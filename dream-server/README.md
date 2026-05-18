@@ -424,7 +424,7 @@ dream mode status                        # Show current mode
 
 Dream Server exists because of the incredible people, projects, and communities that make open-source AI possible. We are grateful to every contributor, maintainer, and tinkerer whose work powers this stack.
 
-Thanks to [kyuz0](https://github.com/kyuz0) for [amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes) — pre-built ROCm containers for Strix Halo that saved us from having to build our own. And to [lhl](https://github.com/lhl) for [strix-halo-testing](https://github.com/lhl/strix-halo-testing) — the foundational Strix Halo AI research and rocWMMA performance work that the broader community builds on.
+Thanks to [lhl](https://github.com/lhl) for [strix-halo-testing](https://github.com/lhl/strix-halo-testing) — the foundational Strix Halo AI research and rocWMMA performance work that the broader community builds on.
 
 ### Community Builds
 
@@ -438,7 +438,6 @@ Thanks to [kyuz0](https://github.com/kyuz0) for [amd-strix-halo-toolboxes](https
 *   [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — Image generation engine
 *   [SDXL Lightning (ByteDance)](https://huggingface.co/ByteDance/SDXL-Lightning) — Image generation model
 *   [AMD ROCm](https://github.com/ROCm/ROCm) — GPU compute platform
-*   [AMD Strix Halo Toolboxes (kyuz0)](https://github.com/kyuz0/amd-strix-halo-toolboxes) — Pre-built ROCm containers for AMD inference
 *   [Strix Halo Testing (lhl)](https://github.com/lhl/strix-halo-testing) — Foundational Strix Halo AI research and rocWMMA optimizations
 *   [n8n](https://github.com/n8n-io/n8n) — Workflow automation
 *   [Qdrant](https://github.com/qdrant/qdrant) — Vector database
