@@ -268,6 +268,7 @@ LLM_API_URL=${llm_api_url}
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 TOGETHER_API_KEY=
+MINIMAX_API_KEY=
 
 #=== LLM Settings (llama-server -- native Metal) ===
 MODEL_PROFILE=${MODEL_PROFILE_REQUESTED:-${MODEL_PROFILE:-qwen}}

@@ -60,7 +60,7 @@ LLM requests routed through LiteLLM to cloud APIs.
 
 | Aspect | Details |
 |--------|---------|
-| **LLM** | Claude, GPT-4o via LiteLLM |
+| **LLM** | Claude, GPT-4o, MiniMax via LiteLLM |
 | **Cost** | ~$0.003-0.06/1K tokens |
 | **Requires** | Internet, API keys |
 | **GPU** | Not needed |
@@ -114,6 +114,7 @@ For AMD Strix Halo performance tuning (GRUB, kernel module, sysctl settings), se
 | `ANTHROPIC_API_KEY` | *(empty)* | Anthropic API key (cloud/hybrid) |
 | `OPENAI_API_KEY` | *(empty)* | OpenAI API key (cloud/hybrid) |
 | `TOGETHER_API_KEY` | *(empty)* | Together AI API key (optional) |
+| `MINIMAX_API_KEY` | *(empty)* | MiniMax API key (optional, cloud/hybrid) |
 
 ---
 

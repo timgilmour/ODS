@@ -268,6 +268,7 @@ LLM_API_BASE_PATH=$llmApiBasePath
 ANTHROPIC_API_KEY=$(Get-EnvOrNew "ANTHROPIC_API_KEY" "")
 OPENAI_API_KEY=$(Get-EnvOrNew "OPENAI_API_KEY" "")
 TOGETHER_API_KEY=$(Get-EnvOrNew "TOGETHER_API_KEY" "")
+MINIMAX_API_KEY=$(Get-EnvOrNew "MINIMAX_API_KEY" "")
 
 #=== LLM Settings (llama-server) ===
 MODEL_PROFILE=$(Get-EnvOrNew "MODEL_PROFILE" "$(if ($TierConfig.ModelProfileRequested) { $TierConfig.ModelProfileRequested } else { "qwen" })")
