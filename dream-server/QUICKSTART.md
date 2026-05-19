@@ -66,8 +66,8 @@ Useful install flags:
 | `--voice` | `-Voice` | Enable Whisper STT and Kokoro TTS |
 | `--workflows` | `-Workflows` | Enable n8n workflows |
 | `--rag` | `-Rag` | Enable Qdrant and embeddings |
-| `--no-hermes` | Direct Windows installer only: `-NoHermes` | Disable the default Hermes agent |
-| `--no-bootstrap` | Not supported on Windows | Wait for the full model instead of fast-start |
+| `--no-hermes` | `-NoHermes` | Disable the default Hermes agent |
+| `--no-bootstrap` | `-NoBootstrap` | Wait for the full model instead of fast-start |
 | `--tier 3` | `-Tier 3` | Force a hardware/model tier |
 
 ## What Happens First
