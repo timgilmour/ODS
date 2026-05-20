@@ -24,6 +24,7 @@ bash scripts/check-compatibility.sh
 bash scripts/check-release-claims.sh
 "$PYTHON_CMD" scripts/validate-golden-paths.py
 "$PYTHON_CMD" scripts/validate-generated-configs.py
+"$PYTHON_CMD" scripts/check-dependency-pins.py
 
 echo "[gate] contracts"
 bash tests/contracts/test-installer-contracts.sh
