@@ -365,6 +365,56 @@ def test_owner_card_status_reports_proxy_state(
     }
 
 
+def test_dream_proxy_service_refreshes_stale_manifest_cache(magic_link_module, monkeypatch):
+    """Owner-card readiness should see dream-proxy after CLI enable.
+
+    The dashboard API imports SERVICES at startup. When `dream enable
+    dream-proxy` renames compose.yaml.disabled to compose.yaml, the running
+    process can have a stale SERVICES cache. The owner-card gate should refresh
+    that one service instead of requiring a manual dashboard-api restart.
+    """
+    magic_link_module.SERVICES.clear()
+
+    refreshed = {
+        "dream-proxy": {
+            "host": "dream-proxy",
+            "port": 80,
+            "health": "/health",
+            "name": "Dream Proxy",
+        }
+    }
+
+    def fake_load_extension_manifests(_extensions_dir, _gpu_backend):
+        return refreshed, [], []
+
+    monkeypatch.setattr(
+        magic_link_module,
+        "load_extension_manifests",
+        fake_load_extension_manifests,
+    )
+
+    service = magic_link_module._dream_proxy_service()
+
+    assert service == refreshed["dream-proxy"]
+    assert magic_link_module.SERVICES["dream-proxy"] == refreshed["dream-proxy"]
+
+
+def test_dream_proxy_service_keeps_disabled_state(magic_link_module, monkeypatch):
+    magic_link_module.SERVICES.clear()
+
+    def fake_load_extension_manifests(_extensions_dir, _gpu_backend):
+        return {}, [], []
+
+    monkeypatch.setattr(
+        magic_link_module,
+        "load_extension_manifests",
+        fake_load_extension_manifests,
+    )
+
+    assert magic_link_module._dream_proxy_service() is None
+    assert "dream-proxy" not in magic_link_module.SERVICES
+
+
 def test_public_url_mode_requires_public_url(magic_link_client):
     resp = magic_link_client.post(
         "/api/auth/magic-link/generate",
