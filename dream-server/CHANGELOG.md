@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.5.3] - 2026-05-26
+
+### Fixed
+- Owner-card readiness now notices `dream-proxy` after `dream enable
+  dream-proxy` and `dream start dream-proxy` without requiring a manual
+  `dashboard-api` restart.
+
+### Validation
+- Fleet test run on 2026-05-26 at commit `cff3b21` passed regressions,
+  zero-prereq bootstrap, installs, verify, cloud-mode, dashboard, Hermes, UI,
+  lifecycle, and distro lab validation across tower2, Strix Halo, Spark, and
+  M5 MacBook Pro.
+- The new `dream-proxy-owner-card-readiness-1474` regression fixture passed on
+  Strix Halo from both already-enabled and disabled states, proving owner-card
+  status returns `ready: true` without restarting `dashboard-api`.
+- Capability reruns confirmed initial Strix Halo and M5 MacBook Pro failures
+  were model/timing flakes; full-model capability probes passed on Strix Halo
+  and M5 MacBook Pro while tower2 and Spark correctly deferred on bootstrap
+  models.
+- Distro lab passed 10/10 Docker lanes and 5/5 Incus VM lanes.
+
 ## [2.5.2] - 2026-05-26
 
 ### Fixed
