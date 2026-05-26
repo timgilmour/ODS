@@ -67,7 +67,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import session_signer
-from config import SERVICES
+from config import EXTENSIONS_DIR, GPU_BACKEND, SERVICES, load_extension_manifests
 from security import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -481,9 +481,30 @@ def _cookie_domain(url_mode: str = "auto") -> Optional[str]:
     return f"{_device_name()}.local"
 
 
+def _dream_proxy_service() -> Optional[dict]:
+    """Return dream-proxy service config, refreshing once for post-enable state.
+
+    dashboard-api loads extension manifests at process startup, but `dream
+    enable dream-proxy` flips compose.yaml.disabled to compose.yaml while this
+    process is still running. Owner-card readiness must see that transition
+    without requiring an operator to restart dashboard-api manually.
+    """
+    service = SERVICES.get("dream-proxy")
+    if service:
+        return service
+
+    refreshed_services, _, errors = load_extension_manifests(EXTENSIONS_DIR, GPU_BACKEND)
+    if errors:
+        logger.debug("Manifest refresh while checking dream-proxy reported %d errors", len(errors))
+    service = refreshed_services.get("dream-proxy")
+    if service:
+        SERVICES["dream-proxy"] = service
+    return service
+
+
 def _dream_proxy_lan_ready() -> tuple[bool, str]:
     """Return whether owner-card LAN URLs can actually be served."""
-    service = SERVICES.get("dream-proxy")
+    service = _dream_proxy_service()
     if not service:
         return (
             False,
