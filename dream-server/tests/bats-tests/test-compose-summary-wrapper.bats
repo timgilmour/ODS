@@ -78,6 +78,19 @@ case "${DOCKER_STUB_MODE:-success}" in
         echo "Container dream-foo started"
         exit 0
         ;;
+    fail-startup-once)
+        state_file="$TMPDIR_TEST/startup-retry-count"
+        count=0
+        [[ -f "$state_file" ]] && count=$(cat "$state_file")
+        count=$((count + 1))
+        echo "$count" > "$state_file"
+        if [[ "$count" -eq 1 ]]; then
+            echo "dependency failed to start: container dream-llama-server exited (137)"
+            exit 1
+        fi
+        echo "Container dream-llama-server started"
+        exit 0
+        ;;
     fail-docker-sock)
         echo "unable to get image 'ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4': permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
         exit 1
@@ -91,6 +104,7 @@ STUB
     chmod +x "$TMPDIR_TEST/bin/docker"
     export PATH="$TMPDIR_TEST/bin:$PATH"
     export DOCKER_CALL_LOG="$TMPDIR_TEST/docker.log"
+    export DREAM_COMPOSE_STARTUP_RETRY_DELAY=0
     : > "$DOCKER_CALL_LOG"
 }
 
@@ -237,6 +251,17 @@ teardown() {
     assert_failure
     run grep -c '^DOCKER_ARGS:' "$DOCKER_CALL_LOG"
     assert_output "1"
+}
+
+@test "wrapper: compose up retries once on transient dependency startup failure" {
+    export DOCKER_STUB_MODE=fail-startup-once
+    run _compose_run_with_summary "Restarting all services" up -d
+    assert_success
+    assert_output --partial "Docker reported a transient service startup failure"
+    assert_output --partial "Restarting all services"
+    assert_output --partial "done"
+    run grep -c '^DOCKER_ARGS:' "$DOCKER_CALL_LOG"
+    assert_output "2"
 }
 
 @test "wrapper: all args after verb are passed to docker compose" {

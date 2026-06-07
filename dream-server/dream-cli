@@ -723,6 +723,15 @@ _compose_run_with_summary() {
         docker compose --progress quiet "$@" >"$_compose_log" 2>&1 || _rc=$?
     fi
 
+    if (( _rc != 0 )) && $_is_compose_up \
+       && grep -Eiq 'dependency failed to start|container .* (exited|is unhealthy)|service .* failed to start|failed to start.*container' "$_compose_log"; then
+        warn "Docker reported a transient service startup failure; waiting briefly and retrying once."
+        sleep "${DREAM_COMPOSE_STARTUP_RETRY_DELAY:-15}"
+        : >"$_compose_log"
+        _rc=0
+        docker compose --progress quiet "$@" >"$_compose_log" 2>&1 || _rc=$?
+    fi
+
     if (( _rc == 0 )); then
         success "${_verb} — done"
         rm -f "$_compose_log"
