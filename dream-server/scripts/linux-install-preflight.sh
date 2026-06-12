@@ -72,6 +72,28 @@ print(json.dumps({
 ' >>"$CHECKS_JSONL"
 }
 
+docker_cli_looks_like_podman() {
+    local docker_version=""
+    docker_version="$(docker --version 2>/dev/null || true)"
+    if printf '%s\n' "$docker_version" | grep -qi 'podman'; then
+        return 0
+    fi
+
+    # podman-docker commonly installs a docker-compatible shim. Dream Server
+    # currently relies on Docker Engine semantics, so the shim must fail loud.
+    local docker_path=""
+    docker_path="$(command -v docker 2>/dev/null || true)"
+    if [[ -n "$docker_path" ]] && command -v readlink >/dev/null 2>&1; then
+        local docker_real=""
+        docker_real="$(readlink -f "$docker_path" 2>/dev/null || true)"
+        case "$(basename "$docker_real")" in
+            podman|podman-docker) return 0 ;;
+        esac
+    fi
+
+    return 1
+}
+
 # --- Distro fingerprint (from /etc/os-release) ---
 DISTRO_ID=""
 DISTRO_VERSION_ID=""
@@ -106,6 +128,7 @@ else
 fi
 
 # --- Docker CLI ---
+DOCKER_IS_PODMAN=false
 if ! command -v docker >/dev/null 2>&1; then
     append_check "DOCKER_INSTALLED" "fail" \
         "Docker CLI not found in PATH" \
@@ -113,11 +136,23 @@ if ! command -v docker >/dev/null 2>&1; then
 else
     DV="$(docker --version 2>/dev/null | head -1 || true)"
     append_check "DOCKER_INSTALLED" "pass" "Docker CLI: ${DV:-present}" ""
+    if docker_cli_looks_like_podman; then
+        DOCKER_IS_PODMAN=true
+        append_check "DOCKER_ENGINE" "fail" \
+            "docker resolves to Podman compatibility mode, not Docker Engine" \
+            "Install Docker Engine and Docker Compose v2. Podman is not a supported Dream Server runtime yet; remove podman-docker or put Docker Engine first in PATH."
+    else
+        append_check "DOCKER_ENGINE" "pass" "Docker CLI appears to target Docker Engine" ""
+    fi
 fi
 
 # --- Docker daemon ---
 DOCKER_INFO_OK=false
-if command -v docker >/dev/null 2>&1; then
+if [[ "$DOCKER_IS_PODMAN" == true ]]; then
+    append_check "DOCKER_DAEMON" "fail" \
+        "Skipped Docker daemon probe because docker resolves to Podman" \
+        "Install Docker Engine; Dream Server does not currently support Podman as the container runtime."
+elif command -v docker >/dev/null 2>&1; then
     if docker info >/dev/null 2>&1; then
         DOCKER_INFO_OK=true
         append_check "DOCKER_DAEMON" "pass" "Docker daemon is reachable" ""
@@ -131,7 +166,11 @@ else
 fi
 
 # --- Docker Compose v2 / v1 ---
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+if [[ "$DOCKER_IS_PODMAN" == true ]]; then
+    append_check "COMPOSE_CLI" "fail" \
+        "Skipped Compose probe because docker resolves to Podman" \
+        "Install Docker Engine with the Docker Compose v2 plugin. podman compose is not a supported substitute for Dream Server installs yet."
+elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     CV="$(docker compose version 2>/dev/null | head -1 || true)"
     append_check "COMPOSE_CLI" "pass" "Compose: $CV" ""
 elif command -v docker-compose >/dev/null 2>&1; then

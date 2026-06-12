@@ -80,6 +80,50 @@ else
     fail "python3 not available — skipped JSON contract (unexpected on CI)"
 fi
 
+# Podman compatibility shims are intentionally not accepted as Docker Engine.
+if command -v python3 >/dev/null 2>&1; then
+    PODMAN_TMP="$(mktemp -d)"
+    cat >"$PODMAN_TMP/docker" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    echo "podman version 5.0.0"
+    ;;
+  *)
+    echo "podman shim called: $*" >&2
+    exit 125
+    ;;
+esac
+EOF
+    chmod +x "$PODMAN_TMP/docker"
+    PODMAN_JSON="$PODMAN_TMP/report.json"
+    if PATH="$PODMAN_TMP:$PATH" "$LP" --json >"$PODMAN_JSON" 2>/dev/null || true; then
+        :
+    fi
+    if python3 - <<PY
+import json
+path = "$PODMAN_JSON"
+with open(path, encoding="utf-8") as f:
+    report = json.load(f)
+checks = {c["id"]: c for c in report["checks"]}
+assert checks["DOCKER_INSTALLED"]["status"] == "pass"
+assert checks["DOCKER_ENGINE"]["status"] == "fail"
+assert checks["DOCKER_DAEMON"]["status"] == "fail"
+assert checks["COMPOSE_CLI"]["status"] == "fail"
+assert "Podman" in checks["DOCKER_ENGINE"]["message"]
+assert report["summary"]["exit_ok"] is False
+print("ok")
+PY
+    then
+        pass "Podman docker shim fails loud as unsupported runtime"
+    else
+        fail "Podman docker shim did not produce the expected fail-loud checks"
+    fi
+    rm -rf "$PODMAN_TMP"
+else
+    fail "python3 not available - skipped Podman shim contract (unexpected on CI)"
+fi
+
 # dream-preflight.sh delegates --install-env to linux-install-preflight
 if grep -q 'linux-install-preflight.sh' "$ROOT_PREFLIGHT" && grep -q '\-\-install-env' "$ROOT_PREFLIGHT"; then
     pass "dream-preflight.sh delegates --install-env to linux-install-preflight.sh"
