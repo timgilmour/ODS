@@ -30,6 +30,7 @@ from performance_oracle import (
     find_catalog_model,
     load_model_catalog,
     model_files_dir,
+    read_env_file_value,
     read_env_value,
 )
 from security import verify_api_key
@@ -198,7 +199,11 @@ def _already_active_model(model_id: str, model: dict) -> tuple[bool, str | None]
         return False, None
     if _read_active_model() != gguf_file:
         return False, None
-    if read_env_value("LLM_MODEL", INSTALL_DIR) not in {model.get("llm_model_name"), model_id}:
+    configured_llm = (
+        read_env_file_value("LLM_MODEL", INSTALL_DIR)
+        or read_env_value("LLM_MODEL", INSTALL_DIR)
+    )
+    if not (_model_name_tokens(configured_llm) & _catalog_model_tokens(model)):
         return False, None
     if not (Path(DATA_DIR) / "models" / gguf_file).exists():
         return False, None
@@ -433,6 +438,20 @@ async def _fetch_llama_loaded_model(host: str, port: int, api_prefix: str) -> st
                 status = model.get("status", {})
                 if isinstance(status, dict) and status.get("value") == "loaded":
                     return model.get("id")
+            desired_tokens = (
+                _model_name_tokens(_read_active_model())
+                | _model_name_tokens(read_env_value("LLM_MODEL", INSTALL_DIR))
+            )
+            if api_prefix == "/api/v1" and desired_tokens:
+                for model in data:
+                    model_tokens = _model_name_tokens(model.get("id"))
+                    model_tokens.update(_model_name_tokens(model.get("checkpoint")))
+                    checkpoints = model.get("checkpoints")
+                    if isinstance(checkpoints, dict):
+                        for checkpoint in checkpoints.values():
+                            model_tokens.update(_model_name_tokens(checkpoint))
+                    if desired_tokens & model_tokens:
+                        return model.get("id")
             if data and data[0].get("id"):
                 return data[0]["id"]
         except (httpx.HTTPError, ValueError):

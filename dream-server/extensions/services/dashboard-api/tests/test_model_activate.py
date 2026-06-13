@@ -19,6 +19,7 @@ _spec.loader.exec_module(_mod)
 
 _check_lemonade_health = _mod._check_lemonade_health
 _send_lemonade_warmup = _mod._send_lemonade_warmup
+_lemonade_completion_ready = _mod._lemonade_completion_ready
 _write_lemonade_config = _mod._write_lemonade_config
 _patch_hermes_model_config = _mod._patch_hermes_model_config
 _compose_restart_llama_server = _mod._compose_restart_llama_server
@@ -107,6 +108,42 @@ class TestSendLemonadeWarmup:
         monkeypatch.setattr(subprocess, "run", fake_run)
         _send_lemonade_warmup("dream-llama-server", "8080", "model.gguf", 0)
         assert "http://dream-llama-server:8080/api/v1/chat/completions" in calls[0]
+
+
+class TestLemonadeCompletionReady:
+
+    def test_success_when_completion_has_choices(self, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout='{"choices":[{"message":{"content":"ok"}}]}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        assert _lemonade_completion_ready("127.0.0.1", "8080", "model.gguf") is True
+        assert "http://127.0.0.1:8080/api/v1/chat/completions" in calls[0]
+        payload = calls[0][calls[0].index("-d") + 1]
+        assert '"extra.model.gguf"' in payload
+
+    def test_false_on_nonzero_exit(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert _lemonade_completion_ready("127.0.0.1", "8080", "model.gguf") is False
+
+    def test_false_on_invalid_json(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout="not-json", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert _lemonade_completion_ready("127.0.0.1", "8080", "model.gguf") is False
 
 
 # --- _write_lemonade_config ---
@@ -454,6 +491,61 @@ class TestModelActivateRollback:
         assert "api_key: sk-inline-from-env-file-67890" in content
         assert "api_key: sk-lemonade" not in content
         assert "enable_thinking: false" in content
+
+    def test_windows_lemonade_already_serving_skips_native_restart(
+        self, tmp_path, monkeypatch,
+    ):
+        install_dir, env_path, _env_text, _models_ini, _ini_text, lemonade_yaml, _yaml_text = (
+            _write_model_activation_fixture(
+                tmp_path,
+                gpu_backend="amd",
+                lemonade=True,
+                lemonade_api_key="sk-inline-from-env-file-67890",
+            )
+        )
+        env_path.write_text(
+            "GPU_BACKEND=amd\n"
+            "LLM_BACKEND=lemonade\n"
+            "AMD_INFERENCE_RUNTIME=lemonade\n"
+            "AMD_INFERENCE_LOCATION=host\n"
+            "AMD_INFERENCE_PORT=8080\n"
+            "GGUF_FILE=new-model.gguf\n"
+            "LLM_MODEL=new-model\n"
+            "CTX_SIZE=4096\n"
+            "LITELLM_LEMONADE_API_KEY=sk-inline-from-env-file-67890\n",
+            encoding="utf-8",
+        )
+
+        calls = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            stdout = (
+                '{"status": "ok", "model_loaded": "extra.new-model.gguf"}'
+                if cmd and cmd[0] == "curl"
+                else ""
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        def fail_restart(_env):
+            raise AssertionError("native Lemonade restart should be skipped")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
+        monkeypatch.delenv("DREAM_HOST_INSTALL_DIR", raising=False)
+        monkeypatch.delenv("LITELLM_LEMONADE_API_KEY", raising=False)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_lemonade_completion_ready", lambda *_args: True)
+        monkeypatch.setattr(_mod, "_restart_windows_lemonade", fail_restart)
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 200
+        content = lemonade_yaml.read_text(encoding="utf-8")
+        assert "model: openai/extra.new-model.gguf" in content
+        assert ["docker", "restart", "dream-litellm"] in calls
 
     def test_activation_patches_hermes_configs_and_restarts_hermes(self, tmp_path, monkeypatch):
         install_dir, _env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (

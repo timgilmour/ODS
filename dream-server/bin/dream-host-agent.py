@@ -3434,6 +3434,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             env_pre = load_env(env_path)
             gpu_backend = env_pre.get("GPU_BACKEND", "nvidia")
             windows_host_lemonade = _is_windows_host_lemonade(env_pre)
+            windows_lemonade_already_serving = False
+            if windows_host_lemonade and env_pre.get("GGUF_FILE") == gguf_file:
+                lemonade_port = env_pre.get("AMD_INFERENCE_PORT", "8080") or "8080"
+                windows_lemonade_already_serving = _lemonade_completion_ready(
+                    "127.0.0.1", lemonade_port, gguf_file,
+                )
+                if windows_lemonade_already_serving:
+                    logger.info(
+                        "Windows Lemonade is already serving %s; refreshing configs "
+                        "without restarting native Lemonade",
+                        gguf_file,
+                    )
             runtime_profile = _select_runtime_profile(model, env_pre)
             runtime_env = {}
             if runtime_profile:
@@ -3574,7 +3586,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             _in_container = bool(os.environ.get("DREAM_HOST_INSTALL_DIR"))
 
             if windows_host_lemonade:
-                _restart_windows_lemonade(env)
+                if not windows_lemonade_already_serving:
+                    _restart_windows_lemonade(env)
             elif gpu_backend == "apple":
                 # macOS: manage native llama-server process via PID file
                 pid_file = INSTALL_DIR / "data" / ".llama-server.pid"
@@ -3849,6 +3862,30 @@ def _send_lemonade_warmup(host: str, port: str, gguf_file: str, attempt: int) ->
     except subprocess.TimeoutExpired:
         pass
     return False
+
+
+def _lemonade_completion_ready(host: str, port: str, gguf_file: str) -> bool:
+    """Return True when Lemonade can complete against the requested GGUF."""
+    model_id = f"extra.{gguf_file}"
+    url = f"http://{host}:{port}/api/v1/chat/completions"
+    payload = json.dumps({
+        "model": model_id,
+        "messages": [{"role": "user", "content": "reply ok"}],
+        "max_tokens": 1,
+        "temperature": 0,
+    })
+    try:
+        result = subprocess.run(
+            ["curl", "-sf", "--max-time", "30", "-X", "POST", url,
+             "-H", "Content-Type: application/json", "-d", payload],
+            capture_output=True, text=True, timeout=35,
+        )
+        if result.returncode != 0:
+            return False
+        data = json.loads(result.stdout or "{}")
+        return bool(data.get("choices"))
+    except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def _is_windows_host_lemonade(env: dict) -> bool:

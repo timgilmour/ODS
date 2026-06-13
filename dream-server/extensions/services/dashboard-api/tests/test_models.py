@@ -103,6 +103,112 @@ def test_fetch_loaded_model_falls_back_to_models_when_lemonade_health_empty(monk
     ]
 
 
+def test_fetch_loaded_model_prefers_configured_lemonade_gguf_over_catalog_first(
+    monkeypatch,
+    tmp_path,
+):
+    import routers.models as models_router
+
+    seen_urls: list[str] = []
+    install_dir = tmp_path / "dream-server"
+    install_dir.mkdir()
+    (install_dir / ".env").write_text(
+        "GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_M.gguf\n"
+        "LLM_MODEL=qwen3.6-35b-a3b-ud-q4\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models_router, "INSTALL_DIR", str(install_dir))
+    monkeypatch.setattr(models_router, "_ENV_PATH", install_dir / ".env")
+
+    class _Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class _Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            seen_urls.append(url)
+            if url.endswith("/health"):
+                return _Response({"status": "ok", "model_loaded": None})
+            return _Response({
+                "data": [
+                    {"id": "Qwen3-Coder-Next-GGUF", "downloaded": True},
+                    {
+                        "id": "extra.Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+                        "checkpoint": "C:\\users\\conta\\dream-server\\data\\models\\Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+                        "downloaded": True,
+                    },
+                ],
+            })
+
+    monkeypatch.setenv("LLM_URL", "http://host.docker.internal:8080")
+    monkeypatch.setattr(models_router.httpx, "AsyncClient", _Client)
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            models_router._fetch_llama_loaded_model("llama-server", 8080, "/api/v1")
+        )
+    finally:
+        loop.close()
+
+    assert result == "extra.Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+    assert seen_urls == [
+        "http://host.docker.internal:8080/api/v1/health",
+        "http://host.docker.internal:8080/api/v1/models",
+    ]
+
+
+def test_already_active_model_uses_env_file_before_stale_process_env(
+    monkeypatch,
+    tmp_path,
+):
+    import routers.models as models_router
+
+    models_router, install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    (install_dir / ".env").write_text(
+        "GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_M.gguf\n"
+        "LLM_MODEL=qwen3.6-35b-a3b\n",
+        encoding="utf-8",
+    )
+    model_file = data_dir / "models" / "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+    model_file.parent.mkdir(parents=True, exist_ok=True)
+    model_file.write_text("model", encoding="utf-8")
+    monkeypatch.setenv("LLM_MODEL", "qwen3.5-2b")
+    monkeypatch.setattr(
+        models_router,
+        "_fetch_loaded_model_sync",
+        lambda: "extra.Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    )
+    monkeypatch.setattr(models_router, "_loaded_model_backend_ready_sync", lambda _model: True)
+
+    already_active, loaded_model = models_router._already_active_model(
+        "qwen3.6-35b-a3b-ud-q4",
+        {
+            "id": "qwen3.6-35b-a3b-ud-q4",
+            "gguf_file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "llm_model_name": "qwen3.6-35b-a3b",
+        },
+    )
+
+    assert already_active is True
+    assert loaded_model == "extra.Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+
+
 def test_get_gpu_vram_returns_none_on_nvml_error(monkeypatch):
     """Operational NVML failures should degrade to unknown GPU rather than 500."""
 
