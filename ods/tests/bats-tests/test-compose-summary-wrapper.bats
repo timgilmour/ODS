@@ -47,6 +47,10 @@ setup() {
     cat > "$TMPDIR_TEST/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "DOCKER_ARGS: $*" >> "$DOCKER_CALL_LOG"
+if [[ "$1" == "rm" ]]; then
+    echo "removed $*"
+    exit 0
+fi
 case "${DOCKER_STUB_MODE:-success}" in
     success)
         echo "Network ods-net created"
@@ -99,6 +103,23 @@ case "${DOCKER_STUB_MODE:-success}" in
         echo "$count" > "$state_file"
         if [[ "$count" -le 2 ]]; then
             echo "dependency failed to start: Error response from daemon: No such container: stale-compose-id"
+            exit 1
+        fi
+        echo "Container ods-llama-server started"
+        exit 0
+        ;;
+    fail-startup-twice-then-name-conflict)
+        state_file="$TMPDIR_TEST/startup-retry-count"
+        count=0
+        [[ -f "$state_file" ]] && count=$(cat "$state_file")
+        count=$((count + 1))
+        echo "$count" > "$state_file"
+        if [[ "$count" -le 2 ]]; then
+            echo "dependency failed to start: Error response from daemon: No such container: stale-compose-id"
+            exit 1
+        fi
+        if [[ "$count" -eq 3 ]]; then
+            echo "Error response from daemon: Conflict. The container name \"/ods-llama-server\" is already in use by container \"d287436ffd1902846f8d81593e4a29c92761457cb57167290e9d7f039d318733\". You have to remove (or rename) that container to be able to reuse that name."
             exit 1
         fi
         echo "Container ods-llama-server started"
@@ -288,6 +309,23 @@ teardown() {
     assert_output --partial "done"
     run grep -c '^DOCKER_ARGS:' "$DOCKER_CALL_LOG"
     assert_output "3"
+}
+
+@test "wrapper: compose up cleans stale ODS name conflict after startup retries" {
+    export DOCKER_STUB_MODE=fail-startup-twice-then-name-conflict
+    export ODS_COMPOSE_STARTUP_RETRY_ATTEMPTS=3
+    export ODS_COMPOSE_NAME_CONFLICT_RETRY_DELAY=0
+    run _compose_run_with_summary "Restarting all services" up -d
+    assert_success
+    assert_output --partial "retrying (1/2)"
+    assert_output --partial "retrying (2/2)"
+    assert_output --partial "stale ODS container-name conflict"
+    assert_output --partial "Restarting all services"
+    assert_output --partial "done"
+    run grep -c '^DOCKER_ARGS: compose' "$DOCKER_CALL_LOG"
+    assert_output "4"
+    run grep -F 'DOCKER_ARGS: rm -f d287436ffd1902846f8d81593e4a29c92761457cb57167290e9d7f039d318733' "$DOCKER_CALL_LOG"
+    assert_success
 }
 
 @test "wrapper: all args after verb are passed to docker compose" {

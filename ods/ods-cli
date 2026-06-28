@@ -711,6 +711,26 @@ _compose_run_with_summary() {
         [[ "$_arg" == "up" ]] && _is_compose_up=true
     done
 
+    _compose_remove_conflicting_ods_containers() {
+        local _log_path="$1"
+        local _removed=false
+        local _name _id
+        while read -r _name _id; do
+            [[ -n "${_name:-}" && -n "${_id:-}" ]] || continue
+            case "$_name" in
+                /ods-*|ods-*)
+                    docker rm -f "$_id" >>"$_log_path" 2>&1 || return 1
+                    _removed=true
+                    ;;
+                *)
+                    warn "Refusing to remove conflicting non-ODS container $_name."
+                    return 1
+                    ;;
+            esac
+        done < <(sed -nE 's/.*container name "([^"]+)".*already in use by container "([0-9a-fA-F]+)".*/\1 \2/p' "$_log_path" | awk '!seen[$0]++')
+        $_removed
+    }
+
     local _rc=0
     docker compose --progress quiet "$@" >"$_compose_log" 2>&1 || _rc=$?
 
@@ -729,15 +749,31 @@ _compose_run_with_summary() {
     fi
     local _startup_attempt=1
     local _startup_retries=$(( _startup_max_attempts - 1 ))
-    while (( _rc != 0 )) && $_is_compose_up \
-       && (( _startup_attempt < _startup_max_attempts )) \
-       && grep -Eiq 'dependency failed to start|No such container|container .* (exited|is unhealthy)|service .* failed to start|failed to start.*container' "$_compose_log"; do
-        warn "Docker reported a transient service startup failure; waiting briefly and retrying (${_startup_attempt}/${_startup_retries})."
-        sleep "${ODS_COMPOSE_STARTUP_RETRY_DELAY:-15}"
+    local _name_conflict_retries="${ODS_COMPOSE_NAME_CONFLICT_RETRY_ATTEMPTS:-1}"
+    if ! [[ "$_name_conflict_retries" =~ ^[0-9]+$ ]] || (( _name_conflict_retries < 0 )); then
+        _name_conflict_retries=1
+    fi
+    local _name_conflict_attempt=0
+    while (( _rc != 0 )) && $_is_compose_up; do
+        if grep -Eiq 'container name "/?ods-[^"]+" is already in use by container "[0-9a-fA-F]+"' "$_compose_log"; then
+            if (( _name_conflict_attempt >= _name_conflict_retries )); then
+                break
+            fi
+            _name_conflict_attempt=$(( _name_conflict_attempt + 1 ))
+            warn "Docker reported a stale ODS container-name conflict; removing the conflicting container and retrying (${_name_conflict_attempt}/${_name_conflict_retries})."
+            _compose_remove_conflicting_ods_containers "$_compose_log" || break
+            sleep "${ODS_COMPOSE_NAME_CONFLICT_RETRY_DELAY:-3}"
+        elif (( _startup_attempt < _startup_max_attempts )) \
+           && grep -Eiq 'dependency failed to start|No such container|container .* (exited|is unhealthy)|service .* failed to start|failed to start.*container' "$_compose_log"; then
+            warn "Docker reported a transient service startup failure; waiting briefly and retrying (${_startup_attempt}/${_startup_retries})."
+            sleep "${ODS_COMPOSE_STARTUP_RETRY_DELAY:-15}"
+            _startup_attempt=$(( _startup_attempt + 1 ))
+        else
+            break
+        fi
         : >"$_compose_log"
         _rc=0
         docker compose --progress quiet "$@" >"$_compose_log" 2>&1 || _rc=$?
-        _startup_attempt=$(( _startup_attempt + 1 ))
     done
 
     if (( _rc == 0 )); then
