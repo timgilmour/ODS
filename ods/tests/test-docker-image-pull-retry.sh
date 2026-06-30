@@ -184,6 +184,24 @@ else
   fi
 fi
 
+printf "  %-60s " "uses full default retry schedule before giving up..."
+rm -f "$TMP_DIR/stdout.log" "$TMP_DIR/stderr.log"
+export DOCKER_MOCK_STATE_FILE="$TMP_DIR/state-default-timeout"
+export SLEEP_LOG="$TMP_DIR/sleep-default-timeout.log"
+rm -f "$DOCKER_MOCK_STATE_FILE" "$SLEEP_LOG"
+if run_pull_with_progress "$TMP_DIR/docker-always-timeout" "img" "label"; then
+  print_fail "(unexpected success)"
+else
+  attempts=$(cat "$DOCKER_MOCK_STATE_FILE" 2>/dev/null || echo 0)
+  sleeps=$(sed 's/[[:space:]]*$//' "$SLEEP_LOG" 2>/dev/null || true)
+  if [[ "$attempts" == "4" && "$sleeps" == "5 15 30" ]]; then
+    print_pass
+  else
+    print_fail "(attempts=$attempts, expected 4; sleeps='$sleeps', expected '5 15 30')"
+  fi
+fi
+unset SLEEP_LOG
+
 printf "  %-60s " "supports configurable retry delays and attempts..."
 rm -f "$TMP_DIR/stdout.log" "$TMP_DIR/stderr.log"
 export DOCKER_MOCK_STATE_FILE="$TMP_DIR/state-configurable"
@@ -233,13 +251,13 @@ echo ""
 echo "3. Retry Strategy Tests (source-level sanity checks)"
 echo "────────────────────────────────────────────────────"
 
-printf "  %-60s " "max_attempts is 3..."
+printf "  %-60s " "max_attempts is 4..."
 retry_count=$(grep -A 15 "^pull_with_progress()" "$ROOT_DIR/installers/lib/ui.sh" | grep -m1 "max_attempts=" | grep -oE '[0-9]+' || true)
 retry_count=${retry_count:-0}
-if [[ "$retry_count" == "3" ]]; then
+if [[ "$retry_count" == "4" ]]; then
   print_pass
 else
-  print_fail "(found $retry_count, expected 3)"
+  print_fail "(found $retry_count, expected 4)"
 fi
 
 printf "  %-60s " "default retry delays are 5s, 15s, 30s..."

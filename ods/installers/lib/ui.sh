@@ -235,8 +235,8 @@ pull_with_progress() {
   local label=$2
   local count=$3
   local total=$4
-  local configured_max_attempts="${ODS_DOCKER_PULL_MAX_ATTEMPTS:-3}"
-  local max_attempts=3
+  local configured_max_attempts="${ODS_DOCKER_PULL_MAX_ATTEMPTS:-4}"
+  local max_attempts=4
   local pull_timeout=3600  # 60 minutes for large images (CUDA is ~10GB)
   local pull_pid
 
