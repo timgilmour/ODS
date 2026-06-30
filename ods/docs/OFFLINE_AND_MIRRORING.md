@@ -57,6 +57,14 @@ docker push <your-registry>/<image>:<tag>
 Prefer digest-pinned records for release receipts. If a service still uses a tag
 pin, record the digest resolved during validation.
 
+On high-latency or unreliable links, the Linux installer retries transient
+Docker pull failures with `5 15 30` second backoff delays. Operators can tune
+this without editing the installer:
+
+```bash
+ODS_DOCKER_PULL_MAX_ATTEMPTS=4 ODS_DOCKER_PULL_RETRY_DELAYS="10 30 60" ./install.sh
+```
+
 ## Models
 
 For model mirrors:
