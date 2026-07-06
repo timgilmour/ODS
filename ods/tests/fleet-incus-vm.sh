@@ -19,10 +19,11 @@ WORK_DIR=""
 
 declare -a CREATED_VMS=()
 declare -a TARGETS=()
+declare -a PASSED_LANES=()
 
 declare -A IMAGES=(
     [ubuntu2404]="images:ubuntu/24.04"
-    [fedora42]="images:almalinux/10"
+    [fedora43]="images:fedora/43"
     [rocky9]="images:rockylinux/9"
     [arch]="images:archlinux/current"
     [opensuse]="images:opensuse/tumbleweed"
@@ -30,7 +31,7 @@ declare -A IMAGES=(
 
 declare -A EXPECTED_PKG=(
     [ubuntu2404]="apt"
-    [fedora42]="dnf"
+    [fedora43]="dnf"
     [rocky9]="dnf"
     [arch]="pacman"
     [opensuse]="zypper"
@@ -38,7 +39,7 @@ declare -A EXPECTED_PKG=(
 
 declare -A LABELS=(
     [ubuntu2404]="Ubuntu 24.04 LTS"
-    [fedora42]="AlmaLinux 10 dnf VM"
+    [fedora43]="Fedora 43"
     [rocky9]="Rocky Linux 9"
     [arch]="Arch Linux current"
     [opensuse]="openSUSE Tumbleweed"
@@ -49,9 +50,11 @@ declare -A ALIASES=(
     [ubuntu24]="ubuntu2404"
     [ubuntu2404]="ubuntu2404"
     [ubuntu/24.04]="ubuntu2404"
-    [fedora]="fedora42"
-    [fedora42]="fedora42"
-    [fedora/42]="fedora42"
+    [fedora]="fedora43"
+    [fedora42]="fedora43"
+    [fedora/42]="fedora43"
+    [fedora43]="fedora43"
+    [fedora/43]="fedora43"
     [rocky]="rocky9"
     [rocky9]="rocky9"
     [rockylinux/9]="rocky9"
@@ -63,7 +66,7 @@ declare -A ALIASES=(
     [opensuse/tumbleweed]="opensuse"
 )
 
-ORDER=(ubuntu2404 fedora42 rocky9 arch opensuse)
+ORDER=(ubuntu2404 fedora43 rocky9 arch opensuse)
 
 log() {
     printf '%s\n' "$*"
@@ -99,13 +102,10 @@ Options:
   -h, --help                Show this help
 
 Default matrix:
-  ubuntu2404 fedora42 rocky9 arch opensuse
-  (fedora42 currently uses an AlmaLinux dnf VM because the Incus public
-   image remote no longer advertises Fedora VM aliases; Fedora remains
-   covered by tests/fleet-multi-distro.sh container breadth.)
+  ubuntu2404 fedora43 rocky9 arch opensuse
 
 Aliases:
-  ubuntu/24.04, fedora/42, rockylinux/9, archlinux/current,
+  ubuntu/24.04, fedora/43, rockylinux/9, archlinux/current,
   opensuse/tumbleweed
 USAGE
 }
@@ -571,7 +571,12 @@ run_lane() {
     incus file push "$PAYLOAD" "$vm/tmp/ods-src.tgz"
     incus file push "$VM_CHECK" "$vm/tmp/fleet-incus-vm-check.sh"
     incus exec "$vm" -- chmod +x /tmp/fleet-incus-vm-check.sh
-    run_vm_check "$vm" "$lane" "$installer_mode"
+    if run_vm_check "$vm" "$lane" "$installer_mode"; then
+        PASSED_LANES+=("$lane")
+    else
+        local rc=$?
+        fail "${LABELS[$lane]} VM check failed with exit code $rc"
+    fi
 
     if [[ "$KEEP_VMS" != "true" ]]; then
         incus delete -f "$vm" >/dev/null
@@ -582,5 +587,9 @@ for lane in "${TARGETS[@]}"; do
     run_lane "$lane"
 done
 
+if ((${#PASSED_LANES[@]} != ${#TARGETS[@]})); then
+    fail "Incus VM fleet matrix only passed ${#PASSED_LANES[@]}/${#TARGETS[@]} lanes: ${PASSED_LANES[*]}"
+fi
+
 log ""
-log "Incus VM fleet matrix passed: ${TARGETS[*]}"
+log "Incus VM fleet matrix passed: ${PASSED_LANES[*]}"
