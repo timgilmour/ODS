@@ -818,6 +818,34 @@ def test_rate_limit_kicks_in_after_repeated_failures(
     assert blocked.status_code == 429
 
 
+def test_rate_limit_bucket_lifecycle(magic_link_module):
+    """Test the memory-bound guarantees of the rate-limit bucket map."""
+    import time
+    
+    ip = "127.0.0.1"
+    past = time.monotonic() - magic_link_module._RATE_LIMIT_WINDOW_SECONDS - 10
+    
+    # 1. Expired buckets are removed (popped).
+    magic_link_module._RATE_LIMIT_BUCKETS[ip] = (1, past)
+    magic_link_module._check_rate_limit(ip)
+    assert ip not in magic_link_module._RATE_LIMIT_BUCKETS
+    
+    # 2. Stale entries are pruned once _RATE_LIMIT_BUCKETS grows past 1000.
+    for i in range(1005):
+        magic_link_module._RATE_LIMIT_BUCKETS[f"10.0.0.{i}"] = (1, past)
+    
+    magic_link_module._check_rate_limit(ip)
+    assert len(magic_link_module._RATE_LIMIT_BUCKETS) == 0
+    
+    # 3. Emergency clear trips if the map remains above 10000.
+    fresh = time.monotonic()
+    for i in range(10005):
+        magic_link_module._RATE_LIMIT_BUCKETS[f"10.1.0.{i}"] = (1, fresh)
+        
+    magic_link_module._check_rate_limit(ip)
+    assert len(magic_link_module._RATE_LIMIT_BUCKETS) == 0
+
+
 # ---------------------------------------------------------------------------
 # List + revoke
 # ---------------------------------------------------------------------------
