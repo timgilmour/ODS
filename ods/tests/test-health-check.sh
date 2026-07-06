@@ -103,6 +103,42 @@ else
     fail "check_container_state missing docker availability check"
 fi
 
+# 8. Disk probe uses POSIX df (-P), not the wrap-prone -h
+if grep -qE 'df -P ' "$ROOT_DIR/scripts/health-check.sh"; then
+    pass "test_disk uses POSIX df -P (avoids long-device-name line wrapping)"
+else
+    fail "test_disk should use df -P for stable single-line output"
+fi
+
+# 9. Behavioral: capacity is parsed correctly even when df wraps the
+# filesystem line (long device name shifts columns). A mock df emits a
+# wrapped 95%-capacity line; the JSON must report disk_usage=95, not the
+# mount point that the old `tail -1 | awk '{print $5}'` parse would pick up.
+MOCK_DIR=$(mktemp -d)
+cat > "$MOCK_DIR/df" <<'MOCK_DF'
+#!/usr/bin/env bash
+# Simulates df output where a long device name wraps onto a second line,
+# shifting the capacity column. Ignores flags/args; capacity is 95%.
+cat <<'DF_OUT'
+Filesystem                              1024-blocks      Used Available Capacity Mounted on
+/dev/mapper/very--long--vg--name-root
+                                          488384000 461000000  27384000      95% /
+DF_OUT
+MOCK_DF
+chmod +x "$MOCK_DIR/df"
+
+set +e
+disk_json=$(cd "$ROOT_DIR" && PATH="$MOCK_DIR:$PATH" bash scripts/health-check.sh --json 2>&1)
+set -e
+rm -rf "$MOCK_DIR"
+
+if echo "$disk_json" | grep -q '"disk_usage": "95"'; then
+    pass "test_disk parses capacity from wrapped df output (column-shift safe)"
+else
+    got=$(echo "$disk_json" | grep -o '"disk_usage": "[^"]*"' | head -1)
+    fail "test_disk mis-parsed wrapped df output; expected disk_usage=95, got: ${got:-<none>}"
+fi
+
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]

@@ -212,8 +212,16 @@ test_gpu() {
 # System-level: Disk
 test_disk() {
     local usage
-    usage=$(df -h "$INSTALL_DIR" 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
-    if [ -n "$usage" ]; then
+    # df -P forces POSIX single-line output. Plain `df -h` wraps a long device
+    # name onto a second line, which shifts awk's column indexes so `$5` reads
+    # the mount point ("/") instead of the capacity — that then trips the
+    # numeric comparison below. Grab the capacity field by its trailing "%" so
+    # the parse survives any column shift, then strip the percent sign.
+    usage=$(df -P "$INSTALL_DIR" 2>/dev/null \
+        | awk 'NR>1 { for (i = 1; i <= NF; i++) if ($i ~ /%$/) { gsub(/%/, "", $i); print $i; exit } }')
+    # Only treat the probe as successful when we parsed a numeric percentage;
+    # this also keeps the `-gt` comparison from erroring on unexpected output.
+    if [[ "$usage" =~ ^[0-9]+$ ]]; then
         result_set "disk" "ok"
         result_set "disk_usage" "$usage"
         if [ "$usage" -gt 90 ]; then
