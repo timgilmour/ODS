@@ -343,15 +343,15 @@ if command -v pwsh >/dev/null 2>&1; then
         ${env:ProgramFiles} = $programFiles
         ${env:ProgramFiles(x86)} = $programFilesX86
         $script:LEMONADE_EXE = Join-Path (Join-Path (Join-Path $programFiles "Lemonade Server") "bin") "lemonade-server.exe"
-        $x86Exe = Join-Path (Join-Path (Join-Path $programFilesX86 "Lemonade Server") "bin") "lemonade-server.exe"
+        $x86Exe = Join-Path (Join-Path (Join-Path $programFilesX86 "Lemonade Server") "bin") "LemonadeServer.exe"
         New-Item -ItemType Directory -Path (Split-Path $x86Exe) -Force | Out-Null
         Set-Content -LiteralPath $x86Exe -Value "stub" -NoNewline
         $resolved = Resolve-ODSLemonadeExe
         if ($resolved -ne $x86Exe) {
-            throw "Expected Program Files (x86) Lemonade path, got: $resolved"
+            throw "Expected Program Files (x86) LemonadeServer.exe path, got: $resolved"
         }
     '; then
-        pass "backend-contract.ps1: reads explicit root, stays standalone, resolves x86 Lemonade installs"
+        pass "backend-contract.ps1: reads explicit root, stays standalone, resolves x86 Lemonade aliases"
     else
         fail "backend-contract.ps1: PowerShell contract failed"
     fi
@@ -518,6 +518,21 @@ if grep -q 'backend-contract.ps1' installers/windows/ods.ps1 \
     pass "ods.ps1 resolves Lemonade across both Program Files roots"
 else
     fail "ods.ps1 must use Lemonade resolver for installed CLI commands"
+fi
+
+# ---------------------------------------------------------------------------
+# 17d. Windows AMD falls back when managed Lemonade never becomes healthy
+# ---------------------------------------------------------------------------
+echo "[contract] Windows AMD Lemonade health failure falls back to llama-server"
+if grep -q 'function Stop-ODSWindowsLemonadeProcesses' installers/windows/install-windows.ps1 \
+    && grep -q 'DreamServerLemonadeRuntime' installers/windows/install-windows.ps1 \
+    && grep -q 'Falling back to native llama-server (Vulkan)' installers/windows/install-windows.ps1 \
+    && grep -q '\$useLemonade = \$false' installers/windows/install-windows.ps1 \
+    && grep -q 'if (-not \$useLemonade)' installers/windows/install-windows.ps1 \
+    && ! grep -q 'throw "Lemonade \$launchMethod started but no Lemonade process was found' installers/windows/install-windows.ps1; then
+    pass "install-windows.ps1: stale Lemonade is stopped and unhealthy Lemonade falls back"
+else
+    fail "install-windows.ps1: Windows AMD must not block Compose behind an unhealthy Lemonade endpoint"
 fi
 
 # ---------------------------------------------------------------------------

@@ -413,6 +413,42 @@ if ($dryRun) {
                 }
             }
 
+            function Stop-ODSWindowsLemonadeProcesses {
+                param(
+                    [string]$ExePath,
+                    [string[]]$TaskNames = @("ODSLemonadeRuntime", "DreamServerLemonadeRuntime")
+                )
+
+                foreach ($_taskName in $TaskNames) {
+                    try { Stop-ScheduledTask -TaskName $_taskName -ErrorAction SilentlyContinue } catch { }
+                    try { Unregister-ScheduledTask -TaskName $_taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+                }
+
+                $_resolvedExe = $null
+                try {
+                    if (-not [string]::IsNullOrWhiteSpace($ExePath)) {
+                        $_resolvedExe = [System.IO.Path]::GetFullPath($ExePath)
+                    }
+                } catch { }
+                $_knownNames = @("LemonadeServer.exe", "lemonade-server.exe", "lemonade-router.exe")
+
+                try {
+                    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                        Where-Object {
+                            $_path = [string]$_.ExecutablePath
+                            $_name = [string]$_.Name
+                            ($_resolvedExe -and $_path -and $_path.Equals($_resolvedExe, [StringComparison]::OrdinalIgnoreCase)) -or
+                            ($_knownNames -contains $_name) -or
+                            ($_path -and ($_path -match '\\(Lemonade Server|lemonade_server|LemonadeServer)\\bin\\'))
+                        } |
+                        ForEach-Object {
+                            try { Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue } catch { }
+                        }
+                } catch {
+                    Write-AIWarn "Could not stop stale Lemonade processes: $_"
+                }
+            }
+
             if ($useLemonade) {
                 # ── Start Lemonade server ──
                 # --extra-models-dir: Lemonade auto-discovers GGUF files in this directory
@@ -422,8 +458,7 @@ if ($dryRun) {
                 Write-AI "Starting Lemonade server..."
                 $modelsDir = Join-Path (Join-Path $installDir "data") "models"
                 $taskName = "ODSLemonadeRuntime"
-                try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
-                try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+                Stop-ODSWindowsLemonadeProcesses -ExePath $script:LEMONADE_EXE -TaskNames @($taskName, "DreamServerLemonadeRuntime")
                 foreach ($listener in @(Get-NetTCPConnection -LocalPort $script:LEMONADE_PORT -State Listen -ErrorAction SilentlyContinue)) {
                     if ($listener.OwningProcess -gt 0) {
                         Stop-Process -Id ([int]$listener.OwningProcess) -Force -ErrorAction SilentlyContinue
@@ -433,43 +468,73 @@ if ($dryRun) {
                 New-Item -ItemType Directory -Path $pidDir -Force | Out-Null
 
                 $argString = "serve --port $($script:LEMONADE_PORT) --host $bindAddr --no-tray --llamacpp vulkan --extra-models-dir `"$modelsDir`""
-                $action = New-ScheduledTaskAction -Execute $script:LEMONADE_EXE -Argument $argString -WorkingDirectory (Split-Path -Parent $script:LEMONADE_EXE)
-                $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(1))
-                $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-                Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-                Start-ScheduledTask -TaskName $taskName
+                $launchMethod = "scheduled task"
+                try {
+                    $action = New-ScheduledTaskAction -Execute $script:LEMONADE_EXE -Argument $argString -WorkingDirectory (Split-Path -Parent $script:LEMONADE_EXE)
+                    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(1))
+                    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+                    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force -ErrorAction Stop | Out-Null
+                    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                } catch {
+                    $launchMethod = "direct process"
+                    Write-AIWarn "Could not start Lemonade through Task Scheduler: $_"
+                    Write-AI "Starting Lemonade directly for this Windows session..."
+                    Start-Process -FilePath $script:LEMONADE_EXE -ArgumentList $argString -WindowStyle Hidden -WorkingDirectory (Split-Path -Parent $script:LEMONADE_EXE) | Out-Null
+                }
                 Start-Sleep -Seconds 5
                 $proc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                     Where-Object { $_.ExecutablePath -and $_.ExecutablePath.Equals($script:LEMONADE_EXE, [StringComparison]::OrdinalIgnoreCase) } |
                     Sort-Object ProcessId -Descending |
                     Select-Object -First 1
+                if (-not $proc -and $launchMethod -eq "scheduled task") {
+                    $launchMethod = "direct process"
+                    Write-AIWarn "Lemonade scheduled task did not start a server process."
+                    Write-AI "Starting Lemonade directly for this Windows session..."
+                    Start-Process -FilePath $script:LEMONADE_EXE -ArgumentList $argString -WindowStyle Hidden -WorkingDirectory (Split-Path -Parent $script:LEMONADE_EXE) | Out-Null
+                    Start-Sleep -Seconds 3
+                    $proc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.Equals($script:LEMONADE_EXE, [StringComparison]::OrdinalIgnoreCase) } |
+                        Sort-Object ProcessId -Descending |
+                        Select-Object -First 1
+                }
                 if (-not $proc) {
-                    throw "Lemonade scheduled task started but no lemonade-server.exe process was found"
+                    Write-AIWarn "Lemonade $launchMethod started but no Lemonade process was found. Falling back to native llama-server (Vulkan)."
+                    Stop-ODSWindowsLemonadeProcesses -ExePath $script:LEMONADE_EXE -TaskNames @($taskName, "DreamServerLemonadeRuntime")
+                    Remove-Item -LiteralPath $script:INFERENCE_PID_FILE -Force -ErrorAction SilentlyContinue
+                    $useLemonade = $false
                 }
-                Set-Content -Path $script:INFERENCE_PID_FILE -Value $proc.ProcessId
 
-                Write-AI "Waiting for Lemonade server to start..."
-                $maxWait = 60; $waited = 0; $healthy = $false
-                while ($waited -lt $maxWait) {
-                    Start-Sleep -Seconds 2; $waited += 2
-                    try {
-                        $req = [System.Net.HttpWebRequest]::Create($script:LEMONADE_HEALTH_URL)
-                        $req.Timeout = 3000; $req.Method = "GET"
-                        $resp = $req.GetResponse(); $code = [int]$resp.StatusCode; $resp.Close()
-                        if ($code -eq 200) { $healthy = $true; break }
-                    } catch { }
-                    if ($waited % 10 -eq 0) { Write-AI "  Still starting... ($waited s)" }
-                }
-                if ($healthy) {
-                    Write-AISuccess "Lemonade server healthy (PID $($proc.ProcessId))"
-                    if ($gpuInfo.HasNpu) {
-                        Write-AISuccess "NPU hybrid mode available (NPU prefill + GPU decode)"
+                if ($useLemonade) {
+                    Set-Content -Path $script:INFERENCE_PID_FILE -Value $proc.ProcessId
+
+                    Write-AI "Waiting for Lemonade server to start..."
+                    $maxWait = 60; $waited = 0; $healthy = $false
+                    while ($waited -lt $maxWait) {
+                        Start-Sleep -Seconds 2; $waited += 2
+                        try {
+                            $req = [System.Net.HttpWebRequest]::Create($script:LEMONADE_HEALTH_URL)
+                            $req.Timeout = 3000; $req.Method = "GET"
+                            $resp = $req.GetResponse(); $code = [int]$resp.StatusCode; $resp.Close()
+                            if ($code -eq 200) { $healthy = $true; break }
+                        } catch { }
+                        if ($waited % 10 -eq 0) { Write-AI "  Still starting... ($waited s)" }
                     }
-                    Write-AI "Model ($($tierConfig.GgufFile)) will load on first request."
-                } else {
-                    Write-AIWarn "Lemonade server did not respond within ${maxWait}s. It may still be starting."
+                    if ($healthy) {
+                        Write-AISuccess "Lemonade server healthy (PID $($proc.ProcessId))"
+                        if ($gpuInfo.HasNpu) {
+                            Write-AISuccess "NPU hybrid mode available (NPU prefill + GPU decode)"
+                        }
+                        Write-AI "Model ($($tierConfig.GgufFile)) will load on first request."
+                    } else {
+                        Write-AIWarn "Lemonade server did not respond within ${maxWait}s. Falling back to native llama-server (Vulkan)."
+                        Stop-ODSWindowsLemonadeProcesses -ExePath $script:LEMONADE_EXE -TaskNames @($taskName, "DreamServerLemonadeRuntime")
+                        Remove-Item -LiteralPath $script:INFERENCE_PID_FILE -Force -ErrorAction SilentlyContinue
+                        $useLemonade = $false
+                    }
                 }
-            } else {
+            }
+
+            if (-not $useLemonade) {
                 # ── Fallback: llama-server.exe (Vulkan) ──
                 $llamaZip = Join-Path $env:TEMP $script:LLAMA_CPP_VULKAN_ASSET
                 if (-not (Test-Path $script:LLAMA_SERVER_EXE)) {
