@@ -521,6 +521,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 17d. Windows AMD falls back when managed Lemonade never becomes healthy
+# ---------------------------------------------------------------------------
+echo "[contract] Windows AMD Lemonade health failure falls back to llama-server"
+if grep -q 'function Stop-ODSWindowsLemonadeProcesses' installers/windows/install-windows.ps1 \
+    && grep -q 'DreamServerLemonadeRuntime' installers/windows/install-windows.ps1 \
+    && grep -q 'Falling back to native llama-server (Vulkan)' installers/windows/install-windows.ps1 \
+    && grep -q '\$useLemonade = \$false' installers/windows/install-windows.ps1 \
+    && grep -q 'if (-not \$useLemonade)' installers/windows/install-windows.ps1; then
+    pass "install-windows.ps1: stale Lemonade is stopped and unhealthy Lemonade falls back"
+else
+    fail "install-windows.ps1: Windows AMD must not block Compose behind an unhealthy Lemonade endpoint"
+fi
+
+# ---------------------------------------------------------------------------
 # 18. Windows image validation treats missing local images as probe misses
 # ---------------------------------------------------------------------------
 echo "[contract] Windows Docker image validation is stderr-safe"
