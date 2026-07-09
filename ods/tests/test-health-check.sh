@@ -325,6 +325,20 @@ else
     skip "async aggregation tests (python3 + PyYAML required for service registry)"
 fi
 
+# 13. LLM probe honors the backend's API base path. Lemonade (AMD) serves
+# /api/v1 while llama-server serves /v1; a hardcoded /v1/completions probe
+# fails on every Lemonade install even when inference is healthy.
+if grep -q 'LLM_API_BASE_PATH:-/v1' "$ROOT_DIR/scripts/health-check.sh"; then
+    pass "test_llm reads LLM_API_BASE_PATH with /v1 default"
+else
+    fail "test_llm must honor LLM_API_BASE_PATH (Lemonade uses /api/v1)"
+fi
+if grep -q '/v1/completions' "$ROOT_DIR/scripts/health-check.sh"; then
+    fail "test_llm still hardcodes /v1/completions"
+else
+    pass "no hardcoded /v1/completions probe remains"
+fi
+
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]
