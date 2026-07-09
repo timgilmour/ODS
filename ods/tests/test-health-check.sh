@@ -103,6 +103,42 @@ else
     fail "check_container_state missing docker availability check"
 fi
 
+# Helper: run health-check.sh --json with a mock nvidia-smi that reports
+# "mem_used, mem_total, util, temp" and echo the resulting gpu status.
+_gpu_status_with_mock() {
+    local csv="$1" mock_dir gpu_json
+    mock_dir=$(mktemp -d)
+    {
+        echo '#!/usr/bin/env bash'
+        echo "echo '$csv'"
+    } > "$mock_dir/nvidia-smi"
+    chmod +x "$mock_dir/nvidia-smi"
+    set +e
+    gpu_json=$(cd "$ROOT_DIR" && PATH="$mock_dir:$PATH" bash scripts/health-check.sh --json 2>&1)
+    set -e
+    rm -rf "$mock_dir"
+    echo "$gpu_json" | grep -o '"gpu": "[^"]*"' | head -1
+}
+
+# 8. A fully-utilized GPU with low memory must NOT warn. An LLM server pins
+# util at ~100% during normal inference; the old util>95 check flagged that
+# healthy state as "warn". Memory is only 8% here, so status must be "ok".
+gpu_busy=$(_gpu_status_with_mock "2048, 24576, 100, 60")
+if echo "$gpu_busy" | grep -q '"gpu": "ok"'; then
+    pass "test_gpu does not warn on 100% utilization when memory is low"
+else
+    fail "test_gpu warned on healthy high-util GPU; got: ${gpu_busy:-<none>}"
+fi
+
+# 9. High memory pressure (>95%) SHOULD warn — the OOM signal the probe means
+# to surface. 24000/24576 = 97%.
+gpu_full=$(_gpu_status_with_mock "24000, 24576, 30, 60")
+if echo "$gpu_full" | grep -q '"gpu": "warn"'; then
+    pass "test_gpu warns when GPU memory exceeds 95%"
+else
+    fail "test_gpu did not warn on >95% memory; got: ${gpu_full:-<none>}"
+fi
+
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]

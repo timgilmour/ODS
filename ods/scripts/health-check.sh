@@ -195,8 +195,16 @@ test_gpu() {
             result_set "gpu_util" "${gpu_util// /}"
             result_set "gpu_temp" "${temp// /}"
 
-            # Warn if GPU memory > 95% or temp > 80C
-            if [ "$(result_get "gpu_util")" -gt 95 ] 2>/dev/null; then
+            # Warn if GPU memory > 95% (approaching OOM) or temp > 80C.
+            # Deliberately NOT based on utilization: a llama-server doing
+            # inference legitimately pins the GPU at ~100% util, so a
+            # util-based warning would fire during normal, healthy load.
+            local mem_used mem_total
+            mem_used="$(result_get "gpu_mem_used")"
+            mem_total="$(result_get "gpu_mem_total")"
+            if [[ "$mem_used" =~ ^[0-9]+$ && "$mem_total" =~ ^[0-9]+$ ]] \
+                && [ "$mem_total" -gt 0 ] \
+                && [ $(( mem_used * 100 / mem_total )) -gt 95 ]; then
                 result_set "gpu" "warn"
             fi
             if [ "$(result_get "gpu_temp")" -gt 80 ] 2>/dev/null; then
