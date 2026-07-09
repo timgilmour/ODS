@@ -1214,10 +1214,16 @@ litellm_settings:
                 [int]$MaxAttempts = 4
             )
 
-            & docker @DockerClientArgs image inspect $Image *> $null
-            if ($LASTEXITCODE -eq 0) {
-                Add-Content -LiteralPath $LogPath -Value "Compose image already cached: $Image"
-                return $true
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "SilentlyContinue"
+            try {
+                & docker @DockerClientArgs image inspect $Image *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    Add-Content -LiteralPath $LogPath -Value "Compose image already cached: $Image"
+                    return $true
+                }
+            } finally {
+                $ErrorActionPreference = $prevEAP
             }
 
             $delays = @(5, 15, 30)
