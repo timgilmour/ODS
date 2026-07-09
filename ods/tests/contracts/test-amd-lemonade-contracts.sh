@@ -528,7 +528,8 @@ if grep -q 'function Stop-ODSWindowsLemonadeProcesses' installers/windows/instal
     && grep -q 'DreamServerLemonadeRuntime' installers/windows/install-windows.ps1 \
     && grep -q 'Falling back to native llama-server (Vulkan)' installers/windows/install-windows.ps1 \
     && grep -q '\$useLemonade = \$false' installers/windows/install-windows.ps1 \
-    && grep -q 'if (-not \$useLemonade)' installers/windows/install-windows.ps1; then
+    && grep -q 'if (-not \$useLemonade)' installers/windows/install-windows.ps1 \
+    && ! grep -q 'throw "Lemonade \$launchMethod started but no Lemonade process was found' installers/windows/install-windows.ps1; then
     pass "install-windows.ps1: stale Lemonade is stopped and unhealthy Lemonade falls back"
 else
     fail "install-windows.ps1: Windows AMD must not block Compose behind an unhealthy Lemonade endpoint"
