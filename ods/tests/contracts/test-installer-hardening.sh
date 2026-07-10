@@ -204,6 +204,7 @@ assert_not_contains "$win_installer" 'disown "\$pid"' "Windows model-upgrade tas
 assert_contains "$win_installer" '< /dev/null' "Windows installer full-model upgrade should close stdin"
 assert_contains "$win_installer" 'model-upgrade.pid' "Windows installer should record the background model-upgrade PID"
 assert_contains "$win_installer" 'ODSModelUpgrade' "Windows installer should launch full-model upgrade through a separate scheduled task"
+assert_contains "$win_installer" 'ODSNativeLlamaRuntime' "Windows installer should launch native llama-server through a managed scheduled task"
 python3 - "$win_installer" >"$tmpdir/windows-upgrade-launcher.out" <<'PY'
 import sys
 from pathlib import Path
@@ -226,6 +227,7 @@ for needle in (
     "Register-ScheduledTask -TaskName $upgradeTaskName",
     "-Settings $upgradeSettings",
     "Start-ScheduledTask -TaskName $upgradeTaskName",
+    "-RunLevel Limited",
 ):
     if needle not in block:
         raise SystemExit(f"model upgrade launcher missing {needle}")
@@ -239,6 +241,30 @@ if 'echo "$`$"' not in wrapper and 'echo "`$`$"' not in wrapper:
 if 'exec bash "$bashScript"' not in wrapper:
     raise SystemExit("model upgrade wrapper does not exec the real upgrade")
 print("windows-upgrade-launcher-supervised")
+PY
+
+python3 - "$win_installer" >"$tmpdir/windows-native-llama-task.out" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index('$nativeLlamaTaskName = "ODSNativeLlamaRuntime"')
+end = text.index('Write-AI "Waiting for llama-server to load model..."', start)
+block = text[start:end]
+for needle in (
+    "New-ScheduledTaskAction",
+    "-Execute $script:LLAMA_SERVER_EXE",
+    "$nativeLlamaPrincipal = New-ScheduledTaskPrincipal",
+    "-RunLevel Limited",
+    "Register-ScheduledTask -TaskName $nativeLlamaTaskName",
+    "Start-ScheduledTask -TaskName $nativeLlamaTaskName",
+    "Get-CimInstance Win32_Process",
+):
+    if needle not in block:
+        raise SystemExit(f"native llama runtime task missing {needle}")
+if "Start-Process -FilePath $script:LLAMA_SERVER_EXE" in block:
+    raise SystemExit("elevated installer still launches native llama-server directly")
+print("windows-native-llama-runtime-limited")
 PY
 assert_contains "$tmpdir/windows-upgrade-launcher.out" 'windows-upgrade-launcher-supervised' "Windows installer should supervise the full-model upgrade in the scheduled task"
 win_phase04="installers/windows/phases/04-requirements.ps1"

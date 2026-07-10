@@ -616,8 +616,55 @@ if ($dryRun) {
                 $pidDir = Split-Path $script:INFERENCE_PID_FILE
                 New-Item -ItemType Directory -Path $pidDir -Force | Out-Null
 
-                $proc = Start-Process -FilePath $script:LLAMA_SERVER_EXE `
-                    -ArgumentList $llamaArgs -WindowStyle Hidden -PassThru
+                # The installer itself may be elevated. Launching llama-server
+                # directly here would give it a high-integrity token that the
+                # limited ODS host agent cannot stop during a dashboard model
+                # swap. Keep the native runtime in the user's integrity level.
+                $nativeLlamaTaskName = "ODSNativeLlamaRuntime"
+                try { Stop-ScheduledTask -TaskName $nativeLlamaTaskName -ErrorAction SilentlyContinue } catch { }
+                try { Unregister-ScheduledTask -TaskName $nativeLlamaTaskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+
+                $nativeLlamaArgString = ($llamaArgs | ForEach-Object {
+                    '"' + ([string]$_).Replace('"', '\"') + '"'
+                }) -join ' '
+                $nativeLlamaAction = New-ScheduledTaskAction `
+                    -Execute $script:LLAMA_SERVER_EXE `
+                    -Argument $nativeLlamaArgString `
+                    -WorkingDirectory $script:LLAMA_SERVER_DIR
+                $nativeLlamaTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(1))
+                $nativeLlamaSettings = New-ScheduledTaskSettingsSet `
+                    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                    -ExecutionTimeLimit ([TimeSpan]::Zero)
+                $nativeLlamaPrincipal = New-ScheduledTaskPrincipal `
+                    -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+                Register-ScheduledTask -TaskName $nativeLlamaTaskName `
+                    -Action $nativeLlamaAction `
+                    -Trigger $nativeLlamaTrigger `
+                    -Settings $nativeLlamaSettings `
+                    -Principal $nativeLlamaPrincipal `
+                    -Description "ODS managed native llama-server runtime" `
+                    -Force -ErrorAction Stop | Out-Null
+                Start-ScheduledTask -TaskName $nativeLlamaTaskName -ErrorAction Stop
+
+                $nativeLlamaProcess = $null
+                for ($i = 0; $i -lt 30; $i++) {
+                    Start-Sleep -Seconds 1
+                    $nativeLlamaProcess = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                        Where-Object {
+                            $_.ExecutablePath -and
+                            $_.ExecutablePath.Equals($script:LLAMA_SERVER_EXE, [StringComparison]::OrdinalIgnoreCase) -and
+                            $_.CommandLine -and
+                            $_.CommandLine.IndexOf($modelFullPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                        } |
+                        Sort-Object ProcessId -Descending |
+                        Select-Object -First 1
+                    if ($nativeLlamaProcess) { break }
+                }
+                if (-not $nativeLlamaProcess) {
+                    Write-AIError "Native llama-server scheduled task started but no matching process was found."
+                    exit 1
+                }
+                $proc = Get-Process -Id ([int]$nativeLlamaProcess.ProcessId) -ErrorAction Stop
                 Set-Content -Path $script:INFERENCE_PID_FILE -Value $proc.Id
 
                 Write-AI "Waiting for llama-server to load model..."
@@ -1624,7 +1671,10 @@ exec bash "$bashScript" "$bashInstallDir" "$($fullTierConfig.GgufFile)" "$($full
                         $upgradeSettings = New-ScheduledTaskSettingsSet `
                             -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
                             -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
-                        $upgradePrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+                        # The upgrade owns the native llama-server hot-swap. It
+                        # must run at the same limited integrity level as the
+                        # host agent so later UI model swaps can stop the child.
+                        $upgradePrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
                         Register-ScheduledTask -TaskName $upgradeTaskName `
                             -Action $upgradeAction `
                             -Trigger $upgradeTrigger `
