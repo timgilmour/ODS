@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn
+from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlparse
 
 VERSION = "1.0.0"
@@ -572,6 +573,26 @@ def load_env(env_path: Path) -> dict:
     return env
 
 
+def _upsert_env_value(env_path: Path, key: str, value: str) -> None:
+    """Persist one simple ``KEY=value`` entry without disturbing other lines."""
+    if any(character in value for character in "\r\n\x00"):
+        raise ValueError(f"Invalid newline or NUL in {key}")
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    output = []
+    written = False
+    for line in lines:
+        line_key = line.split("=", 1)[0] if "=" in line and not line.startswith("#") else None
+        if line_key == key:
+            if not written:
+                output.append(f"{key}={value}")
+                written = True
+            continue
+        output.append(line)
+    if not written:
+        output.append(f"{key}={value}")
+    env_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+
 def _normalize_ods_mode(value) -> str:
     """Return a supported ODS mode or ``unknown`` for missing/invalid input."""
     mode = str(value or "").strip().lower()
@@ -1016,10 +1037,14 @@ def docker_compose_recreate(service_ids: list[str]) -> tuple:
 
     flags = resolve_compose_flags()
     cmd = ["docker", "compose"] + flags + ["up", "-d", "--no-deps", "--force-recreate"] + service_ids
+    compose_env = os.environ.copy()
+    for key in ("GGUF_FILE", "LLM_MODEL", "LEMONADE_MODEL", "MAX_CONTEXT", "CTX_SIZE"):
+        compose_env.pop(key, None)
     try:
         result = subprocess.run(
             cmd, cwd=str(INSTALL_DIR),
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_START,
+            env=compose_env,
         )
         return (True, "") if result.returncode == 0 else (False, result.stderr[:500] or result.stdout[:500])
     except subprocess.TimeoutExpired:
@@ -4259,6 +4284,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         litellm_local_backup: str | None = None
         hermes_live_snapshot: dict | None = None
         hermes_backups: dict[Path, str] = {}
+        perplexica_snapshot: dict | None = None
         committed = False
         rollback_attempted = False
         runtime_restart_strategy: str | None = None
@@ -4325,6 +4351,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                 rollback_env = load_env(env_path)
                 _restart_existing_container("ods-litellm")
                 hermes_restarted = _restart_existing_container("ods-hermes")
+                _recreate_openclaw_if_present()
+                if perplexica_snapshot is not None:
+                    _restore_perplexica_config(perplexica_snapshot)
                 previous_gguf = str(rollback_env.get("GGUF_FILE") or "")
                 previous_model = str(
                     rollback_env.get("LLM_MODEL")
@@ -4340,15 +4369,15 @@ class AgentHandler(BaseHTTPRequestHandler):
                     except (TypeError, ValueError):
                         previous_context = 32768
                     previous_windows_native = _is_windows_host_llama_server(rollback_env)
-                    previous_hermes_model = (
-                        previous_gguf
-                        if previous_windows_native
-                        else (
-                            f"extra.{previous_gguf}"
-                            if str(rollback_env.get("GPU_BACKEND") or "").lower() == "amd"
-                            else previous_gguf
+                    previous_hermes_model = previous_gguf
+                    if (
+                        not previous_windows_native
+                        and str(rollback_env.get("GPU_BACKEND") or "").lower() == "amd"
+                    ):
+                        previous_hermes_model = (
+                            rollback_env.get("LEMONADE_MODEL")
+                            or f"extra.{previous_gguf}"
                         )
-                    )
                     previous_base_url = rollback_env.get("HERMES_LLM_BASE_URL") or (
                         "http://litellm:4000/v1"
                         if _is_windows_host_lemonade(rollback_env)
@@ -4366,6 +4395,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     model_id=previous_model,
                     gguf_file=previous_gguf,
                     llm_model_name=previous_model,
+                    lemonade_model_id=str(rollback_env.get("LEMONADE_MODEL") or ""),
                 ):
                     raise RuntimeError(
                         f"previous model {previous_gguf} did not pass identity and completion readiness"
@@ -4382,11 +4412,26 @@ class AgentHandler(BaseHTTPRequestHandler):
             windows_host_lemonade = _is_windows_host_lemonade(env_pre)
             windows_lemonade_managed = _windows_lemonade_is_managed(env_pre)
             windows_native_llama = _is_windows_host_llama_server(env_pre)
+            lemonade_runtime = str(gpu_backend).lower() == "amd" and not windows_native_llama
+            same_lemonade_target = _runtime_model_identity_matches(
+                env_pre.get("GGUF_FILE"),
+                gguf_file=gguf_file,
+            )
+            lemonade_model_id = ""
             windows_lemonade_already_serving = False
-            if windows_host_lemonade and env_pre.get("GGUF_FILE") == gguf_file:
+            if windows_host_lemonade and same_lemonade_target:
                 lemonade_port = env_pre.get("AMD_INFERENCE_PORT", "8080") or "8080"
+                lemonade_model_id = _resolve_lemonade_model_id(
+                    env_pre,
+                    gguf_file,
+                    host="127.0.0.1",
+                    port=str(lemonade_port),
+                )
                 windows_lemonade_already_serving = _lemonade_completion_ready(
-                    "127.0.0.1", lemonade_port, gguf_file,
+                    "127.0.0.1",
+                    str(lemonade_port),
+                    gguf_file,
+                    lemonade_model_id,
                 )
                 if windows_lemonade_already_serving:
                     logger.info(
@@ -4421,6 +4466,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 )
             except FileNotFoundError:
                 pass
+            perplexica_snapshot = _capture_perplexica_config(env_pre)
 
             # Update .env
             if env_path.exists():
@@ -4434,6 +4480,12 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "MODEL_RUNTIME_PROFILE_LABEL": runtime_profile.get("label", "") if runtime_profile else "",
                     "MODEL_RUNTIME_PROFILE_SOURCE": runtime_profile.get("source_url", "") if runtime_profile else "",
                 }
+                if lemonade_runtime:
+                    updates["LEMONADE_MODEL"] = (
+                        str(env_pre.get("LEMONADE_MODEL") or "")
+                        if same_lemonade_target
+                        else ""
+                    )
                 runtime_keys = {
                     "LLAMA_PARALLEL",
                     "LLAMA_ARG_FLASH_ATTN",
@@ -4494,56 +4546,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                 encoding="utf-8",
             )
 
-            # Regenerate LiteLLM lemonade config so it routes to the new model.
-            # Only written on Lemonade installs where lemonade.yaml exists.
-            if lemonade_yaml.exists() and not windows_native_llama:
-                _write_lemonade_config(INSTALL_DIR, gguf_file)
-
-            hermes_model_name = (
-                gguf_file
-                if windows_native_llama
-                else f"extra.{gguf_file}" if gpu_backend == "amd" else gguf_file
-            )
-            hermes_live_exists = bool(
-                hermes_live_snapshot and hermes_live_snapshot.get("exists")
-            )
-            hermes_base_url = env_pre.get("HERMES_LLM_BASE_URL") or (
-                "http://litellm:4000/v1" if windows_host_lemonade else None
-            )
-            hermes_live_patched = False
-            if hermes_live_exists:
-                patched_live, hermes_live_patched = _patch_hermes_config_text(
-                    str(hermes_live_snapshot.get("text") or ""),
-                    hermes_model_name,
-                    base_url=hermes_base_url,
-                    context_length=context_length,
-                )
-                if hermes_live_patched:
-                    _write_hermes_live_config(
-                        hermes_live_config,
-                        patched_live,
-                        hermes_live_snapshot.get("source"),
-                    )
-                verified_live = _capture_hermes_live_config(hermes_live_config)
-                if not _hermes_config_matches(
-                    str(verified_live.get("text") or ""),
-                    hermes_model_name,
-                    hermes_base_url,
-                    int(context_length),
-                ):
-                    raise RuntimeError("Hermes persisted model route could not be verified")
-            hermes_template_patched = _patch_hermes_model_config(
-                hermes_template_config,
-                hermes_model_name,
-                base_url=hermes_base_url,
-                context_length=context_length,
-            )
-            # A missing live file can be seeded from the patched template on
-            # the next Hermes start. An existing file was verified above.
-            hermes_patched = hermes_live_patched or (
-                hermes_template_patched and not hermes_live_exists
-            )
-
             # Restart llama-server with the new model.
             # Three strategies depending on platform / agent location:
             # - apple (macOS): llama-server runs natively via Metal, not Docker.
@@ -4600,23 +4602,88 @@ class AgentHandler(BaseHTTPRequestHandler):
                 runtime_restart_strategy = "compose-llama"
                 _compose_restart_llama_server(env)
 
+            if lemonade_runtime:
+                lemonade_host, lemonade_port = _lemonade_runtime_address(env)
+                lemonade_model_id = _resolve_lemonade_model_id(
+                    env,
+                    gguf_file,
+                    host=lemonade_host,
+                    port=lemonade_port,
+                )
+                if not lemonade_model_id:
+                    raise RuntimeError(
+                        f"Could not resolve Lemonade model ID for {gguf_file}"
+                    )
+
+            hermes_model_name = (
+                gguf_file
+                if windows_native_llama
+                else lemonade_model_id if lemonade_runtime else gguf_file
+            )
+            hermes_base_url = env_pre.get("HERMES_LLM_BASE_URL") or (
+                "http://litellm:4000/v1" if windows_host_lemonade else None
+            )
+
             healthy = _wait_for_model_readiness(
                 env,
                 model_id=model_id,
                 gguf_file=gguf_file,
                 llm_model_name=llm_model_name,
+                lemonade_model_id=lemonade_model_id,
             )
 
             if healthy:
+                if lemonade_runtime:
+                    _upsert_env_value(env_path, "LEMONADE_MODEL", lemonade_model_id)
+                    env["LEMONADE_MODEL"] = lemonade_model_id
+                    if lemonade_yaml.exists() or env.get("ODS_MODE") == "lemonade":
+                        _write_lemonade_config(
+                            INSTALL_DIR,
+                            gguf_file,
+                            lemonade_model_id,
+                        )
+
                 if windows_native_llama:
                     _write_windows_native_litellm_config(INSTALL_DIR, gguf_file, env)
 
-                # Regenerate lemonade.yaml if active.  Lemonade requires the
-                # exact model ID (extra.<GGUF_FILE>) - a wildcard doesn't work.
-                # Mirrors bootstrap-upgrade.sh lines 364-384.
-                ods_mode = env.get("ODS_MODE", "local")
-                if ods_mode == "lemonade":
-                    _write_lemonade_config(INSTALL_DIR, gguf_file)
+                hermes_live_exists = bool(
+                    hermes_live_snapshot and hermes_live_snapshot.get("exists")
+                )
+                hermes_live_patched = False
+                if hermes_live_exists:
+                    patched_live, hermes_live_patched = _patch_hermes_config_text(
+                        str(hermes_live_snapshot.get("text") or ""),
+                        hermes_model_name,
+                        base_url=hermes_base_url,
+                        context_length=context_length,
+                    )
+                    if hermes_live_patched:
+                        _write_hermes_live_config(
+                            hermes_live_config,
+                            patched_live,
+                            hermes_live_snapshot.get("source"),
+                        )
+                    verified_live = _capture_hermes_live_config(hermes_live_config)
+                    if not _hermes_config_matches(
+                        str(verified_live.get("text") or ""),
+                        hermes_model_name,
+                        hermes_base_url,
+                        int(context_length),
+                    ):
+                        raise RuntimeError(
+                            "Hermes persisted model route could not be verified"
+                        )
+                hermes_template_patched = _patch_hermes_model_config(
+                    hermes_template_config,
+                    hermes_model_name,
+                    base_url=hermes_base_url,
+                    context_length=context_length,
+                )
+                # A missing live file can be seeded from the patched template
+                # on the next Hermes start. An existing file was verified above.
+                hermes_patched = hermes_live_patched or (
+                    hermes_template_patched and not hermes_live_exists
+                )
 
                 # Restart dependent services so they pick up the new model
                 _restart_existing_container("ods-litellm")
@@ -4625,6 +4692,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                         hermes_model_name,
                         hermes_base_url,
                         int(context_length),
+                    )
+                _recreate_openclaw_if_present()
+                if perplexica_snapshot is not None:
+                    _update_perplexica_model(
+                        env,
+                        perplexica_snapshot,
+                        gguf_file=gguf_file,
+                        lemonade_model_id=lemonade_model_id,
                     )
                 committed = True  # system state is committed before the response write
                 json_response(self, 200, {"status": "activated", "model_id": model_id})
@@ -4803,6 +4878,143 @@ def _runtime_model_identity_matches(
     return bool(expected and actual.intersection(expected))
 
 
+def _lemonade_runtime_address(env: dict) -> tuple[str, str]:
+    """Return the Lemonade address reachable from this host-agent process."""
+    location = str(env.get("AMD_INFERENCE_LOCATION") or "").lower()
+    if _is_windows_host_lemonade(env) or location == "host":
+        return (
+            "127.0.0.1",
+            str(env.get("AMD_INFERENCE_PORT") or env.get("OLLAMA_PORT") or "8080"),
+        )
+    if os.environ.get("ODS_HOST_INSTALL_DIR"):
+        return "ods-llama-server", "8080"
+    return "127.0.0.1", str(env.get("OLLAMA_PORT") or "8080")
+
+
+def _lemonade_catalog_values(value: object):
+    """Yield string leaves from Lemonade checkpoint metadata."""
+    if isinstance(value, str):
+        if value.strip():
+            yield value
+    elif isinstance(value, dict):
+        for nested in value.values():
+            yield from _lemonade_catalog_values(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            yield from _lemonade_catalog_values(nested)
+
+
+def _lemonade_catalog_model_id(body: str, gguf_file: str) -> str:
+    """Return the exact catalog ID whose ID/checkpoint matches ``gguf_file``."""
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    models = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return ""
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        candidates = [model_id]
+        candidates.extend(_lemonade_catalog_values(entry.get("checkpoint")))
+        candidates.extend(_lemonade_catalog_values(entry.get("checkpoints")))
+        for candidate in candidates:
+            normalized = candidate.strip().replace("\\", "/").rstrip("/")
+            leaf = normalized.rsplit("/", 1)[-1]
+            if ":" in leaf:
+                leaf = leaf.rsplit(":", 1)[-1]
+            if _runtime_model_identity_matches(candidate, gguf_file=gguf_file) or (
+                leaf != candidate
+                and _runtime_model_identity_matches(leaf, gguf_file=gguf_file)
+            ):
+                return model_id.strip()
+    return ""
+
+
+def _lemonade_uses_stem_ids(version: object) -> bool:
+    """Return whether ``version`` is Lemonade 10.7 or newer."""
+    match = re.search(r"\d+(?:\.\d+){1,3}", str(version or ""))
+    if not match:
+        return False
+    try:
+        parts = tuple(int(part) for part in match.group(0).split("."))
+    except ValueError:
+        return False
+    return (parts + (0, 0, 0, 0))[:4] >= (10, 7, 0, 0)
+
+
+def _resolve_lemonade_model_id(
+    env: dict,
+    gguf_file: str,
+    *,
+    host: str | None = None,
+    port: str | None = None,
+) -> str:
+    """Resolve the exact request ID Lemonade assigned to a local GGUF.
+
+    Prefer the live model catalog, whose checkpoint metadata survives naming
+    changes. A persisted ID is a fallback only when it belongs to the requested
+    configured GGUF. Lemonade 10.7 changed
+    extra-directory IDs to filename stems, so the health version determines
+    the fallback when the catalog is not ready yet. An absent/older version
+    deliberately keeps the legacy Linux ``extra.<file>.gguf`` behavior.
+    """
+    normalized = str(gguf_file or "").strip().replace("\\", "/").rstrip("/")
+    filename = normalized.rsplit("/", 1)[-1]
+    if not filename:
+        return ""
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    persisted = str(env.get("LEMONADE_MODEL") or "").strip()
+    configured_gguf = str(env.get("GGUF_FILE") or "").strip()
+    persisted_matches_target = bool(
+        persisted
+        and _runtime_model_identity_matches(
+            configured_gguf,
+            gguf_file=filename,
+        )
+    )
+    if host is None or port is None:
+        resolved_host, resolved_port = _lemonade_runtime_address(env)
+        host = host or resolved_host
+        port = port or resolved_port
+
+    version = ""
+    for path, timeout in (("/api/v1/models", 5), ("/api/v1/health", 5)):
+        try:
+            result = subprocess.run(
+                [
+                    "curl", "-sf", "--max-time", str(timeout),
+                    f"http://{host}:{port}{path}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout + 5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode != 0:
+            continue
+        if path.endswith("/models"):
+            live_id = _lemonade_catalog_model_id(result.stdout, filename)
+            if live_id:
+                return live_id
+            continue
+        try:
+            health = json.loads(result.stdout or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(health, dict):
+            version = health.get("version") or ""
+
+    if persisted_matches_target:
+        return persisted
+    return stem if _lemonade_uses_stem_ids(version) else f"extra.{filename}"
+
+
 def _check_llama_model_identity(
     body: str,
     *,
@@ -4842,9 +5054,9 @@ def _live_runtime_has_model(env: dict, gguf_file: str) -> bool | None:
         return False
     gpu_backend = str(env.get("GPU_BACKEND") or "nvidia").lower()
     windows_native_llama = _is_windows_host_llama_server(env)
-    if _is_windows_host_lemonade(env):
-        host = "127.0.0.1"
-        port = str(env.get("AMD_INFERENCE_PORT") or "8080")
+    is_lemonade = gpu_backend == "amd" and not windows_native_llama
+    if is_lemonade:
+        host, port = _lemonade_runtime_address(env)
     elif windows_native_llama:
         host = "127.0.0.1"
         port = str(env.get("AMD_INFERENCE_PORT") or env.get("OLLAMA_PORT") or "8080")
@@ -4857,7 +5069,6 @@ def _live_runtime_has_model(env: dict, gguf_file: str) -> bool | None:
     else:
         host = "127.0.0.1"
         port = str(env.get("OLLAMA_PORT") or "8080")
-    is_lemonade = gpu_backend == "amd" and not windows_native_llama
     path = "/api/v1/health" if is_lemonade else "/v1/models"
     try:
         result = subprocess.run(
@@ -4875,7 +5086,13 @@ def _live_runtime_has_model(env: dict, gguf_file: str) -> bool | None:
     if is_lemonade:
         if not isinstance(data, dict) or "model_loaded" not in data:
             return None
-        return _check_lemonade_health(body, gguf_file)
+        lemonade_model_id = _resolve_lemonade_model_id(
+            env,
+            gguf_file,
+            host=host,
+            port=port,
+        )
+        return _check_lemonade_health(body, gguf_file, lemonade_model_id)
     if not isinstance(data, dict) or not isinstance(data.get("data"), list):
         return None
     local_name = _local_model_name_from_gguf(gguf_file)
@@ -4887,7 +5104,11 @@ def _live_runtime_has_model(env: dict, gguf_file: str) -> bool | None:
     )
 
 
-def _check_lemonade_health(body: str, expected_gguf_file: str | None = None) -> bool:
+def _check_lemonade_health(
+    body: str,
+    expected_gguf_file: str | None = None,
+    expected_model_id: str = "",
+) -> bool:
     """Check if Lemonade health response indicates a model is loaded.
 
     Lemonade returns {"status": "ok", "model_loaded": null} when healthy
@@ -4898,12 +5119,13 @@ def _check_lemonade_health(body: str, expected_gguf_file: str | None = None) -> 
     """
     try:
         data = json.loads(body)
-        if expected_gguf_file is not None:
+        if expected_gguf_file is not None or expected_model_id:
             if not isinstance(data, dict) or str(data.get("status") or "").casefold() != "ok":
                 return False
             return _runtime_model_identity_matches(
                 data.get("model_loaded"),
-                gguf_file=expected_gguf_file,
+                model_id=expected_model_id,
+                gguf_file=expected_gguf_file or "",
             )
         loaded = data.get("model_loaded")
         return isinstance(loaded, str) and bool(loaded.strip())
@@ -5083,14 +5305,13 @@ macos_configure_llm_bridge_from_env "$env_file" "$install_dir"
         )
 
 
-def _send_lemonade_warmup(host: str, port: str, gguf_file: str, attempt: int) -> bool:
+def _send_lemonade_warmup(host: str, port: str, model_id: str, attempt: int) -> bool:
     """Send a warm-up chat completion to trigger Lemonade on-demand model load.
 
     Lemonade discovers models from its configured extra_models_dir but only
     loads them when a request arrives for that model ID. Returns True if the
     request was accepted (model is loading). Mirrors bootstrap-upgrade.sh.
     """
-    model_id = f"extra.{gguf_file}"
     url = f"http://{host}:{port}/api/v1/chat/completions"
     payload = json.dumps({
         "model": model_id,
@@ -5112,12 +5333,17 @@ def _send_lemonade_warmup(host: str, port: str, gguf_file: str, attempt: int) ->
     return False
 
 
-def _lemonade_completion_ready(host: str, port: str, gguf_file: str) -> bool:
+def _lemonade_completion_ready(
+    host: str,
+    port: str,
+    gguf_file: str,
+    lemonade_model_id: str = "",
+) -> bool:
     """Return True when Lemonade can complete against the requested GGUF."""
     return _chat_completion_ready(
         host,
         port,
-        f"extra.{gguf_file}",
+        lemonade_model_id or f"extra.{gguf_file}",
         api_prefix="/api/v1",
     )
 
@@ -5128,17 +5354,17 @@ def _wait_for_model_readiness(
     model_id: str,
     gguf_file: str,
     llm_model_name: str,
+    lemonade_model_id: str = "",
     attempts: int = 60,
     initial_delay: float = 5,
     interval: float = 5,
 ) -> bool:
     """Prove exact runtime identity and one meaningful completion."""
     gpu_backend = str(env.get("GPU_BACKEND") or "nvidia").lower()
-    windows_host_lemonade = _is_windows_host_lemonade(env)
     windows_native_llama = _is_windows_host_llama_server(env)
-    if windows_host_lemonade:
-        host = "127.0.0.1"
-        port = str(env.get("AMD_INFERENCE_PORT") or "8080")
+    is_lemonade = gpu_backend == "amd" and not windows_native_llama
+    if is_lemonade:
+        host, port = _lemonade_runtime_address(env)
     elif windows_native_llama:
         host = "127.0.0.1"
         port = str(env.get("AMD_INFERENCE_PORT") or env.get("OLLAMA_PORT") or "8080")
@@ -5152,17 +5378,18 @@ def _wait_for_model_readiness(
         host = "127.0.0.1"
         port = str(env.get("OLLAMA_PORT") or "8080")
 
-    is_lemonade = gpu_backend == "amd" and not windows_native_llama
     identity_path = "/api/v1/health" if is_lemonade else "/v1/models"
     identity_url = f"http://{host}:{port}{identity_path}"
     completion_model = llm_model_name or gguf_file
     completion_prefix = "/v1"
     if is_lemonade:
-        completion_model = (
-            env.get("LEMONADE_MODEL")
-            if str(env.get("AMD_INFERENCE_MANAGED") or "true").lower() == "false"
-            else ""
-        ) or f"extra.{gguf_file}"
+        lemonade_model_id = lemonade_model_id or _resolve_lemonade_model_id(
+            env,
+            gguf_file,
+            host=host,
+            port=port,
+        )
+        completion_model = lemonade_model_id
         completion_prefix = str(env.get("LEMONADE_API_BASE_PATH") or "/api/v1")
 
     logger.info("Waiting for requested model identity %s at %s", gguf_file, identity_url)
@@ -5180,9 +5407,18 @@ def _wait_for_model_readiness(
             )
             body = result.stdout.strip()
             if is_lemonade:
-                identity_ready = _check_lemonade_health(body, gguf_file)
+                identity_ready = _check_lemonade_health(
+                    body,
+                    gguf_file,
+                    lemonade_model_id,
+                )
                 if not identity_ready and body and (not warmup_sent or attempt % 3 == 0):
-                    warmup_sent = _send_lemonade_warmup(host, port, gguf_file, attempt)
+                    warmup_sent = _send_lemonade_warmup(
+                        host,
+                        port,
+                        lemonade_model_id,
+                        attempt,
+                    )
             else:
                 identity_ready = _check_llama_model_identity(
                     body,
@@ -5573,6 +5809,7 @@ def _render_runtime_config(
     surface: str,
     *,
     gguf_file: str,
+    lemonade_model_id: str,
     lemonade_api_key: str,
     lemonade_api_base: str,
     ods_mode: str,
@@ -5592,6 +5829,8 @@ def _render_runtime_config(
         gpu_backend,
         "--gguf-file",
         gguf_file,
+        "--lemonade-model-id",
+        lemonade_model_id,
         "--lemonade-api-base",
         lemonade_api_base,
         "--litellm-key",
@@ -5615,7 +5854,11 @@ def _render_runtime_config(
     return True
 
 
-def _write_lemonade_config(install_dir: Path, gguf_file: str):
+def _write_lemonade_config(
+    install_dir: Path,
+    gguf_file: str,
+    lemonade_model_id: str = "",
+):
     """Regenerate lemonade.yaml with the correct model ID for LiteLLM.
 
     Lemonade exposes models as ``extra.<GGUF_FILE>`` — the LiteLLM config
@@ -5629,6 +5872,11 @@ def _write_lemonade_config(install_dir: Path, gguf_file: str):
     # static "sk-lemonade" would silently revert key rotation.
     env = load_env(install_dir / ".env")
     lemonade_api_key = env.get("LITELLM_LEMONADE_API_KEY", "sk-lemonade")
+    lemonade_model_id = (
+        str(lemonade_model_id or "").strip()
+        or str(env.get("LEMONADE_MODEL") or "").strip()
+        or f"extra.{gguf_file}"
+    )
     ods_mode = env.get("ODS_MODE", "lemonade")
     gpu_backend = env.get("GPU_BACKEND", "amd")
     lemonade_api_base = "http://llama-server:8080/api/v1"
@@ -5639,19 +5887,23 @@ def _write_lemonade_config(install_dir: Path, gguf_file: str):
         install_dir,
         "litellm-lemonade",
         gguf_file=gguf_file,
+        lemonade_model_id=lemonade_model_id,
         lemonade_api_key=lemonade_api_key,
         lemonade_api_base=lemonade_api_base,
         ods_mode=ods_mode,
         gpu_backend=gpu_backend,
     ):
-        logger.info("Wrote lemonade.yaml via runtime renderer for model: extra.%s", gguf_file)
+        logger.info(
+            "Wrote lemonade.yaml via runtime renderer for model: %s",
+            lemonade_model_id,
+        )
         return
 
     content = (
         "model_list:\n"
         "  - model_name: \"*\"\n"
         "    litellm_params:\n"
-        f"      model: openai/extra.{gguf_file}\n"
+        f"      model: openai/{lemonade_model_id}\n"
         f"      api_base: {lemonade_api_base}\n"
         f"      api_key: {lemonade_api_key}\n"
         "      extra_body:\n"
@@ -5665,7 +5917,7 @@ def _write_lemonade_config(install_dir: Path, gguf_file: str):
         "  stream_timeout: 900\n"
     )
     config_path.write_text(content, encoding="utf-8")
-    logger.info("Wrote lemonade.yaml for model: extra.%s", gguf_file)
+    logger.info("Wrote lemonade.yaml for model: %s", lemonade_model_id)
 
 
 def _write_windows_native_litellm_config(install_dir: Path, gguf_file: str, env: dict):
@@ -5829,6 +6081,199 @@ def _restart_existing_container(container: str) -> bool:
         raise RuntimeError(
             f"docker restart {container} failed (exit {result.returncode}): {detail[:300]}"
         )
+    return True
+
+
+def _perplexica_config_url(env: dict) -> str:
+    """Return the Perplexica config endpoint reachable from this process."""
+    if os.environ.get("ODS_HOST_INSTALL_DIR"):
+        return "http://ods-perplexica:3000/api/config"
+    port = str(env.get("PERPLEXICA_PORT") or "3004").strip()
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        port = "3004"
+    return f"http://127.0.0.1:{port}/api/config"
+
+
+def _perplexica_http_json(url: str, payload: dict | None = None) -> dict:
+    """Read or update Perplexica's config API using only the stdlib."""
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib_request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+        method="POST" if data is not None else "GET",
+    )
+    with urllib_request.urlopen(request, timeout=5) as response:
+        body = response.read().decode("utf-8")
+    if not body.strip():
+        return {}
+    parsed = json.loads(body)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Perplexica config API returned a non-object response")
+    return parsed
+
+
+def _capture_perplexica_config(env: dict) -> dict | None:
+    """Snapshot mutable Perplexica routing state when the service is running."""
+    if not _container_running("ods-perplexica"):
+        return None
+    url = _perplexica_config_url(env)
+    payload = _perplexica_http_json(url)
+    values = payload.get("values")
+    if not isinstance(values, dict):
+        raise RuntimeError("Perplexica config response is missing values")
+    required = ("modelProviders", "preferences")
+    if any(key not in values for key in required):
+        raise RuntimeError("Perplexica config is missing model provider preferences")
+    return {
+        "url": url,
+        "values": {key: values[key] for key in required},
+    }
+
+
+def _perplexica_model_route(
+    env: dict,
+    gguf_file: str,
+    lemonade_model_id: str = "",
+) -> tuple[str, str, str]:
+    """Return model, container-visible base URL, and key for Perplexica."""
+    runtime = str(
+        env.get("AMD_INFERENCE_RUNTIME")
+        or env.get("LLM_BACKEND")
+        or env.get("ODS_MODE")
+        or ""
+    ).strip().lower()
+    lemonade = runtime == "lemonade" or _is_windows_host_lemonade(env)
+    model = str(
+        lemonade_model_id
+        or (env.get("LEMONADE_MODEL") if lemonade else "")
+        or (f"extra.{gguf_file}" if lemonade else gguf_file)
+    ).strip()
+    if not model:
+        raise RuntimeError("Perplexica model route has an empty model ID")
+
+    if lemonade:
+        base_url = str(
+            env.get("HERMES_LLM_BASE_URL") or "http://litellm:4000/v1"
+        ).strip()
+    else:
+        base_url = str(env.get("LLM_API_URL") or "http://llama-server:8080").strip()
+    if not re.search(r"/(?:api/)?v1/?$", base_url, re.IGNORECASE):
+        base_url = f"{base_url.rstrip('/')}/v1"
+    api_key = str(env.get("LITELLM_KEY") or env.get("OPENAI_API_KEY") or "no-key")
+    return model, base_url, api_key
+
+
+def _post_perplexica_config(url: str, key: str, value: object) -> None:
+    _perplexica_http_json(url, {"key": key, "value": value})
+
+
+def _perplexica_config_matches(
+    values: dict,
+    model: str,
+    base_url: str,
+    api_key: str,
+) -> bool:
+    providers = values.get("modelProviders")
+    preferences = values.get("preferences")
+    if not isinstance(providers, list) or not isinstance(preferences, dict):
+        return False
+    provider = next(
+        (entry for entry in providers if isinstance(entry, dict) and entry.get("type") == "openai"),
+        None,
+    )
+    if provider is None:
+        return False
+    chat_models = provider.get("chatModels")
+    config = provider.get("config")
+    return bool(
+        isinstance(chat_models, list)
+        and any(
+            isinstance(entry, dict)
+            and (entry.get("key") == model or entry.get("name") == model)
+            for entry in chat_models
+        )
+        and isinstance(config, dict)
+        and config.get("baseURL") == base_url
+        and config.get("apiKey") == api_key
+        and preferences.get("defaultChatModel") == model
+        and preferences.get("defaultChatProvider") == provider.get("id")
+    )
+
+
+def _update_perplexica_model(
+    env: dict,
+    snapshot: dict,
+    *,
+    gguf_file: str,
+    lemonade_model_id: str = "",
+) -> None:
+    """Update and verify Perplexica after a successful runtime model swap."""
+    url = str(snapshot["url"])
+    values = json.loads(json.dumps(snapshot["values"]))
+    providers = values.get("modelProviders")
+    preferences = values.get("preferences")
+    if not isinstance(providers, list) or not isinstance(preferences, dict):
+        raise RuntimeError("Perplexica snapshot is missing routing state")
+    provider = next(
+        (entry for entry in providers if isinstance(entry, dict) and entry.get("type") == "openai"),
+        None,
+    )
+    if provider is None or not provider.get("id"):
+        raise RuntimeError("Perplexica has no configured OpenAI provider")
+
+    model, base_url, api_key = _perplexica_model_route(
+        env,
+        gguf_file,
+        lemonade_model_id,
+    )
+    provider["chatModels"] = [{"key": model, "name": model}]
+    provider_config = provider.get("config")
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+        provider["config"] = provider_config
+    provider_config["baseURL"] = base_url
+    provider_config["apiKey"] = api_key
+    preferences["defaultChatModel"] = model
+    preferences["defaultChatProvider"] = provider["id"]
+
+    _post_perplexica_config(url, "modelProviders", providers)
+    _post_perplexica_config(url, "preferences", preferences)
+    verified = _perplexica_http_json(url).get("values")
+    if not isinstance(verified, dict) or not _perplexica_config_matches(
+        verified,
+        model,
+        base_url,
+        api_key,
+    ):
+        raise RuntimeError("Perplexica did not persist the active model route")
+
+
+def _restore_perplexica_config(snapshot: dict) -> None:
+    """Restore the Perplexica routing keys captured before model activation."""
+    url = str(snapshot["url"])
+    values = snapshot.get("values")
+    if not isinstance(values, dict):
+        raise RuntimeError("Perplexica rollback snapshot is invalid")
+    for key in ("modelProviders", "preferences"):
+        if key not in values:
+            raise RuntimeError(f"Perplexica rollback snapshot is missing {key}")
+        _post_perplexica_config(url, key, values[key])
+    verified = _perplexica_http_json(url).get("values")
+    if not isinstance(verified, dict) or any(
+        verified.get(key) != values[key]
+        for key in ("modelProviders", "preferences")
+    ):
+        raise RuntimeError("Perplexica rollback could not be verified")
+
+
+def _recreate_openclaw_if_present() -> bool:
+    """Recreate OpenClaw so model environment changes reach its injector."""
+    if not _container_exists("ods-openclaw"):
+        return False
+    ok, error = docker_compose_recreate(["openclaw"])
+    if not ok:
+        raise RuntimeError(f"Could not recreate OpenClaw after model change: {error}")
     return True
 
 

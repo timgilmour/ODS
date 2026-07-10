@@ -2151,7 +2151,14 @@ PERPLEXICA_PORT=$(grep -E '^PERPLEXICA_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= 
 _perplexica_url="http://127.0.0.1:${PERPLEXICA_PORT}"
 if curl -sf --max-time 3 "${_perplexica_url}/api/config" >/dev/null 2>&1; then
     log "Updating Perplexica config to point at ${FULL_LLM_MODEL}..."
-    _py_cmd="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+        _py_cmd="${ODS_PYTHON_CMD:-}"
+        if [[ -z "$_py_cmd" && -f "$INSTALL_DIR/lib/python-cmd.sh" ]]; then
+            . "$INSTALL_DIR/lib/python-cmd.sh"
+            _py_cmd="$(ods_detect_python_cmd 2>/dev/null || true)"
+        fi
+        if [[ -z "$_py_cmd" ]]; then
+            _py_cmd="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+        fi
     if [[ -n "$_py_cmd" ]]; then
         # On Lemonade, LiteLLM exposes the model id as "extra.<GGUF_FILE>".
         # On NVIDIA/Apple/CPU, llama.cpp serves under the bare GGUF id.
@@ -2164,13 +2171,18 @@ if curl -sf --max-time 3 "${_perplexica_url}/api/config" >/dev/null 2>&1; then
         fi
         _litellm_key=$(grep -E '^LITELLM_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"\047\r' || echo "no-key")
         : "${_litellm_key:=no-key}"
-        _px_base_url=$(grep -E '^LLM_API_URL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"\047\r' || echo "http://llama-server:8080")
-        : "${_px_base_url:=http://llama-server:8080}"
+        if [[ "$_runtime_for_perplexica" == "lemonade" || "$_llm_backend_for_perplexica" == "lemonade" ]]; then
+            _px_base_url="$(read_env_value HERMES_LLM_BASE_URL)"
+            : "${_px_base_url:=http://litellm:4000/v1}"
+        else
+            _px_base_url=$(grep -E '^LLM_API_URL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"\047\r' || echo "http://llama-server:8080")
+            : "${_px_base_url:=http://llama-server:8080}"
+        fi
         case "$_px_base_url" in
             */v1|*/api/v1) ;;
             *) _px_base_url="${_px_base_url%/}/v1" ;;
         esac
-        if curl -sf --max-time 3 "${_perplexica_url}/api/config" 2>/dev/null | \
+        if _px_update_output=$(curl -sf --max-time 3 "${_perplexica_url}/api/config" 2>/dev/null | \
             PERPLEXICA_URL="$_perplexica_url" \
             PX_MODEL="$_px_model" \
             PX_KEY="$_litellm_key" \
@@ -2210,9 +2222,10 @@ prefs["defaultChatProvider"] = openai_prov["id"]
 post("preferences", prefs)
 post_setup_complete()
 print("ok")
-' >/dev/null 2>&1; then
+ ' 2>&1); then
             log "Perplexica defaultChatModel updated to ${_px_model}."
         else
+            log "Perplexica updater error: $(printf '%s' "$_px_update_output" | tr '\r\n' ' ' | tail -c 800)"
             log "WARNING: Perplexica config update failed (non-fatal — defaultChatModel may still read the bootstrap value)"
         fi
     else

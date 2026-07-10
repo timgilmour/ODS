@@ -113,6 +113,19 @@ grep -qF 'patch_hermes_model_after_swap' <<<"$windows_lemonade_block" \
     || fail "Windows Lemonade must patch Hermes before marking the swap verified"
 pass "Windows Lemonade hot-swap patches Hermes before cleanup"
 
+perplexica_update_block="$(awk '
+    /Updating Perplexica config to point at/ { in_block=1 }
+    in_block { print }
+    in_block && /Perplexica config update failed/ { exit }
+' "$TARGET" | grep -v '^[[:space:]]*#')"
+grep -qF 'ods_detect_python_cmd' <<<"$perplexica_update_block" \
+    || fail "Perplexica post-swap update must reject Windows Store Python aliases"
+grep -qF 'read_env_value HERMES_LLM_BASE_URL' <<<"$perplexica_update_block" \
+    || fail "Lemonade Perplexica updates must use the working LiteLLM route"
+grep -qF 'read_env_value LEMONADE_MODEL' <<<"$perplexica_update_block" \
+    || fail "Perplexica post-swap update must use the exact Lemonade model ID"
+pass "Perplexica post-swap update uses runnable Python and the exact LiteLLM model route"
+
 grep -qF 'HOT_SWAP_VERIFIED=true' <<<"$active_code" \
     || fail "hot-swap must record when the full model is verified serving"
 grep -qF 'Removing bootstrap model after verified full-model serving' <<<"$active_code" \

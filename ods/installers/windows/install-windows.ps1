@@ -211,6 +211,41 @@ if ($gpuInfo.Backend -eq "amd") {
 . (Join-Path $PhasesDir "06-directories.ps1")
 . (Join-Path $PhasesDir "07-devtools.ps1")
 
+$lemonadeModel = ""
+if ($envResult -and $envResult.ContainsKey("LemonadeModel")) {
+    $lemonadeModel = [string]$envResult.LemonadeModel
+}
+
+function Set-ODSWindowsHermesRuntimeModel {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ModelId
+    )
+
+    if (-not $enableHermes) { return $true }
+
+    $runtimeEnv = Get-WindowsODSEnvMap -InstallDir $installDir
+    $hermesBaseUrl = Get-WindowsODSEnvValue `
+        -EnvMap $runtimeEnv -Keys @("HERMES_LLM_BASE_URL") `
+        -Default $(if ($cloudMode -or $gpuInfo.Backend -eq "amd") {
+            "http://litellm:4000/v1"
+        } else {
+            "http://llama-server:8080/v1"
+        })
+    $hermesTemplate = Join-Path (Join-Path (Join-Path $installDir "extensions") "services\hermes") "cli-config.yaml.template"
+    $hermesLive = Join-Path (Join-Path $installDir "data\hermes") "config.yaml"
+    $hermesRequestTimeout = $(if ($cloudMode) { 180 } else { 900 })
+    $templateUpdated = Update-HermesConfigFile -Path $hermesTemplate -Model $ModelId -BaseUrl $hermesBaseUrl -ContextLength ([int]$tierConfig.MaxContext) `
+        -RequestTimeoutSeconds $hermesRequestTimeout `
+        -LemonadeCompact:($gpuInfo.Backend -eq "amd")
+    $liveUpdated = Update-HermesConfigFile `
+        -Path $hermesLive -Model $ModelId -BaseUrl $hermesBaseUrl `
+        -ContextLength ([int]$tierConfig.MaxContext) `
+        -RequestTimeoutSeconds $hermesRequestTimeout `
+        -LemonadeCompact:($gpuInfo.Backend -eq "amd")
+    return ($templateUpdated -and $liveUpdated)
+}
+
 # ============================================================================
 # PHASE 8 -- LAUNCH (download model, start Docker services)
 # ============================================================================
@@ -310,44 +345,12 @@ if ($dryRun) {
             }
 
             if ($enableHermes) {
-                $hermesModel = $(if ($tierConfig.GgufFile) {
-                    if ($gpuInfo.Backend -eq "amd") { "extra.$($tierConfig.GgufFile)" } else { $tierConfig.GgufFile }
-                } else {
-                    $tierConfig.LlmModel
-                })
-                $hermesBaseUrl = ""
-                if (Test-Path $envPath) {
-                    foreach ($line in Get-Content $envPath) {
-                        if ($line -match "^HERMES_LLM_BASE_URL=(.+)$") {
-                            $hermesBaseUrl = $Matches[1].Trim().Trim('"').Trim("'")
-                            break
-                        }
-                    }
-                }
-                if ([string]::IsNullOrWhiteSpace($hermesBaseUrl)) {
-                    $hermesBaseUrl = $(if ($cloudMode -or $gpuInfo.Backend -eq "amd") {
-                        "http://litellm:4000/v1"
-                    } else {
-                        "http://llama-server:8080/v1"
-                    })
-                }
-                $hermesTemplate = Join-Path (Join-Path (Join-Path $installDir "extensions") "services\hermes") "cli-config.yaml.template"
-                $hermesLive = Join-Path (Join-Path $installDir "data\hermes") "config.yaml"
-                if (-not (Test-Path $hermesTemplate)) {
-                    Write-AIError "Missing Hermes config template at $hermesTemplate"
+                $hermesModel = $(if ($tierConfig.GgufFile) { $tierConfig.GgufFile } else { $tierConfig.LlmModel })
+                if (-not (Set-ODSWindowsHermesRuntimeModel -ModelId $hermesModel)) {
+                    Write-AIError "Failed to patch Hermes config for Windows runtime (model=$hermesModel)"
                     exit 1
                 }
-                if (-not (Test-Path $hermesLive)) {
-                    Copy-Item -Path $hermesTemplate -Destination $hermesLive -Force
-                }
-                $hermesRequestTimeout = $(if ($cloudMode) { 180 } else { 900 })
-                $patchedHermesTemplate = Update-HermesConfigFile -Path $hermesTemplate -Model $hermesModel -BaseUrl $hermesBaseUrl -ContextLength ([int]$tierConfig.MaxContext) -RequestTimeoutSeconds $hermesRequestTimeout -LemonadeCompact:($gpuInfo.Backend -eq "amd")
-                $patchedHermesLive = Update-HermesConfigFile -Path $hermesLive -Model $hermesModel -BaseUrl $hermesBaseUrl -ContextLength ([int]$tierConfig.MaxContext) -RequestTimeoutSeconds $hermesRequestTimeout -LemonadeCompact:($gpuInfo.Backend -eq "amd")
-                if (-not ($patchedHermesTemplate -and $patchedHermesLive)) {
-                    Write-AIError "Failed to patch Hermes config for Windows runtime (model=$hermesModel, base_url=$hermesBaseUrl)"
-                    exit 1
-                }
-                Write-AISuccess "Patched Hermes config for bootstrap model (model=$hermesModel, context=$($tierConfig.MaxContext), request_timeout=${hermesRequestTimeout}s)"
+                Write-AISuccess "Patched Hermes config for bootstrap model (model=$hermesModel, context=$($tierConfig.MaxContext))"
             }
         }
 
@@ -558,6 +561,24 @@ if ($dryRun) {
                         }
                     }
                     if ($healthy) {
+                        try {
+                            $lemonadeModel = Resolve-ODSLemonadeModelId `
+                                -Port $script:LEMONADE_PORT `
+                                -GgufFile $tierConfig.GgufFile `
+                                -VersionOverride ([string]$launchContract.Version)
+                            $null = Set-WindowsODSLemonadeModelConfiguration `
+                                -InstallDir $installDir -ModelId $lemonadeModel `
+                                -Port ([string]$script:LEMONADE_PORT)
+                            if (-not (Set-ODSWindowsHermesRuntimeModel -ModelId $lemonadeModel)) {
+                                throw "Hermes configuration could not be updated for model '$lemonadeModel'."
+                            }
+                            Write-AISuccess "Lemonade model route configured (model: $lemonadeModel)"
+                        } catch {
+                            Write-AIWarn "Lemonade model route configuration failed: $_"
+                            $healthy = $false
+                        }
+                    }
+                    if ($healthy) {
                         Write-AISuccess "Lemonade server healthy (PID $($proc.ProcessId))"
                         if ($gpuInfo.HasNpu) {
                             Write-AISuccess "NPU hybrid mode available (NPU prefill + GPU decode)"
@@ -718,6 +739,7 @@ if ($dryRun) {
 
                 # Patch .env: user declined Lemonade, correct backend and API path
                 $envPath = Join-Path $installDir ".env"
+                $nativeModel = $tierConfig.GgufFile
                 if (Test-Path $envPath) {
                     $envContent = Get-Content $envPath -Raw
                     $envContent = $envContent -replace "(?m)^ODS_MODE=.*$", "ODS_MODE=local"
@@ -730,6 +752,7 @@ if ($dryRun) {
                     $envContent = $envContent -replace "(?m)^AMD_INFERENCE_SUPPORTED_BACKENDS=.*$", "AMD_INFERENCE_SUPPORTED_BACKENDS=vulkan"
                     $envContent = $envContent -replace "(?m)^AMD_INFERENCE_RUNTIME_MODE=.*$", "AMD_INFERENCE_RUNTIME_MODE=windows-llama-server-fallback"
                     $envContent = $envContent -replace "(?m)^AMD_INFERENCE_MANAGED=.*$", "AMD_INFERENCE_MANAGED=true"
+                    $envContent = $envContent -replace "(?m)^LEMONADE_MODEL=.*$", "LEMONADE_MODEL="
                     [System.IO.File]::WriteAllText($envPath, $envContent, (New-Object System.Text.UTF8Encoding($false)))
                     Write-AISuccess "Patched .env for llama-server backend"
 
@@ -771,6 +794,11 @@ litellm_settings:
 "@
                     [System.IO.File]::WriteAllText((Join-Path $litellmDir "local.yaml"), $litellmLocal, (New-Object System.Text.UTF8Encoding($false)))
                     Write-AISuccess "Patched LiteLLM local config for native llama-server"
+                }
+                $lemonadeModel = ""
+                if (-not (Set-ODSWindowsHermesRuntimeModel -ModelId $nativeModel)) {
+                    Write-AIError "Failed to patch Hermes config for native llama-server model '$nativeModel'"
+                    exit 1
                 }
             }
         }
@@ -1858,6 +1886,20 @@ if (-not $cloudMode) {
     Write-AI "Verifying the LLM can actually serve a completion..."
     $llmReady = Test-WindowsLlmModelReadiness -Endpoint $llmEndpoint -InstallDir $installDir `
         -GgufFile $tierConfig.GgufFile -TimeoutSec 120
+    if ($llmReady.Ok -and $useLemonade) {
+        try {
+            $lemonadeModel = [string]$llmReady.ModelId
+            $null = Set-WindowsODSLemonadeModelConfiguration `
+                -InstallDir $installDir -ModelId $lemonadeModel `
+                -Port ([string]$script:LEMONADE_PORT)
+            if (-not (Set-ODSWindowsHermesRuntimeModel -ModelId $lemonadeModel)) {
+                throw "Hermes configuration could not be updated for model '$lemonadeModel'."
+            }
+        } catch {
+            $llmReady.Ok = $false
+            $llmReady.Detail = "completion succeeded, but the resolved Lemonade model configuration could not be persisted: $_"
+        }
+    }
     if ($llmReady.Ok) {
         Write-AISuccess "LLM serving verified (model: $($llmReady.ModelId))"
     } else {
@@ -2008,7 +2050,11 @@ if ($enableVoice) {
 if (Test-ODSWindowsServiceEnabled -ServiceId "perplexica" -Plan $servicePlan) {
     Write-AI "Configuring Perplexica..."
     $perplexicaModel = $(if ($tierConfig.GgufFile) {
-        if ($useLemonade) { "extra.$($tierConfig.GgufFile)" } else { $tierConfig.GgufFile }
+        if ($useLemonade -and -not [string]::IsNullOrWhiteSpace($lemonadeModel)) {
+            $lemonadeModel
+        } else {
+            $tierConfig.GgufFile
+        }
     } else {
         $tierConfig.LlmModel
     })
