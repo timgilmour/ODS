@@ -213,11 +213,13 @@ _compute_launchd_path() {
 
 COLIMA_VM_IP=""
 COLIMA_HOST_IP=""
+COLIMA_PRIVATE_ROUTE_PREFERRED=false
 
 _detect_colima_private_network() {
-    local status_json interface_name
+    local status_json interface_name colima_config preferred_route
     COLIMA_VM_IP=""
     COLIMA_HOST_IP=""
+    COLIMA_PRIVATE_ROUTE_PREFERRED=false
 
     status_json="$(colima status --json 2>>"$ODS_LOG_FILE" || true)"
     [[ -n "$status_json" ]] || return 1
@@ -241,9 +243,18 @@ import ipaddress, os
 vm = ipaddress.ip_address(os.environ["COLIMA_VM_IP"])
 host = ipaddress.ip_address(os.environ["COLIMA_HOST_IP"])
 network = ipaddress.ip_network(f"{vm}/24", strict=False)
-valid = vm.version == 4 and host.version == 4 and host != vm and host in network and host.is_private
+    valid = vm.version == 4 and host.version == 4 and host != vm and host in network and host.is_private
 raise SystemExit(0 if valid else 1)
 ' >/dev/null 2>&1
+
+    colima_config="${COLIMA_HOME:-$HOME/.colima}/default/colima.yaml"
+    preferred_route="$(awk '
+        /^network:/ { in_network=1; next }
+        in_network && /^[^[:space:]]/ { in_network=0 }
+        in_network && /^[[:space:]]+preferredRoute:/ { print $2; exit }
+    ' "$colima_config" 2>/dev/null || true)"
+    [[ "$preferred_route" == "true" ]] && COLIMA_PRIVATE_ROUTE_PREFERRED=true
+    return 0
 }
 
 _ensure_colima_private_network() {
@@ -253,21 +264,22 @@ _ensure_colima_private_network() {
         return 1
     fi
 
-    if _detect_colima_private_network; then
+    if _detect_colima_private_network && [[ "$COLIMA_PRIVATE_ROUTE_PREFERRED" == "true" ]]; then
         ai_ok "Colima private host bridge ready (${COLIMA_HOST_IP} <-> ${COLIMA_VM_IP})"
         return 0
     fi
 
     if $DRY_RUN; then
-        ai "[DRY RUN] Would restart Colima with --network-address for private host-service routing"
+        ai "[DRY RUN] Would restart Colima with private vmnet as the preferred route"
         return 0
     fi
 
-    ai_warn "Colima has no reachable private VM address; restarting it with --network-address."
+    ai_warn "Colima needs a preferred private VM route; restarting its VM to configure one."
     ai_warn "Running non-ODS containers will restart with the Colima VM. Container data is preserved."
-    if ! colima stop >>"$ODS_LOG_FILE" 2>&1 || ! colima start --network-address >>"$ODS_LOG_FILE" 2>&1; then
+    if ! colima stop >>"$ODS_LOG_FILE" 2>&1 \
+       || ! colima start --network-address --network-preferred-route >>"$ODS_LOG_FILE" 2>&1; then
         ai_err "Could not enable Colima private networking."
-        ai "  Run: colima stop && colima start --network-address"
+        ai "  Run: colima stop && colima start --network-address --network-preferred-route"
         return 1
     fi
 
@@ -276,8 +288,10 @@ _ensure_colima_private_network() {
         docker info >/dev/null 2>&1 && break
         sleep 1
     done
-    if ! docker info >/dev/null 2>&1 || ! _detect_colima_private_network; then
-        ai_err "Colima restarted, but its private host bridge could not be discovered."
+    if ! docker info >/dev/null 2>&1 \
+       || ! _detect_colima_private_network \
+       || [[ "$COLIMA_PRIVATE_ROUTE_PREFERRED" != "true" ]]; then
+        ai_err "Colima restarted, but its preferred private host route could not be verified."
         return 1
     fi
     ai_ok "Colima private host bridge enabled (${COLIMA_HOST_IP} <-> ${COLIMA_VM_IP})"
