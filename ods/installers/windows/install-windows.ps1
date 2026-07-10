@@ -454,16 +454,19 @@ if ($dryRun) {
                         $_resolvedExe = [System.IO.Path]::GetFullPath($ExePath)
                     }
                 } catch { }
-                $_knownNames = @("LemonadeServer.exe", "lemonade-server.exe", "lemonade-router.exe")
+                $_managedBin = if ($_resolvedExe) { Split-Path -Parent $_resolvedExe } else { $null }
+                $_managedBinPrefix = if ($_managedBin) {
+                    $_managedBin.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+                } else {
+                    $null
+                }
 
                 try {
                     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                         Where-Object {
                             $_path = [string]$_.ExecutablePath
-                            $_name = [string]$_.Name
                             ($_resolvedExe -and $_path -and $_path.Equals($_resolvedExe, [StringComparison]::OrdinalIgnoreCase)) -or
-                            ($_knownNames -contains $_name) -or
-                            ($_path -and ($_path -match '\\(Lemonade Server|lemonade_server|LemonadeServer)\\bin\\'))
+                            ($_managedBinPrefix -and $_path -and $_path.StartsWith($_managedBinPrefix, [StringComparison]::OrdinalIgnoreCase))
                         } |
                         ForEach-Object {
                             try { Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue } catch { }
@@ -919,6 +922,50 @@ litellm_settings:
             Write-AI "Using install-scoped Docker client config: $dockerConfigDir"
         }
 
+        function Get-ODSWindowsUserDockerClientArgs {
+            <#
+            .SYNOPSIS
+                Return the Docker client configuration that existed before ODS
+                created its installer-scoped config.
+
+            .DESCRIPTION
+                A user may intentionally set DOCKER_CONFIG for a private registry
+                or an enterprise credential helper. Keep that exact setting for
+                recovery instead of silently replacing it with an empty/default
+                profile after the installer-scoped config fails.
+            #>
+            if ($script:ODSWindowsOriginalDockerConfigDefined -and
+                -not [string]::IsNullOrWhiteSpace($script:ODSWindowsOriginalDockerConfig)) {
+                return @("--config", $script:ODSWindowsOriginalDockerConfig)
+            }
+
+            $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+            if ([string]::IsNullOrWhiteSpace($userProfile)) { return @() }
+            return @("--config", (Join-Path $userProfile ".docker"))
+        }
+
+        function Use-ODSWindowsUserDockerConfig {
+            param([string]$Reason = "Docker recovery")
+
+            if ($script:ODSWindowsDockerConfigMode -eq "user") { return }
+
+            $script:ODSWindowsDockerClientArgs = @($script:ODSWindowsUserDockerClientArgs)
+            $script:ODSWindowsDockerConfigMode = "user"
+            if ($script:ODSWindowsOriginalDockerConfigDefined) {
+                $env:DOCKER_CONFIG = $script:ODSWindowsOriginalDockerConfig
+            } else {
+                Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
+            }
+
+            $source = if ($script:ODSWindowsOriginalDockerConfigDefined -and
+                -not [string]::IsNullOrWhiteSpace($script:ODSWindowsOriginalDockerConfig)) {
+                "the user's original DOCKER_CONFIG"
+            } else {
+                "the user's default Docker config"
+            }
+            Write-AIWarn "Using $source for $Reason."
+        }
+
         function Write-ODSWindowsComposeLaunchRecord {
             param(
                 [string]$InstallDir,
@@ -975,7 +1022,7 @@ litellm_settings:
 
             Push-Location $InstallDir
             try {
-                $managedIds = @(& docker @dockerClientArgs compose @ComposeFlags ps -q 2>$null |
+                $managedIds = @(& docker @script:ODSWindowsDockerClientArgs compose @ComposeFlags ps -q 2>$null |
                     Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
                 if ($managedIds.Count -eq 0) {
                     Write-AIError "Docker Compose did not create any managed Windows containers."
@@ -986,7 +1033,7 @@ litellm_settings:
 
                 $missingServices = New-Object System.Collections.Generic.List[string]
                 foreach ($service in $RequiredServices) {
-                    $serviceIds = @(& docker @dockerClientArgs compose @ComposeFlags ps -q $service 2>$null |
+                    $serviceIds = @(& docker @script:ODSWindowsDockerClientArgs compose @ComposeFlags ps -q $service 2>$null |
                         Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
                     if ($serviceIds.Count -eq 0) {
                         [void]$missingServices.Add($service)
@@ -1019,20 +1066,27 @@ litellm_settings:
             exit 1
         }
 
+        $script:ODSWindowsOriginalDockerConfigDefined = Test-Path Env:DOCKER_CONFIG
+        $script:ODSWindowsOriginalDockerConfig = if ($script:ODSWindowsOriginalDockerConfigDefined) { $env:DOCKER_CONFIG } else { "" }
         Initialize-ODSWindowsDockerClientConfig -InstallDir $installDir
-        $dockerClientArgs = @("--config", $env:DOCKER_CONFIG)
+        $script:ODSWindowsDockerClientArgs = @("--config", $env:DOCKER_CONFIG)
+        $script:ODSWindowsUserDockerClientArgs = @(Get-ODSWindowsUserDockerClientArgs)
+        $script:ODSWindowsDockerConfigMode = "install-scoped"
 
         function Test-ODSDockerImageAvailable {
-            param([string]$Image)
+            param(
+                [string]$Image,
+                [string[]]$DockerClientArgs = $script:ODSWindowsDockerClientArgs
+            )
             if ([string]::IsNullOrWhiteSpace($Image)) { return $false }
 
             $prevEAP = $ErrorActionPreference
             $ErrorActionPreference = "SilentlyContinue"
             try {
-                & docker @dockerClientArgs image inspect $Image *> $null
+                & docker @DockerClientArgs image inspect $Image *> $null
                 if ($LASTEXITCODE -eq 0) { return $true }
 
-                & docker @dockerClientArgs manifest inspect $Image *> $null
+                & docker @DockerClientArgs manifest inspect $Image *> $null
                 return ($LASTEXITCODE -eq 0)
             } finally {
                 $ErrorActionPreference = $prevEAP
@@ -1067,35 +1121,19 @@ litellm_settings:
                 [Parameter(Mandatory = $true)][string[]]$DockerClientArgs,
                 [Parameter(Mandatory = $true)][string[]]$ComposeFlags,
                 [Parameter(Mandatory = $true)][string]$BuildLog,
-                [switch]$UseLegacyBuilder,
-                [switch]$UseDefaultDockerConfig
+                [switch]$UseLegacyBuilder
             )
 
             $hadBuildKit = Test-Path Env:DOCKER_BUILDKIT
             $previousBuildKit = $env:DOCKER_BUILDKIT
-            $hadDockerConfig = Test-Path Env:DOCKER_CONFIG
-            $previousDockerConfig = $env:DOCKER_CONFIG
-            $effectiveDockerClientArgs = $DockerClientArgs
-
             try {
                 if ($UseLegacyBuilder) {
                     $env:DOCKER_BUILDKIT = "0"
                 }
-                if ($UseDefaultDockerConfig) {
-                    $effectiveDockerClientArgs = @()
-                    Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
-                }
 
-                & docker @effectiveDockerClientArgs compose @ComposeFlags build --no-cache $Service *>> $BuildLog
+                & docker @DockerClientArgs compose @ComposeFlags build --no-cache $Service *>> $BuildLog
                 return $LASTEXITCODE
             } finally {
-                if ($UseDefaultDockerConfig) {
-                    if ($hadDockerConfig) {
-                        $env:DOCKER_CONFIG = $previousDockerConfig
-                    } else {
-                        Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
-                    }
-                }
                 if ($UseLegacyBuilder) {
                     if ($hadBuildKit) {
                         $env:DOCKER_BUILDKIT = $previousBuildKit
@@ -1197,6 +1235,15 @@ litellm_settings:
                 return $Image
             }
 
+            if ($script:ODSWindowsDockerConfigMode -eq "install-scoped") {
+                Write-AIWarn "$Label image validation failed with the install-scoped Docker config; retrying with the user's Docker config."
+                if (Test-ODSDockerImageAvailable -Image $Image -DockerClientArgs $script:ODSWindowsUserDockerClientArgs) {
+                    Use-ODSWindowsUserDockerConfig -Reason "$Label image validation"
+                    Write-AISuccess "$Label image available: $Image"
+                    return $Image
+                }
+            }
+
             $fallback = $FallbackImage
             if ([string]::IsNullOrWhiteSpace($fallback)) {
                 $fallback = [Environment]::GetEnvironmentVariable($FallbackEnvName)
@@ -1205,6 +1252,12 @@ litellm_settings:
                 Write-AIWarn "$Label image unavailable: $Image"
                 Write-AIWarn "Trying explicit fallback from ${FallbackEnvName}: $fallback"
                 if (Test-ODSDockerImageAvailable -Image $fallback) {
+                    Write-AISuccess "$Label fallback image available: $fallback"
+                    return $fallback
+                }
+                if ($script:ODSWindowsDockerConfigMode -eq "install-scoped" -and
+                    (Test-ODSDockerImageAvailable -Image $fallback -DockerClientArgs $script:ODSWindowsUserDockerClientArgs)) {
+                    Use-ODSWindowsUserDockerConfig -Reason "$Label fallback image validation"
                     Write-AISuccess "$Label fallback image available: $fallback"
                     return $fallback
                 }
@@ -1482,7 +1535,7 @@ litellm_settings:
                 Write-AI "  building $_svc ..."
                 $_buildExit = Invoke-ODSWindowsComposeBuildService `
                     -Service $_svc `
-                    -DockerClientArgs $dockerClientArgs `
+                    -DockerClientArgs $script:ODSWindowsDockerClientArgs `
                     -ComposeFlags $composeFlags `
                     -BuildLog $_buildLog
 
@@ -1491,7 +1544,7 @@ litellm_settings:
                     Add-Content -LiteralPath $_buildLog -Value "`n--- retrying $_svc with plain docker build and DOCKER_BUILDKIT=0 after Docker credential-helper failure ---"
                     $_buildExit = Invoke-ODSWindowsPlainDockerBuildService `
                         -Service $_svc `
-                        -DockerClientArgs $dockerClientArgs `
+                        -DockerClientArgs $script:ODSWindowsDockerClientArgs `
                         -ComposeFlags $composeFlags `
                         -BuildLog $_buildLog
                     if ($_buildExit -eq 0) {
@@ -1500,14 +1553,13 @@ litellm_settings:
                 }
 
                 if ($_buildExit -ne 0) {
-                    Write-AIWarn "  $_svc build failed with the install-scoped Docker config; retrying with the user's default Docker config."
-                    Add-Content -LiteralPath $_buildLog -Value "`n--- retrying $_svc with user's default Docker config after install-scoped Docker config failure ---"
+                    Write-AIWarn "  $_svc build failed with the install-scoped Docker config; retrying with the user's Docker config."
+                    Add-Content -LiteralPath $_buildLog -Value "`n--- retrying $_svc with user's Docker config after install-scoped Docker config failure ---"
                     $_buildExit = Invoke-ODSWindowsComposeBuildService `
                         -Service $_svc `
-                        -DockerClientArgs $dockerClientArgs `
+                        -DockerClientArgs $script:ODSWindowsUserDockerClientArgs `
                         -ComposeFlags $composeFlags `
-                        -BuildLog $_buildLog `
-                        -UseDefaultDockerConfig
+                        -BuildLog $_buildLog
                     if ($_buildExit -eq 0) {
                         $_defaultDockerConfigServices += $_svc
                     }
@@ -1522,10 +1574,8 @@ litellm_settings:
                 Write-AIWarn "Used Docker legacy builder fallback for: $($_legacyBuilderServices -join ', ')"
             }
             if ($_defaultDockerConfigServices.Count -gt 0) {
-                Write-AIWarn "Used user's default Docker config for local image builds: $($_defaultDockerConfigServices -join ', ')"
-                Write-AIWarn "Continuing Compose preflight and service launch with the user's default Docker config."
-                $dockerClientArgs = @()
-                Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
+                Use-ODSWindowsUserDockerConfig -Reason "local image builds: $($_defaultDockerConfigServices -join ', ')"
+                Write-AIWarn "Continuing Compose preflight and service launch with the user's Docker config."
             }
             if ($_failedBuildServices.Count -gt 0) {
                 Write-Host ""
@@ -1545,21 +1595,20 @@ litellm_settings:
             }
             Write-AISuccess "Local images rebuilt"
 
-            $composePreflightOk = Invoke-ODSWindowsComposeImagePreflight -DockerClientArgs $dockerClientArgs -ComposeFlags $composeFlags -LogPath $_composeLog
-            if (-not $composePreflightOk -and $dockerClientArgs.Count -gt 0) {
-                Write-AIWarn "Compose image preflight failed with the install-scoped Docker config; retrying with the user's default Docker config."
-                Add-Content -LiteralPath $_composeLog -Value "`n--- retrying Compose image preflight with user's default Docker config after install-scoped config failure ---"
-                $dockerClientArgs = @()
-                Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
-                $composePreflightOk = Invoke-ODSWindowsComposeImagePreflight -DockerClientArgs $dockerClientArgs -ComposeFlags $composeFlags -LogPath $_composeLog
+            $composePreflightOk = Invoke-ODSWindowsComposeImagePreflight -DockerClientArgs $script:ODSWindowsDockerClientArgs -ComposeFlags $composeFlags -LogPath $_composeLog
+            if (-not $composePreflightOk -and $script:ODSWindowsDockerConfigMode -eq "install-scoped") {
+                Write-AIWarn "Compose image preflight failed with the install-scoped Docker config; retrying with the user's Docker config."
+                Add-Content -LiteralPath $_composeLog -Value "`n--- retrying Compose image preflight with user's Docker config after install-scoped config failure ---"
+                Use-ODSWindowsUserDockerConfig -Reason "Compose image preflight"
+                $composePreflightOk = Invoke-ODSWindowsComposeImagePreflight -DockerClientArgs $script:ODSWindowsDockerClientArgs -ComposeFlags $composeFlags -LogPath $_composeLog
                 if ($composePreflightOk) {
-                    Write-AIWarn "Using the user's default Docker config for Compose preflight and service launch."
+                    Write-AIWarn "Continuing Compose service launch with the user's Docker config."
                 }
             }
 
             Write-ODSWindowsComposeLaunchRecord -InstallDir $installDir -ComposeFlags $composeFlags `
-                -ComposeArgs $composeUpArgs -DockerClientArgs $dockerClientArgs
-            $dockerLaunchLabel = if ($dockerClientArgs.Count -eq 0) { "docker" } else { "docker $($dockerClientArgs -join ' ')" }
+                -ComposeArgs $composeUpArgs -DockerClientArgs $script:ODSWindowsDockerClientArgs
+            $dockerLaunchLabel = if ($script:ODSWindowsDockerClientArgs.Count -eq 0) { "docker" } else { "docker $($script:ODSWindowsDockerClientArgs -join ' ')" }
             Write-AI "Running: $dockerLaunchLabel compose $($composeFlags -join ' ') $($composeUpArgs -join ' ')"
             Write-AI "Compose working directory: $installDir"
 
@@ -1574,8 +1623,17 @@ litellm_settings:
             }
 
             Write-AI "Starting services... this may take several minutes."
-            & docker @dockerClientArgs compose @composeFlags @composeUpArgs *> $_composeLog
+            & docker @script:ODSWindowsDockerClientArgs compose @composeFlags @composeUpArgs *> $_composeLog
             $composeExit = $LASTEXITCODE
+            if ($composeExit -ne 0 -and $script:ODSWindowsDockerConfigMode -eq "install-scoped") {
+                Write-AIWarn "Compose service launch failed with the install-scoped Docker config; retrying with the user's Docker config."
+                Add-Content -LiteralPath $_composeLog -Value "`n--- retrying Compose service launch with user's Docker config after install-scoped config failure ---"
+                Use-ODSWindowsUserDockerConfig -Reason "Compose service launch"
+                Write-ODSWindowsComposeLaunchRecord -InstallDir $installDir -ComposeFlags $composeFlags `
+                    -ComposeArgs $composeUpArgs -DockerClientArgs $script:ODSWindowsDockerClientArgs
+                & docker @script:ODSWindowsDockerClientArgs compose @composeFlags @composeUpArgs *>> $_composeLog
+                $composeExit = $LASTEXITCODE
+            }
         }
         finally {
             Pop-Location

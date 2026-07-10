@@ -26,11 +26,14 @@ belong to your regular account.
 Keep the ODS installer in a normal PowerShell session. ODS installs the
 Lemonade runtime for the current user under `%LOCALAPPDATA%\lemonade_server`;
 it does not require an Administrator shell or an all-users `Program Files`
-installation. The installer writes a verbose MSI log to:
+installation. The installer writes a verbose MSI log under the ODS install directory:
 
 ```text
-%USERPROFILE%\ods\logs\lemonade-msi-install.log
+<ODS install directory>\logs\lemonade-msi-install.log
 ```
+
+With the default location this is `%USERPROFILE%\ods\logs\lemonade-msi-install.log`.
+If the installer was run with `-InstallDir`, use that directory instead.
 
 If Lemonade still fails, attach the installer output plus that log after
 reviewing it for local paths. ODS falls back to native Vulkan `llama-server`
