@@ -1690,7 +1690,7 @@ for service in (data.get("services") or {}).values():
     # privacy-shield may be disabled by feature flags; building them anyway can
     # surface unrelated Dockerfile failures and make a healthy selected stack
     # look broken.
-    ai "Rebuilding local-built images (no-cache)..."
+    ai "Rebuilding local-built images..."
     _macos_candidate_build_services=(dashboard dashboard-api ape token-spy privacy-shield)
     if ! _macos_enabled_services="$(docker compose "${COMPOSE_FLAGS[@]}" config --services 2>>"$ODS_LOG_FILE")"; then
         ai_err "Could not resolve macOS compose services for local image rebuilds."
@@ -1706,15 +1706,34 @@ for service in (data.get("services") or {}).values():
         fi
     done
 
-    declare -a _macos_build_pids _macos_build_names
+    _macos_build_max_attempts="${ODS_DOCKER_BUILD_MAX_ATTEMPTS:-3}"
+    [[ "$_macos_build_max_attempts" =~ ^[1-9][0-9]*$ ]] || _macos_build_max_attempts=3
+    _macos_build_failed=0
+    _macos_build_delays=(5 15 30)
     for _svc in "${_macos_build_services[@]}"; do
-        docker compose "${COMPOSE_FLAGS[@]}" build --no-cache "$_svc" >> "$ODS_LOG_FILE" 2>&1 &
-        _macos_build_pids+=($!)
-        _macos_build_names+=("$_svc")
+        _macos_build_ok=false
+        for ((_attempt=1; _attempt<=_macos_build_max_attempts; _attempt++)); do
+            ai "Building local image: ${_svc} (${_attempt}/${_macos_build_max_attempts})"
+            if docker compose "${COMPOSE_FLAGS[@]}" build "$_svc" >> "$ODS_LOG_FILE" 2>&1; then
+                _macos_build_ok=true
+                ai_ok "Built local image: ${_svc}"
+                break
+            fi
+            if (( _attempt < _macos_build_max_attempts )); then
+                _delay="${_macos_build_delays[$((_attempt - 1))]:-30}"
+                ai_warn "Build failed for ${_svc}; retrying in ${_delay}s (see $ODS_LOG_FILE)"
+                sleep "$_delay"
+            fi
+        done
+        if [[ "$_macos_build_ok" != "true" ]]; then
+            ai_err "Build failed for required local service ${_svc} after ${_macos_build_max_attempts} attempts (see $ODS_LOG_FILE)"
+            _macos_build_failed=$((_macos_build_failed + 1))
+        fi
     done
-    for _i in "${!_macos_build_pids[@]}"; do
-        wait "${_macos_build_pids[$_i]}" || ai_warn "Build failed for ${_macos_build_names[$_i]} (see $ODS_LOG_FILE)"
-    done
+    if [[ "$_macos_build_failed" -ne 0 ]]; then
+        ai_err "${_macos_build_failed} required local image(s) failed to build; refusing to launch stale images."
+        exit 1
+    fi
     ai_ok "Local images rebuilt"
 
     mkdir -p "${INSTALL_DIR}/logs"
