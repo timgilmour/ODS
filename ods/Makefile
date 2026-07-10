@@ -70,6 +70,9 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== fleet-multi-distro keep-going on docker pull failure ==="
 	@bash tests/test-fleet-multi-distro-keep-going.sh
+	@echo ""
+	@echo "=== CLI user-extension dependency resolution ==="
+	@bash tests/test-cli-user-extension-deps.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="
