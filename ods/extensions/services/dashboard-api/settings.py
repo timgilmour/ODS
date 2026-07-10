@@ -54,6 +54,9 @@ _MANUAL_RESTART_KEYS = {
     "DASHBOARD_API_KEY", "ODS_AGENT_KEY", "DASHBOARD_PORT",
     "DASHBOARD_API_PORT", "ODS_AGENT_PORT", "ODS_AGENT_HOST",
 }
+_READ_ONLY_ENV_FIELDS = {
+    "ODS_MODE": "Runtime mode is selected by the installer and cannot be changed from the dashboard.",
+}
 
 # ── Env parsing ────────────────────────────────────────────────────────────────
 
@@ -150,6 +153,8 @@ def _build_env_fields(
             "default": definition.get("default"),
             "value": value,
             "hasValue": value != "",
+            "readOnly": key in _READ_ONLY_ENV_FIELDS,
+            "readOnlyReason": _READ_ONLY_ENV_FIELDS.get(key, ""),
         }
 
     for key, value in values.items():
@@ -168,6 +173,8 @@ def _build_env_fields(
             "default": None,
             "value": value,
             "hasValue": value != "",
+            "readOnly": key in _READ_ONLY_ENV_FIELDS,
+            "readOnlyReason": _READ_ONLY_ENV_FIELDS.get(key, ""),
         }
 
     return fields

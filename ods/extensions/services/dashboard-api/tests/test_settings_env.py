@@ -123,6 +123,64 @@ def test_api_settings_env_masks_secret_values(test_client, settings_env_fixture)
     assert payload["agentAvailable"] is True
 
 
+def test_api_settings_env_marks_runtime_mode_read_only(test_client, settings_env_fixture):
+    env_path = settings_env_fixture["env_path"]
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "ODS_MODE=local\n",
+        encoding="utf-8",
+    )
+
+    response = test_client.get("/api/settings/env", headers=test_client.auth_headers)
+
+    assert response.status_code == 200
+    field = response.json()["fields"]["ODS_MODE"]
+    assert field["readOnly"] is True
+    assert "installer" in field["readOnlyReason"].lower()
+
+
+def test_api_settings_env_rejects_runtime_mode_change(test_client, settings_env_fixture):
+    env_path = settings_env_fixture["env_path"]
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "ODS_MODE=cloud\n",
+        encoding="utf-8",
+    )
+
+    response = test_client.put(
+        "/api/settings/env",
+        headers=test_client.auth_headers,
+        json={"mode": "form", "values": {"ODS_MODE": "local"}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["issues"] == [{
+        "key": "ODS_MODE",
+        "message": "Runtime mode is selected by the installer and cannot be changed from the dashboard.",
+    }]
+    assert "ODS_MODE=cloud" in env_path.read_text(encoding="utf-8")
+
+
+def test_api_settings_env_allows_unchanged_runtime_mode(test_client, settings_env_fixture):
+    env_path = settings_env_fixture["env_path"]
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "ODS_MODE=local\n",
+        encoding="utf-8",
+    )
+
+    response = test_client.put(
+        "/api/settings/env",
+        headers=test_client.auth_headers,
+        json={
+            "mode": "form",
+            "values": {"ODS_MODE": "local", "WEBUI_AUTH": "false"},
+        },
+    )
+
+    assert response.status_code == 200
+    updated_env = env_path.read_text(encoding="utf-8")
+    assert "ODS_MODE=local" in updated_env
+    assert "WEBUI_AUTH=false" in updated_env
+
+
 def test_api_settings_env_preserves_existing_secret_when_blank(test_client, settings_env_fixture):
     env_path = settings_env_fixture["env_path"]
 

@@ -908,6 +908,24 @@ def _prepare_env_save(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]
             for key in invalid_keys
         ], _compute_env_apply_plan(current_values, current_values)
 
+    read_only_changes = []
+    for key, submitted_value in submitted_values.items():
+        field = base_fields[key]
+        if not field.get("readOnly"):
+            continue
+        current_value = current_values.get(key, "")
+        if str(submitted_value) != current_value:
+            read_only_changes.append({
+                "key": key,
+                "message": field.get("readOnlyReason") or "Field is read-only.",
+            })
+    if read_only_changes:
+        return (
+            _render_env_from_values(current_values),
+            read_only_changes,
+            _compute_env_apply_plan(current_values, current_values),
+        )
+
     normalized_values = _serialize_form_values(submitted_values, base_fields, current_values)
     merged_values = {**current_values, **normalized_values}
     for key, field in base_fields.items():
