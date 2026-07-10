@@ -340,13 +340,74 @@ def _patch_model_router_paths(monkeypatch, tmp_path):
     install_dir = tmp_path / "ods"
     data_dir = install_dir / "data"
     data_dir.mkdir(parents=True)
+    (install_dir / ".env").write_text("ODS_MODE=local\n", encoding="utf-8")
     monkeypatch.setattr(helpers, "_PERF_FILE", data_dir / "model_performance.json")
     monkeypatch.setattr(models_router, "INSTALL_DIR", str(install_dir))
     monkeypatch.setattr(models_router, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(models_router, "_LIBRARY_PATH", install_dir / "config" / "model-library.json")
     monkeypatch.setattr(models_router, "_MODELS_DIR", data_dir / "models")
     monkeypatch.setattr(models_router, "_ENV_PATH", install_dir / ".env")
+    monkeypatch.setattr(models_router, "ODS_MODE_EFFECTIVE", "local")
     return models_router, install_dir, data_dir
+
+
+@pytest.mark.parametrize("mode", ["local", "hybrid", "lemonade"])
+def test_model_activation_mode_policy_allows_matching_local_modes(mode):
+    import routers.models as models_router
+
+    assert models_router._model_activation_mode_denial(mode, mode) is None
+
+
+@pytest.mark.parametrize(
+    ("effective_mode", "configured_mode", "expected_code", "expected_reason"),
+    [
+        ("cloud", "cloud", "local_mode_required", "effective_mode_not_local"),
+        ("unknown", "local", "ods_mode_unknown", "mode_unknown"),
+        ("local", "invalid", "ods_mode_unknown", "mode_unknown"),
+        ("cloud", "local", "ods_mode_mismatch", "mode_mismatch"),
+        ("local", "cloud", "ods_mode_mismatch", "mode_mismatch"),
+    ],
+)
+def test_load_model_rejects_unsafe_mode_before_lookup_or_agent_call(
+    test_client,
+    monkeypatch,
+    tmp_path,
+    effective_mode,
+    configured_mode,
+    expected_code,
+    expected_reason,
+):
+    models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    (install_dir / ".env").write_text(
+        f"ODS_MODE={configured_mode}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models_router, "ODS_MODE_EFFECTIVE", effective_mode)
+    monkeypatch.setattr(
+        models_router,
+        "_call_agent_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unsafe activation reached host agent")
+        ),
+    )
+
+    response = test_client.post(
+        "/api/models/not-installed/load",
+        headers=test_client.auth_headers,
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    message = detail.pop("message")
+    assert message.startswith("Local model activation is unavailable")
+    assert detail == {
+        "error": "local_mode_required",
+        "code": expected_code,
+        "reason": expected_reason,
+        "effectiveMode": models_router.normalize_ods_mode(effective_mode),
+        "configuredMode": models_router.normalize_ods_mode(configured_mode),
+        "requestedModelId": "not-installed",
+    }
 
 
 def _gpu():
@@ -466,7 +527,8 @@ def test_api_models_marks_installer_configured_model(test_client, monkeypatch, t
     assert resp.status_code == 200
     model = resp.json()["models"][0]
     assert resp.json()["configuredModel"] == "qwen3.5-9b-q4"
-    assert resp.json()["odsMode"] == "cloud"
+    assert resp.json()["odsMode"] == "local"
+    assert resp.json()["configuredMode"] == "cloud"
     assert model["recommended"] is True
     assert model["configured"] is True
     assert model["recommendation"]["source"] == "installer_configured"
@@ -520,6 +582,7 @@ def test_load_model_noops_when_requested_model_already_loaded(test_client, monke
     }])
     (data_dir / "models" / "Qwen3.5-9B-Q4_K_M.gguf").write_text("model", encoding="utf-8")
     (install_dir / ".env").write_text(
+        "ODS_MODE=local\n"
         "LLM_MODEL=qwen3.5-9b\n"
         "GGUF_FILE=Qwen3.5-9B-Q4_K_M.gguf\n",
         encoding="utf-8",
@@ -558,6 +621,7 @@ def test_load_model_delegates_when_live_backend_reports_different_model(test_cli
     }])
     (data_dir / "models" / "Qwen3.5-9B-Q4_K_M.gguf").write_text("model", encoding="utf-8")
     (install_dir / ".env").write_text(
+        "ODS_MODE=local\n"
         "LLM_MODEL=qwen3.5-9b\n"
         "GGUF_FILE=Qwen3.5-9B-Q4_K_M.gguf\n",
         encoding="utf-8",
@@ -596,6 +660,7 @@ def test_load_model_delegates_when_loaded_backend_is_not_ready(test_client, monk
     }])
     (data_dir / "models" / "Qwen3.5-9B-Q4_K_M.gguf").write_text("model", encoding="utf-8")
     (install_dir / ".env").write_text(
+        "ODS_MODE=local\n"
         "LLM_MODEL=qwen3.5-9b\n"
         "GGUF_FILE=Qwen3.5-9B-Q4_K_M.gguf\n",
         encoding="utf-8",
@@ -626,7 +691,10 @@ def test_load_model_delegates_local_gguf_without_catalog_entry(test_client, monk
         "model",
         encoding="utf-8",
     )
-    (install_dir / ".env").write_text("MAX_CONTEXT=65536\n", encoding="utf-8")
+    (install_dir / ".env").write_text(
+        "ODS_MODE=local\nMAX_CONTEXT=65536\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         models_router,
         "_call_agent_model",

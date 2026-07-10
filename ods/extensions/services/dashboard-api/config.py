@@ -24,6 +24,19 @@ EXTENSIONS_DIR = Path(
 
 DEFAULT_SERVICE_HOST = os.environ.get("SERVICE_HOST", "host.docker.internal")
 GPU_BACKEND = os.environ.get("GPU_BACKEND", "nvidia")
+ODS_MODES = frozenset({"local", "cloud", "hybrid", "lemonade"})
+LOCAL_MODEL_MODES = frozenset({"local", "hybrid", "lemonade"})
+
+
+def normalize_ods_mode(value: Any) -> str:
+    """Return a supported ODS mode or ``unknown`` for missing/invalid input."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in ODS_MODES else "unknown"
+
+
+# This is the mode of the running dashboard-api container. Unlike the mounted
+# .env file, the process environment is fixed until the service is recreated.
+ODS_MODE_EFFECTIVE = normalize_ods_mode(os.environ.get("ODS_MODE"))
 
 
 def _read_env_from_file(key: str) -> str:

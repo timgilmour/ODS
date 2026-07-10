@@ -2304,10 +2304,11 @@ class TestModelActivationModeAndMacosBridge:
         response = handler.parse_response()
         assert response == {
             "error": "local_mode_required",
-            "message": (
-                "Local model activation is unavailable while ODS_MODE=cloud; "
-                "transition ODS to local mode first."
-            ),
+            "code": "local_mode_required",
+            "reason": "effective_mode_not_local",
+            "message": "Local model activation is unavailable while effective ODS mode is 'cloud'.",
+            "effectiveMode": "cloud",
+            "configuredMode": "cloud",
             "mode": "cloud",
             "requestedModelId": "local-target",
             "activeModelId": "cloud-router-model",
@@ -2318,6 +2319,64 @@ class TestModelActivationModeAndMacosBridge:
         assert _mod._model_activation_target is None
         assert _mod._model_activate_lock.acquire(blocking=False)
         _mod._model_activate_lock.release()
+
+    def test_cloud_startup_cannot_be_changed_to_local_by_editing_env(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        install_dir = tmp_path / "install"
+        install_dir.mkdir()
+        env_path = install_dir / ".env"
+        original_env = (
+            "ODS_MODE=local\n"
+            "LLM_MODEL=cloud-router-model\n"
+            "GGUF_FILE=\n"
+        )
+        env_path.write_text(original_env, encoding="utf-8")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "STARTUP_ODS_MODE", "cloud")
+
+        def unexpected_mutation(*_args, **_kwargs):
+            raise AssertionError("mode mismatch must fail before runtime mutation")
+
+        monkeypatch.setattr(_mod.subprocess, "run", unexpected_mutation)
+        handler = _FakeHandler(b"")
+
+        _mod.AgentHandler._do_model_activate(handler, "local-target")
+
+        assert handler.response_code == 409
+        response = handler.parse_response()
+        assert response["code"] == "ods_mode_mismatch"
+        assert response["reason"] == "mode_mismatch"
+        assert response["effectiveMode"] == "cloud"
+        assert response["configuredMode"] == "local"
+        assert response["requestedModelId"] == "local-target"
+        assert response["activeModelId"] == "cloud-router-model"
+        assert env_path.read_text(encoding="utf-8") == original_env
+        assert sorted(path.name for path in install_dir.iterdir()) == [".env"]
+
+    def test_unknown_startup_mode_fails_closed(self, tmp_path, monkeypatch):
+        install_dir = tmp_path / "install"
+        install_dir.mkdir()
+        env_path = install_dir / ".env"
+        env_path.write_text("ODS_MODE=local\n", encoding="utf-8")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "STARTUP_ODS_MODE", "unknown")
+        handler = _FakeHandler(b"")
+
+        _mod.AgentHandler._do_model_activate(handler, "local-target")
+
+        assert handler.response_code == 409
+        response = handler.parse_response()
+        assert response["code"] == "ods_mode_unknown"
+        assert response["reason"] == "mode_unknown"
+        assert response["effectiveMode"] == "unknown"
+        assert response["configuredMode"] == "local"
+
+    @pytest.mark.parametrize("mode", ["local", "hybrid", "lemonade"])
+    def test_matching_local_capable_modes_are_allowed(self, mode):
+        assert _mod._model_activation_mode_denial(mode, mode) is None
 
     def test_cloud_mode_without_active_target_returns_explicit_null(
         self,

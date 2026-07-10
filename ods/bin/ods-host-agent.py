@@ -67,6 +67,7 @@ INSTALL_DIR: Path = Path()
 DATA_DIR: Path = Path()
 AGENT_API_KEY: str = ""
 GPU_BACKEND: str = "nvidia"
+STARTUP_ODS_MODE: str | None = None
 TIER: str = "1"
 GPU_COUNT: str = "1"
 CORE_SERVICE_IDS: set = set()
@@ -75,6 +76,8 @@ CORE_SERVICE_IDS: set = set()
 ALWAYS_ON_SERVICES: frozenset = frozenset({"llama-server", "open-webui", "dashboard", "dashboard-api"})
 USER_EXTENSIONS_DIR: Path = Path()
 EXTENSIONS_DIR: Path = Path()
+_ODS_MODES = frozenset({"local", "cloud", "hybrid", "lemonade"})
+_LOCAL_MODEL_MODES = frozenset({"local", "hybrid", "lemonade"})
 
 # Per-service locks to prevent concurrent start+stop races on the same service
 _service_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
@@ -567,6 +570,67 @@ def load_env(env_path: Path) -> dict:
             key, _, val = line.partition("=")
             env[key.strip()] = val.strip().strip("'\"")
     return env
+
+
+def _normalize_ods_mode(value) -> str:
+    """Return a supported ODS mode or ``unknown`` for missing/invalid input."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in _ODS_MODES else "unknown"
+
+
+def _model_activation_modes(persisted_env: dict) -> tuple[str, str]:
+    """Return immutable startup mode and current persisted configured mode."""
+    configured_mode = _normalize_ods_mode(persisted_env.get("ODS_MODE"))
+    if STARTUP_ODS_MODE is None:
+        # Direct unit calls predate startup-mode initialization. Keep their
+        # historical local default; main() always initializes the real process.
+        if configured_mode == "unknown" and not persisted_env.get("ODS_MODE"):
+            configured_mode = "local"
+        effective_mode = configured_mode
+    else:
+        effective_mode = _normalize_ods_mode(STARTUP_ODS_MODE)
+    return effective_mode, configured_mode
+
+
+def _model_activation_mode_denial(
+    effective_mode: str,
+    configured_mode: str,
+) -> dict[str, str] | None:
+    """Describe why this host process cannot safely perform a model swap."""
+    effective_mode = _normalize_ods_mode(effective_mode)
+    configured_mode = _normalize_ods_mode(configured_mode)
+    if "unknown" in {effective_mode, configured_mode}:
+        code = "ods_mode_unknown"
+        reason = "mode_unknown"
+        message = (
+            "Local model activation is unavailable because the effective or "
+            "configured ODS mode is unknown."
+        )
+    elif effective_mode != configured_mode:
+        code = "ods_mode_mismatch"
+        reason = "mode_mismatch"
+        message = (
+            f"Local model activation is unavailable because effective mode "
+            f"'{effective_mode}' does not match configured mode '{configured_mode}'."
+        )
+    elif effective_mode not in _LOCAL_MODEL_MODES:
+        code = "local_mode_required"
+        reason = "effective_mode_not_local"
+        message = (
+            f"Local model activation is unavailable while effective ODS mode "
+            f"is '{effective_mode}'."
+        )
+    else:
+        return None
+
+    return {
+        "error": "local_mode_required",
+        "code": code,
+        "reason": reason,
+        "message": message,
+        "effectiveMode": effective_mode,
+        "configuredMode": configured_mode,
+    }
 
 
 def load_core_service_ids(config_path: Path) -> set:
@@ -4072,18 +4136,15 @@ class AgentHandler(BaseHTTPRequestHandler):
             logger.exception("Model activation could not read persisted mode")
             json_response(self, 500, {"error": f"Model activation failed: {exc}"})
             return
-        persisted_mode = str(persisted_env.get("ODS_MODE") or "local").strip().lower()
-        if persisted_mode == "cloud":
+        effective_mode, configured_mode = _model_activation_modes(persisted_env)
+        mode_denial = _model_activation_mode_denial(effective_mode, configured_mode)
+        if mode_denial is not None:
             json_response(
                 self,
                 409,
                 {
-                    "error": "local_mode_required",
-                    "message": (
-                        "Local model activation is unavailable while ODS_MODE=cloud; "
-                        "transition ODS to local mode first."
-                    ),
-                    "mode": "cloud",
+                    **mode_denial,
+                    "mode": configured_mode,
                     "requestedModelId": model_id,
                     "activeModelId": (
                         persisted_env.get("LLM_MODEL")
@@ -6595,7 +6656,8 @@ def _request_server_shutdown(server, signum=None):
 
 
 def main():
-    global INSTALL_DIR, DATA_DIR, AGENT_API_KEY, GPU_BACKEND, TIER, GPU_COUNT, CORE_SERVICE_IDS
+    global INSTALL_DIR, DATA_DIR, AGENT_API_KEY, GPU_BACKEND, STARTUP_ODS_MODE
+    global TIER, GPU_COUNT, CORE_SERVICE_IDS
     global USER_EXTENSIONS_DIR, EXTENSIONS_DIR, ODS_VERSION
 
     parser = argparse.ArgumentParser(description="ODS Host Agent")
@@ -6631,6 +6693,7 @@ def main():
         logger.error("Neither ODS_AGENT_KEY nor DASHBOARD_API_KEY set in .env")
         sys.exit(1)
     GPU_BACKEND = env.get("GPU_BACKEND", "nvidia")
+    STARTUP_ODS_MODE = _normalize_ods_mode(env.get("ODS_MODE"))
     TIER = env.get("TIER", "1")
     GPU_COUNT = env.get("GPU_COUNT", "1")
 
@@ -6675,7 +6738,13 @@ def main():
             "ODS_AGENT_BIND=<ip> in %s/.env.",
             INSTALL_DIR,
         )
-    logger.info("Install dir: %s | GPU: %s | Tier: %s", INSTALL_DIR, GPU_BACKEND, TIER)
+    logger.info(
+        "Install dir: %s | GPU: %s | Tier: %s | Effective mode: %s",
+        INSTALL_DIR,
+        GPU_BACKEND,
+        TIER,
+        STARTUP_ODS_MODE,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

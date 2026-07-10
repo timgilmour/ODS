@@ -14,7 +14,15 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
-from config import DATA_DIR, INSTALL_DIR, LLM_BACKEND, SERVICES
+from config import (
+    DATA_DIR,
+    INSTALL_DIR,
+    LLM_BACKEND,
+    LOCAL_MODEL_MODES,
+    ODS_MODE_EFFECTIVE,
+    SERVICES,
+    normalize_ods_mode,
+)
 from gpu import get_gpu_info
 from helpers import (
     get_bootstrap_status,
@@ -63,6 +71,52 @@ _GPU_VRAM_EXCEPTIONS = (
     KeyError,
     AttributeError,
 )
+
+
+def _configured_ods_mode() -> str:
+    """Return the current persisted mode without treating process env as config."""
+    return normalize_ods_mode(read_env_file_value("ODS_MODE", INSTALL_DIR))
+
+
+def _model_activation_mode_denial(
+    effective_mode: str,
+    configured_mode: str,
+) -> dict[str, str] | None:
+    """Describe why this runtime cannot safely perform a local model swap."""
+    effective_mode = normalize_ods_mode(effective_mode)
+    configured_mode = normalize_ods_mode(configured_mode)
+    if "unknown" in {effective_mode, configured_mode}:
+        code = "ods_mode_unknown"
+        reason = "mode_unknown"
+        message = (
+            "Local model activation is unavailable because the effective or "
+            "configured ODS mode is unknown."
+        )
+    elif effective_mode != configured_mode:
+        code = "ods_mode_mismatch"
+        reason = "mode_mismatch"
+        message = (
+            f"Local model activation is unavailable because effective mode "
+            f"'{effective_mode}' does not match configured mode '{configured_mode}'."
+        )
+    elif effective_mode not in LOCAL_MODEL_MODES:
+        code = "local_mode_required"
+        reason = "effective_mode_not_local"
+        message = (
+            f"Local model activation is unavailable while effective ODS mode "
+            f"is '{effective_mode}'."
+        )
+    else:
+        return None
+
+    return {
+        "error": "local_mode_required",
+        "code": code,
+        "reason": reason,
+        "message": message,
+        "effectiveMode": effective_mode,
+        "configuredMode": configured_mode,
+    }
 
 try:
     import pynvml
@@ -348,11 +402,8 @@ async def list_models(api_key: str = Depends(verify_api_key)):
             os_name=signature.get("os"),
             flags=signature.get("flags"),
         )
-    payload["odsMode"] = (
-        read_env_file_value("ODS_MODE", INSTALL_DIR)
-        or read_env_value("ODS_MODE", INSTALL_DIR)
-        or "local"
-    ).strip().lower()
+    payload["odsMode"] = ODS_MODE_EFFECTIVE
+    payload["configuredMode"] = _configured_ods_mode()
     return payload
 
 
@@ -781,6 +832,16 @@ def cancel_download(api_key: str = Depends(verify_api_key)):
 @router.post("/api/models/{model_id}/load")
 def load_model(model_id: str, api_key: str = Depends(verify_api_key)):
     """Activate a model — update config and restart llama-server."""
+    mode_denial = _model_activation_mode_denial(
+        ODS_MODE_EFFECTIVE,
+        _configured_ods_mode(),
+    )
+    if mode_denial is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={**mode_denial, "requestedModelId": model_id},
+        )
+
     model = _find_loadable_model(model_id)
     if model is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found in library or local GGUF files")

@@ -31,6 +31,22 @@ features:
 """
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, "unknown"),
+        ("", "unknown"),
+        (" LOCAL ", "local"),
+        ("cloud", "cloud"),
+        ("HYBRID", "hybrid"),
+        ("lemonade", "lemonade"),
+        ("core", "unknown"),
+    ],
+)
+def test_normalize_ods_mode(value, expected):
+    assert config.normalize_ods_mode(value) == expected
+
+
 class TestReadManifestFile:
 
     def test_reads_yaml(self, tmp_path):
