@@ -358,7 +358,7 @@ generate_ods_env() {
     if [[ "${DOCKER_BACKEND:-unknown}" == "colima" ]]; then
         macos_llm_bridge_enabled="true"
         macos_host_agent_bridge_enabled="true"
-        native_llama_port="18080"
+        native_llama_port="8080"
         macos_host_gateway="${COLIMA_HOST_IP:-}"
         macos_vm_ip="${COLIMA_VM_IP:-}"
         if [[ -n "$macos_host_gateway" ]]; then
