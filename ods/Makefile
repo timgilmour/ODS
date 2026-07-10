@@ -56,6 +56,9 @@ test: ## Run unit and contract tests
 	@echo "=== ods config show secret-mask matrix ==="
 	@bash tests/test-ods-config-secret-mask.sh
 	@echo ""
+	@echo "=== CLI preset restore user extensions ==="
+	@bash tests/test-cli-preset-restore-user-extensions.sh
+	@echo ""
 	@echo "=== bootstrap OpenClaw compose-guard regression ==="
 	@bash tests/test-bootstrap-openclaw-compose-guard.sh
 	@echo ""
