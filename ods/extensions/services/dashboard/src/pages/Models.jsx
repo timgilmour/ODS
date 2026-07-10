@@ -19,6 +19,7 @@ import { useModels } from '../hooks/useModels'
 import { useDownloadProgress } from '../hooks/useDownloadProgress'
 
 const PAGE_SIZE = 10
+const CLOUD_MODE_RUN_TITLE = 'Switch ODS to local mode to run this model.'
 const TECH_PANEL_STYLE = {
   background: 'linear-gradient(180deg, rgba(10,10,18,0.96), rgba(7,7,13,0.92))',
   borderColor: 'rgba(255,255,255,0.08)',
@@ -42,6 +43,7 @@ export default function Models() {
     gpu,
     currentModel,
     configuredModel,
+    odsMode,
     recommendationAlternatives,
     loading,
     error,
@@ -269,6 +271,8 @@ export default function Models() {
                       key={rowId}
                       model={model}
                       gpu={gpu}
+                      odsMode={odsMode}
+                      isCurrentModel={model.id === currentModel}
                       isLoading={actionLoading === model.id}
                       loadBusy={!!actionLoading}
                       downloadBusy={downloadProgress.isDownloading || !!downloadStarting}
@@ -516,6 +520,8 @@ function FilterChip({ active, onClick, children }) {
 function ModelTableRow({
   model,
   gpu,
+  odsMode,
+  isCurrentModel,
   isLoading,
   loadBusy,
   downloadBusy,
@@ -527,8 +533,9 @@ function ModelTableRow({
   onBenchmark,
   onDelete,
 }) {
-  const isLoaded = model.status === 'loaded'
+  const isLoaded = model.status === 'loaded' || isCurrentModel
   const isDownloaded = model.status === 'downloaded'
+  const cloudMode = odsMode === 'cloud'
   const memory = getMemoryMeta(model, gpu)
   const compatibility = getCompatibilityMeta(model, memory)
   const speed = getSpeedDisplay(model)
@@ -562,6 +569,7 @@ function ModelTableRow({
       <div className="self-center">
         <PrimaryAction
           model={model}
+          odsMode={odsMode}
           isLoaded={isLoaded}
           isDownloaded={isDownloaded}
           isLoading={isLoading}
@@ -589,12 +597,19 @@ function ModelTableRow({
               <MenuButton onClick={onBenchmark} icon={RefreshCw}>Benchmark</MenuButton>
             )}
             {isDownloaded && !isLoaded && (
-              <MenuButton onClick={onLoad} icon={Play} disabled={!model.fitsVram || loadBusy}>Run model</MenuButton>
+              <MenuButton
+                onClick={onLoad}
+                icon={Play}
+                disabled={cloudMode || !model.fitsVram || loadBusy}
+                title={cloudMode ? CLOUD_MODE_RUN_TITLE : undefined}
+              >
+                Run model
+              </MenuButton>
             )}
             {model.status === 'available' && (
               <MenuButton onClick={onDownload} icon={Download} disabled={downloadBusy}>Download</MenuButton>
             )}
-            {(isDownloaded || isLoaded) && (
+            {isDownloaded && !isLoaded && (
               <MenuButton onClick={onDelete} icon={Trash2} danger>Delete file</MenuButton>
             )}
             {!isLoaded && !isDownloaded && model.status !== 'available' && (
@@ -636,6 +651,7 @@ function ModelTableRow({
 
 function PrimaryAction({
   model,
+  odsMode,
   isLoaded,
   isDownloaded,
   isLoading,
@@ -670,13 +686,16 @@ function PrimaryAction({
   }
 
   if (isDownloaded) {
+    const cloudMode = odsMode === 'cloud'
+    const runDisabled = cloudMode || !model.fitsVram || loadBusy
     return (
       <button
         type="button"
         onClick={onLoad}
-        disabled={!model.fitsVram || loadBusy}
+        disabled={runDisabled}
+        title={cloudMode ? CLOUD_MODE_RUN_TITLE : undefined}
         className={`inline-flex h-8 min-w-24 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold transition-colors ${
-          model.fitsVram && !loadBusy
+          !runDisabled
             ? 'bg-theme-accent text-white shadow-[0_0_18px_rgba(168,85,247,0.32)] hover:bg-theme-accent-hover'
             : 'cursor-not-allowed border border-white/[0.08] bg-black/20 text-theme-text-muted'
         }`}
@@ -807,12 +826,13 @@ function Pagination({ page, pageCount, onChange }) {
   )
 }
 
-function MenuButton({ icon: Icon, children, onClick, disabled, danger }) {
+function MenuButton({ icon: Icon, children, onClick, disabled, danger, title }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
         danger
           ? 'text-red-300 hover:bg-red-500/10'

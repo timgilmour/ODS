@@ -198,3 +198,4 @@ class ModelLibraryResponse(BaseModel):
     configuredModel: Optional[str] = None
     recommendationPolicy: Optional[str] = None
     recommendationAlternatives: list[dict[str, Any]] = Field(default_factory=list)
+    odsMode: str = "local"

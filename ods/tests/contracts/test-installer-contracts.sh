@@ -91,6 +91,18 @@ grep -q 'starting|verifying|swapping' ods-cli \
 echo "[contract] macOS host-agent LaunchAgent install-dir"
 bash tests/test-macos-host-agent-verification.sh
 
+echo "[contract] macOS direct binds replace conflicting Colima bridges"
+bash tests/test-macos-direct-bind-bridge.sh
+
+echo "[contract] macOS CLI preserves cloud/local model routing"
+bash tests/test-macos-cli-mode-routing.sh
+
+echo "[contract] macOS cloud resolver preserves selected extension state"
+bash tests/test-macos-cloud-resolver.sh
+
+echo "[contract] macOS installer preserves authenticated local/cloud transitions"
+bash tests/test-macos-installer-transitions.sh
+
 echo "[contract] AMD reassign keeps HSA override Strix-only"
 grep -q '_env_set "HSA_OVERRIDE_GFX_VERSION" "11.5.1"' ods-cli \
   || { echo "[FAIL] ods-cli must set HSA override to 11.5.1 for gfx1151"; exit 1; }

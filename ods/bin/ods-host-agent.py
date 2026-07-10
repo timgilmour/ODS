@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import collections
+import hashlib
 import importlib
 import json
 import logging
@@ -47,6 +48,9 @@ VALID_HOOK_NAMES = frozenset({
     "pre_uninstall", "post_uninstall",
 })
 logger = logging.getLogger("ods-host-agent")
+
+_MACOS_LLM_BRIDGE_LABEL = "com.ods.llm-bridge"
+_MACOS_HOST_AGENT_BRIDGE_LABEL = "com.ods.host-agent-bridge"
 
 # Hardcoded fallback — used when core-service-ids.json is missing or unreadable.
 # Prevents fail-open: without this, a missing JSON file would allow anyone with
@@ -208,8 +212,11 @@ _model_download_lock = threading.Lock()
 _model_download_thread: threading.Thread | None = None
 _model_download_proc: subprocess.Popen | None = None
 _model_download_cancel = threading.Event()
+_model_download_cancelable = False
 # Model activation lock — prevent concurrent .env writes and Docker restarts
 _model_activate_lock = threading.Lock()
+_model_activation_state_lock = threading.Lock()
+_model_activation_target: str | None = None
 # Update lock/state: only one background ods-update run at a time.
 _update_lock = threading.Lock()
 _update_status_lock = threading.Lock()
@@ -223,6 +230,189 @@ def _model_download_thread_alive() -> bool:
     return bool(thread is not None and thread.is_alive())
 
 
+def _begin_model_activation(model_id: str) -> tuple[bool, str | None]:
+    """Atomically acquire activation ownership and publish its target."""
+    global _model_activation_target
+    with _model_activation_state_lock:
+        if not _model_activate_lock.acquire(blocking=False):
+            return False, _model_activation_target
+        _model_activation_target = model_id
+        return True, model_id
+
+
+def _end_model_activation() -> None:
+    """Clear activation ownership before making the lock available again."""
+    global _model_activation_target
+    with _model_activation_state_lock:
+        _model_activation_target = None
+        _model_activate_lock.release()
+
+
+def _download_status_model_token(value: object) -> str:
+    """Return the catalog filename embedded in a progress label."""
+    return str(value or "").split(" (", 1)[0].strip()
+
+
+def _artifact_expected_size(metadata: dict) -> int | None:
+    """Return an exact catalog byte size when one is available."""
+    for key in ("size_bytes", "expected_size_bytes", "file_size_bytes"):
+        raw = metadata.get(key)
+        if isinstance(raw, bool) or raw in (None, ""):
+            continue
+        try:
+            size = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            return size
+    return None
+
+
+def _model_download_manifest(model: dict) -> dict | None:
+    """Build the complete integrity manifest for one catalog model."""
+    gguf_file = str(model.get("gguf_file") or "").strip()
+    if not gguf_file:
+        return None
+
+    raw_parts = model.get("gguf_parts")
+    artifacts = []
+    if isinstance(raw_parts, list) and raw_parts:
+        for raw_part in raw_parts:
+            if not isinstance(raw_part, dict):
+                return None
+            filename = str(raw_part.get("file") or "").strip()
+            url = str(raw_part.get("url") or "").strip()
+            if not filename or not url:
+                return None
+            artifacts.append({
+                "file": filename,
+                "url": url,
+                "sha256": str(raw_part.get("sha256") or "").strip().lower(),
+                "size_bytes": _artifact_expected_size(raw_part),
+            })
+    else:
+        url = str(model.get("gguf_url") or "").strip()
+        if not url:
+            return None
+        artifacts.append({
+            "file": gguf_file,
+            "url": url,
+            "sha256": str(model.get("gguf_sha256") or "").strip().lower(),
+            "size_bytes": _artifact_expected_size(model),
+        })
+
+    filenames = [artifact["file"] for artifact in artifacts]
+    if gguf_file not in filenames or len(filenames) != len(set(filenames)):
+        return None
+    return {"gguf_file": gguf_file, "artifacts": artifacts}
+
+
+def _safe_model_artifact_path(models_dir: Path, filename: object) -> Path | None:
+    """Resolve a catalog artifact while keeping it directly in models_dir."""
+    token = str(filename or "").strip()
+    if (
+        not token
+        or "\x00" in token
+        or "/" in token
+        or "\\" in token
+        or Path(token).name != token
+    ):
+        return None
+    try:
+        root = models_dir.resolve()
+        target = (models_dir / token).resolve()
+        if not target.is_relative_to(root):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return target
+
+
+def _verify_model_artifact(
+    path: Path,
+    artifact: dict,
+    cancel_event: threading.Event | None = None,
+) -> tuple[bool, str]:
+    """Verify one model artifact against exact catalog integrity metadata."""
+    try:
+        if not path.is_file():
+            return False, "file is missing"
+        actual_size = path.stat().st_size
+    except OSError as exc:
+        return False, f"file could not be inspected: {exc}"
+    if actual_size <= 0:
+        return False, "file is empty"
+
+    expected_size = artifact.get("size_bytes")
+    if expected_size is not None and actual_size != expected_size:
+        return False, f"size mismatch: expected {expected_size} bytes, got {actual_size}"
+
+    expected_sha = str(artifact.get("sha256") or "").strip().lower()
+    if expected_sha:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            return False, "catalog SHA256 is malformed"
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1048576), b""):
+                    if cancel_event is not None and cancel_event.is_set():
+                        return False, "verification cancelled"
+                    digest.update(chunk)
+        except OSError as exc:
+            return False, f"file could not be hashed: {exc}"
+        actual_sha = digest.hexdigest()
+        if actual_sha != expected_sha:
+            return (
+                False,
+                f"SHA256 mismatch: expected {expected_sha[:12]}..., got {actual_sha[:12]}...",
+            )
+    elif expected_size is None:
+        return False, "catalog has no exact size or SHA256"
+
+    if cancel_event is not None and cancel_event.is_set():
+        return False, "verification cancelled"
+    return True, ""
+
+
+def _verify_model_manifest(
+    models_dir: Path,
+    manifest: dict,
+    cancel_event: threading.Event | None = None,
+) -> tuple[bool, str]:
+    """Verify every file in a catalog model manifest."""
+    for artifact in manifest.get("artifacts", []):
+        filename = artifact.get("file", "")
+        target = _safe_model_artifact_path(models_dir, filename)
+        if target is None:
+            return False, f"unsafe catalog filename: {filename!r}"
+        valid, reason = _verify_model_artifact(target, artifact, cancel_event)
+        if not valid:
+            return False, f"{filename}: {reason}"
+    return True, ""
+
+
+def _catalog_manifest_for_status(model_label: object) -> tuple[dict | None, str]:
+    """Resolve a stale status label to its complete catalog manifest."""
+    token = _download_status_model_token(model_label)
+    library_path = INSTALL_DIR / "config" / "model-library.json"
+    try:
+        library = json.loads(library_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, f"model catalog unavailable: {exc}"
+
+    models = library.get("models", []) if isinstance(library, dict) else []
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        manifest = _model_download_manifest(model)
+        if manifest is None:
+            continue
+        filenames = {artifact["file"] for artifact in manifest["artifacts"]}
+        if token == manifest["gguf_file"] or token in filenames:
+            return manifest, ""
+    return None, f"no catalog manifest matches {token or 'the stale download'}"
+
+
 def _normalize_model_download_status(status_path: Path, data: dict) -> dict:
     status = str(data.get("status") or "")
     if status not in {"downloading", "verifying"}:
@@ -230,9 +420,15 @@ def _normalize_model_download_status(status_path: Path, data: dict) -> dict:
     if _model_download_thread_alive():
         return data
 
-    model = str(data.get("model") or "").split(" (", 1)[0]
+    model = _download_status_model_token(data.get("model"))
     models_dir = INSTALL_DIR / "data" / "models"
-    if model and _model_file_ready(models_dir / model):
+    manifest, manifest_error = _catalog_manifest_for_status(model)
+    manifest_valid = False
+    integrity_error = manifest_error
+    if manifest is not None:
+        manifest_valid, integrity_error = _verify_model_manifest(models_dir, manifest)
+        model = manifest["gguf_file"]
+    if manifest_valid:
         _write_model_status(status_path, "complete", model, 0, 0)
     else:
         _write_model_status(
@@ -241,7 +437,11 @@ def _normalize_model_download_status(status_path: Path, data: dict) -> dict:
             model,
             int(data.get("bytesDownloaded") or 0),
             int(data.get("bytesTotal") or 0),
-            data.get("error") or "Model download is not running; previous download was interrupted.",
+            data.get("error")
+            or (
+                "Model download is not running; previous download is incomplete or corrupt: "
+                f"{integrity_error}"
+            ),
         )
     try:
         return json.loads(status_path.read_text(encoding="utf-8"))
@@ -318,11 +518,13 @@ def _detect_docker_bridge_gateway() -> str:
 
 def _resolve_agent_bind_addr(env: dict, system_name: str | None = None) -> str:
     """Resolve the host-agent bind address without exposing LAN by default."""
+    system_name = system_name or platform.system()
     explicit = env.get("ODS_AGENT_BIND", "").strip()
     if explicit:
+        if system_name == "Darwin" and explicit == "::":
+            return "0.0.0.0"
         return explicit
 
-    system_name = system_name or platform.system()
     if system_name in ("Darwin", "Windows"):
         return "127.0.0.1"
 
@@ -339,6 +541,62 @@ def _resolve_agent_bind_addr(env: dict, system_name: str | None = None) -> str:
     return "127.0.0.1"
 
 
+def _macos_direct_bind_conflicts_with_bridge(
+    env: dict,
+    bind_addr: str,
+    system_name: str | None = None,
+) -> bool:
+    """Return whether a native macOS bind supersedes the Colima bridge."""
+    if (system_name or platform.system()) != "Darwin":
+        return False
+
+    bind_addr = str(bind_addr or "").strip()
+    gateway_addr = str(env.get("ODS_MACOS_HOST_GATEWAY") or "").strip()
+    return (
+        bind_addr in {"0.0.0.0", "::"}
+        or bool(gateway_addr and bind_addr == gateway_addr)
+    )
+
+
+def _disable_conflicting_macos_bridge(env: dict, bind_addr: str, label: str) -> bool:
+    """Best-effort bootout of a bridge that would collide with a direct bind."""
+    if not _macos_direct_bind_conflicts_with_bridge(env, bind_addr):
+        return False
+
+    service_target = f"gui/{os.getuid()}/{label}"
+    try:
+        result = subprocess.run(
+            ["launchctl", "bootout", service_target],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "Could not disable conflicting macOS bridge %s before binding %s; continuing: %s",
+            label,
+            bind_addr,
+            exc,
+        )
+        return False
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or "no output"
+        logger.warning(
+            "Could not disable conflicting macOS bridge %s before binding %s "
+            "(launchctl exit %d: %s); continuing",
+            label,
+            bind_addr,
+            result.returncode,
+            detail,
+        )
+        return False
+
+    logger.info("Disabled conflicting macOS bridge %s before binding %s", label, bind_addr)
+    return True
+
+
 def invalidate_compose_cache() -> None:
     """Drop the saved .compose-flags cache so the next resolve re-runs the script."""
     (INSTALL_DIR / ".compose-flags").unlink(missing_ok=True)
@@ -352,7 +610,9 @@ def resolve_compose_flags() -> list:
             return raw.split()
 
     script = INSTALL_DIR / "scripts" / "resolve-compose-stack.sh"
-    # Contract note: every resolver launch below must include --gpu-count.
+    # Contract note: every resolver launch below must include --gpu-count and
+    # the persisted ODS_MODE. Extension toggles invalidate the cache while the
+    # agent process keeps running, so os.environ may not reflect the install.
     if not script.exists():
         raise RuntimeError(f"resolve-compose-stack.sh not found at {script}")
     bash = _find_usable_bash()
@@ -367,12 +627,14 @@ def resolve_compose_flags() -> list:
     if platform.system() == "Windows":
         _ensure_windows_resolver_pyyaml(sys.executable)
         env["ODS_PYTHON_CMD"] = _to_bash_path(Path(sys.executable))
+    ods_mode = load_env(INSTALL_DIR / ".env").get("ODS_MODE", "").strip() or "local"
     cmd = [
         bash, _to_bash_path(script),
         "--script-dir", _to_bash_path(INSTALL_DIR),
         "--tier", TIER,
         "--gpu-backend", GPU_BACKEND,
         "--gpu-count", GPU_COUNT,
+        "--ods-mode", ods_mode,
     ]
     try:
         result = subprocess.run(
@@ -711,6 +973,8 @@ def _resolve_local_gguf_filename(model_id: str, models_dir: Path) -> str | None:
     candidate_stem = Path(candidate).stem.lower()
     exact_matches: list[Path] = []
     stem_matches: list[Path] = []
+    logical_matches: list[Path] = []
+    candidate_logical = _local_model_name_from_gguf(candidate).lower()
     try:
         for path in models_dir.iterdir():
             if not path.is_file() or not path.name.lower().endswith(".gguf"):
@@ -719,10 +983,12 @@ def _resolve_local_gguf_filename(model_id: str, models_dir: Path) -> str | None:
                 exact_matches.append(path)
             elif path.stem.lower() == candidate_stem:
                 stem_matches.append(path)
+            elif _local_model_name_from_gguf(path.name).lower() == candidate_logical:
+                logical_matches.append(path)
     except OSError:
         return None
 
-    matches = exact_matches or stem_matches
+    matches = exact_matches or stem_matches or logical_matches
     if len(matches) == 1:
         return matches[0].name
     if len(matches) > 1:
@@ -3188,7 +3454,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         {"file": ..., "url": ...} dicts.  The first part's filename is
         used as gguf_file for status tracking.
         """
-        global _model_download_thread
+        global _model_download_cancelable, _model_download_thread
         if not check_auth(self):
             return
         body = read_json_body(self)
@@ -3212,40 +3478,42 @@ class AgentHandler(BaseHTTPRequestHandler):
         else:
             download_plan = [(gguf_file, gguf_url)]
 
-        # Validate against library (prevent arbitrary URL downloads).
-        # Also harvest expected SHA256s keyed by filename so verification can
-        # cover every part of split-file downloads, not just single-file models.
+        # Validate the complete request against the library. A split request
+        # must include every catalog part; accepting a subset can otherwise
+        # create a false-complete model that llama.cpp cannot load.
         library_path = INSTALL_DIR / "config" / "model-library.json"
         allowed = False
         # Sentinel: distinguishes "catalog unreadable/missing" (500) from
         # "catalog readable but model not listed" (403). Conflating the two
         # masks broken installs as policy denials.
         catalog_ok = False
-        expected_sha_by_file: dict = {}
+        manifest = None
         if library_path.exists():
             try:
                 lib = json.loads(library_path.read_text(encoding="utf-8"))
                 catalog_ok = True
                 for m in lib.get("models", []):
+                    if not isinstance(m, dict):
+                        continue
                     if m.get("gguf_file") != gguf_file:
                         continue
+                    candidate_manifest = _model_download_manifest(m)
+                    if candidate_manifest is None:
+                        break
                     if gguf_parts:
-                        # Verify every (file, url) in the request matches the library
-                        lib_parts_meta = {
-                            (p["file"], p["url"]): p.get("sha256", "")
-                            for p in m.get("gguf_parts", [])
-                            if p.get("file") and p.get("url")
-                        }
-                        req_parts = set(download_plan)
-                        if req_parts and req_parts <= set(lib_parts_meta.keys()):
+                        catalog_plan = [
+                            (artifact["file"], artifact["url"])
+                            for artifact in candidate_manifest["artifacts"]
+                        ]
+                        if download_plan == catalog_plan:
                             allowed = True
-                            expected_sha_by_file = {
-                                file: lib_parts_meta[(file, url)]
-                                for file, url in download_plan
-                            }
-                    elif m.get("gguf_url") == gguf_url:
+                            manifest = candidate_manifest
+                    elif (
+                        len(candidate_manifest["artifacts"]) == 1
+                        and candidate_manifest["artifacts"][0]["url"] == gguf_url
+                    ):
                         allowed = True
-                        expected_sha_by_file = {gguf_file: m.get("gguf_sha256", "")}
+                        manifest = candidate_manifest
                     break
             except (json.JSONDecodeError, OSError):
                 logger.exception("Model library catalog unavailable")
@@ -3257,26 +3525,59 @@ class AgentHandler(BaseHTTPRequestHandler):
         if not allowed:
             json_response(self, 403, {"error": "Model not in library catalog"})
             return
+        if manifest is None:
+            json_response(self, 500, {"error": "Model catalog manifest is invalid"})
+            return
 
         models_dir = INSTALL_DIR / "data" / "models"
         status_path = INSTALL_DIR / "data" / "model-download-status.json"
-        # For split models, check ALL parts exist (not just the first)
-        all_downloaded = all(_model_file_ready(models_dir / fn) for fn, _ in download_plan)
-        if all_downloaded:
+        artifact_by_file = {
+            artifact["file"]: artifact
+            for artifact in manifest["artifacts"]
+        }
+        artifact_paths = {}
+        for artifact in manifest["artifacts"]:
+            target = _safe_model_artifact_path(models_dir, artifact["file"])
+            if target is None:
+                json_response(self, 500, {"error": "Model catalog contains an unsafe filename"})
+                return
+            artifact_paths[artifact["file"]] = target
+
+        # Existing files are reusable only after exact catalog verification.
+        # This intentionally hashes them before returning already_downloaded;
+        # non-empty alone is not evidence that a prior transfer completed.
+        valid_preexisting_files = set()
+        invalid_existing_files = {}
+        for filename, target in artifact_paths.items():
+            valid, reason = _verify_model_artifact(target, artifact_by_file[filename])
+            if valid:
+                valid_preexisting_files.add(filename)
+            elif target.exists():
+                invalid_existing_files[filename] = reason
+
+        if len(valid_preexisting_files) == len(download_plan):
             # A previous process can leave stale "downloading" status after the
             # final file is already on disk. Normalize that here so the
             # dashboard stops showing phantom progress.
             _write_model_status(status_path, "complete", gguf_file, 0, 0)
             json_response(self, 200, {"status": "already_downloaded"})
             return
-        for fn, _ in download_plan:
-            target = models_dir / fn
-            if target.is_file() and not _model_file_ready(target):
-                target.unlink(missing_ok=True)
+
+        for filename, reason in invalid_existing_files.items():
+            logger.warning("Discarding invalid existing model artifact %s: %s", filename, reason)
+            try:
+                artifact_paths[filename].unlink(missing_ok=True)
+            except OSError as exc:
+                json_response(
+                    self,
+                    500,
+                    {"error": f"Invalid model artifact could not be replaced: {filename}: {exc}"},
+                )
+                return
         pending_download_plan = [
             (idx, fn, url)
             for idx, (fn, url) in enumerate(download_plan, 1)
-            if not _model_file_ready(models_dir / fn)
+            if fn not in valid_preexisting_files
         ]
 
         # Check for concurrent download
@@ -3286,9 +3587,62 @@ class AgentHandler(BaseHTTPRequestHandler):
                 return
 
             _model_download_cancel.clear()
+            _model_download_cancelable = True
 
             def _download():
-                global _model_download_proc
+                global _model_download_cancelable, _model_download_proc
+                created_final_paths: set[Path] = set()
+                temp_paths: set[Path] = set()
+                cancel_cleanup_done = False
+
+                def _discard_cancelled_path(path: Path) -> str | None:
+                    if not path.exists():
+                        return None
+                    try:
+                        path.unlink()
+                        return None
+                    except OSError as unlink_error:
+                        quarantine = path.with_name(
+                            f".{path.name}.cancelled-{threading.get_ident()}-{time.time_ns()}"
+                        )
+                        try:
+                            os.replace(str(path), str(quarantine))
+                            logger.warning(
+                                "Quarantined cancelled model artifact %s as %s after unlink failed: %s",
+                                path.name,
+                                quarantine.name,
+                                unlink_error,
+                            )
+                            return None
+                        except OSError as quarantine_error:
+                            return (
+                                f"{path.name}: unlink failed ({unlink_error}); "
+                                f"quarantine failed ({quarantine_error})"
+                            )
+
+                def _finish_cancelled_download() -> None:
+                    nonlocal cancel_cleanup_done
+                    if cancel_cleanup_done:
+                        return
+                    cancel_cleanup_done = True
+                    cleanup_errors = []
+                    for path in sorted(temp_paths | created_final_paths, key=str):
+                        error = _discard_cancelled_path(path)
+                        if error:
+                            cleanup_errors.append(error)
+                    message = "Download cancelled by user"
+                    if cleanup_errors:
+                        message += "; cleanup incomplete: " + "; ".join(cleanup_errors)
+                    _write_model_status(
+                        status_path,
+                        "cancelled" if not cleanup_errors else "failed",
+                        gguf_file,
+                        0,
+                        0,
+                        message,
+                    )
+                    logger.info("Model download cancelled: %s", gguf_file)
+
                 try:
                     models_dir.mkdir(parents=True, exist_ok=True)
                     label = gguf_file if len(download_plan) == 1 else f"{gguf_file} ({len(download_plan)} parts)"
@@ -3296,9 +3650,16 @@ class AgentHandler(BaseHTTPRequestHandler):
 
                     for part_idx, part_file_name, part_url in pending_download_plan:
                         if _model_download_cancel.is_set():
-                            break
-                        part_target = models_dir / part_file_name
-                        part_tmp = models_dir / f"{part_file_name}.part"
+                            _finish_cancelled_download()
+                            return
+                        part_target = artifact_paths[part_file_name]
+                        part_tmp = _safe_model_artifact_path(
+                            models_dir,
+                            f"{part_file_name}.part",
+                        )
+                        if part_tmp is None:
+                            raise RuntimeError(f"Unsafe temporary model filename: {part_file_name}.part")
+                        temp_paths.add(part_tmp)
                         part_label = part_file_name if len(download_plan) == 1 else f"{part_file_name} (part {part_idx}/{len(download_plan)})"
 
                         # Get real file size by following redirects and reading final Content-Length
@@ -3347,57 +3708,61 @@ class AgentHandler(BaseHTTPRequestHandler):
                         # be killed from the cancel handler or _poll_progress thread.
                         success = False
                         last_error = ""
-                        for attempt in range(1, 4):
-                            if _model_download_cancel.is_set():
-                                break
-                            if attempt > 1:
-                                logger.info("Model download retry %d/3 for %s", attempt, part_file_name)
-                                # Use wait() instead of sleep() so cancel is honored immediately
-                                _model_download_cancel.wait(5)
-                            proc = subprocess.Popen(
-                                ["curl", "-fSL", "-C", "-", "--connect-timeout", "30",
-                                 "-o", str(part_tmp), part_url],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            )
-                            _model_download_proc = proc
-                            try:
-                                proc.wait(timeout=14400)
-                            except subprocess.TimeoutExpired:
-                                proc.kill()
-                                proc.wait(timeout=5)
-                            _model_download_proc = None
-
-                            if _model_download_cancel.is_set():
-                                break
-                            if proc.returncode == 0:
-                                try:
-                                    part_tmp.rename(part_target)
-                                except OSError as exc:
-                                    last_error = f"Download finished but final file could not be moved into place: {exc}"
-                                else:
-                                    if _model_file_ready(part_target):
-                                        success = True
+                        try:
+                            for attempt in range(1, 4):
+                                if _model_download_cancel.is_set():
+                                    break
+                                if attempt > 1:
+                                    logger.info("Model download retry %d/3 for %s", attempt, part_file_name)
+                                    # Use wait() instead of sleep() so cancel is honored immediately
+                                    _model_download_cancel.wait(5)
+                                    if _model_download_cancel.is_set():
                                         break
-                                    last_error = "Download finished but model file is missing or empty"
-                                    part_target.unlink(missing_ok=True)
-                            else:
-                                last_error = f"curl exited with code {proc.returncode}"
-                            _write_model_status(
-                                status_path,
-                                "downloading",
-                                part_label,
-                                0,
-                                part_total,
-                                f"Retry {attempt}/3: {last_error}",
-                            )
+                                proc = subprocess.Popen(
+                                    ["curl", "-fSL", "-C", "-", "--connect-timeout", "30",
+                                     "-o", str(part_tmp), part_url],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                )
+                                _model_download_proc = proc
+                                try:
+                                    proc.wait(timeout=14400)
+                                except subprocess.TimeoutExpired:
+                                    proc.kill()
+                                    proc.wait(timeout=5)
+                                finally:
+                                    _model_download_proc = None
 
-                        _stop_progress.set()
-                        progress_thread.join(timeout=3)
+                                if _model_download_cancel.is_set():
+                                    break
+                                if proc.returncode == 0:
+                                    try:
+                                        part_tmp.replace(part_target)
+                                        created_final_paths.add(part_target)
+                                    except OSError as exc:
+                                        last_error = f"Download finished but final file could not be moved into place: {exc}"
+                                    else:
+                                        if _model_file_ready(part_target):
+                                            success = True
+                                            break
+                                        last_error = "Download finished but model file is missing or empty"
+                                        part_target.unlink(missing_ok=True)
+                                        created_final_paths.discard(part_target)
+                                else:
+                                    last_error = f"curl exited with code {proc.returncode}"
+                                _write_model_status(
+                                    status_path,
+                                    "downloading",
+                                    part_label,
+                                    0,
+                                    part_total,
+                                    f"Retry {attempt}/3: {last_error}",
+                                )
+                        finally:
+                            _stop_progress.set()
+                            progress_thread.join(timeout=3)
 
                         if _model_download_cancel.is_set():
-                            part_tmp.unlink(missing_ok=True)
-                            _write_model_status(status_path, "cancelled", gguf_file, 0, 0, "Download cancelled by user")
-                            logger.info("Model download cancelled: %s", gguf_file)
+                            _finish_cancelled_download()
                             return
 
                         if not success:
@@ -3412,63 +3777,75 @@ class AgentHandler(BaseHTTPRequestHandler):
                             )
                             return
 
-                    # Verify SHA256 for every downloaded part. Catalog is the
-                    # source of truth: split-file models carry per-part sha256
-                    # in expected_sha_by_file, single-file models carry one
-                    # entry. Empty checksum -> warn (do not silently skip), so
-                    # missing catalog entries surface during operator review.
-                    import hashlib
                     if _model_download_cancel.is_set():
-                        _write_model_status(status_path, "cancelled", gguf_file, 0, 0, "Download cancelled by user")
+                        _finish_cancelled_download()
                         return
-                    for part_idx, (part_file_name, _) in enumerate(download_plan, 1):
-                        expected = expected_sha_by_file.get(part_file_name, "")
-                        final_target = models_dir / part_file_name
-                        if not _model_file_ready(final_target):
-                            _write_model_status(
-                                status_path,
-                                "failed",
-                                part_file_name,
-                                0,
-                                0,
-                                "Download finished but model file is missing or empty",
-                            )
-                            return
-                        if not expected:
-                            logger.warning(
-                                "SHA256 verification skipped for %s: no checksum in model-library.json",
-                                part_file_name,
-                            )
-                            continue
-                        final_size = final_target.stat().st_size
+                    for part_idx, artifact in enumerate(manifest["artifacts"], 1):
+                        part_file_name = artifact["file"]
+                        final_target = artifact_paths[part_file_name]
+                        try:
+                            final_size = final_target.stat().st_size
+                        except OSError:
+                            final_size = 0
                         verify_label = (
                             part_file_name
                             if len(download_plan) == 1
                             else f"{part_file_name} (part {part_idx}/{len(download_plan)})"
                         )
                         _write_model_status(status_path, "verifying", verify_label, final_size, final_size)
-                        sha = hashlib.sha256()
-                        with open(final_target, "rb") as f:
-                            for chunk in iter(lambda: f.read(1048576), b""):
-                                sha.update(chunk)
-                        actual = sha.hexdigest()
-                        if actual != expected:
-                            final_target.unlink(missing_ok=True)
+                        valid, reason = _verify_model_artifact(
+                            final_target,
+                            artifact,
+                            _model_download_cancel,
+                        )
+                        if _model_download_cancel.is_set():
+                            _finish_cancelled_download()
+                            return
+                        if not valid:
+                            if final_target in created_final_paths:
+                                final_target.unlink(missing_ok=True)
+                                created_final_paths.discard(final_target)
                             _write_model_status(
                                 status_path,
                                 "failed",
                                 part_file_name,
                                 0,
                                 0,
-                                f"SHA256 mismatch: expected {expected[:12]}..., got {actual[:12]}...",
+                                reason,
                             )
                             return
 
-                    _write_model_status(status_path, "complete", gguf_file, 0, 0)
+                    with _model_download_lock:
+                        cancelled_before_commit = _model_download_cancel.is_set()
+                        if not cancelled_before_commit:
+                            _model_download_cancelable = False
+                            _write_model_status(status_path, "complete", gguf_file, 0, 0)
+                    if cancelled_before_commit:
+                        _finish_cancelled_download()
+                        return
                     logger.info("Model download complete: %s (%d parts)", gguf_file, len(download_plan))
                 except Exception as exc:
-                    logger.error("Model download failed: %s", exc)
-                    _write_model_status(status_path, "failed", gguf_file, 0, 0, str(exc))
+                    if _model_download_cancel.is_set():
+                        _finish_cancelled_download()
+                    else:
+                        for path in temp_paths:
+                            try:
+                                path.unlink(missing_ok=True)
+                            except OSError:
+                                logger.warning("Could not remove failed model temporary file %s", path)
+                        logger.error("Model download failed: %s", exc)
+                        _write_model_status(status_path, "failed", gguf_file, 0, 0, str(exc))
+                finally:
+                    _model_download_proc = None
+                    with _model_download_lock:
+                        late_cancel = (
+                            _model_download_cancelable
+                            and _model_download_cancel.is_set()
+                            and not cancel_cleanup_done
+                        )
+                        _model_download_cancelable = False
+                    if late_cancel:
+                        _finish_cancelled_download()
 
             _model_download_thread = threading.Thread(target=_download, daemon=True)
             _model_download_thread.start()
@@ -3480,13 +3857,17 @@ class AgentHandler(BaseHTTPRequestHandler):
         if not check_auth(self):
             return
         with _model_download_lock:
-            if _model_download_thread is None or not _model_download_thread.is_alive():
+            if (
+                _model_download_thread is None
+                or not _model_download_thread.is_alive()
+                or not _model_download_cancelable
+            ):
                 json_response(self, 200, {"status": "no_download"})
                 return
-        _model_download_cancel.set()
-        # Capture local reference to avoid TOCTOU race — the download thread
-        # may null out _model_download_proc between the check and kill.
-        proc_ref = _model_download_proc
+            _model_download_cancel.set()
+            # Capture under the same state lock; the worker may clear the
+            # global process reference as soon as curl exits.
+            proc_ref = _model_download_proc
         if proc_ref is not None:
             try:
                 proc_ref.kill()
@@ -3503,22 +3884,59 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         model_id = body.get("model_id", "")
-        if not model_id:
+        if not isinstance(model_id, str) or not model_id.strip():
             json_response(self, 400, {"error": "model_id is required"})
             return
 
-        if not _model_activate_lock.acquire(blocking=False):
-            json_response(self, 409, {"error": "Another model activation is in progress"})
+        acquired, active_model_id = _begin_model_activation(model_id)
+        if not acquired:
+            json_response(
+                self,
+                409,
+                {
+                    "error": "Another model activation is in progress",
+                    "activeModelId": active_model_id,
+                },
+            )
             return
 
         try:
             self._do_model_activate(model_id)
         finally:
-            _model_activate_lock.release()
+            _end_model_activation()
 
     def _do_model_activate(self, model_id: str):
         """Inner activate logic — called with _model_activate_lock held."""
         import time
+
+        env_path = INSTALL_DIR / ".env"
+        try:
+            persisted_env = load_env(env_path)
+        except (OSError, UnicodeError) as exc:
+            logger.exception("Model activation could not read persisted mode")
+            json_response(self, 500, {"error": f"Model activation failed: {exc}"})
+            return
+        persisted_mode = str(persisted_env.get("ODS_MODE") or "local").strip().lower()
+        if persisted_mode == "cloud":
+            json_response(
+                self,
+                409,
+                {
+                    "error": "local_mode_required",
+                    "message": (
+                        "Local model activation is unavailable while ODS_MODE=cloud; "
+                        "transition ODS to local mode first."
+                    ),
+                    "mode": "cloud",
+                    "requestedModelId": model_id,
+                    "activeModelId": (
+                        persisted_env.get("LLM_MODEL")
+                        or persisted_env.get("GGUF_FILE")
+                        or None
+                    ),
+                },
+            )
+            return
 
         def local_gguf_model_from_id(raw_model_id: str) -> dict | None:
             models_dir = INSTALL_DIR / "data" / "models"
@@ -3583,7 +4001,6 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 400, {"error": f"Model file not downloaded or empty: {gguf_file}"})
             return
 
-        env_path = INSTALL_DIR / ".env"
         models_ini = INSTALL_DIR / "config" / "llama-server" / "models.ini"
         lemonade_yaml = INSTALL_DIR / "config" / "litellm" / "lemonade.yaml"
         litellm_local_yaml = INSTALL_DIR / "config" / "litellm" / "local.yaml"
@@ -3599,7 +4016,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         litellm_local_backup: str | None = None
         hermes_backups: dict[Path, str] = {}
         committed = False
-        windows_native_restart_attempted = False
+        runtime_restart_strategy: str | None = None
+        apple_llama_bin: Path | None = None
+        apple_llama_log: Path | None = None
+        apple_pid_file: Path | None = None
 
         def restore_backups():
             if env_backup is not None:
@@ -3614,6 +4034,30 @@ class AgentHandler(BaseHTTPRequestHandler):
                 litellm_local_yaml.unlink(missing_ok=True)
             for hermes_path, hermes_text in hermes_backups.items():
                 hermes_path.write_text(hermes_text, encoding="utf-8")
+
+        def restore_previous_runtime():
+            rollback_env = load_env(env_path)
+            if runtime_restart_strategy == "windows-lemonade":
+                _restart_windows_lemonade(rollback_env)
+            elif runtime_restart_strategy == "windows-native-llama":
+                _restart_windows_native_llama_server(env_path, rollback_env)
+            elif runtime_restart_strategy == "macos-native-llama":
+                if not all((apple_llama_bin, apple_llama_log, apple_pid_file)):
+                    raise RuntimeError("macOS native llama rollback paths are unavailable")
+                _restart_macos_native_llama_server(
+                    env_path,
+                    apple_llama_bin,
+                    apple_llama_log,
+                    apple_pid_file,
+                )
+            elif runtime_restart_strategy == "container-llama":
+                _recreate_llama_server(rollback_env)
+            elif runtime_restart_strategy == "compose-llama":
+                _compose_restart_llama_server(rollback_env)
+            elif runtime_restart_strategy is not None:
+                raise RuntimeError(
+                    f"Unknown model activation restart strategy: {runtime_restart_strategy}"
+                )
 
         try:
             # Read current env BEFORE modification — needed for gpu_backend guard
@@ -3813,55 +4257,35 @@ class AgentHandler(BaseHTTPRequestHandler):
 
             if windows_host_lemonade:
                 if not windows_lemonade_already_serving:
+                    runtime_restart_strategy = "windows-lemonade"
                     _restart_windows_lemonade(env)
             elif windows_native_llama:
-                windows_native_restart_attempted = True
+                runtime_restart_strategy = "windows-native-llama"
                 _restart_windows_native_llama_server(env_path, env)
             elif gpu_backend == "apple":
                 # macOS: manage native llama-server process via PID file
-                pid_file = INSTALL_DIR / "data" / ".llama-server.pid"
-                llama_bin = INSTALL_DIR / "bin" / "llama-server"
-                llama_log = INSTALL_DIR / "data" / "llama-server.log"
+                apple_pid_file = INSTALL_DIR / "data" / ".llama-server.pid"
+                apple_llama_bin = INSTALL_DIR / "bin" / "llama-server"
+                apple_llama_log = INSTALL_DIR / "data" / "llama-server.log"
 
-                if not llama_bin.exists():
+                if not apple_llama_bin.exists():
                     restore_backups()
                     json_response(self, 500, {"error": "llama-server binary not found — re-run installer"})
                     return
 
-                # Stop existing native process
-                if pid_file.exists():
-                    try:
-                        old_pid = int(pid_file.read_text(encoding="utf-8").strip())
-                        # Verify PID is llama-server before killing (prevent PID reuse accidents)
-                        try:
-                            ps_result = subprocess.run(
-                                ["ps", "-p", str(old_pid), "-o", "comm="],
-                                capture_output=True, text=True, timeout=5,
-                            )
-                            if "llama" not in ps_result.stdout.lower():
-                                raise OSError("PID is not llama-server")
-                        except (subprocess.TimeoutExpired, OSError):
-                            pid_file.unlink(missing_ok=True)
-                            raise OSError("stale PID")
-                        os.kill(old_pid, signal.SIGTERM)
-                        for _ in range(20):
-                            try:
-                                os.kill(old_pid, 0)
-                                time.sleep(0.5)
-                            except OSError:
-                                break
-                        else:
-                            os.kill(old_pid, signal.SIGKILL)
-                    except (ValueError, OSError):
-                        pass
-                    pid_file.unlink(missing_ok=True)
-
-                # Re-launch native llama-server with new model
-                _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
+                runtime_restart_strategy = "macos-native-llama"
+                _restart_macos_native_llama_server(
+                    env_path,
+                    apple_llama_bin,
+                    apple_llama_log,
+                    apple_pid_file,
+                )
             elif _in_container:
                 override_image = llama_server_image or ("ghcr.io/ggml-org/llama.cpp:server-cuda-b9014" if gpu_backend == "nvidia" else "")
+                runtime_restart_strategy = "container-llama"
                 _recreate_llama_server(env, override_image=override_image)
             else:
+                runtime_restart_strategy = "compose-llama"
                 _compose_restart_llama_server(env)
 
             # Health check (up to 5 min)
@@ -3870,7 +4294,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             # Determine health check URL based on where the agent runs:
             # - Inside a container (ODS_HOST_INSTALL_DIR set): use docker
             #   network name + internal port 8080
-            # - On the host (native systemd or macOS): use 127.0.0.1 + OLLAMA_PORT.
+            # - Native Apple: probe a reachable address for BIND_ADDRESS.
+            # - Other host-native installs: use 127.0.0.1 + OLLAMA_PORT.
             #   (Use 127.0.0.1, not localhost — localhost resolves to ::1 on
             #   IPv6-enabled hosts but Docker binds to 127.0.0.1 only.)
             if windows_host_lemonade:
@@ -3880,7 +4305,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 llama_host = "127.0.0.1"
                 llama_port = env.get("AMD_INFERENCE_PORT") or env.get("OLLAMA_PORT") or "8080"
             elif gpu_backend == "apple":
-                llama_host = "127.0.0.1"
+                llama_host = _native_llama_health_host(env)
                 llama_port = env.get("ODS_NATIVE_LLAMA_PORT") or env.get("OLLAMA_PORT") or "8080"
             elif os.environ.get("ODS_HOST_INSTALL_DIR"):
                 llama_host = "ods-llama-server"
@@ -3888,24 +4313,29 @@ class AgentHandler(BaseHTTPRequestHandler):
             else:
                 llama_host = "127.0.0.1"
                 llama_port = env.get("OLLAMA_PORT", "8080")
-            health_path = "/api/v1/health" if gpu_backend == "amd" and not windows_native_llama else "/health"
-            health_url = f"http://{llama_host}:{llama_port}{health_path}"
-            logger.info("Waiting for llama-server health at %s", health_url)
+            is_lemonade = gpu_backend == "amd" and not windows_native_llama
+            identity_path = "/api/v1/health" if is_lemonade else "/v1/models"
+            identity_url = f"http://{llama_host}:{llama_port}{identity_path}"
+            logger.info(
+                "Waiting for requested model identity %s at %s",
+                gguf_file,
+                identity_url,
+            )
             healthy = False
             warmup_sent = False
             time.sleep(5)  # Give container time to start
             for attempt in range(60):
                 try:
                     result = subprocess.run(
-                        ["curl", "-s", "--max-time", "5", health_url],
+                        ["curl", "-s", "--max-time", "5", identity_url],
                         capture_output=True, text=True, timeout=10,
                     )
                     body = result.stdout.strip()
-                    if gpu_backend == "amd" and not windows_native_llama:
+                    if is_lemonade:
                         # Lemonade returns {"status":"ok","model_loaded":null}
-                        # before a model is loaded — must verify model_loaded
-                        # is non-null.  Mirrors bootstrap-upgrade.sh:330.
-                        if _check_lemonade_health(body):
+                        # before a model is loaded. Require the exact requested
+                        # target; a different non-null model is not success.
+                        if _check_lemonade_health(body, gguf_file):
                             healthy = True
                         elif body:
                             # Send warm-up request every 3rd attempt (~15s)
@@ -3916,16 +4346,25 @@ class AgentHandler(BaseHTTPRequestHandler):
                                 )
                             if attempt % 6 == 0:
                                 logger.info(
-                                    "Lemonade healthy but no model loaded (attempt %d)",
+                                    "Lemonade has not loaded requested model %s (attempt %d)",
+                                    gguf_file,
                                     attempt + 1,
                                 )
                     else:
-                        # llama.cpp: 200 with "ok" means model is loaded
-                        body_lower = body.lower()
-                        if '"ok"' in body_lower or body_lower == "ok":
+                        if _check_llama_model_identity(
+                            body,
+                            model_id=model_id,
+                            gguf_file=gguf_file,
+                            llm_model_name=llm_model_name,
+                        ):
                             healthy = True
                         elif attempt % 6 == 0:
-                            logger.info("Health check attempt %d: %s", attempt + 1, body[:100])
+                            logger.info(
+                                "llama.cpp has not loaded requested model %s (attempt %d): %s",
+                                gguf_file,
+                                attempt + 1,
+                                body[:100],
+                            )
                     if healthy:
                         logger.info("llama-server healthy after %d attempts", attempt + 1)
                         break
@@ -3950,69 +4389,41 @@ class AgentHandler(BaseHTTPRequestHandler):
                 if hermes_patched:
                     dependent_services.append("ods-hermes")
                 for svc in dependent_services:
-                    subprocess.run(["docker", "restart", svc],
-                                   capture_output=True, timeout=60)
+                    restart_result = subprocess.run(
+                        ["docker", "restart", svc],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if restart_result.returncode != 0:
+                        detail = (restart_result.stderr or restart_result.stdout or "").strip()
+                        raise RuntimeError(
+                            f"docker restart {svc} failed (exit {restart_result.returncode}): "
+                            f"{detail[:300]}"
+                        )
                 committed = True  # system state is committed before the response write
                 json_response(self, 200, {"status": "activated", "model_id": model_id})
             else:
                 # Rollback
                 logger.warning("Model activation failed — rolling back")
                 restore_backups()
-                rollback_env = load_env(env_path)
-                rollback_windows_host_lemonade = _is_windows_host_lemonade(rollback_env)
-                rollback_windows_native_llama = _is_windows_host_llama_server(rollback_env)
-                if rollback_windows_host_lemonade:
-                    _restart_windows_lemonade(rollback_env)
-                elif rollback_windows_native_llama:
-                    _restart_windows_native_llama_server(env_path, rollback_env)
-                elif gpu_backend == "apple":
-                    # Stop newly launched native process, re-launch with old params
-                    if pid_file.exists():
-                        try:
-                            new_pid = int(pid_file.read_text(encoding="utf-8").strip())
-                            try:
-                                ps_result = subprocess.run(
-                                    ["ps", "-p", str(new_pid), "-o", "comm="],
-                                    capture_output=True, text=True, timeout=5,
-                                )
-                                if "llama" not in ps_result.stdout.lower():
-                                    raise OSError("PID is not llama-server")
-                            except (subprocess.TimeoutExpired, OSError):
-                                pid_file.unlink(missing_ok=True)
-                                raise OSError("stale PID")
-                            os.kill(new_pid, signal.SIGTERM)
-                            for _ in range(20):
-                                try:
-                                    os.kill(new_pid, 0)
-                                    time.sleep(0.5)
-                                except OSError:
-                                    break
-                            else:
-                                os.kill(new_pid, signal.SIGKILL)
-                        except (ValueError, OSError):
-                            pass
-                        pid_file.unlink(missing_ok=True)
-                    _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
-                elif _in_container:
-                    _recreate_llama_server(rollback_env)
-                else:
-                    _compose_restart_llama_server(rollback_env)
+                restore_previous_runtime()
                 json_response(self, 500, {"error": "Health check failed — rolled back to previous model", "rolled_back": True})
 
         except Exception as exc:
             if not committed:
+                backups_restored = False
                 try:
                     restore_backups()
+                    backups_restored = True
                 except OSError:
                     logger.exception("Rollback write failed during model-activate failure handling")
-                if windows_native_restart_attempted:
+                if backups_restored and runtime_restart_strategy is not None:
                     try:
-                        rollback_env = load_env(env_path)
-                        _restart_windows_native_llama_server(env_path, rollback_env)
+                        restore_previous_runtime()
                     except Exception:
                         logger.exception(
-                            "Failed to restore Windows native llama-server "
-                            "after model activation error"
+                            "Failed to restore previous runtime after model activation error"
                         )
             logger.exception("Model activation failed")
             json_response(self, 500, {"error": f"Model activation failed: {exc}"})
@@ -4073,18 +4484,210 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 500, {"error": f"Failed to delete: {exc}"})
 
 
-def _check_lemonade_health(body: str) -> bool:
+def _runtime_model_identity_tokens(value: object) -> set[str]:
+    """Return exact, known runtime aliases for one model identity value."""
+    if not isinstance(value, str):
+        return set()
+    raw = value.strip()
+    if not raw:
+        return set()
+
+    variants = {raw}
+    lowered = raw.casefold()
+    for prefix in ("extra.", "user."):
+        if lowered.startswith(prefix):
+            variants.add(raw[len(prefix):])
+
+    tokens = set()
+    for variant in variants:
+        normalized = variant.strip().replace("\\", "/").rstrip("/")
+        if not normalized:
+            continue
+        basename = normalized.rsplit("/", 1)[-1]
+        for candidate in (normalized, basename):
+            folded = candidate.casefold()
+            tokens.add(folded)
+            if folded.endswith(".gguf"):
+                tokens.add(folded[:-5])
+    return tokens
+
+
+def _runtime_model_identity_matches(
+    value: object,
+    *,
+    model_id: str = "",
+    gguf_file: str = "",
+    llm_model_name: str = "",
+) -> bool:
+    """Match a runtime identity to exact supported aliases, never substrings."""
+    actual = _runtime_model_identity_tokens(value)
+    if not actual:
+        return False
+    expected = set()
+    for candidate in (model_id, gguf_file, llm_model_name):
+        expected.update(_runtime_model_identity_tokens(candidate))
+    return bool(expected and actual.intersection(expected))
+
+
+def _check_llama_model_identity(
+    body: str,
+    *,
+    model_id: str,
+    gguf_file: str,
+    llm_model_name: str,
+) -> bool:
+    """Return True only when llama.cpp reports the requested model loaded."""
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    models = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        return False
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        status = model.get("status")
+        if isinstance(status, dict):
+            status = status.get("value")
+        if status is not None and str(status).strip().casefold() != "loaded":
+            continue
+        if _runtime_model_identity_matches(
+            model.get("id"),
+            model_id=model_id,
+            gguf_file=gguf_file,
+            llm_model_name=llm_model_name,
+        ):
+            return True
+    return False
+
+
+def _check_lemonade_health(body: str, expected_gguf_file: str | None = None) -> bool:
     """Check if Lemonade health response indicates a model is loaded.
 
     Lemonade returns {"status": "ok", "model_loaded": null} when healthy
-    but no model is loaded yet.  Returns True only when model_loaded is
-    non-null.  Mirrors bootstrap-upgrade.sh line 330.
+    but no model is loaded yet. Activation callers pass expected_gguf_file so
+    success requires that exact target. The optional generic form still
+    requires a non-empty string identity; false and empty values are never
+    treated as a loaded model.
     """
     try:
         data = json.loads(body)
-        return data.get("model_loaded") is not None
-    except (json.JSONDecodeError, TypeError):
+        if expected_gguf_file is not None:
+            if not isinstance(data, dict) or str(data.get("status") or "").casefold() != "ok":
+                return False
+            return _runtime_model_identity_matches(
+                data.get("model_loaded"),
+                gguf_file=expected_gguf_file,
+            )
+        loaded = data.get("model_loaded")
+        return isinstance(loaded, str) and bool(loaded.strip())
+    except (AttributeError, json.JSONDecodeError, TypeError):
         return False
+
+
+def _native_llama_health_host(env: dict) -> str:
+    """Return a URL-safe host reachable through the native llama bind."""
+    bind_addr = str(env.get("BIND_ADDRESS") or "").strip() or "127.0.0.1"
+    if bind_addr == "0.0.0.0":
+        return "127.0.0.1"
+    if bind_addr == "::":
+        return "[::1]"
+    if ":" in bind_addr and not bind_addr.startswith("["):
+        return f"[{bind_addr}]"
+    return bind_addr
+
+
+def _require_macos_bridge_manager(env_path: Path) -> tuple[Path, Path]:
+    """Return installed bridge lifecycle files or fail before listener shutdown."""
+    constants_path = INSTALL_DIR / "lib" / "constants.sh"
+    manager_path = INSTALL_DIR / "lib" / "bridge-manager.sh"
+    missing = [path for path in (constants_path, manager_path) if not path.is_file()]
+    if missing:
+        names = ", ".join(str(path) for path in missing)
+        raise RuntimeError(
+            f"Installed macOS bridge lifecycle files are missing: {names}; re-run the installer"
+        )
+    if not env_path.is_file():
+        raise RuntimeError(f"macOS bridge configuration requires {env_path}")
+    return constants_path, manager_path
+
+
+def _configure_macos_llm_bridge(env_path: Path) -> None:
+    """Apply the installed shared macOS LLM bridge manager to current .env."""
+    _require_macos_bridge_manager(env_path)
+
+    bash = _find_usable_bash()
+    if not bash:
+        raise RuntimeError("A usable Bash executable is required for macOS bridge management")
+
+    bridge_adapter = r'''
+set -euo pipefail
+install_dir="$1"
+env_file="$2"
+export ODS_HOME="$install_dir"
+export ODS_SCRIPT_HINT="$install_dir"
+
+source "$install_dir/lib/constants.sh"
+source "$install_dir/lib/bridge-manager.sh"
+
+ai_err() { printf '%s\n' "$*" >&2; }
+ai_ok() { printf '%s\n' "$*" >&2; }
+
+read_env_value() {
+    local source_file="$1" key="$2"
+    awk -v key="$key" '
+        index($0, key "=") == 1 {
+            sub(/^[^=]*=/, "")
+            sub(/\r$/, "")
+            print
+            exit
+        }
+    ' "$source_file"
+}
+
+upsert_env_value() {
+    local target_file="$1" key="$2" value="$3" tmp_file
+    tmp_file="${target_file}.bridge.$$"
+    if ! cp -p "$target_file" "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if ! awk -v key="$key" -v value="$value" '
+        BEGIN { found = 0 }
+        index($0, key "=") == 1 {
+            if (!found) {
+                print key "=" value
+                found = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!found) print key "=" value
+        }
+    ' "$target_file" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    mv -f "$tmp_file" "$target_file"
+}
+
+macos_configure_llm_bridge_from_env "$env_file" "$install_dir"
+'''
+    result = subprocess.run(
+        [bash, "-c", bridge_adapter, "ods-host-agent", str(INSTALL_DIR), str(env_path)],
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or "no output"
+        raise RuntimeError(
+            f"macOS LLM bridge configuration failed (exit {result.returncode}): "
+            f"{detail[-1000:]}"
+        )
 
 
 def _send_lemonade_warmup(host: str, port: str, gguf_file: str, attempt: int) -> bool:
@@ -4728,6 +5331,57 @@ def _select_runtime_profile(model: dict, env: dict) -> dict | None:
     return None
 
 
+def _stop_macos_native_llama_server(pid_file: Path) -> None:
+    """Stop only the PID-file-owned native llama-server process."""
+    if not pid_file.exists():
+        return
+    try:
+        old_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        if old_pid <= 1:
+            raise OSError("invalid llama-server PID")
+        try:
+            ps_result = subprocess.run(
+                ["ps", "-p", str(old_pid), "-o", "comm="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if ps_result.returncode != 0 or "llama" not in ps_result.stdout.lower():
+                raise OSError("PID is not llama-server")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise OSError("stale llama-server PID") from exc
+
+        os.kill(old_pid, signal.SIGTERM)
+        for _ in range(20):
+            try:
+                os.kill(old_pid, 0)
+                time.sleep(0.5)
+            except OSError:
+                break
+        else:
+            os.kill(old_pid, signal.SIGKILL)
+    except (ValueError, OSError):
+        pass
+    finally:
+        pid_file.unlink(missing_ok=True)
+
+
+def _restart_macos_native_llama_server(
+    env_path: Path,
+    llama_bin: Path,
+    llama_log: Path,
+    pid_file: Path,
+) -> None:
+    """Restart native inference with bridge lifecycle ordering preserved."""
+    # Validate the installed shared manager before taking down a healthy
+    # listener. The actual bridge mutation must happen after shutdown so a
+    # direct-bound listener cannot collide with a newly recreated bridge.
+    _require_macos_bridge_manager(env_path)
+    _stop_macos_native_llama_server(pid_file)
+    _configure_macos_llm_bridge(env_path)
+    _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
+
+
 def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path, pid_file: Path):
     """Launch the native (Metal) llama-server process and write its PID file.
 
@@ -4742,6 +5396,7 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
     reasoning_fmt = {"off": "none", "on": "deepseek"}.get(reasoning, reasoning)
     # Honour the unified BIND_ADDRESS knob (PR #964); empty/missing → loopback.
     bind_addr = env.get("BIND_ADDRESS", "").strip() or "127.0.0.1"
+    _disable_conflicting_macos_bridge(env, bind_addr, _MACOS_LLM_BRIDGE_LABEL)
     port = (
         env.get("ODS_NATIVE_LLAMA_PORT")
         or env.get("AMD_INFERENCE_PORT")
@@ -5036,6 +5691,16 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     request_queue_size = 128
 
 
+def _create_host_agent_server(env: dict, bind_addr: str, port: int):
+    """Create the agent server after removing any colliding macOS bridge."""
+    _disable_conflicting_macos_bridge(
+        env,
+        bind_addr,
+        _MACOS_HOST_AGENT_BRIDGE_LABEL,
+    )
+    return ThreadedHTTPServer((bind_addr, port), AgentHandler)
+
+
 def _request_server_shutdown(server, signum=None):
     """Ask serve_forever() to exit from a helper thread.
 
@@ -5122,7 +5787,7 @@ def main():
     # restart the service after ods-network exists.
     bind_addr = _resolve_agent_bind_addr(env)
 
-    server = ThreadedHTTPServer((bind_addr, port), AgentHandler)
+    server = _create_host_agent_server(env, bind_addr, port)
     signal.signal(signal.SIGTERM, lambda signum, _frame: _request_server_shutdown(server, signum))
     signal.signal(signal.SIGINT, lambda signum, _frame: _request_server_shutdown(server, signum))
     logger.info("ODS Host Agent v%s listening on %s:%d", VERSION, bind_addr, port)

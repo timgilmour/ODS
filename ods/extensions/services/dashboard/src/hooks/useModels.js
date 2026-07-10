@@ -73,20 +73,52 @@ const MOCK_CURRENT_MODEL = 'Qwen/Qwen2.5-32B-Instruct-AWQ'
 const DEFAULT_POLL_MS = 30000
 const PENDING_MODEL_ACTION_POLL_MS = 2000
 const MODELS_FETCH_TIMEOUT_MS = 30000
+const MODEL_ACTIVATION_POLL_MS = 5000
+// The dashboard API permits the host activation request to run for 600s.
+// Keep the UI lock slightly longer so that deadline can settle before we fail.
+const MODEL_ACTIVATION_TIMEOUT_MS = 610000
 
 // Named export for dev-only mocking (explicit opt-in via VITE_USE_MOCK_DATA)
 export { getMockModels }
 
-async function errorMessageFromResponse(response, fallback) {
+async function responseJson(response) {
   try {
-    const data = await response.json()
-    if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail
-    if (typeof data?.message === 'string' && data.message.trim()) return data.message
-    if (typeof data?.error === 'string' && data.error.trim()) return data.error
+    return await response.json()
   } catch {
-    // Keep the stable fallback when the server returns non-JSON error content.
+    return {}
   }
+}
+
+function errorMessageFromPayload(data, fallback) {
+  if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail
+  if (data?.detail && typeof data.detail === 'object') {
+    if (typeof data.detail.message === 'string' && data.detail.message.trim()) return data.detail.message
+    if (typeof data.detail.error === 'string' && data.detail.error.trim()) return data.detail.error
+    if (typeof data.detail.detail === 'string' && data.detail.detail.trim()) return data.detail.detail
+  }
+  if (typeof data?.message === 'string' && data.message.trim()) return data.message
+  if (typeof data?.error === 'string' && data.error.trim()) return data.error
   return fallback
+}
+
+async function errorMessageFromResponse(response, fallback) {
+  return errorMessageFromPayload(await responseJson(response), fallback)
+}
+
+function conflictActiveModelId(data) {
+  const nested = data?.detail && typeof data.detail === 'object'
+    ? data.detail.activeModelId
+    : null
+  for (const value of [data?.activeModelId, nested]) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function normalizeOdsMode(value) {
+  return typeof value === 'string' && value.trim().toLowerCase() === 'cloud'
+    ? 'cloud'
+    : 'local'
 }
 
 export function useModels() {
@@ -94,6 +126,7 @@ export function useModels() {
   const [gpu, setGpu] = useState(USE_MOCK_DATA ? MOCK_GPU : null)
   const [currentModel, setCurrentModel] = useState(USE_MOCK_DATA ? MOCK_CURRENT_MODEL : null)
   const [configuredModel, setConfiguredModel] = useState(USE_MOCK_DATA ? MOCK_CURRENT_MODEL : null)
+  const [odsMode, setOdsMode] = useState('local')
   const [recommendationAlternatives, setRecommendationAlternatives] = useState([])
   const [loading, setLoading] = useState(USE_MOCK_DATA ? false : true)
   const [error, setError] = useState(null)
@@ -156,6 +189,7 @@ export function useModels() {
       setGpu(data.gpu)
       setCurrentModel(data.currentModel)
       setConfiguredModel(data.configuredModel ?? null)
+      setOdsMode(normalizeOdsMode(data.odsMode))
       setRecommendationAlternatives(data.recommendationAlternatives ?? [])
       setError(null)
       reconcilePendingAction(data.models)
@@ -221,45 +255,86 @@ export function useModels() {
   }
 
   const loadModel = async (modelId) => {
-    // Prevent concurrent activations — only one model can load at a time
-    if (loadActiveRef.current) return
+    if (odsMode === 'cloud') {
+      setError('Switch ODS to local mode to run this model.')
+      return
+    }
+
+    // Prevent concurrent activations - only one model can load at a time.
+    if (loadActiveRef.current) {
+      const activeModelId = pendingActionRef.current?.kind === 'load'
+        ? pendingActionRef.current.modelId
+        : null
+      setError(activeModelId
+        ? `Model activation is already in progress for ${activeModelId}.`
+        : 'A model activation is already in progress.')
+      return
+    }
     loadActiveRef.current = true
     const action = startAction(modelId, 'load')
     setError(null)
 
-    // Model activation is long-running (20-60s).  The browser connection
-    // often drops before the backend responds (nginx 499 / NetworkError),
-    // but the server still completes the activation.  Fire the POST
-    // without blocking and poll for status instead.
-    let serverError = null
-    fetch(`/api/models/${encodeURIComponent(modelId)}/load`, { method: 'POST' })
-      .then(async (res) => {
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}))
-          const detail = body.detail || ''
-          // 409/lock = another activation running — not a real error, keep polling
-          if (/in progress|lock|already/i.test(detail)) return
-          serverError = detail || 'Failed to load model'
+    // Model activation can consume the API's full 600-second budget. The
+    // browser connection may still disappear while the server completes, so
+    // status remains authoritative and the POST runs alongside polling.
+    const controller = new AbortController()
+    const startedAt = Date.now()
+    let activationError = null
+    let targetLoaded = false
+
+    const activationRequest = fetch(`/api/models/${encodeURIComponent(modelId)}/load`, {
+      method: 'POST',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (response.ok) return
+
+        const body = await responseJson(response)
+        if (response.status === 409) {
+          const activeModelId = conflictActiveModelId(body)
+          if (activeModelId === modelId) return
+
+          const detail = errorMessageFromPayload(body, 'Another model activation is in progress')
+          activationError = activeModelId
+            ? `${detail} Active target: ${activeModelId}; requested target: ${modelId}.`
+            : `${detail} The server did not identify the active target, so this request cannot safely join it.`
+          return
         }
+
+        activationError = errorMessageFromPayload(body, 'Failed to load model')
       })
-      .catch(() => {}) // NetworkError — server still processing
+      // A dropped request does not prove activation failed. Continue polling
+      // until the requested model appears or the explicit UI deadline expires.
+      .catch(() => {})
 
-    // Poll until model loads, server error, or timeout (2.5 min)
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 5000))
-      if (serverError) {
-        setError(serverError)
-        break
-      }
-      try {
+    try {
+      while (Date.now() - startedAt < MODEL_ACTIVATION_TIMEOUT_MS) {
+        const remainingMs = MODEL_ACTIVATION_TIMEOUT_MS - (Date.now() - startedAt)
+        await new Promise(resolve => setTimeout(resolve, Math.min(MODEL_ACTIVATION_POLL_MS, remainingMs)))
+
+        if (activationError) break
         const data = await fetchModels()
-        if (data?.currentModel === modelId) break
-      } catch { /* poll failure, retry */ }
-    }
+        if (data?.currentModel === modelId) {
+          targetLoaded = true
+          break
+        }
+      }
 
-    await fetchModels()
-    finishAction(action.token)
-    loadActiveRef.current = false
+      // Take one final authoritative snapshot at the deadline or after a POST
+      // failure. This cannot turn an unverified 409 into same-target success.
+      const finalData = await fetchModels()
+      if (!activationError && finalData?.currentModel === modelId) targetLoaded = true
+
+      if (!targetLoaded) {
+        setError(activationError ||
+          `Timed out after 10 minutes waiting for ${modelId} to activate. The server may still be finishing; refresh before retrying.`)
+      }
+    } finally {
+      controller.abort()
+      void activationRequest
+      finishAction(action.token)
+      loadActiveRef.current = false
+    }
   }
 
   const deleteModel = async (modelId) => {
@@ -270,7 +345,9 @@ export function useModels() {
       const response = await fetch(`/api/models/${encodeURIComponent(modelId)}`, {
         method: 'DELETE'
       })
-      if (!response.ok) throw new Error('Failed to delete model')
+      if (!response.ok) {
+        throw new Error(await errorMessageFromResponse(response, `Failed to delete ${modelId}`))
+      }
       await fetchModels() // Refresh
     } catch (err) {
       setError(err.message)
@@ -303,6 +380,7 @@ export function useModels() {
     gpu,
     currentModel,
     configuredModel,
+    odsMode,
     recommendationAlternatives,
     loading,
     error,

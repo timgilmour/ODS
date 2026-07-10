@@ -38,6 +38,7 @@ describe('useModels', () => {
       gpu: { vramTotal: 16 },
       currentModel: 'qwen-32b',
       configuredModel: 'qwen-32b',
+      odsMode: 'cloud',
       recommendationAlternatives: [{ id: 'qwen-32b', name: 'Qwen2.5 32B' }]
     }
     fetch.mockResolvedValue({
@@ -55,8 +56,38 @@ describe('useModels', () => {
     expect(result.current.gpu.vramTotal).toBe(16)
     expect(result.current.currentModel).toBe('qwen-32b')
     expect(result.current.configuredModel).toBe('qwen-32b')
+    expect(result.current.odsMode).toBe('cloud')
     expect(result.current.recommendationAlternatives[0].id).toBe('qwen-32b')
     expect(result.current.error).toBeNull()
+  })
+
+  test('defaults odsMode to local when the models response omits it', async () => {
+    fetch.mockResolvedValue(modelsResponse([]))
+
+    const { result } = renderHook(() => useModels())
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.odsMode).toBe('local')
+  })
+
+  test('does not send a model activation POST in cloud mode', async () => {
+    const target = 'downloaded-model'
+    fetch.mockResolvedValue(modelsResponse(
+      [{ id: target, status: 'downloaded' }],
+      { odsMode: 'cloud' }
+    ))
+
+    const { result } = renderHook(() => useModels())
+    await waitFor(() => expect(result.current.odsMode).toBe('cloud'))
+
+    await act(async () => {
+      await result.current.loadModel(target)
+    })
+
+    const activationPosts = fetch.mock.calls.filter(([, options]) => options?.method === 'POST')
+    expect(activationPosts).toHaveLength(0)
+    expect(result.current.actionLoading).toBeNull()
+    expect(result.current.error).toBe('Switch ODS to local mode to run this model.')
   })
 
   test('sets error on fetch failure', async () => {
@@ -177,6 +208,200 @@ describe('useModels', () => {
       deleteRequest.resolve({ ok: true })
       await deletePromise
     })
+  })
+
+  test('shows the backend delete explanation instead of a generic failure', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    fetch.mockImplementation((_url, opts) => {
+      if (opts?.method === 'DELETE') {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: () => Promise.resolve({ detail: 'The active model must be stopped before deleting its file.' })
+        })
+      }
+      return Promise.resolve(modelsResponse([{ id: 'to-delete', status: 'downloaded' }]))
+    })
+
+    const { result } = renderHook(() => useModels())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.deleteModel('to-delete')
+    })
+
+    expect(result.current.error).toBe('The active model must be stopped before deleting its file.')
+    expect(result.current.actionLoading).toBeNull()
+  })
+
+  test('keeps activation pending beyond 150 seconds until the requested model is loaded', async () => {
+    vi.useFakeTimers()
+    const target = 'slow-model'
+    let currentModel = null
+    fetch.mockImplementation((_url, opts) => {
+      if (opts?.method === 'POST') return Promise.resolve({ ok: true })
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: currentModel ? 'loaded' : 'downloaded' }],
+        { currentModel }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(155000) })
+      expect(result.current.actionLoading).toBe(target)
+      expect(result.current.error).toBeNull()
+
+      currentModel = target
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
+      expect(result.current.currentModel).toBe(target)
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('holds the activation lock through 600 seconds and then reports a terminal timeout', async () => {
+    vi.useFakeTimers()
+    const target = 'never-loads'
+    fetch.mockImplementation((_url, opts) => {
+      if (opts?.method === 'POST') return Promise.resolve({ ok: true })
+      return Promise.resolve(modelsResponse([{ id: target, status: 'downloaded' }]))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(600000) })
+      expect(result.current.actionLoading).toBe(target)
+      expect(result.current.error).toBeNull()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000)
+        await loadPromise
+      })
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toMatch(/timed out after 10 minutes/i)
+      expect(result.current.error).toContain(target)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test.each([
+    ['root payload', { detail: 'Activation already in progress', activeModelId: 'same-target' }],
+    ['nested detail payload', { detail: { message: 'Activation already in progress', activeModelId: 'same-target' } }],
+  ])('continues waiting for a same-target 409 from a %s', async (_label, conflictBody) => {
+    vi.useFakeTimers()
+    const target = 'same-target'
+    let currentModel = null
+    fetch.mockImplementation((_url, opts) => {
+      if (opts?.method === 'POST') {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: () => Promise.resolve(conflictBody),
+        })
+      }
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: currentModel ? 'loaded' : 'downloaded' }],
+        { currentModel }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(result.current.actionLoading).toBe(target)
+      expect(result.current.error).toBeNull()
+
+      currentModel = target
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test.each([
+    [
+      'different target',
+      { detail: { error: 'Activation already in progress', activeModelId: 'other-model' } },
+      /active target: other-model; requested target: requested-model/i,
+    ],
+    [
+      'unknown target',
+      { detail: 'Activation already in progress' },
+      /did not identify the active target/i,
+    ],
+  ])('rejects a 409 with a %s instead of joining it', async (_label, conflictBody, expectedError) => {
+    vi.useFakeTimers()
+    const baseline = 'baseline-model'
+    const target = 'requested-model'
+    fetch.mockImplementation((_url, opts) => {
+      if (opts?.method === 'POST') {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: () => Promise.resolve(conflictBody),
+        })
+      }
+      return Promise.resolve(modelsResponse(
+        [
+          { id: baseline, status: 'loaded' },
+          { id: target, status: 'downloaded' },
+        ],
+        { currentModel: baseline }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
+
+      expect(result.current.currentModel).toBe(baseline)
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toMatch(expectedError)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('late mutation settlement does not clear a newer action', async () => {

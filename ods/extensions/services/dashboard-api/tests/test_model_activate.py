@@ -109,15 +109,13 @@ class TestCheckLemonadeHealth:
     def test_empty_string(self):
         assert _check_lemonade_health("") is False
 
-    def test_model_loaded_false_is_truthy(self):
-        """model_loaded=false is unusual but non-null, so should be True."""
+    def test_model_loaded_false_is_not_an_identity(self):
         body = '{"model_loaded": false}'
-        assert _check_lemonade_health(body) is True
+        assert _check_lemonade_health(body) is False
 
-    def test_model_loaded_empty_string(self):
-        """model_loaded="" is non-null, so should be True."""
+    def test_model_loaded_empty_string_is_not_an_identity(self):
         body = '{"model_loaded": ""}'
-        assert _check_lemonade_health(body) is True
+        assert _check_lemonade_health(body) is False
 
 
 # --- _send_lemonade_warmup ---
@@ -416,6 +414,46 @@ class TestLaunchNativeLlamaServer:
         assert "deepseek" in cmd
         assert _kwargs["cwd"] == str(tmp_path)
 
+    def test_llm_bridge_is_disabled_before_native_bind(self, monkeypatch, tmp_path):
+        env = {
+            "GGUF_FILE": "test-model.gguf",
+            "BIND_ADDRESS": "0.0.0.0",
+            "ODS_MACOS_HOST_GATEWAY": "192.168.106.1",
+        }
+        events = []
+
+        class _FakeProc:
+            pid = 4321
+
+        def fake_disable(actual_env, bind_addr, label):
+            events.append(("bootout", actual_env, bind_addr, label))
+            return True
+
+        def fake_popen(cmd, **kwargs):
+            events.append(("bind", cmd, kwargs))
+            return _FakeProc()
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod, "load_env", lambda _path: env)
+        monkeypatch.setattr(_mod, "_disable_conflicting_macos_bridge", fake_disable)
+        monkeypatch.setattr(_mod.subprocess, "Popen", fake_popen)
+
+        _launch_native_llama_server(
+            tmp_path / ".env",
+            tmp_path / "bin" / "llama-server",
+            tmp_path / "data" / "llama-server.log",
+            tmp_path / "data" / ".llama-server.pid",
+        )
+
+        assert events[0] == (
+            "bootout",
+            env,
+            "0.0.0.0",
+            "com.ods.llm-bridge",
+        )
+        assert events[1][0] == "bind"
+        assert events[1][1][events[1][1].index("--host") + 1] == "0.0.0.0"
+
 
 class TestWindowsNativeLlamaServer:
 
@@ -563,6 +601,17 @@ class _BrokenPipeWriter:
         raise BrokenPipeError("client disconnected")
 
 
+def _llama_identity_response(model_id):
+    return json.dumps({
+        "object": "list",
+        "data": [{
+            "id": model_id,
+            "object": "model",
+            "status": {"value": "loaded"},
+        }],
+    })
+
+
 def _write_model_activation_fixture(
     tmp_path,
     gpu_backend="nvidia",
@@ -618,6 +667,63 @@ def _write_model_activation_fixture(
 
 class TestModelActivateRollback:
 
+    @pytest.mark.parametrize(
+        ("bind_addr", "expected_identity_url"),
+        [
+            ("0.0.0.0", "http://127.0.0.1:9090/v1/models"),
+            ("::", "http://[::1]:9090/v1/models"),
+            ("192.168.106.1", "http://192.168.106.1:9090/v1/models"),
+        ],
+    )
+    def test_apple_native_activation_probes_reachable_bind(
+        self,
+        tmp_path,
+        monkeypatch,
+        bind_addr,
+        expected_identity_url,
+    ):
+        install_dir, env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path, gpu_backend="apple")
+        )
+        env_path.write_text(
+            env_path.read_text(encoding="utf-8")
+            + f"BIND_ADDRESS={bind_addr}\nODS_NATIVE_LLAMA_PORT=9090\n",
+            encoding="utf-8",
+        )
+        llama_bin = install_dir / "bin" / "llama-server"
+        llama_bin.parent.mkdir(parents=True)
+        llama_bin.write_text("", encoding="utf-8")
+        lib_dir = install_dir / "lib"
+        lib_dir.mkdir(parents=True)
+        (lib_dir / "constants.sh").write_text("# test fixture\n", encoding="utf-8")
+        (lib_dir / "bridge-manager.sh").write_text("# test fixture\n", encoding="utf-8")
+        launches = []
+        calls = []
+
+        def fake_launch(*args):
+            launches.append(args)
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            stdout = _llama_identity_response("new-model.gguf") if cmd and cmd[0] == "curl" else ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.delenv("ODS_HOST_INSTALL_DIR", raising=False)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_configure_macos_llm_bridge", lambda _env_path: None)
+        monkeypatch.setattr(_mod, "_launch_native_llama_server", fake_launch)
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 200
+        assert len(launches) == 1
+        curl_calls = [cmd for cmd in calls if cmd and cmd[0] == "curl"]
+        assert [cmd[-1] for cmd in curl_calls] == [expected_identity_url]
+
     def test_success_response_disconnect_does_not_roll_back(self, tmp_path, monkeypatch):
         install_dir, env_path, _env_text, models_ini, _ini_text, _yaml, _yaml_text = (
             _write_model_activation_fixture(tmp_path)
@@ -628,7 +734,7 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
 
         def fake_run(cmd, **_kwargs):
-            stdout = '{"status": "ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = _llama_identity_response("new-model.gguf") if cmd and cmd[0] == "curl" else ""
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
@@ -640,6 +746,134 @@ class TestModelActivateRollback:
         assert "GGUF_FILE=new-model.gguf" in env_path.read_text(encoding="utf-8")
         assert "LLM_MODEL=new-model" in env_path.read_text(encoding="utf-8")
         assert "filename = new-model.gguf" in models_ini.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "runtime_kind",
+        [
+            "compose-llama",
+            "container-llama",
+            "windows-lemonade",
+            "windows-native-llama",
+            "macos-native-llama",
+        ],
+    )
+    def test_late_failure_restores_previous_runtime_and_config(
+        self,
+        tmp_path,
+        monkeypatch,
+        runtime_kind,
+    ):
+        gpu_backend = "amd" if runtime_kind.startswith("windows-") else "nvidia"
+        if runtime_kind == "macos-native-llama":
+            gpu_backend = "apple"
+        install_dir, env_path, _env_text, models_ini, _ini_text, lemonade_yaml, _ = (
+            _write_model_activation_fixture(
+                tmp_path,
+                gpu_backend=gpu_backend,
+                lemonade=runtime_kind == "windows-lemonade",
+            )
+        )
+
+        if runtime_kind == "windows-lemonade":
+            env_path.write_text(
+                "ODS_MODE=lemonade\n"
+                "GPU_BACKEND=amd\n"
+                "LLM_BACKEND=lemonade\n"
+                "AMD_INFERENCE_RUNTIME=lemonade\n"
+                "AMD_INFERENCE_LOCATION=host\n"
+                "AMD_INFERENCE_PORT=8080\n"
+                "GGUF_FILE=old-model.gguf\n"
+                "LLM_MODEL=old-model\n"
+                "CTX_SIZE=2048\n",
+                encoding="utf-8",
+            )
+        elif runtime_kind == "windows-native-llama":
+            env_path.write_text(
+                "ODS_MODE=local\n"
+                "GPU_BACKEND=amd\n"
+                "LLM_BACKEND=llama-server\n"
+                "AMD_INFERENCE_RUNTIME=llama-server\n"
+                "AMD_INFERENCE_RUNTIME_MODE=windows-llama-server-fallback\n"
+                "AMD_INFERENCE_LOCATION=host\n"
+                "AMD_INFERENCE_MANAGED=true\n"
+                "AMD_INFERENCE_PORT=9090\n"
+                "GGUF_FILE=old-model.gguf\n"
+                "LLM_MODEL=old-model\n"
+                "CTX_SIZE=2048\n",
+                encoding="utf-8",
+            )
+        elif runtime_kind == "macos-native-llama":
+            llama_bin = install_dir / "bin" / "llama-server"
+            llama_bin.parent.mkdir(parents=True)
+            llama_bin.write_text("binary", encoding="utf-8")
+
+        local_yaml = install_dir / "config" / "litellm" / "local.yaml"
+        tracked_configs = (env_path, models_ini, lemonade_yaml, local_yaml)
+
+        def config_state():
+            return {
+                path: path.read_text(encoding="utf-8") if path.exists() else None
+                for path in tracked_configs
+            }
+
+        original_config = config_state()
+        runtime_restarts = []
+
+        def record_restart(env):
+            runtime_restarts.append((env["GGUF_FILE"], config_state()))
+
+        def record_container_restart(env, override_image=""):
+            record_restart(env)
+
+        def record_native_restart(path, _env=None, *_args):
+            record_restart(_mod.load_env(path))
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.delenv("ODS_HOST_INSTALL_DIR", raising=False)
+        if runtime_kind == "compose-llama":
+            monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
+            monkeypatch.setattr(_mod, "_compose_restart_llama_server", record_restart)
+        elif runtime_kind == "container-llama":
+            monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
+            monkeypatch.setenv("ODS_HOST_INSTALL_DIR", str(install_dir))
+            monkeypatch.setattr(_mod, "_recreate_llama_server", record_container_restart)
+        elif runtime_kind == "windows-lemonade":
+            monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
+            monkeypatch.setattr(_mod, "_restart_windows_lemonade", record_restart)
+        elif runtime_kind == "windows-native-llama":
+            monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
+            monkeypatch.setattr(_mod, "_restart_windows_native_llama_server", record_native_restart)
+        else:
+            monkeypatch.setattr(_mod.platform, "system", lambda: "Darwin")
+            monkeypatch.setattr(_mod, "_restart_macos_native_llama_server", record_native_restart)
+
+        def fake_run(cmd, **_kwargs):
+            if cmd and cmd[0] == "curl":
+                stdout = (
+                    '{"status": "ok", "model_loaded": "extra.new-model.gguf"}'
+                    if runtime_kind == "windows-lemonade"
+                    else _llama_identity_response("new-model.gguf")
+                )
+                return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+            if cmd == ["docker", "restart", "ods-litellm"]:
+                raise subprocess.TimeoutExpired(cmd, 60)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 500
+        assert [model for model, _state in runtime_restarts] == [
+            "new-model.gguf",
+            "old-model.gguf",
+        ]
+        assert "GGUF_FILE=new-model.gguf" in runtime_restarts[0][1][env_path]
+        assert "filename = new-model.gguf" in runtime_restarts[0][1][models_ini]
+        assert runtime_restarts[1][1] == original_config
+        assert config_state() == original_config
 
     def test_activation_accepts_local_gguf_without_catalog_entry(self, tmp_path, monkeypatch):
         install_dir, env_path, _env_text, models_ini, _ini_text, _yaml, _yaml_text = (
@@ -670,7 +904,11 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
 
         def fake_run(cmd, **_kwargs):
-            stdout = '{"status":"ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = (
+                _llama_identity_response("Research.Model-Q8_0.gguf")
+                if cmd and cmd[0] == "curl"
+                else ""
+            )
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
@@ -717,7 +955,11 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
 
         def fake_run(cmd, **_kwargs):
-            stdout = '{"status":"ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = (
+                _llama_identity_response("MixedCaseModel.GGUF")
+                if cmd and cmd[0] == "curl"
+                else ""
+            )
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
@@ -731,7 +973,7 @@ class TestModelActivateRollback:
         assert "LLM_MODEL=MixedCaseModel" in env_text
         assert "filename = MixedCaseModel.GGUF" in models_ini.read_text(encoding="utf-8")
 
-    def test_activation_sanitizes_local_llm_model_name_for_spaced_filename(
+    def test_activation_accepts_sanitized_local_id_for_spaced_filename(
         self, tmp_path, monkeypatch,
     ):
         install_dir, env_path, _env_text, models_ini, _ini_text, _yaml, _yaml_text = (
@@ -760,20 +1002,53 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
 
         def fake_run(cmd, **_kwargs):
-            stdout = '{"status":"ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = (
+                _llama_identity_response("My Custom Model.Q8_0.GGUF")
+                if cmd and cmd[0] == "curl"
+                else ""
+            )
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
         handler = _ResponseHandler()
 
-        _mod.AgentHandler._do_model_activate(handler, "My Custom Model.Q8_0")
+        _mod.AgentHandler._do_model_activate(handler, "My-Custom-Model.Q8_0")
 
         assert handler.response_code == 200
+        assert handler.parse_response() == {
+            "status": "activated",
+            "model_id": "My-Custom-Model.Q8_0",
+        }
         env_text = env_path.read_text(encoding="utf-8")
         assert "GGUF_FILE=My Custom Model.Q8_0.GGUF" in env_text
         assert "LLM_MODEL=My-Custom-Model.Q8_0" in env_text
         assert "[My-Custom-Model.Q8_0]" in models_ini.read_text(encoding="utf-8")
         assert "filename = My Custom Model.Q8_0.GGUF" in models_ini.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "../outside",
+            r"..\outside",
+            "nested/model",
+            r"nested\model",
+            "unsafe\x00model",
+        ],
+    )
+    def test_local_gguf_resolver_rejects_path_traversal(self, tmp_path, model_id):
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        (models_dir / "outside.gguf").write_text("model", encoding="utf-8")
+
+        assert _mod._resolve_local_gguf_filename(model_id, models_dir) is None
+
+    def test_local_gguf_resolver_rejects_ambiguous_sanitized_id(self, tmp_path):
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        (models_dir / "My Custom Model.gguf").write_text("model", encoding="utf-8")
+        (models_dir / "My@Custom@Model.gguf").write_text("model", encoding="utf-8")
+
+        assert _mod._resolve_local_gguf_filename("My-Custom-Model", models_dir) is None
 
     def test_activation_rejects_empty_local_gguf_before_restart(self, tmp_path, monkeypatch):
         install_dir, _env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (
@@ -938,8 +1213,13 @@ class TestModelActivateRollback:
         def fake_run(cmd, **_kwargs):
             calls.append(cmd)
             if cmd and cmd[0] == "curl":
-                assert cmd[-1] == "http://127.0.0.1:9090/health"
-                return subprocess.CompletedProcess(cmd, 0, stdout='{"status":"ok"}', stderr="")
+                assert cmd[-1] == "http://127.0.0.1:9090/v1/models"
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=_llama_identity_response("new-model.gguf"),
+                    stderr="",
+                )
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
@@ -991,7 +1271,12 @@ class TestModelActivateRollback:
 
         def fake_run(cmd, **_kwargs):
             if cmd and cmd[0] == "curl":
-                return subprocess.CompletedProcess(cmd, 0, stdout='{"status":"ok"}', stderr="")
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=_llama_identity_response("new-model.gguf"),
+                    stderr="",
+                )
             if cmd == ["docker", "restart", "ods-litellm"]:
                 raise subprocess.TimeoutExpired(cmd, 60)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -1076,7 +1361,7 @@ class TestModelActivateRollback:
 
         def fake_run(cmd, **_kwargs):
             calls.append(cmd)
-            stdout = '{"status": "ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = _llama_identity_response("new-model.gguf") if cmd and cmd[0] == "curl" else ""
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
@@ -1125,7 +1410,7 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
 
         def fake_run(cmd, **_kwargs):
-            stdout = '{"status": "ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = _llama_identity_response("new-model.gguf") if cmd and cmd[0] == "curl" else ""
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
@@ -1169,7 +1454,7 @@ class TestModelActivateRollback:
 
         def fake_run(cmd, **_kwargs):
             calls.append(cmd)
-            stdout = '{"status": "ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = _llama_identity_response("new-model.gguf") if cmd and cmd[0] == "curl" else ""
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
@@ -1225,7 +1510,7 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
 
         def fake_run(cmd, **_kwargs):
-            stdout = '{"status": "ok"}' if cmd and cmd[0] == "curl" else ""
+            stdout = _llama_identity_response("new-model.gguf") if cmd and cmd[0] == "curl" else ""
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)

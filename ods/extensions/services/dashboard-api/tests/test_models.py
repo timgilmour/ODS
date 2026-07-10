@@ -12,6 +12,8 @@ import types
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 
+import pytest
+
 from models import GPUInfo
 
 
@@ -113,6 +115,26 @@ def test_agent_model_status_and_actions_share_transport(monkeypatch):
         ("GET", "/v1/model/status", 5, None),
         ("POST", "/v1/model/download", 30, {"model": "test"}),
     ]
+
+
+def test_agent_activation_conflict_preserves_target(monkeypatch):
+    import routers.models as models_router
+
+    payload = {
+        "error": "Another model activation is in progress",
+        "activeModelId": "phi4-mini-q4",
+    }
+
+    def conflict(*_args, **_kwargs):
+        raise models_router.AgentHTTPError(409, payload["error"], json.dumps(payload))
+
+    monkeypatch.setattr(models_router, "request_agent_json", conflict)
+
+    with pytest.raises(models_router.HTTPException) as exc_info:
+        models_router._call_agent_model("/v1/model/activate", {"model_id": "phi4-mini-q4"}, timeout=600)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == payload
 
 
 def test_fetch_loaded_model_falls_back_to_models_when_lemonade_health_empty(monkeypatch):
@@ -429,6 +451,7 @@ def test_api_models_marks_installer_configured_model(test_client, monkeypatch, t
         "llm_model_name": "qwen3.5-9b",
     }])
     (install_dir / ".env").write_text(
+        "ODS_MODE=cloud\n"
         "LLM_MODEL=qwen3.5-9b\n"
         "GGUF_FILE=Qwen3.5-9B-Q4_K_M.gguf\n",
         encoding="utf-8",
@@ -443,6 +466,7 @@ def test_api_models_marks_installer_configured_model(test_client, monkeypatch, t
     assert resp.status_code == 200
     model = resp.json()["models"][0]
     assert resp.json()["configuredModel"] == "qwen3.5-9b-q4"
+    assert resp.json()["odsMode"] == "cloud"
     assert model["recommended"] is True
     assert model["configured"] is True
     assert model["recommendation"]["source"] == "installer_configured"
@@ -703,6 +727,54 @@ def test_local_gguf_model_uses_safe_logical_id_for_spaced_filename(monkeypatch, 
     assert model["gguf_file"] == "My Custom Model.Q8_0.GGUF"
     assert model["id"] == "My-Custom-Model.Q8_0"
     assert model["llm_model_name"] == "My-Custom-Model.Q8_0"
+
+
+def test_local_gguf_ui_id_loads_and_deletes_spaced_filename(test_client, monkeypatch, tmp_path):
+    models_router, install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    _write_model_library(install_dir, [])
+    gguf = data_dir / "models" / "My Custom Model.Q8_0.GGUF"
+    gguf.write_text("model", encoding="utf-8")
+    calls = []
+
+    def agent_call(path, body, timeout=30):
+        calls.append((path, body, timeout))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent_call)
+
+    load_response = test_client.post(
+        "/api/models/My-Custom-Model.Q8_0/load",
+        headers=test_client.auth_headers,
+    )
+    delete_response = test_client.delete(
+        "/api/models/My-Custom-Model.Q8_0",
+        headers=test_client.auth_headers,
+    )
+
+    assert load_response.status_code == 200
+    assert delete_response.status_code == 200
+    assert calls == [
+        ("/v1/model/activate", {"model_id": "My-Custom-Model.Q8_0"}, 600),
+        ("/v1/model/delete", {"gguf_file": "My Custom Model.Q8_0.GGUF"}, 30),
+    ]
+
+
+def test_delete_local_gguf_rejects_path_separators(test_client, monkeypatch, tmp_path):
+    models_router, install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    _write_model_library(install_dir, [])
+    (data_dir / "models" / "nested.gguf").write_text("model", encoding="utf-8")
+    monkeypatch.setattr(
+        models_router,
+        "_call_agent_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe delete reached host agent")),
+    )
+
+    response = test_client.delete(
+        "/api/models/..%5Cnested",
+        headers=test_client.auth_headers,
+    )
+
+    assert response.status_code == 404
 
 
 def test_load_model_rejects_local_gguf_path_separators(test_client, monkeypatch, tmp_path):

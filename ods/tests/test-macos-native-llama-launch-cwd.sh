@@ -53,9 +53,11 @@ grep -qF 'com.ods.full-model-download' "$installer" \
 pass "macOS installer clears legacy native llama LaunchAgents"
 
 bridge="$ROOT_DIR/bin/ods-macos-llm-bridge.py"
+bridge_manager="$ROOT_DIR/installers/macos/lib/bridge-manager.sh"
 env_generator="$ROOT_DIR/installers/macos/lib/env-generator.sh"
 uninstaller="$ROOT_DIR/ods-uninstall.sh"
 [[ -f "$bridge" ]] || fail "macOS Colima LLM bridge script is missing"
+[[ -f "$bridge_manager" ]] || fail "shared macOS bridge manager is missing"
 grep -qF 'ODS_MACOS_LLM_BRIDGE_ENABLED=${macos_llm_bridge_enabled}' "$env_generator" \
     || fail "macOS env generator must enable the private LLM bridge for Colima"
 grep -qF 'ODS_NATIVE_LLAMA_PORT=${native_llama_port}' "$env_generator" \
@@ -70,8 +72,14 @@ grep -qF '_configure_macos_llm_bridge' "$installer" \
     || fail "macOS installer must launch the Colima LLM bridge before native llama"
 grep -qF '_configure_macos_host_agent_bridge' "$installer" \
     || fail "macOS installer must bridge dashboard actions to the loopback host agent"
-grep -qF -- '--allow-peer' "$installer" \
-    || fail "macOS installer must scope host bridges to the Colima VM peer"
+grep -qF 'source "${LIB_DIR}/bridge-manager.sh"' "$installer" \
+    || fail "macOS installer must source the shared bridge manager"
+grep -qF 'source "${LIB_DIR}/bridge-manager.sh"' "$cli" \
+    || fail "macOS CLI must source the shared bridge manager"
+grep -qF 'macos_configure_llm_bridge_from_env' "$bridge_manager" \
+    || fail "shared bridge manager must derive LLM bridge state from .env"
+grep -qF -- '--allow-peer' "$bridge_manager" \
+    || fail "shared bridge manager must scope host bridges to the Colima VM peer"
 grep -qF 'ODS_NATIVE_LLAMA_PORT' "$bootstrap" \
     || fail "bootstrap hot-swap must preserve the private native llama port"
 grep -qF 'ODS_NATIVE_LLAMA_PORT' "$cli" \

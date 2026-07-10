@@ -485,7 +485,12 @@ assert_not_contains "installers/macos/install-macos.sh" 'wait .*\|\| ai_warn "Bu
 assert_contains "installers/macos/install-macos.sh" 'colima start --network-address --network-preferred-route' "macOS installer does not prefer the private Colima vmnet route"
 assert_contains "installers/macos/install-macos.sh" 'ODS_MACOS_HOST_GATEWAY' "macOS installer does not persist the private Colima host gateway"
 assert_contains "installers/macos/install-macos.sh" '_configure_macos_host_agent_bridge' "macOS installer does not bridge host-agent actions over private Colima networking"
-assert_contains "installers/macos/install-macos.sh" 'Dashboard container reached the host agent through the private Colima bridge' "macOS installer does not verify host-agent reachability from the real container"
+assert_contains "installers/macos/install-macos.sh" 'source "\$\{LIB_DIR\}/bridge-manager\.sh"' "macOS installer does not source shared bridge lifecycle code"
+assert_contains "installers/macos/ods-macos.sh" 'source "\$\{LIB_DIR\}/bridge-manager\.sh"' "macOS CLI does not source shared bridge lifecycle code"
+assert_contains "installers/macos/lib/bridge-manager.sh" 'macos_configure_llm_bridge_from_env' "shared macOS bridge manager does not derive bridge state from .env"
+assert_contains "installers/macos/lib/bridge-manager.sh" '--allow-peer' "shared macOS bridge manager does not restrict the Colima peer"
+assert_contains "installers/macos/install-macos.sh" '/v1/model/status' "macOS installer does not verify authenticated host-agent reachability from the dashboard container"
+assert_contains "installers/macos/install-macos.sh" 'Authorization: Bearer' "macOS installer host-agent readiness probe is not authenticated"
 assert_contains "installers/macos/docker-compose.macos.yml" 'ODS_MACOS_HOST_GATEWAY:-host.docker.internal' "macOS compose does not route native inference over the private Colima gateway"
 assert_contains "extensions/services/litellm/compose.apple.yaml" 'ODS_MACOS_HOST_GATEWAY:-host-gateway' "macOS LiteLLM overlay does not route native inference over the private Colima gateway"
 assert_contains "installers/windows/install-windows.ps1" 'Assert-ODSWindowsManagedContainers' "Windows installer does not assert compose-managed containers"
@@ -525,5 +530,7 @@ if [[ "$resolver_out" != "python" ]]; then
   echo "Bash Python resolver selected '$resolver_out' instead of real python after a WindowsApps python3 alias" >&2
   exit 1
 fi
+
+bash tests/test-macos-cli-mode-routing.sh
 
 echo "[PASS] installer hardening contracts"

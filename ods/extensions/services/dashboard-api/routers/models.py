@@ -348,6 +348,11 @@ async def list_models(api_key: str = Depends(verify_api_key)):
             os_name=signature.get("os"),
             flags=signature.get("flags"),
         )
+    payload["odsMode"] = (
+        read_env_file_value("ODS_MODE", INSTALL_DIR)
+        or read_env_value("ODS_MODE", INSTALL_DIR)
+        or "local"
+    ).strip().lower()
     return payload
 
 
@@ -408,6 +413,15 @@ def _call_agent_model(path: str, body: dict, timeout: int = 30) -> dict:
     try:
         return request_agent_json("POST", path, payload=body, timeout=timeout)
     except AgentHTTPError as exc:
+        if exc.status_code == 409:
+            detail: Any = exc.detail
+            try:
+                payload = json.loads(exc.response_text)
+                if isinstance(payload, dict):
+                    detail = payload
+            except (json.JSONDecodeError, TypeError):
+                pass
+            raise HTTPException(status_code=409, detail=detail) from exc
         raise HTTPException(status_code=502, detail=exc.detail) from exc
     except AgentUnavailable as exc:
         raise HTTPException(status_code=503, detail=f"Host agent unreachable: {exc}") from exc
@@ -445,6 +459,8 @@ def _resolve_local_gguf_filename(model_id: str) -> str | None:
     candidate_stem = Path(candidate).stem.lower()
     exact_matches: list[Path] = []
     stem_matches: list[Path] = []
+    logical_matches: list[Path] = []
+    candidate_logical = _local_model_name_from_gguf(candidate).lower()
     try:
         for path in _MODELS_DIR.iterdir():
             if not _is_final_gguf_file(path):
@@ -453,11 +469,13 @@ def _resolve_local_gguf_filename(model_id: str) -> str | None:
                 exact_matches.append(path)
             elif path.stem.lower() == candidate_stem:
                 stem_matches.append(path)
+            elif _local_model_name_from_gguf(path.name).lower() == candidate_logical:
+                logical_matches.append(path)
     except OSError as exc:
         logger.warning("Failed to resolve local GGUF %s: %s", model_id, exc)
         return None
 
-    matches = exact_matches or stem_matches
+    matches = exact_matches or stem_matches or logical_matches
     if len(matches) == 1:
         return matches[0].name
     if len(matches) > 1:
@@ -799,9 +817,9 @@ async def benchmark_model(model_id: str, body: dict[str, Any] | None = None, api
 @router.delete("/api/models/{model_id}")
 def delete_model(model_id: str, api_key: str = Depends(verify_api_key)):
     """Delete a downloaded model file."""
-    model = _find_model_in_library(model_id)
+    model = _find_model_in_library(model_id) or _find_local_gguf_model(model_id)
     if model is None:
-        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found in library")
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found in library or local GGUF files")
 
     payload = {
         "gguf_file": model["gguf_file"],

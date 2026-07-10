@@ -25,6 +25,7 @@ function baseState(overrides = {}) {
     gpu: { vramUsed: 2, vramTotal: 8, vramFree: 6 },
     currentModel: null,
     configuredModel: null,
+    odsMode: 'local',
     recommendationAlternatives: [],
     loading: false,
     error: null,
@@ -105,6 +106,9 @@ test('loaded models show active state and benchmark action', () => {
   expect(screen.getByText('Active')).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: /benchmark/i }))
   expect(benchmarkModel).toHaveBeenCalledWith('qwen3.5-9b-q4')
+
+  fireEvent.click(screen.getByRole('button', { name: /model actions/i }))
+  expect(screen.queryByRole('button', { name: /delete file/i })).not.toBeInTheDocument()
 })
 
 test('renders oracle source labels and install recommendation context', () => {
@@ -157,6 +161,63 @@ test('runs downloaded models through the existing load action', () => {
   fireEvent.click(screen.getByRole('button', { name: /^run$/i }))
 
   expect(loadModel).toHaveBeenCalledWith('qwen3.5-9b-q4')
+
+  fireEvent.click(screen.getByRole('button', { name: /model actions/i }))
+  expect(screen.getByRole('button', { name: /delete file/i })).toBeInTheDocument()
+})
+
+test('keeps Download available in cloud mode', () => {
+  const downloadModel = vi.fn()
+  useModelsMock.mockReturnValue(baseState({
+    odsMode: 'cloud',
+    downloadModel,
+    models: [model()],
+  }))
+
+  renderModels()
+  const downloadButton = screen.getByRole('button', { name: /^download$/i })
+  expect(downloadButton).toBeEnabled()
+  fireEvent.click(downloadButton)
+
+  expect(downloadModel).toHaveBeenCalledWith('qwen3.5-9b-q4')
+})
+
+test('disables primary and menu Run actions in cloud mode', () => {
+  const loadModel = vi.fn()
+  useModelsMock.mockReturnValue(baseState({
+    odsMode: 'cloud',
+    loadModel,
+    models: [model({ status: 'downloaded' })],
+  }))
+
+  renderModels()
+
+  const primaryRun = screen.getByRole('button', { name: /^run$/i })
+  expect(primaryRun).toBeDisabled()
+  expect(primaryRun).toHaveAttribute('title', 'Switch ODS to local mode to run this model.')
+  fireEvent.click(primaryRun)
+
+  fireEvent.click(screen.getByRole('button', { name: /model actions/i }))
+  const menuRun = screen.getByRole('button', { name: /run model/i })
+  expect(menuRun).toBeDisabled()
+  expect(menuRun).toHaveAttribute('title', 'Switch ODS to local mode to run this model.')
+  fireEvent.click(menuRun)
+
+  expect(loadModel).not.toHaveBeenCalled()
+})
+
+test('treats currentModel as active even if a stale row still says downloaded', () => {
+  useModelsMock.mockReturnValue(baseState({
+    currentModel: 'qwen3.5-9b-q4',
+    models: [model({ status: 'downloaded' })],
+  }))
+
+  renderModels()
+
+  expect(screen.getByText('Active')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /benchmark/i })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: /model actions/i }))
+  expect(screen.queryByRole('button', { name: /delete file/i })).not.toBeInTheDocument()
 })
 
 test('filters models by search and category without changing catalog data', () => {
