@@ -5176,14 +5176,25 @@ def _completion_text(data: object) -> str:
         return ""
     message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else choice.get("text")
-    if isinstance(content, str):
+    if isinstance(content, str) and content.strip():
         return content[:4096]
     if isinstance(content, list):
         parts = []
         for item in content:
             if isinstance(item, dict) and isinstance(item.get("text"), str):
                 parts.append(item["text"])
-        return "".join(parts)[:4096]
+        text = "".join(parts)
+        if text.strip():
+            return text[:4096]
+    reasoning_content = (
+        message.get("reasoning_content")
+        if isinstance(message, dict)
+        else choice.get("reasoning_content")
+    )
+    if isinstance(reasoning_content, str):
+        return reasoning_content[:4096]
+    if isinstance(content, str):
+        return content[:4096]
     return ""
 
 

@@ -21,6 +21,7 @@ sys.modules["ods_host_agent_activate"] = _mod
 _spec.loader.exec_module(_mod)
 
 _check_lemonade_health = _mod._check_lemonade_health
+_meaningful_completion = _mod._meaningful_completion
 _resolve_lemonade_model_id = _mod._resolve_lemonade_model_id
 _send_lemonade_warmup = _mod._send_lemonade_warmup
 _lemonade_completion_ready = _mod._lemonade_completion_ready
@@ -104,6 +105,18 @@ class TestCheckLemonadeHealth:
     def test_no_model_loaded_key(self):
         body = '{"status": "ok"}'
         assert _check_lemonade_health(body) is False
+
+    def test_completion_accepts_reasoning_content_when_message_content_empty(self):
+        body = {
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning_content": "Okay",
+                    "role": "assistant",
+                }
+            }]
+        }
+        assert _meaningful_completion(body) is True
 
     def test_invalid_json(self):
         assert _check_lemonade_health("not json") is False
