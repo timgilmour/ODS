@@ -24,6 +24,43 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTS_DIR="$SCRIPT_DIR/tests"
 
+# Load environment and resolve ports
+load_env() {
+    local env_file="$SCRIPT_DIR/.env"
+    if [[ -f "$env_file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%[$'\r']}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ "$line" =~ ^# ]] && continue
+            [[ -z "$line" ]] && continue
+            if [[ "$line" == *"="* ]]; then
+                local key="${line%%=*}"
+                local val="${line#*=}"
+                key="${key#"${key%%[![:space:]]*}"}"
+                key="${key%"${key##*[![:space:]]}"}"
+                val="${val#\"}"
+                val="${val%\"}"
+                val="${val#\'}"
+                val="${val%\'}"
+                if [[ -n "$key" && -z "${!key:-}" ]]; then
+                    export "$key"="$val"
+                fi
+            fi
+        done < "$env_file"
+    fi
+}
+load_env
+
+# Retrieve DASHBOARD_API_KEY from text file if not set in .env
+if [[ -z "${DASHBOARD_API_KEY:-}" ]]; then
+    key_file="$SCRIPT_DIR/data/dashboard-api-key.txt"
+    if [[ -f "$key_file" ]]; then
+        DASHBOARD_API_KEY=$(cat "$key_file" | tr -d '\r\n ' || true)
+        export DASHBOARD_API_KEY
+    fi
+fi
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -135,12 +172,17 @@ if $VOICE || $STRESS; then
     echo ""
     
     # Quick voice health
-    if curl -s http://127.0.0.1:3002/api/voice/status | grep -q '"available":true'; then
+    local auth_header=()
+    if [[ -n "${DASHBOARD_API_KEY:-}" ]]; then
+        auth_header=(-H "Authorization: Bearer $DASHBOARD_API_KEY")
+    fi
+    local voice_url="http://127.0.0.1:${DASHBOARD_API_PORT:-3002}/api/voice/status"
+    if curl -s "${auth_header[@]}" "$voice_url" | grep -q '"available":true'; then
         echo -e "${GREEN}✓ Voice services available${NC}"
         
         # Check individual services
         for svc in stt tts livekit; do
-            if curl -s http://127.0.0.1:3002/api/voice/status | jq -e ".services.$svc.status == \"healthy\"" >/dev/null 2>&1; then
+            if curl -s "${auth_header[@]}" "$voice_url" | jq -e ".services.$svc.status == \"healthy\"" >/dev/null 2>&1; then
                 echo -e "  ${GREEN}✓${NC} $svc healthy"
             else
                 echo -e "  ${RED}✗${NC} $svc unhealthy"

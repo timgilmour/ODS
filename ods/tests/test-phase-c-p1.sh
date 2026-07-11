@@ -13,11 +13,63 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Load environment and resolve ports
+load_env() {
+    local env_file="$ROOT_DIR/.env"
+    if [[ -f "$env_file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%[$'\r']}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ "$line" =~ ^# ]] && continue
+            [[ -z "$line" ]] && continue
+            if [[ "$line" == *"="* ]]; then
+                local key="${line%%=*}"
+                local val="${line#*=}"
+                key="${key#"${key%%[![:space:]]*}"}"
+                key="${key%"${key##*[![:space:]]}"}"
+                val="${val#\"}"
+                val="${val%\"}"
+                val="${val#\'}"
+                val="${val%\'}"
+                if [[ -n "$key" && -z "${!key:-}" ]]; then
+                    export "$key"="$val"
+                fi
+            fi
+        done < "$env_file"
+    fi
+}
+load_env
+
+# Retrieve DASHBOARD_API_KEY from text file if not set in .env
+if [[ -z "${DASHBOARD_API_KEY:-}" ]]; then
+    key_file="$ROOT_DIR/data/dashboard-api-key.txt"
+    if [[ -f "$key_file" ]]; then
+        DASHBOARD_API_KEY=$(cat "$key_file" | tr -d '\r\n ' || true)
+        export DASHBOARD_API_KEY
+    fi
+fi
 
 # Config
-API_URL="http://localhost:3002"
-DASHBOARD_API_URL="http://localhost:3001"
+API_URL="http://localhost:${DASHBOARD_API_PORT:-3002}"
+DASHBOARD_API_URL="http://localhost:${DASHBOARD_PORT:-3001}"
 TEST_TIMEOUT=10
+
+# Wrap curl to automatically supply dashboard-api authentication header
+curl() {
+    local args=()
+    if [[ -n "${DASHBOARD_API_KEY:-}" ]]; then
+        for arg in "$@"; do
+            if [[ "$arg" == "$API_URL"* ]]; then
+                args+=(-H "Authorization: Bearer $DASHBOARD_API_KEY")
+                break
+            fi
+        done
+    fi
+    command curl "${args[@]}" "$@"
+}
 
 PASS_COUNT=0
 FAIL_COUNT=0
