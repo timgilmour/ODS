@@ -4406,6 +4406,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         previous_base_url,
                         previous_context,
                     )
+                    _verify_hermes_dashboard_ready()
                 if not previous_gguf:
                     raise RuntimeError("previous GGUF identity is empty")
                 if not _wait_for_model_readiness(
@@ -4720,6 +4721,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         hermes_base_url,
                         int(context_length),
                     )
+                    _verify_hermes_dashboard_ready()
                 openclaw_recreated = _recreate_openclaw_if_present()
                 if perplexica_snapshot is not None:
                     _update_perplexica_model(
@@ -6561,6 +6563,64 @@ def _verify_running_hermes_route(
     text = _read_hermes_container_config()
     if not _hermes_config_matches(text, model_name, base_url, context_length):
         raise RuntimeError("Hermes restarted without the requested persisted model route")
+
+
+_HERMES_DASHBOARD_TOKEN_PROBE = r"""
+import re
+import sys
+import urllib.request
+
+try:
+    with urllib.request.urlopen("http://ods-hermes:9119", timeout=3) as response:
+        status = getattr(response, "status", 200)
+        body = response.read(8192).decode("utf-8", "replace")
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+
+if status >= 400:
+    print(f"Hermes dashboard returned HTTP {status}", file=sys.stderr)
+    sys.exit(2)
+
+if not re.search(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*"[^"]+"', body):
+    print("Hermes dashboard token was not found", file=sys.stderr)
+    sys.exit(3)
+"""
+
+
+def _verify_hermes_dashboard_ready(
+    timeout_seconds: int = 90,
+    interval_seconds: int = 2,
+) -> None:
+    """Prove dashboard-api can reach Hermes's browser dashboard/token."""
+    interval_seconds = max(1, int(interval_seconds or 1))
+    attempts = max(1, int(timeout_seconds / interval_seconds))
+    last_detail = ""
+    for attempt in range(attempts):
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    "ods-dashboard-api",
+                    "python",
+                    "-c",
+                    _HERMES_DASHBOARD_TOKEN_PROBE,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last_detail = str(exc)
+        else:
+            if result.returncode == 0:
+                return
+            last_detail = (result.stderr or result.stdout or "").strip()
+        if attempt < attempts - 1:
+            time.sleep(interval_seconds)
+    detail = f": {last_detail[:300]}" if last_detail else ""
+    raise RuntimeError(f"Hermes dashboard did not become reachable after restart{detail}")
 
 
 def _normalize_key(value) -> str:

@@ -1334,6 +1334,25 @@ def _write_model_activation_fixture(
     return install_dir, env_path, env_text, models_ini, ini_text, lemonade_yaml, lemonade_text
 
 
+def test_verify_hermes_dashboard_ready_retries_until_token(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="connection refused")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+
+    _mod._verify_hermes_dashboard_ready(timeout_seconds=3, interval_seconds=1)
+
+    assert len(calls) == 2
+    assert calls[0][:5] == ["docker", "exec", "ods-dashboard-api", "python", "-c"]
+    assert "http://ods-hermes:9119" in calls[0][-1]
+
+
 class TestModelActivateRollback:
 
     @pytest.fixture(autouse=True)
@@ -1342,6 +1361,7 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
         monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
         monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
+        monkeypatch.setattr(_mod, "_verify_hermes_dashboard_ready", lambda: None)
 
     @pytest.mark.parametrize(
         ("bind_addr", "expected_identity_url"),
@@ -2554,6 +2574,66 @@ class TestModelActivateRollback:
             "dependent:ods-litellm",
             "dependent:ods-hermes",
             "ready:old-model.gguf",
+        ]
+
+    def test_activation_waits_for_hermes_dashboard_after_restart(
+        self, tmp_path, monkeypatch,
+    ):
+        install_dir, _env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path)
+        )
+        hermes_live = install_dir / "data" / "hermes" / "config.yaml"
+        hermes_template = install_dir / "extensions" / "services" / "hermes" / "cli-config.yaml.template"
+        hermes_live.parent.mkdir(parents=True)
+        hermes_template.parent.mkdir(parents=True)
+        hermes_text = (
+            "model:\n"
+            "  default: \"old-model.gguf\"\n"
+            "  provider: \"custom\"\n"
+            "  context_length: 2048\n"
+        )
+        hermes_live.write_text(hermes_text, encoding="utf-8")
+        hermes_template.write_text(hermes_text, encoding="utf-8")
+        events = []
+
+        def restart_runtime(env):
+            events.append(f"runtime:{env['GGUF_FILE']}")
+
+        def restart_dependent(container):
+            events.append(f"dependent:{container}")
+            return container in {"ods-litellm", "ods-hermes"}
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", restart_runtime)
+        monkeypatch.setattr(_mod, "_wait_for_model_readiness", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(_mod, "_restart_existing_container", restart_dependent)
+        monkeypatch.setattr(
+            _mod,
+            "_verify_running_hermes_route",
+            lambda model, *_args: events.append(f"hermes-route:{model}"),
+        )
+        monkeypatch.setattr(
+            _mod,
+            "_verify_hermes_dashboard_ready",
+            lambda: events.append("hermes-dashboard-ready"),
+        )
+        monkeypatch.setattr(
+            _mod,
+            "_verify_litellm_route",
+            lambda _env: events.append("litellm-route"),
+        )
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 200
+        assert events == [
+            "runtime:new-model.gguf",
+            "dependent:ods-litellm",
+            "dependent:ods-hermes",
+            "hermes-route:new-model.gguf",
+            "hermes-dashboard-ready",
+            "litellm-route",
         ]
 
     def test_activation_succeeds_without_optional_dependents(self, tmp_path, monkeypatch):
