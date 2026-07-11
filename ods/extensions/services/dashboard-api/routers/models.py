@@ -416,7 +416,7 @@ def model_download_status(api_key: str = Depends(verify_api_key)):
     """Get current model download progress (if any)."""
     agent_status = _get_agent_model_status()
     if agent_status and agent_status.get("status") != "idle":
-        if _is_stale_terminal_download_status(agent_status):
+        if _is_cancelled_download_status(agent_status) or _is_stale_terminal_download_status(agent_status):
             return _idle_download_status(last_terminal_status=agent_status)
         return agent_status
 
@@ -438,7 +438,7 @@ def model_download_status(api_key: str = Depends(verify_api_key)):
         }
     try:
         status = json.loads(status_path.read_text(encoding="utf-8"))
-        if _is_stale_terminal_download_status(status):
+        if _is_cancelled_download_status(status) or _is_stale_terminal_download_status(status):
             return _idle_download_status(last_terminal_status=status)
         return status
     except (json.JSONDecodeError, OSError):
@@ -475,6 +475,13 @@ def _is_stale_terminal_download_status(status: Any) -> bool:
         return False
     age = (datetime.now(timezone.utc) - updated_at).total_seconds()
     return age > _STALE_TERMINAL_DOWNLOAD_STATUS_SECONDS
+
+
+def _is_cancelled_download_status(status: Any) -> bool:
+    if not isinstance(status, dict):
+        return False
+    key = str(status.get("status") or "").casefold()
+    return key in {"cancelled", "canceled"}
 
 
 def _get_agent_model_status(timeout: int = 5) -> Optional[dict]:

@@ -781,6 +781,30 @@ def test_download_status_ignores_stale_terminal_agent_status(test_client, monkey
     assert "curl exited" in payload["lastTerminalStatus"]["error"]
 
 
+def test_download_status_treats_cancelled_agent_status_as_idle(test_client, monkeypatch, tmp_path):
+    models_router, _install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        models_router,
+        "_get_agent_model_status",
+        lambda: {
+            "status": "cancelled",
+            "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+            "updatedAt": "2999-01-01T00:00:00+00:00",
+            "error": "Download cancelled by user",
+        },
+    )
+
+    resp = test_client.get("/api/models/download-status", headers=test_client.auth_headers)
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "idle"
+    assert payload["active"] is False
+    assert payload["isDownloading"] is False
+    assert payload["lastTerminalStatus"]["status"] == "cancelled"
+    assert payload["lastTerminalStatus"]["model"] == "Qwen3-30B-A3B-Q4_K_M.gguf"
+
+
 def test_download_status_ignores_stale_terminal_status_file(test_client, monkeypatch, tmp_path):
     models_router, _install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(models_router, "_get_agent_model_status", lambda: None)
@@ -801,6 +825,31 @@ def test_download_status_ignores_stale_terminal_status_file(test_client, monkeyp
     payload = resp.json()
     assert payload["status"] == "idle"
     assert payload["lastTerminalStatus"]["model"] == "Phi-4-mini-instruct-Q4_K_M.gguf"
+
+
+def test_download_status_treats_cancelled_status_file_as_idle(test_client, monkeypatch, tmp_path):
+    models_router, _install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "_get_agent_model_status", lambda: None)
+    status_path = data_dir / "model-download-status.json"
+    status_path.write_text(
+        json.dumps({
+            "status": "canceled",
+            "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+            "updatedAt": "2999-01-01T00:00:00+00:00",
+            "error": "Download canceled by user",
+        }),
+        encoding="utf-8",
+    )
+
+    resp = test_client.get("/api/models/download-status", headers=test_client.auth_headers)
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "idle"
+    assert payload["active"] is False
+    assert payload["isDownloading"] is False
+    assert payload["lastTerminalStatus"]["status"] == "canceled"
+    assert payload["lastTerminalStatus"]["model"] == "Qwen3-30B-A3B-Q4_K_M.gguf"
 
 
 def test_load_model_resolves_local_gguf_by_stem_with_mixed_case_extension(
