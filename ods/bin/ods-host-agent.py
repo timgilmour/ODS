@@ -29,7 +29,6 @@ import socket
 import stat as stat_mod
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -1475,6 +1474,19 @@ def read_json_body(handler) -> dict | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         json_response(handler, 400, {"error": "Invalid JSON"})
         return None
+
+
+def discard_request_body(handler) -> None:
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+    except (ValueError, TypeError):
+        return
+    remaining = max(0, length)
+    while remaining:
+        chunk = handler.rfile.read(min(remaining, MAX_BODY))
+        if not chunk:
+            break
+        remaining -= len(chunk)
 
 
 def read_optional_json_body(handler) -> dict | None:
@@ -4097,6 +4109,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         """Cancel an in-progress model download."""
         if not check_auth(self):
             return
+        discard_request_body(self)
         with _model_download_lock:
             if (
                 _model_download_thread is None
@@ -5830,41 +5843,19 @@ if ($launchContract.RequiresRuntimeConfiguration) {
 New-Item -ItemType Directory -Path (Split-Path -Parent $pidPath) -Force | Out-Null
 Set-Content -LiteralPath $pidPath -Value $proc.ProcessId
 '''
-    def _make_launcher_log_path(suffix: str) -> Path:
-        fd, name = tempfile.mkstemp(prefix="ods-lemonade-restart-", suffix=suffix)
-        os.close(fd)
-        return Path(name)
-    stdout_path = _make_launcher_log_path(".stdout.log")
-    stderr_path = _make_launcher_log_path(".stderr.log")
-    def _read_launcher_log(path: Path) -> str:
-        try:
-            return path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
     try:
-        with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
-            result = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-                stdout=stdout_file,
-                stderr=stderr_file,
-                text=True,
-                timeout=120,
-                env=ps_env,
-            )
-        stdout_text = _read_launcher_log(stdout_path)
-        stderr_text = _read_launcher_log(stderr_path)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=120,
+            env=ps_env,
+        )
     except subprocess.TimeoutExpired as exc:
-        stdout_text = _read_launcher_log(stdout_path)
-        stderr_text = _read_launcher_log(stderr_path)
-        detail = (stderr_text or stdout_text).strip()[:500]
-        if detail:
-            raise RuntimeError(f"Windows Lemonade restart timed out after {exc.timeout} seconds: {detail}") from exc
-        raise
-    finally:
-        stdout_path.unlink(missing_ok=True)
-        stderr_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Windows Lemonade restart timed out after {exc.timeout} seconds") from exc
     if result.returncode != 0:
-        raise RuntimeError(f"Windows Lemonade restart failed: {(stderr_text or stdout_text).strip()[:500]}")
+        raise RuntimeError(f"Windows Lemonade restart failed with exit code {result.returncode}")
     logger.info("Windows Lemonade direct process started")
 
 
