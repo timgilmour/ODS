@@ -5236,13 +5236,27 @@ def _native_llama_health_host(env: dict) -> str:
 
 def _require_macos_bridge_manager(env_path: Path) -> tuple[Path, Path]:
     """Return installed bridge lifecycle files or fail before listener shutdown."""
-    constants_path = INSTALL_DIR / "lib" / "constants.sh"
-    manager_path = INSTALL_DIR / "lib" / "bridge-manager.sh"
-    missing = [path for path in (constants_path, manager_path) if not path.is_file()]
-    if missing:
-        names = ", ".join(str(path) for path in missing)
+    candidates = (
+        (
+            INSTALL_DIR / "lib" / "constants.sh",
+            INSTALL_DIR / "lib" / "bridge-manager.sh",
+        ),
+        (
+            INSTALL_DIR / "installers" / "macos" / "lib" / "constants.sh",
+            INSTALL_DIR / "installers" / "macos" / "lib" / "bridge-manager.sh",
+        ),
+    )
+    for constants_path, manager_path in candidates:
+        if constants_path.is_file() and manager_path.is_file():
+            break
+    else:
+        expected = "; ".join(
+            f"{constants_path}, {manager_path}"
+            for constants_path, manager_path in candidates
+        )
         raise RuntimeError(
-            f"Installed macOS bridge lifecycle files are missing: {names}; re-run the installer"
+            "macOS bridge lifecycle files are missing from installed and source layouts: "
+            f"{expected}; re-run the installer"
         )
     if not env_path.is_file():
         raise RuntimeError(f"macOS bridge configuration requires {env_path}")
@@ -5251,7 +5265,7 @@ def _require_macos_bridge_manager(env_path: Path) -> tuple[Path, Path]:
 
 def _configure_macos_llm_bridge(env_path: Path) -> None:
     """Apply the installed shared macOS LLM bridge manager to current .env."""
-    _require_macos_bridge_manager(env_path)
+    constants_path, manager_path = _require_macos_bridge_manager(env_path)
 
     bash = _find_usable_bash()
     if not bash:
@@ -5261,11 +5275,13 @@ def _configure_macos_llm_bridge(env_path: Path) -> None:
 set -euo pipefail
 install_dir="$1"
 env_file="$2"
+constants_file="$3"
+bridge_manager_file="$4"
 export ODS_HOME="$install_dir"
 export ODS_SCRIPT_HINT="$install_dir"
 
-source "$install_dir/lib/constants.sh"
-source "$install_dir/lib/bridge-manager.sh"
+source "$constants_file"
+source "$bridge_manager_file"
 
 ai_err() { printf '%s\n' "$*" >&2; }
 ai_ok() { printf '%s\n' "$*" >&2; }
@@ -5312,7 +5328,16 @@ upsert_env_value() {
 macos_configure_llm_bridge_from_env "$env_file" "$install_dir"
 '''
     result = subprocess.run(
-        [bash, "-c", bridge_adapter, "ods-host-agent", str(INSTALL_DIR), str(env_path)],
+        [
+            bash,
+            "-c",
+            bridge_adapter,
+            "ods-host-agent",
+            str(INSTALL_DIR),
+            str(env_path),
+            str(constants_path),
+            str(manager_path),
+        ],
         capture_output=True,
         text=True,
         timeout=45,

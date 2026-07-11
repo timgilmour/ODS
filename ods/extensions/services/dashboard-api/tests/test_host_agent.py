@@ -2549,8 +2549,13 @@ class TestModelActivationModeAndMacosBridge:
         assert len(calls) == 1
         cmd, kwargs = calls[0]
         assert cmd[:2] == ["/bin/bash", "-c"]
-        assert cmd[-2:] == [str(install_dir), str(env_path)]
-        assert 'source "$install_dir/lib/bridge-manager.sh"' in cmd[2]
+        assert cmd[-4:] == [
+            str(install_dir),
+            str(env_path),
+            str(lib_dir / "constants.sh"),
+            str(lib_dir / "bridge-manager.sh"),
+        ]
+        assert 'source "$bridge_manager_file"' in cmd[2]
         assert 'macos_configure_llm_bridge_from_env "$env_file" "$install_dir"' in cmd[2]
         assert 'cp -p "$target_file" "$tmp_file"' in cmd[2]
         assert kwargs == {
@@ -2559,6 +2564,35 @@ class TestModelActivationModeAndMacosBridge:
             "timeout": 45,
             "check": False,
         }
+
+    def test_bridge_adapter_falls_back_to_source_macos_lib(self, tmp_path, monkeypatch):
+        install_dir = tmp_path / "install"
+        source_lib_dir = install_dir / "installers" / "macos" / "lib"
+        source_lib_dir.mkdir(parents=True)
+        env_path = install_dir / ".env"
+        env_path.write_text("ODS_MODE=local\nBIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
+        (source_lib_dir / "constants.sh").write_text("# constants\n", encoding="utf-8")
+        (source_lib_dir / "bridge-manager.sh").write_text("# manager\n", encoding="utf-8")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "_find_usable_bash", lambda: "/bin/bash")
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+        _mod._configure_macos_llm_bridge(env_path)
+
+        assert len(calls) == 1
+        cmd, _kwargs = calls[0]
+        assert cmd[-4:] == [
+            str(install_dir),
+            str(env_path),
+            str(source_lib_dir / "constants.sh"),
+            str(source_lib_dir / "bridge-manager.sh"),
+        ]
 
     def test_missing_bridge_manager_fails_before_listener_shutdown(
         self,
