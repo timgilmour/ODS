@@ -846,10 +846,12 @@ _compose_run_with_summary() {
 
     # Connect failed services to logs and recovery steps if not in test stub mode
     if [[ -z "${DOCKER_STUB_MODE:-}" ]]; then
-        local _flags_str
-        _flags_str=$(get_compose_flags)
-        local -a _compose_args
-        read -ra _compose_args <<< "$_flags_str"
+        local -a _compose_args=()
+        local _arg
+        for _arg in "$@"; do
+            [[ "$_arg" == "up" || "$_arg" == "down" || "$_arg" == "stop" || "$_arg" == "pull" ]] && break
+            _compose_args+=("$_arg")
+        done
 
         local _failed_candidates=()
         local _c
