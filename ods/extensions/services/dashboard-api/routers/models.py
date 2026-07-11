@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from typing import Optional
@@ -60,6 +61,9 @@ _ENV_PATH = Path(INSTALL_DIR) / ".env"
 _MODEL_DISCOVERY_TIMEOUT_SECONDS = float(os.environ.get("DASHBOARD_MODEL_DISCOVERY_TIMEOUT", "15.0"))
 _AGENT_MODEL_STATUS_CACHE_TTL_SECONDS = float(
     os.environ.get("DASHBOARD_AGENT_MODEL_STATUS_CACHE_TTL", "0.5")
+)
+_STALE_TERMINAL_DOWNLOAD_STATUS_SECONDS = float(
+    os.environ.get("DASHBOARD_STALE_TERMINAL_DOWNLOAD_STATUS_SECONDS", "1800")
 )
 _agent_model_status_cache_lock = threading.Lock()
 _agent_model_status_cache_at = 0.0
@@ -412,6 +416,8 @@ def model_download_status(api_key: str = Depends(verify_api_key)):
     """Get current model download progress (if any)."""
     agent_status = _get_agent_model_status()
     if agent_status and agent_status.get("status") != "idle":
+        if _is_stale_terminal_download_status(agent_status):
+            return _idle_download_status(last_terminal_status=agent_status)
         return agent_status
 
     status_path = Path(DATA_DIR) / "model-download-status.json"
@@ -431,9 +437,44 @@ def model_download_status(api_key: str = Depends(verify_api_key)):
             "eta": bootstrap_info.eta_seconds,
         }
     try:
-        return json.loads(status_path.read_text(encoding="utf-8"))
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        if _is_stale_terminal_download_status(status):
+            return _idle_download_status(last_terminal_status=status)
+        return status
     except (json.JSONDecodeError, OSError):
         return {"status": "idle"}
+
+
+def _idle_download_status(last_terminal_status: Optional[dict] = None) -> dict:
+    status = {"status": "idle", "active": False, "isDownloading": False}
+    if last_terminal_status:
+        status["lastTerminalStatus"] = last_terminal_status
+    return status
+
+
+def _parse_status_updated_at(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_stale_terminal_download_status(status: Any) -> bool:
+    if not isinstance(status, dict):
+        return False
+    key = str(status.get("status") or "").casefold()
+    if key not in {"failed", "error", "cancelled", "canceled"}:
+        return False
+    updated_at = _parse_status_updated_at(status.get("updatedAt"))
+    if not updated_at:
+        return False
+    age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+    return age > _STALE_TERMINAL_DOWNLOAD_STATUS_SECONDS
 
 
 def _get_agent_model_status(timeout: int = 5) -> Optional[dict]:

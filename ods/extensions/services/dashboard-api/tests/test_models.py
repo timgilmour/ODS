@@ -745,6 +745,7 @@ def test_download_status_prefers_host_agent_normalized_status(test_client, monke
         lambda: {
             "status": "failed",
             "model": "Phi-4-mini-instruct-Q4_K_M.gguf",
+            "updatedAt": "2999-01-01T00:00:00+00:00",
             "error": "Model download is not running; previous download was interrupted.",
         },
     )
@@ -754,6 +755,52 @@ def test_download_status_prefers_host_agent_normalized_status(test_client, monke
     assert resp.status_code == 200
     assert resp.json()["status"] == "failed"
     assert "not running" in resp.json()["error"]
+
+
+def test_download_status_ignores_stale_terminal_agent_status(test_client, monkeypatch, tmp_path):
+    models_router, _install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        models_router,
+        "_get_agent_model_status",
+        lambda: {
+            "status": "failed",
+            "model": "Phi-4-mini-instruct-Q4_K_M.gguf",
+            "updatedAt": "2000-01-01T00:00:00+00:00",
+            "error": "Retry 1/3: curl exited with code -15",
+        },
+    )
+
+    resp = test_client.get("/api/models/download-status", headers=test_client.auth_headers)
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "idle"
+    assert payload["active"] is False
+    assert payload["isDownloading"] is False
+    assert payload["lastTerminalStatus"]["status"] == "failed"
+    assert "curl exited" in payload["lastTerminalStatus"]["error"]
+
+
+def test_download_status_ignores_stale_terminal_status_file(test_client, monkeypatch, tmp_path):
+    models_router, _install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "_get_agent_model_status", lambda: None)
+    status_path = data_dir / "model-download-status.json"
+    status_path.write_text(
+        json.dumps({
+            "status": "failed",
+            "model": "Phi-4-mini-instruct-Q4_K_M.gguf",
+            "updatedAt": "2000-01-01T00:00:00+00:00",
+            "error": "previous download is incomplete or corrupt",
+        }),
+        encoding="utf-8",
+    )
+
+    resp = test_client.get("/api/models/download-status", headers=test_client.auth_headers)
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "idle"
+    assert payload["lastTerminalStatus"]["model"] == "Phi-4-mini-instruct-Q4_K_M.gguf"
 
 
 def test_load_model_resolves_local_gguf_by_stem_with_mixed_case_extension(
