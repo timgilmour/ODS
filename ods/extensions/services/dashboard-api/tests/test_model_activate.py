@@ -1240,6 +1240,43 @@ class TestRestartWindowsLemonade:
                 "LEMONADE_EXTERNAL": "true",
             })
 
+    def test_restart_failure_includes_powershell_output(self, monkeypatch, tmp_path):
+        program_files = tmp_path / "Program Files"
+        lemonade_exe = program_files / "Lemonade Server" / "bin" / "LemonadeServer.exe"
+        lemonade_exe.parent.mkdir(parents=True)
+        lemonade_exe.write_text("", encoding="utf-8")
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["capture_output"] = kwargs.get("capture_output")
+            captured["stdout"] = kwargs.get("stdout")
+            captured["stderr"] = kwargs.get("stderr")
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="launch stdout Bearer stdout-secret",
+                stderr="launch stderr LEMONADE_ADMIN_API_KEY=stderr-secret",
+            )
+
+        monkeypatch.setenv("ProgramFiles", str(program_files))
+        monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _restart_windows_lemonade({"AMD_INFERENCE_PORT": "8080"})
+
+        message = str(exc_info.value)
+        assert "Windows Lemonade restart failed with exit code 1" in message
+        assert "launch stderr" in message
+        assert "launch stdout" in message
+        assert "stderr-secret" not in message
+        assert "stdout-secret" not in message
+        assert "[redacted]" in message
+        assert captured["capture_output"] is True
+        assert captured["stdout"] is None
+        assert captured["stderr"] is None
+
 
 # --- Rollback integration ---
 

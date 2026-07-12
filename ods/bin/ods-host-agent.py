@@ -5856,11 +5856,28 @@ if ($launchContract.RequiresRuntimeConfiguration) {
 New-Item -ItemType Directory -Path (Split-Path -Parent $pidPath) -Force | Out-Null
 Set-Content -LiteralPath $pidPath -Value $proc.ProcessId
 '''
+    def summarize_powershell_output(result) -> str:
+        output = "\n".join(
+            part.strip()
+            for part in (getattr(result, "stderr", ""), getattr(result, "stdout", ""))
+            if part and part.strip()
+        ).strip()
+        output = re.sub(
+            r"(?i)(Authorization\s*[:=]\s*Bearer\s+|Bearer\s+)[^\s'\";]+",
+            r"\1[redacted]",
+            output,
+        )
+        output = re.sub(
+            r"(?i)((?:LEMONADE_ADMIN_API_KEY|LITELLM_LEMONADE_API_KEY|api[-_]?key)\s*[=:]\s*)[^\s'\";]+",
+            r"\1[redacted]",
+            output,
+        )
+        return output[-1200:] if output else "no PowerShell output captured"
+
     try:
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             text=True,
             timeout=120,
             env=ps_env,
@@ -5868,7 +5885,16 @@ Set-Content -LiteralPath $pidPath -Value $proc.ProcessId
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Windows Lemonade restart timed out after {exc.timeout} seconds") from exc
     if result.returncode != 0:
-        raise RuntimeError(f"Windows Lemonade restart failed with exit code {result.returncode}")
+        details = summarize_powershell_output(result)
+        logger.error(
+            "Windows Lemonade restart failed with exit code %s: %s",
+            result.returncode,
+            details,
+        )
+        raise RuntimeError(
+            "Windows Lemonade restart failed with exit code "
+            f"{result.returncode}: {details}"
+        )
     logger.info("Windows Lemonade direct process started")
 
 
