@@ -1019,14 +1019,14 @@ function Invoke-ODSHostAgentConfiguredModelActivation {
     if ([string]::IsNullOrWhiteSpace($agentPort)) { $agentPort = "7710" }
 
     $agentHealthUrl = "http://127.0.0.1:$agentPort/health"
-    $agentUrl = "http://127.0.0.1:$agentPort/v1/model/activate"
+    $agentUrl = "http://127.0.0.1:$agentPort/v1/runtime/lemonade/ensure"
     try {
         $null = Invoke-WebRequest -Uri $agentHealthUrl `
             -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
         Write-AI "Loading configured Lemonade model through host agent..."
         $body = @{
             model_id = $modelId
-            runtime_only = $true
+            gguf_file = $ggufFile
         } | ConvertTo-Json -Compress
         $headers = @{ Authorization = "Bearer $agentKey" }
         $null = Invoke-RestMethod -Method Post -Uri $agentUrl `

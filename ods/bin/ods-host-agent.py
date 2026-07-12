@@ -2180,6 +2180,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_model_download_cancel()
         elif self.path == "/v1/model/activate":
             self._handle_model_activate()
+        elif self.path == "/v1/runtime/lemonade/ensure":
+            self._handle_windows_lemonade_runtime_ensure()
         elif self.path == "/v1/model/delete":
             self._handle_model_delete()
         elif self.path == "/v1/compose/invalidate-cache":
@@ -4138,7 +4140,6 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         model_id = body.get("model_id", "")
-        runtime_only = bool(body.get("runtime_only") or body.get("runtimeOnly"))
         if not isinstance(model_id, str) or not model_id.strip():
             json_response(self, 400, {"error": "model_id is required"})
             return
@@ -4164,11 +4165,146 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            self._do_model_activate(model_id, runtime_only=runtime_only)
+            self._do_model_activate(model_id)
         finally:
             _end_model_activation()
 
-    def _do_model_activate(self, model_id: str, *, runtime_only: bool = False):
+    def _handle_windows_lemonade_runtime_ensure(self):
+        """Ensure the configured Windows Lemonade runtime is alive and loaded."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+
+        model_id = body.get("model_id", "")
+        gguf_file = body.get("gguf_file", "")
+        if model_id is not None and not isinstance(model_id, str):
+            json_response(self, 400, {"error": "model_id must be a string"})
+            return
+        if gguf_file is not None and not isinstance(gguf_file, str):
+            json_response(self, 400, {"error": "gguf_file must be a string"})
+            return
+
+        active_id = str(model_id or gguf_file or "configured-lemonade")
+        acquired, active_model_id = _begin_model_activation(active_id)
+        if not acquired:
+            with _model_lifecycle_state_lock:
+                active_operation = _model_lifecycle_operation
+            json_response(
+                self,
+                409,
+                {
+                    "error": (
+                        "Another model activation is in progress"
+                        if active_operation == "model_activation"
+                        else f"Cannot ensure Lemonade runtime while {active_operation or 'another operation'} is in progress"
+                    ),
+                    "code": "model_lifecycle_busy",
+                    "activeOperation": active_operation,
+                    "activeModelId": active_model_id,
+                },
+            )
+            return
+
+        try:
+            self._do_windows_lemonade_runtime_ensure(
+                str(model_id or ""),
+                str(gguf_file or ""),
+            )
+        finally:
+            _end_model_activation()
+
+    def _do_windows_lemonade_runtime_ensure(self, model_id: str = "", gguf_file: str = ""):
+        env_path = INSTALL_DIR / ".env"
+        try:
+            env = load_env(env_path)
+        except (OSError, UnicodeError) as exc:
+            logger.exception("Windows Lemonade runtime ensure could not read .env")
+            json_response(self, 500, {"error": f"Windows Lemonade runtime ensure failed: {exc}"})
+            return
+
+        if not _is_windows_host_lemonade(env):
+            json_response(
+                self,
+                409,
+                {
+                    "error": "Windows Lemonade runtime ensure is only available for host-managed Windows Lemonade installs",
+                    "code": "unsupported_runtime",
+                },
+            )
+            return
+        if not _windows_lemonade_is_managed(env):
+            json_response(
+                self,
+                409,
+                {
+                    "error": "Refusing to manage externally configured Windows Lemonade",
+                    "code": "external_runtime",
+                },
+            )
+            return
+
+        target_gguf = (gguf_file or str(env.get("GGUF_FILE") or "")).strip()
+        if not target_gguf:
+            json_response(self, 400, {"error": "gguf_file is required"})
+            return
+        target = _safe_model_artifact_path(INSTALL_DIR / "data" / "models", target_gguf)
+        if target is None:
+            json_response(self, 400, {"error": "Invalid model file path"})
+            return
+        if not _model_file_ready(target):
+            json_response(self, 400, {"error": f"Model file not downloaded or empty: {target_gguf}"})
+            return
+
+        if _live_runtime_has_model(env, target_gguf) is not True:
+            _restart_windows_lemonade(env)
+
+        lemonade_host, lemonade_port = _lemonade_runtime_address(env)
+        lemonade_model_id = _resolve_lemonade_model_id(
+            env,
+            target_gguf,
+            host=lemonade_host,
+            port=lemonade_port,
+        )
+        if not lemonade_model_id:
+            json_response(
+                self,
+                500,
+                {"error": f"Could not resolve Lemonade model ID for {target_gguf}"},
+            )
+            return
+
+        llm_model_name = str(env.get("LLM_MODEL") or model_id or _local_model_name_from_gguf(target_gguf))
+        if not _wait_for_model_readiness(
+            env,
+            model_id=model_id or llm_model_name,
+            gguf_file=target_gguf,
+            llm_model_name=llm_model_name,
+            lemonade_model_id=lemonade_model_id,
+            initial_delay=0,
+        ):
+            json_response(
+                self,
+                500,
+                {"error": f"Windows Lemonade did not load configured model: {target_gguf}"},
+            )
+            return
+
+        _upsert_env_value(env_path, "LEMONADE_MODEL", lemonade_model_id)
+        _write_lemonade_config(INSTALL_DIR, target_gguf, lemonade_model_id)
+        json_response(
+            self,
+            200,
+            {
+                "status": "ready",
+                "model_id": model_id or llm_model_name,
+                "gguf_file": target_gguf,
+                "lemonade_model_id": lemonade_model_id,
+            },
+        )
+
+    def _do_model_activate(self, model_id: str):
         """Inner activate logic — called with _model_activate_lock held."""
         env_path = INSTALL_DIR / ".env"
         try:
@@ -4674,19 +4810,6 @@ class AgentHandler(BaseHTTPRequestHandler):
 
                 if windows_native_llama:
                     _write_windows_native_litellm_config(INSTALL_DIR, gguf_file, env)
-
-                if runtime_only and windows_host_lemonade:
-                    committed = True
-                    json_response(
-                        self,
-                        200,
-                        {
-                            "status": "activated",
-                            "model_id": model_id,
-                            "runtime_only": True,
-                        },
-                    )
-                    return
 
                 hermes_live_exists = bool(
                     hermes_live_snapshot and hermes_live_snapshot.get("exists")
