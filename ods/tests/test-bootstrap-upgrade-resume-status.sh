@@ -88,6 +88,49 @@ if grep -q 'local lock_dir="$INSTALL_DIR/data/bootstrap-upgrade.lock"' "$TARGET"
 fi
 grep -q 'write_status "downloading" "$percent" "$progress_bytes" "$total_bytes"' "$TARGET" \
     || fail "active bootstrap-status must write clamped progress bytes so UI progress cannot exceed 100%"
+if grep -q 'write_status "downloading" "" 0 0 0 "Another bootstrap model upgrade is already running' "$TARGET"; then
+    fail "duplicate bootstrap-upgrade path must not flatten active download status to zero progress"
+fi
+grep -q 'write_existing_upgrade_status "$existing_pid"' "$TARGET" \
+    || fail "duplicate bootstrap-upgrade path must reconstruct active download progress"
+
+locked_install_dir="$tmp/install-lock-held"
+mkdir -p "$locked_install_dir/data/models" "$locked_install_dir/config/llama-server" "$locked_install_dir/bin" "$tmp/locks"
+cp "$install_dir/.env" "$locked_install_dir/.env"
+printf 'bootstrap model\n' > "$locked_install_dir/data/models/Bootstrap.gguf"
+printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
+    > "$locked_install_dir/data/models/Full.gguf.part"
+
+sleep 30 &
+existing_pid=$!
+trap 'kill "$existing_pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+lock_key="$(printf '%s\0%s' "$locked_install_dir" "Full.gguf" | cksum | awk '{print $1}')"
+lock_dir="$tmp/locks/ods-bootstrap-upgrade-${lock_key}.lock"
+mkdir -p "$lock_dir"
+printf '%s\n' "$existing_pid" > "$lock_dir/pid"
+
+PATH="$fakebin:$PATH" TMPDIR="$tmp/locks" bash "$TARGET" \
+    "$locked_install_dir" \
+    "Full.gguf" \
+    "https://example.invalid/Full.gguf" \
+    "" \
+    "full-model" \
+    "32768" \
+    "Bootstrap.gguf" \
+    > "$tmp/bootstrap-lock-held.log" 2>&1
+
+grep -q '"status": "downloading"' "$locked_install_dir/data/bootstrap-status.json" \
+    || fail "lock-held bootstrap-status must remain downloading"
+grep -q '"bytesDownloaded": 60' "$locked_install_dir/data/bootstrap-status.json" \
+    || fail "lock-held bootstrap-status must report existing partial bytes"
+grep -q '"bytesTotal": 100' "$locked_install_dir/data/bootstrap-status.json" \
+    || fail "lock-held bootstrap-status must report remote size when available"
+grep -q '"percent": 60.0' "$locked_install_dir/data/bootstrap-status.json" \
+    || fail "lock-held bootstrap-status must report existing partial progress"
+grep -q "Continuing existing bootstrap model upgrade (pid $existing_pid)" \
+    "$locked_install_dir/data/bootstrap-status.json" \
+    || fail "lock-held bootstrap-status should identify the controlling upgrade"
+kill "$existing_pid" 2>/dev/null || true
 
 set +e
 PATH="$fakebin:$PATH" ODS_BOOTSTRAP_DOWNLOAD_ATTEMPTS=2 bash "$TARGET" \

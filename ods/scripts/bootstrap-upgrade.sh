@@ -147,6 +147,31 @@ write_failed_download_status() {
     write_status "failed" "$percent" "$downloaded" "$total" 0 "$message"
 }
 
+write_existing_upgrade_status() {
+    local existing_pid="${1:-}" message
+    local part_file="$MODELS_DIR/$FULL_GGUF_FILE.part"
+    local final_file="$MODELS_DIR/$FULL_GGUF_FILE"
+    local downloaded=0 total=0 percent=""
+
+    message="Continuing existing bootstrap model upgrade"
+    [[ -n "$existing_pid" ]] && message="$message (pid $existing_pid)"
+
+    if [[ -f "$final_file" ]]; then
+        downloaded=$(file_size "$final_file")
+        total="$downloaded"
+        percent=100
+    else
+        if [[ -f "$part_file" ]]; then
+            downloaded=$(file_size "$part_file")
+        fi
+        total=$(get_remote_size "$FULL_GGUF_URL")
+        [[ -z "$total" ]] && total=0
+        percent=$(status_percent "$downloaded" "$total")
+    fi
+
+    write_status "downloading" "$percent" "$downloaded" "$total" 0 "$message"
+}
+
 compose_recreate_llama_server_with_retry() {
     local -a compose_args=("$@")
     local max_attempts="${ODS_BOOTSTRAP_COMPOSE_RETRY_ATTEMPTS:-3}"
@@ -199,8 +224,8 @@ acquire_upgrade_lock() {
 
         if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
             log "Another bootstrap model upgrade is already running (pid $existing_pid); leaving it in control."
-            if [[ ! -f "$STATUS_FILE" ]]; then
-                write_status "downloading" "" 0 0 0 "Another bootstrap model upgrade is already running."
+            if [[ ! -f "$STATUS_FILE" ]] || grep -q 'Another bootstrap model upgrade is already running' "$STATUS_FILE" 2>/dev/null; then
+                write_existing_upgrade_status "$existing_pid"
             fi
             exit 0
         fi
