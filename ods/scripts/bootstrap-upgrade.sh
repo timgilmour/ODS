@@ -1747,6 +1747,40 @@ _download_attempts="${ODS_BOOTSTRAP_DOWNLOAD_ATTEMPTS:-6}"
 case "$_download_attempts" in
     ''|*[!0-9]*|0) _download_attempts=6 ;;
 esac
+_download_connect_timeout="${ODS_BOOTSTRAP_DOWNLOAD_CONNECT_TIMEOUT:-30}"
+case "$_download_connect_timeout" in
+    ''|*[!0-9]*|0) _download_connect_timeout=30 ;;
+esac
+_download_speed_time="${ODS_BOOTSTRAP_DOWNLOAD_SPEED_TIME:-120}"
+case "$_download_speed_time" in
+    ''|*[!0-9]*|0) _download_speed_time=120 ;;
+esac
+_download_speed_limit="${ODS_BOOTSTRAP_DOWNLOAD_SPEED_LIMIT:-262144}"
+case "$_download_speed_limit" in
+    ''|*[!0-9]*|0) _download_speed_limit=262144 ;;
+esac
+_download_http_version="${ODS_BOOTSTRAP_DOWNLOAD_HTTP_VERSION:-http1.1}"
+_download_transport_label="auto"
+_download_curl_http_flags=()
+case "$_download_http_version" in
+    ""|auto|AUTO|Auto)
+        _download_transport_label="auto"
+        ;;
+    1|1.1|http1|HTTP1|http1.1|HTTP1.1)
+        _download_transport_label="http1.1"
+        _download_curl_http_flags=(--http1.1)
+        ;;
+    2|http2|HTTP2)
+        _download_transport_label="http2"
+        _download_curl_http_flags=(--http2)
+        ;;
+    *)
+        log "Unknown ODS_BOOTSTRAP_DOWNLOAD_HTTP_VERSION=${_download_http_version}; using http1.1."
+        _download_transport_label="http1.1"
+        _download_curl_http_flags=(--http1.1)
+        ;;
+esac
+log "Download transport: curl ${_download_transport_label}, connect timeout ${_download_connect_timeout}s, speed floor ${_download_speed_limit} B/s for ${_download_speed_time}s"
 
 if [[ -f "$_final_path" ]]; then
     acquire_model_lifecycle_lock || fail "Could not serialize full-model finalization."
@@ -1800,7 +1834,9 @@ if [[ "$_dl_success" != "true" ]]; then
             # Let this script own retry/resume. curl's internal retry path can
             # restart the transfer from byte zero after a long connection reset,
             # truncating an otherwise good multi-GB .part file.
-            if curl -fSL -C - --connect-timeout 30 --speed-time 300 --speed-limit 1024 \
+            if curl -fSL -C - --connect-timeout "$_download_connect_timeout" \
+                    --speed-time "$_download_speed_time" --speed-limit "$_download_speed_limit" \
+                    "${_download_curl_http_flags[@]}" \
                     -o "$_part_path" "$FULL_GGUF_URL" 2>&1; then
                 if [[ ! -s "$_part_path" ]]; then
                     log "Download attempt $_attempt reported success but produced no partial file: $_part_path"

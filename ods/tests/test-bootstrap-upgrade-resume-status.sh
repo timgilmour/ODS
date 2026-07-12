@@ -81,6 +81,15 @@ printf '999999\n' > "$install_dir/data/.llama-server.pid"
 if grep -Eq -- '--retry|--retry-all-errors|--max-time[[:space:]]+3600' "$TARGET"; then
     fail "bootstrap-upgrade long GGUF curl should rely on script-level retry/resume, not curl internal retry"
 fi
+grep -q 'ODS_BOOTSTRAP_DOWNLOAD_SPEED_LIMIT' "$TARGET" \
+    || fail "bootstrap-upgrade download speed floor must be operator-configurable"
+grep -q 'ODS_BOOTSTRAP_DOWNLOAD_HTTP_VERSION' "$TARGET" \
+    || fail "bootstrap-upgrade HTTP transport must be operator-configurable"
+grep -q -- '--http1.1' "$TARGET" \
+    || fail "bootstrap-upgrade should prefer HTTP/1.1 after observed HuggingFace HTTP/2 stream cancels"
+if grep -q -- '--speed-time 300 --speed-limit 1024' "$TARGET"; then
+    fail "bootstrap-upgrade must not allow multi-day stalled model downloads by default"
+fi
 grep -q 'ods-bootstrap-upgrade-' "$TARGET" \
     || fail "bootstrap-upgrade lock must live outside install data so reinstall cannot erase it"
 if grep -q 'local lock_dir="$INSTALL_DIR/data/bootstrap-upgrade.lock"' "$TARGET"; then
