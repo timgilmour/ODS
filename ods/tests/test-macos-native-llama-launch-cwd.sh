@@ -52,6 +52,12 @@ grep -qF 'com.ods.full-model-download' "$installer" \
     || fail "macOS installer must unload legacy full-model-download LaunchAgent"
 pass "macOS installer clears legacy native llama LaunchAgents"
 
+grep -qF 'lsof -a -p "$pid" -d cwd -Fn' "$installer" \
+    || fail "macOS installer must inspect cwd for relative native llama-server launches"
+grep -qF './bin/llama-server*|bin/llama-server*' "$installer" \
+    || fail "macOS installer must treat relative install-dir llama-server processes as owned"
+pass "macOS installer reaps relative-path native llama processes"
+
 bridge="$ROOT_DIR/bin/ods-macos-llm-bridge.py"
 bridge_manager="$ROOT_DIR/installers/macos/lib/bridge-manager.sh"
 env_generator="$ROOT_DIR/installers/macos/lib/env-generator.sh"

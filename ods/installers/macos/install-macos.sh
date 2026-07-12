@@ -659,12 +659,21 @@ BOOTSTRAP_LAUNCH_PY
 }
 
 _macos_native_llama_pid_is_owned() {
-    local pid="$1" command_line process_name
+    local pid="$1" command_line process_name process_cwd
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     process_name="$(ps -ww -p "$pid" -o comm= 2>/dev/null || true)"
     command_line="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
     [[ "${process_name##*/}" == "llama-server" ]] || return 1
-    [[ -n "${LLAMA_SERVER_BIN:-}" && "$command_line" == *"$LLAMA_SERVER_BIN"* ]]
+    if [[ -n "${LLAMA_SERVER_BIN:-}" && "$command_line" == *"$LLAMA_SERVER_BIN"* ]]; then
+        return 0
+    fi
+    case "$command_line" in
+        ./bin/llama-server*|bin/llama-server*)
+            process_cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+            [[ -n "$process_cwd" && "$process_cwd" == "$INSTALL_DIR" ]]
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 _macos_stop_install_owned_native_llama() {
