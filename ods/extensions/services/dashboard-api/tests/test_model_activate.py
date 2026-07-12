@@ -1223,6 +1223,18 @@ class TestRestartWindowsLemonade:
             assert "-ExecutionTimeLimit ([TimeSpan]::Zero)" in task_block, source_name
             assert "-Settings $lemonadeSettings" in task_block, source_name
 
+    def test_windows_cli_restart_waits_for_configured_lemonade_model(self):
+        ods_root = Path(__file__).resolve().parents[4]
+        source = (ods_root / "installers" / "windows" / "ods.ps1").read_text(
+            encoding="utf-8",
+        )
+
+        assert "function Wait-ODSLemonadeConfiguredModel" in source
+        assert "Resolve-ODSLemonadeModelId -Port $script:LEMONADE_PORT" in source
+        assert "/api/v1/chat/completions" in source
+        assert "Test-ODSLemonadeLoadedModelMatches" in source
+        assert "Wait-ODSLemonadeConfiguredModel -EnvVars $envVars" in source
+
     def test_refuses_externally_managed_runtime_before_process_discovery(
         self, monkeypatch, tmp_path,
     ):

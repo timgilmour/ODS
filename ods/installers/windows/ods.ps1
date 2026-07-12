@@ -883,6 +883,105 @@ function Start-ODSLemonadeRuntime {
     return [int]$proc.ProcessId
 }
 
+function Test-ODSLemonadeLoadedModelMatches {
+    param(
+        [string]$LoadedModel,
+        [string]$ExpectedModelId,
+        [string]$GgufFile
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LoadedModel)) { return $false }
+    $targetFile = [IO.Path]::GetFileName($GgufFile)
+    if ([string]::IsNullOrWhiteSpace($targetFile)) { return $false }
+    $targetStem = [IO.Path]::GetFileNameWithoutExtension($targetFile)
+
+    $actualValues = New-Object System.Collections.Generic.List[string]
+    $normalizedLoaded = ([string]$LoadedModel).Replace('\', '/').Trim()
+    $actualValues.Add($normalizedLoaded)
+    $loadedLeaf = ($normalizedLoaded -split '/')[-1]
+    $actualValues.Add($loadedLeaf)
+    if ($loadedLeaf.Contains(':')) {
+        $actualValues.Add(($loadedLeaf -split ':')[-1])
+    }
+    $actualValues.Add(($loadedLeaf -replace '^(extra|user)[\.\:_-]', ''))
+
+    $expectedValues = @(
+        $ExpectedModelId,
+        $targetFile,
+        $targetStem,
+        "extra.$targetFile"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+
+    foreach ($actual in @($actualValues)) {
+        foreach ($expected in @($expectedValues)) {
+            if ([string]$actual -and [string]$expected -and
+                ([string]$actual).Equals([string]$expected, [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Wait-ODSLemonadeConfiguredModel {
+    param([hashtable]$EnvVars)
+
+    $ggufFile = $EnvVars["GGUF_FILE"]
+    if ([string]::IsNullOrWhiteSpace($ggufFile)) { return }
+
+    $modelPath = Join-Path (Join-Path $InstallDir "data\models") $ggufFile
+    if (-not (Test-Path -LiteralPath $modelPath -PathType Leaf)) {
+        throw "Configured Lemonade model file is missing: $modelPath"
+    }
+
+    $modelId = $EnvVars["LEMONADE_MODEL"]
+    try {
+        $modelId = Resolve-ODSLemonadeModelId -Port $script:LEMONADE_PORT -GgufFile $ggufFile
+    } catch {
+        if ([string]::IsNullOrWhiteSpace($modelId)) {
+            $modelId = [IO.Path]::GetFileNameWithoutExtension($ggufFile)
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($modelId)) {
+        $modelId = [IO.Path]::GetFileNameWithoutExtension($ggufFile)
+    }
+
+    $chatUrl = "http://127.0.0.1:$($script:LEMONADE_PORT)/api/v1/chat/completions"
+    $payload = @{
+        model = $modelId
+        messages = @(@{ role = "user"; content = "hello" })
+        max_tokens = 1
+    } | ConvertTo-Json -Depth 5 -Compress
+
+    $lastError = ""
+    for ($i = 0; $i -lt 60; $i++) {
+        try {
+            $health = Invoke-RestMethod -Method Get -Uri $script:LEMONADE_HEALTH_URL `
+                -TimeoutSec 5 -ErrorAction Stop
+            if (Test-ODSLemonadeLoadedModelMatches `
+                    -LoadedModel ([string]$health.model_loaded) `
+                    -ExpectedModelId $modelId `
+                    -GgufFile $ggufFile) {
+                Write-AISuccess "Lemonade model ready ($modelId)"
+                return
+            }
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+
+        try {
+            $null = Invoke-RestMethod -Method Post -Uri $chatUrl `
+                -ContentType "application/json" -Body $payload `
+                -TimeoutSec 30 -ErrorAction Stop
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+        Start-Sleep -Seconds 5
+    }
+
+    throw "Lemonade did not load configured model '$ggufFile' using request id '$modelId'. Last error: $lastError"
+}
+
 # Backward-compat alias
 function Get-NativeLlamaStatus { return Get-NativeInferenceStatus }
 
@@ -914,9 +1013,10 @@ function Start-NativeInferenceServer {
             Start-Sleep -Seconds 2; $waited += 2
             try {
                 $resp = Invoke-WebRequest -Uri $script:LEMONADE_HEALTH_URL `
-                    -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
+                -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
                 if ($resp.StatusCode -eq 200) {
                     Write-AISuccess "Lemonade server healthy"
+                    Wait-ODSLemonadeConfiguredModel -EnvVars $envVars
                     return
                 }
             } catch { }
