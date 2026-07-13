@@ -38,10 +38,6 @@
         "openai_chat": {
           "status": "verified",
           "reason": "Fleet diagnostic on m5-mbp at 42b3a95c returned the requested verification code in 4/4 direct OpenAI-compatible chat completions."
-        },
-        "hermes_talk": {
-          "status": "unsupported_until_revalidated",
-          "reason": "m5-mbp model UI cycle 002 at 42b3a95c loaded Phi-4 Mini successfully, but ODS Talk/Hermes returned a memory-tool style response instead of the requested verification code. Direct chat remained healthy, so treat this as an app/model compatibility gap, not a runtime failure."
         }
       }
     },
