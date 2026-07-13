@@ -174,6 +174,47 @@ assert_contains "$pip_runtime_calls" 'pkg_update' "Python pip guard did not upda
 assert_contains "$pip_runtime_calls" 'pkg_install:python3-pip' "Python pip guard did not install missing python3-pip"
 assert_contains "$pip_runtime_out" 'OK Test pip available' "Python pip guard did not re-check pip after install"
 
+echo "[contract] Linux Python user-site pip installs handle PEP 668"
+pep668_out="$tmpdir/python-pep668.out"
+bash -c '
+  set -euo pipefail
+  ROOT_DIR="$1"
+  tmpdir="$2"
+  cd "$ROOT_DIR"
+
+  SCRIPT_DIR="$ROOT_DIR"
+  LOG_FILE="$tmpdir/pep668.log"
+  DRY_RUN=false
+  INTERACTIVE=false
+  PKG_MANAGER=apt
+
+  ai() { :; }
+  ai_ok() { :; }
+  ai_warn() { :; }
+  ai_bad() { :; }
+  error() { echo "ERROR $*" >&2; exit 1; }
+
+  fake_py="$tmpdir/fake-python-pep668"
+  cat > "$fake_py" <<PYEOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-m" && "\${2:-}" == "pip" && "\${3:-}" == "install" ]]; then
+  if printf "%s\n" "\$@" | grep -q -- "--break-system-packages"; then
+    echo "break-system-packages-used" >> "$tmpdir/pep668.calls"
+    exit 0
+  fi
+  echo "externally-managed-environment" >&2
+  exit 1
+fi
+exit 99
+PYEOF
+  chmod +x "$fake_py"
+
+  source installers/lib/python-runtime.sh
+  ods_python_pip_install_user "$fake_py" "$LOG_FILE" "huggingface_hub[hf_xet]>=0.27"
+  cat "$tmpdir/pep668.calls"
+' bash "$ROOT_DIR" "$tmpdir" >"$pep668_out"
+assert_contains "$pep668_out" 'break-system-packages-used' "Python pip install helper did not retry with --break-system-packages"
+
 echo "[contract] public bootstrap supports non-gnu Linux OSTYPE and zypper prerequisites"
 bootstrap="get-ods.sh"
 assert_contains "$bootstrap" '\$\{OSTYPE:-\}' "bootstrap should guard OSTYPE when detecting Linux"
@@ -237,7 +278,9 @@ macos_ui="installers/macos/lib/ui.sh"
 macos_installer="installers/macos/install-macos.sh"
 assert_contains "$linux_services" 'download-hf-artifact.py' "Linux bootstrap model download should fall back to Hugging Face client for Xet-backed artifacts"
 assert_contains "$linux_services" 'ods_ensure_python_pip' "Linux Hugging Face fallback should install pip before Python package dependencies"
+assert_contains "$linux_services" 'ods_python_pip_install_user' "Linux Hugging Face fallback should tolerate PEP 668 user-site installs"
 assert_contains "installers/phases/07-devtools.sh" 'ods_ensure_python_pip' "Linux host-agent downloader dependency install should install pip first"
+assert_contains "installers/phases/07-devtools.sh" '--break-system-packages' "Linux host-agent downloader dependency install should tolerate PEP 668 user-site installs"
 assert_contains "$macos_ui" 'curl -C - -L --progress-bar' "macOS bootstrap model download should preserve curl resume support"
 assert_contains "$macos_ui" 'ODS_DOWNLOAD_CONNECT_TIMEOUT:-30' "macOS bootstrap model download should allow configurable connect timeout"
 assert_contains "$macos_ui" 'ODS_DOWNLOAD_LOW_SPEED_TIME:-120' "macOS bootstrap model download should fail/retry stalled transfers promptly"
