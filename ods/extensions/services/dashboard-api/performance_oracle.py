@@ -187,11 +187,47 @@ def normalize_catalog_entry(raw: dict[str, Any]) -> dict[str, Any] | None:
         "active_params_b": raw.get("active_params_b"),
         "tokens_per_sec_estimate": raw.get("tokens_per_sec_estimate"),
         "runtime_profiles": raw.get("runtime_profiles") if isinstance(raw.get("runtime_profiles"), list) else [],
+        "app_compatibility": raw.get("app_compatibility") if isinstance(raw.get("app_compatibility"), dict) else {},
         "aliases": sorted(aliases),
     }
     if raw.get("decode_read_mb"):
         model["decode_read_mb"] = raw["decode_read_mb"]
     return model
+
+
+def _app_compatibility_entry(raw: Any, default_label: str) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        status = str(raw.get("status") or "unknown").strip() or "unknown"
+        label = str(raw.get("label") or default_label).strip() or default_label
+        reason = str(raw.get("reason") or "").strip()
+        evidence = str(raw.get("evidence") or "").strip()
+    elif isinstance(raw, str) and raw.strip():
+        status = raw.strip()
+        label = default_label
+        reason = ""
+        evidence = ""
+    else:
+        status = "unknown"
+        label = default_label
+        reason = ""
+        evidence = ""
+
+    payload = {
+        "status": normalize_key(status).replace("-", "_") or "unknown",
+        "label": label,
+        "reason": reason,
+    }
+    if evidence:
+        payload["evidence"] = evidence
+    return payload
+
+
+def model_app_compatibility(model: dict[str, Any]) -> dict[str, Any]:
+    raw = model.get("app_compatibility") if isinstance(model.get("app_compatibility"), dict) else {}
+    return {
+        "openaiChat": _app_compatibility_entry(raw.get("openai_chat"), "Direct chat untested"),
+        "hermesTalk": _app_compatibility_entry(raw.get("hermes_talk"), "ODS Talk untested"),
+    }
 
 
 def load_model_catalog(install_dir: str | Path) -> list[dict[str, Any]]:
@@ -1048,6 +1084,7 @@ def build_models_payload(gpu_info: Optional[GPUInfo], loaded_model: Optional[str
                 "expertCount": metadata.get("expert_count"),
                 "expertUsedCount": metadata.get("expert_used_count"),
             },
+            "appCompatibility": model_app_compatibility(model),
             "status": "loaded" if is_loaded else status_if_not_loaded,
             "recommended": is_recommended,
             "configured": is_configured,

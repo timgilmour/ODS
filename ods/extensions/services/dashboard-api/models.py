@@ -175,6 +175,7 @@ class ModelLibraryEntry(BaseModel):
     architecture: Optional[str] = None
     activeParamsB: Optional[float] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    appCompatibility: dict[str, Any] = Field(default_factory=dict)
     status: str  # "loaded", "downloaded", "available"
     recommended: bool = False
     configured: bool = False

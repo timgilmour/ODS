@@ -227,6 +227,38 @@ test('blocks low-context downloaded models from becoming the active agent model'
   expect(deleteModel).toHaveBeenCalledWith('qwen3.5-9b-q4')
 })
 
+test('blocks explicit Talk-incompatible models even when context is high', () => {
+  const loadModel = vi.fn()
+  const deleteModel = vi.fn()
+  useModelsMock.mockReturnValue(baseState({
+    loadModel,
+    deleteModel,
+    models: [model({
+      name: 'Phi-4 Mini',
+      status: 'downloaded',
+      contextLength: 128000,
+      appCompatibility: {
+        hermesTalk: {
+          status: 'unsupported_until_revalidated',
+          reason: 'Direct chat works, but ODS Talk failed validation.',
+        },
+      },
+    })],
+  }))
+
+  renderModels()
+
+  const runButton = screen.getByRole('button', { name: /not talk ready/i })
+  expect(runButton).toBeDisabled()
+  expect(runButton).toHaveAttribute('title', 'Direct chat works, but ODS Talk failed validation.')
+  fireEvent.click(runButton)
+  expect(loadModel).not.toHaveBeenCalled()
+  expect(screen.getByText('Direct chat only')).toBeInTheDocument()
+
+  const deleteButton = screen.getByRole('button', { name: /delete phi-4 mini$/i })
+  expect(deleteButton).toBeEnabled()
+})
+
 test('keeps Download available in cloud mode', () => {
   const downloadModel = vi.fn()
   useModelsMock.mockReturnValue(baseState({

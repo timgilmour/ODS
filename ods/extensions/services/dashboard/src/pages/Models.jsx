@@ -786,7 +786,10 @@ function PrimaryAction({
   if (isDownloaded) {
     const runDisabled = Boolean(runDisabledReason)
     const contextBlocked = isAgentContextDisabledReason(runDisabledReason)
-    const buttonLabel = contextBlocked ? `Needs ${formatContext(hermesMinimumContext)}` : 'Run'
+    const compatibilityBlocked = isHermesTalkBlocked(getHermesTalkCompatibility(model))
+    const buttonLabel = contextBlocked
+      ? `Needs ${formatContext(hermesMinimumContext)}`
+      : compatibilityBlocked ? 'Not Talk Ready' : 'Run'
     return (
       <span className="inline-flex" title={runDisabledReason || `Run ${model.name}`}>
         <button
@@ -800,7 +803,7 @@ function PrimaryAction({
               : 'cursor-not-allowed border border-white/[0.08] bg-black/20 text-theme-text-muted'
           }`}
         >
-          {contextBlocked ? <AlertCircle size={13} /> : <Play size={13} />}
+          {contextBlocked || compatibilityBlocked ? <AlertCircle size={13} /> : <Play size={13} />}
           {buttonLabel}
         </button>
       </span>
@@ -1056,6 +1059,10 @@ function getRunDisabledReason({
   if (minimumContext > 0 && contextLength > 0 && contextLength < minimumContext) {
     return `Hermes Agent requires at least ${formatContext(minimumContext)} context; this model has ${formatContext(contextLength)}.`
   }
+  const talkCompatibility = getHermesTalkCompatibility(model)
+  if (isHermesTalkBlocked(talkCompatibility)) {
+    return talkCompatibility.reason || 'ODS Talk is not currently compatible with this model.'
+  }
   if (model.fitsVram !== true) {
     const required = Number(model.estimatedRequired || model.vramRequired || 0)
     const total = Number(gpu?.vramTotal || 0)
@@ -1286,11 +1293,43 @@ function getCompatibilityMeta(model, memory) {
       tone: nearLimit ? 'amber' : 'red',
     }
   }
+  const talkCompatibility = getHermesTalkCompatibility(model)
+  if (isHermesTalkBlocked(talkCompatibility)) {
+    return {
+      label: 'Direct chat only',
+      detail: 'Talk blocked',
+      tone: 'amber',
+    }
+  }
+  if (isHermesTalkVerified(talkCompatibility)) {
+    return { label: 'Talk ready', detail: model.recommended || model.status === 'loaded' ? 'Best' : 'Verified', tone: 'green' }
+  }
   if (model.recommended || model.status === 'loaded') {
     return { label: model.fitLabel || 'Fits GPU', detail: 'Best', tone: 'green' }
   }
   if (memory.percent > 82) return { label: model.fitLabel || 'Fits GPU', detail: 'Good', tone: 'green' }
   return { label: model.fitLabel || 'Fits GPU', detail: memory.percent < 45 ? 'Excellent' : 'Good', tone: 'green' }
+}
+
+function getHermesTalkCompatibility(model) {
+  return model?.appCompatibility?.hermesTalk || null
+}
+
+function isHermesTalkBlocked(compatibility) {
+  const status = String(compatibility?.status || '').toLowerCase()
+  return [
+    'blocked',
+    'incompatible',
+    'not_recommended',
+    'not_supported',
+    'unsupported',
+    'unsupported_until_revalidated',
+  ].includes(status)
+}
+
+function isHermesTalkVerified(compatibility) {
+  const status = String(compatibility?.status || '').toLowerCase()
+  return ['supported', 'verified'].includes(status)
 }
 
 function getSpeedDisplay(model) {
@@ -1356,6 +1395,7 @@ function getModelTags(model, hermesMinimumContext) {
 
 function getIconTone(model, compatibility) {
   if (!model?.fitsVram) return { border: 'border-orange-400/35', bg: 'bg-orange-500/10', text: 'text-orange-400' }
+  if (compatibility.tone === 'amber') return { border: 'border-amber-400/35', bg: 'bg-amber-500/10', text: 'text-amber-300' }
   if (compatibility.detail === 'Best') return { border: 'border-theme-accent/35', bg: 'bg-theme-accent/10', text: 'text-theme-accent' }
   return { border: 'border-emerald-400/30', bg: 'bg-emerald-500/10', text: 'text-emerald-400' }
 }

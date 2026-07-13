@@ -120,11 +120,17 @@ export default function ODSTalk() {
       if (!resp.ok) throw new Error(await parseError(resp, 'ODS Talk is not ready.'))
       const data = await resp.json()
       const capabilities = data.capabilities || {}
+      const compatibilityReason = data.reason || data.modelCompatibility?.hermesTalk?.reason || ''
       setVoiceState({
         tts: Boolean(capabilities.tts),
         audioMessage: Boolean(capabilities.audio_message),
         liveMic: Boolean(liveMicSupported && capabilities.audio_message),
       })
+      if (!capabilities.text_chat) {
+        setStatus('offline')
+        setStatusText(compatibilityReason || 'ODS Talk text chat is not available.')
+        return
+      }
       setStatus('ready')
       setStatusText('Ready')
     } catch (err) {
@@ -333,7 +339,7 @@ export default function ODSTalk() {
     // prompt for images ("Describe what you see in this image."). Without
     // either a caption or an attachment, there's nothing to send.
     if (!clean && !attachment) return
-    if (sending || status === 'expired') return
+    if (sending || status !== 'ready') return
     setSending(true)
 
     const userId = transcriptId || makeId('user')
@@ -605,7 +611,7 @@ export default function ODSTalk() {
 
   // Send is enabled either with text OR an attachment (an image alone is a
   // valid message — the model gets a default "describe this" prompt).
-  const canSend = (input.trim().length > 0 || pendingAttachment) && !sending && status !== 'expired'
+  const canSend = (input.trim().length > 0 || pendingAttachment) && !sending && status === 'ready'
 
   return (
     <div className="min-h-dvh bg-[#f8faf8] text-zinc-950 antialiased">
@@ -663,7 +669,7 @@ export default function ODSTalk() {
 
         {status === 'offline' && (
           <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
-            ODS Talk cannot reach its local services. Try again after the box finishes starting.
+            {statusText || 'ODS Talk cannot reach its local services. Try again after the box finishes starting.'}
           </div>
         )}
 

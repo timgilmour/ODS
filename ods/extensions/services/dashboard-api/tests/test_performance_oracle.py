@@ -169,6 +169,34 @@ def test_build_models_payload_uses_official_model_library(data_dir, tmp_path):
     assert payload["models"][0]["llmModelName"] == "phi-4-mini"
 
 
+def test_model_payload_projects_explicit_app_compatibility(data_dir, tmp_path):
+    install_dir = tmp_path / "ods"
+    (install_dir / "data" / "models").mkdir(parents=True)
+    catalog = [{
+        "id": "phi4-mini-q4",
+        "name": "Phi-4 Mini",
+        "gguf_file": "Phi-4-mini-instruct-Q4_K_M.gguf",
+        "size_mb": 2490,
+        "vram_required_gb": 4,
+        "context_length": 128000,
+        "quantization": "Q4_K_M",
+        "specialty": "Balanced",
+        "description": "Compact 128K model.",
+        "llm_model_name": "phi-4-mini",
+        "app_compatibility": {
+            "openai_chat": {"status": "verified", "reason": "direct chat passed"},
+            "hermes_talk": {"status": "unsupported_until_revalidated", "reason": "Talk proof failed"},
+        },
+    }]
+
+    payload = build_models_payload(_gpu(), None, 0, install_dir, data_dir, catalog=catalog, evidence=[])
+
+    compatibility = payload["models"][0]["appCompatibility"]
+    assert compatibility["openaiChat"]["status"] == "verified"
+    assert compatibility["hermesTalk"]["status"] == "unsupported_until_revalidated"
+    assert compatibility["hermesTalk"]["reason"] == "Talk proof failed"
+
+
 def test_installer_recommended_model_survives_bootstrap_env(data_dir, tmp_path):
     install_dir = tmp_path / "ods"
     (install_dir / "data" / "models").mkdir(parents=True)
