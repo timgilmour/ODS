@@ -23,6 +23,66 @@ EXTENSIONS_DIR = Path(
 
 DEFAULT_SERVICE_HOST = os.environ.get("SERVICE_HOST", "host.docker.internal")
 GPU_BACKEND = os.environ.get("GPU_BACKEND", "nvidia")
+ODS_MODES = frozenset({"local", "cloud", "hybrid", "lemonade"})
+LOCAL_MODEL_MODES = frozenset({"local", "hybrid", "lemonade"})
+LLM_CONTRACT_ROUTES = frozenset({"gateway", "direct"})
+LLM_CONTRACT_PINNING = frozenset({"none", "dynamic"})
+
+
+def normalize_ods_mode(value: Any) -> str:
+    """Return a supported ODS mode or ``unknown`` for missing/invalid input."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in ODS_MODES else "unknown"
+
+
+def normalize_llm_contract(value: Any) -> dict[str, Any] | None:
+    """Normalize a manifest ``llm`` contract for API and harness consumers."""
+    if not isinstance(value, dict):
+        return None
+
+    consumes = bool(value.get("consumes", False))
+    route = str(value.get("route") or "").strip().lower()
+    pinning = str(value.get("pinning") or "").strip().lower()
+    if route not in LLM_CONTRACT_ROUTES:
+        route = "direct" if consumes else ""
+    if pinning not in LLM_CONTRACT_PINNING:
+        pinning = "none"
+
+    normalized: dict[str, Any] = {
+        "consumes": consumes,
+        "route": route,
+        "pinning": pinning,
+    }
+
+    min_context = value.get("min_context")
+    if min_context is not None:
+        try:
+            normalized["min_context"] = max(0, int(min_context))
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid llm.min_context value: %r", min_context)
+
+    probe = value.get("probe")
+    if isinstance(probe, dict):
+        normalized["probe"] = probe.copy()
+
+    swap_safe = bool(consumes and (route == "gateway" or pinning == "dynamic"))
+    normalized["swap_safe"] = swap_safe
+    normalized["badge"] = "swap-safe" if swap_safe else "not-swap-safe"
+    if not consumes:
+        normalized["swap_safe_reason"] = "This service does not declare LLM inference consumption."
+    elif route == "gateway":
+        normalized["swap_safe_reason"] = "Routes through the ODS gateway alias and follows model swaps automatically."
+    elif pinning == "dynamic":
+        normalized["swap_safe_reason"] = "Declares a dynamic model refresh path and is re-probed after swaps."
+    else:
+        normalized["swap_safe_reason"] = "Direct model route without a declared refresh path; swaps may require reconciliation."
+
+    return normalized
+
+
+# This is the mode of the running dashboard-api container. Unlike the mounted
+# .env file, the process environment is fixed until the service is recreated.
+ODS_MODE_EFFECTIVE = normalize_ods_mode(os.environ.get("ODS_MODE"))
 
 
 def _read_env_from_file(key: str) -> str:
@@ -119,7 +179,7 @@ def load_extension_manifests(
                 else:
                     external_port = int(ext_port_default)
 
-                services[service_id] = {
+                service_config = {
                     "host": host,
                     "port": int(service.get("port", 0)),
                     "external_port": external_port,
@@ -137,6 +197,10 @@ def load_extension_manifests(
                     **({"type": service["type"]} if "type" in service else {}),
                     **({"health_port": int(service["health_port"])} if "health_port" in service else {}),
                 }
+                llm_contract = normalize_llm_contract(service.get("llm"))
+                if llm_contract is not None:
+                    service_config["llm"] = llm_contract
+                services[service_id] = service_config
 
             manifest_features = manifest.get("features", [])
             if isinstance(manifest_features, list):

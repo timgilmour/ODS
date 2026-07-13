@@ -876,6 +876,31 @@ class TestApiStatusServiceSerialization:
         assert serialized[0]["severity"] == "disabled"
         assert serialized[0]["countsAsIssue"] is False
 
+    def test_serialize_services_includes_llm_contract(self, monkeypatch):
+        from models import ServiceStatus
+        llm_contract = {
+            "consumes": True,
+            "route": "gateway",
+            "pinning": "none",
+            "swap_safe": True,
+        }
+        monkeypatch.setattr("main.SERVICES", {
+            "open-webui": {"category": "core", "llm": llm_contract},
+        })
+        services = [
+            ServiceStatus(
+                id="open-webui",
+                name="Open WebUI (Chat)",
+                port=8080,
+                external_port=3000,
+                status="healthy",
+            )
+        ]
+
+        serialized = _serialize_services(services, uptime=42)
+
+        assert serialized[0]["llm"] == llm_contract
+
     def test_optional_unknown_does_not_count_as_issue(self, monkeypatch):
         from models import ServiceStatus
         monkeypatch.setattr("main.SERVICES", {
@@ -922,6 +947,27 @@ class TestApiStatusServiceSerialization:
             "severity": "critical",
             "countsAsIssue": True,
         }]
+
+    def test_fallback_services_include_llm_contract(self, monkeypatch):
+        llm_contract = {
+            "consumes": True,
+            "route": "direct",
+            "pinning": "none",
+            "swap_safe": False,
+        }
+        monkeypatch.setattr("main.SERVICES", {
+            "openclaw": {
+                "name": "OpenClaw",
+                "port": 18789,
+                "external_port": 7860,
+                "category": "optional",
+                "llm": llm_contract,
+            }
+        })
+
+        serialized = _fallback_services()
+
+        assert serialized[0]["llm"] == llm_contract
 
 
 # --- /api/status fallback on exception ---

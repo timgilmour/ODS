@@ -634,6 +634,9 @@ def _serialize_services(service_statuses: list[ServiceStatus], uptime: int) -> l
             "port": service.external_port,
             "uptime": uptime if service.status == "healthy" else None,
         }
+        llm_contract = SERVICES.get(service.id, {}).get("llm")
+        if isinstance(llm_contract, dict):
+            item["llm"] = llm_contract
         item.update(_service_semantics(service.id, service.status))
         serialized.append(item)
     return serialized
@@ -652,6 +655,9 @@ def _fallback_services() -> list[dict]:
             "port": external_port,
             "uptime": None,
         }
+        llm_contract = config.get("llm")
+        if isinstance(llm_contract, dict):
+            item["llm"] = llm_contract
         item.update(_service_semantics(service_id, "unknown"))
         links.append(item)
     return links
