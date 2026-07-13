@@ -56,3 +56,21 @@ def test_release_model_switchboard_catalog_ids_exist():
     ids = {model["id"] for model in catalog["models"]}
 
     assert expected <= ids
+
+
+def test_new_switchboard_models_do_not_change_install_recommendations():
+    expected_switchboard_only = {
+        "phi3.5-mini-q4",
+        "llama3.2-3b-instruct-q4",
+        "qwen2.5-coder-3b-128k-q4",
+        "qwen2.5-7b-instruct-q4",
+        "llama3.1-8b-instruct-q4",
+        "granite3.3-8b-instruct-q4",
+        "mistral-nemo-12b-instruct-q4",
+    }
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+    by_id = {model["id"]: model for model in catalog["models"]}
+
+    assert expected_switchboard_only <= set(by_id)
+    for model_id in expected_switchboard_only:
+        assert by_id[model_id].get("install_recommendation") is False, model_id
