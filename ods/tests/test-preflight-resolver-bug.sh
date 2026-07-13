@@ -4,6 +4,9 @@
 # ============================================================================
 set -euo pipefail
 
+# Derive ODS root directory from test file location
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # Create temporary directory layout
 TEMP_WORKSPACE="$(mktemp -d)"
 trap 'rm -rf "$TEMP_WORKSPACE"' EXIT
@@ -21,7 +24,7 @@ ods_detect_python_cmd() {
 EOF
 
 # Copy the real preflight-engine.sh to our mock location
-cp ods/scripts/preflight-engine.sh "$TEMP_ODS/scripts/"
+cp "$ROOT_DIR/scripts/preflight-engine.sh" "$TEMP_ODS/scripts/"
 
 # Create a mock python script that preflight-engine.sh should run
 MOCK_PYTHON_BIN="$TEMP_WORKSPACE/mock_python"
