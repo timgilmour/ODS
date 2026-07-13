@@ -399,6 +399,64 @@ def test_already_active_model_uses_env_file_before_stale_process_env(
     assert loaded_model == "extra.Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 
 
+def test_load_model_noops_lemonade_active_identity_without_chat_probe(
+    test_client,
+    monkeypatch,
+    tmp_path,
+):
+    models_router, install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    _write_model_library(install_dir, [{
+        "id": "qwen3.6-35b-a3b-ud-q4",
+        "name": "Qwen 3.6 35B-A3B UD",
+        "gguf_file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "size_mb": 21616,
+        "vram_required_gb": 24,
+        "context_length": 131072,
+        "quantization": "Q4_K_M",
+        "specialty": "Quality",
+        "description": "Large active Lemonade model.",
+        "llm_model_name": "qwen3.6-35b-a3b",
+    }])
+    (data_dir / "models" / "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf").write_text(
+        "model",
+        encoding="utf-8",
+    )
+    (install_dir / ".env").write_text(
+        "ODS_MODE=local\n"
+        "LLM_BACKEND=lemonade\n"
+        "LLM_MODEL=qwen3.6-35b-a3b\n"
+        "GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_M.gguf\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
+    monkeypatch.setattr(
+        models_router,
+        "_fetch_loaded_model_sync",
+        lambda: "Qwen3.6-35B-A3B-UD-Q4_K_M",
+    )
+
+    def fail_backend_probe(_loaded):
+        raise AssertionError("already-active Lemonade load should not run a chat readiness probe")
+
+    def fail_agent_call(*_args, **_kwargs):
+        raise AssertionError("already-active Lemonade load should not call host-agent activate")
+
+    monkeypatch.setattr(models_router, "_loaded_model_backend_ready_sync", fail_backend_probe)
+    monkeypatch.setattr(models_router, "_call_agent_model", fail_agent_call)
+
+    resp = test_client.post(
+        "/api/models/qwen3.6-35b-a3b-ud-q4/load",
+        headers=test_client.auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "already_active",
+        "model_id": "qwen3.6-35b-a3b-ud-q4",
+        "loadedModel": "Qwen3.6-35B-A3B-UD-Q4_K_M",
+    }
+
+
 def test_get_gpu_vram_returns_none_on_nvml_error(monkeypatch):
     """Operational NVML failures should degrade to unknown GPU rather than 500."""
 

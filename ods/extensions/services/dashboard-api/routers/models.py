@@ -207,9 +207,13 @@ def _model_name_tokens(value: str | None) -> set[str]:
     token = Path(str(value).strip()).name
     if not token:
         return set()
-    tokens = {token.lower()}
-    if token.lower().startswith("extra."):
-        tokens.add(token[6:].lower())
+    lower = token.lower()
+    tokens = {lower}
+    if lower.startswith("extra."):
+        tokens.add(lower[6:])
+    for candidate in tuple(tokens):
+        if candidate.endswith(".gguf"):
+            tokens.add(candidate[:-5])
     return tokens
 
 
@@ -292,11 +296,13 @@ def _already_active_model(model_id: str, model: dict) -> tuple[bool, str | None]
         return False, None
 
     loaded_model = _fetch_loaded_model_sync()
-    if (
-        _model_name_tokens(loaded_model) & _catalog_model_tokens(model)
-        and _loaded_model_backend_ready_sync(loaded_model)
-    ):
-        return True, loaded_model
+    if _model_name_tokens(loaded_model) & _catalog_model_tokens(model):
+        # Lemonade's health endpoint is the authoritative loaded-model source.
+        # A one-token chat probe against a large already-active model can take
+        # longer than dashboard/UI clients will wait, which turns an idempotent
+        # Run click into an unnecessary activation.
+        if LLM_BACKEND == "lemonade" or _loaded_model_backend_ready_sync(loaded_model):
+            return True, loaded_model
     return False, loaded_model
 
 
