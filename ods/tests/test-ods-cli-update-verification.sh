@@ -124,6 +124,12 @@ grep -q 'Update complete' "$tmp_dir/update.out" || {
     exit 1
 }
 
+grep -q -- 'pull --ignore-buildable' "$docker_log" || {
+    cat "$docker_log" >&2
+    printf '[FAIL] update did not skip local-build images during compose pull\n' >&2
+    exit 1
+}
+
 grep -q -- 'config --services' "$docker_log" || {
     cat "$docker_log" >&2
     printf '[FAIL] update did not inspect the active compose stack\n' >&2

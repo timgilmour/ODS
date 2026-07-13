@@ -1606,7 +1606,11 @@ cmd_update() {
         warn "ods-update.sh and ods-backup.sh not found; skipping pre-update snapshot."
     fi
 
-    if ! _compose_run_with_summary "Pulling latest images" "${flags[@]}" pull; then
+    # Some ODS services are deliberately local-built (for example AMD
+    # Lemonade's ods-lemonade-server image). `docker compose pull` should
+    # refresh registry-backed services without trying to pull those local
+    # image tags from Docker Hub/GHCR.
+    if ! _compose_run_with_summary "Pulling latest images" "${flags[@]}" pull --ignore-buildable; then
         error "Failed to pull latest images"
     fi
 
