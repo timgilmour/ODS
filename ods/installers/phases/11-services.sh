@@ -129,6 +129,17 @@ _phase11_download_hf_artifact() {
     "$python_cmd" "$helper" "$url" "$destination" >> "$log_file" 2>&1
 }
 
+_phase11_model_file_valid() {
+    local path="$1" expected_sha="${2:-}" actual_hash
+    [[ -s "$path" ]] || return 1
+    if [[ -n "$expected_sha" ]]; then
+        command -v sha256sum >/dev/null 2>&1 || return 1
+        actual_hash="$(sha256sum "$path" 2>/dev/null | awk '{print $1}')"
+        [[ -n "$actual_hash" && "$actual_hash" == "$expected_sha" ]] || return 1
+    fi
+    return 0
+}
+
 ods_progress 75 "services" "Starting services"
 show_phase 5 6 "Starting Services" "~2-3 minutes"
 
@@ -536,7 +547,7 @@ else
         # Swap to bootstrap model for the foreground download
         GGUF_FILE="$BOOTSTRAP_GGUF_FILE"
         GGUF_URL="$BOOTSTRAP_GGUF_URL"
-        GGUF_SHA256=""  # No SHA256 for Tier 0 model
+        GGUF_SHA256="${BOOTSTRAP_GGUF_SHA256:-}"
         LLM_MODEL="$BOOTSTRAP_LLM_MODEL"
         MAX_CONTEXT="$BOOTSTRAP_MAX_CONTEXT"
         ai "Fast-start mode: downloading bootstrap model (~1.5GB) for instant chat."
@@ -621,6 +632,11 @@ else
                 printf "\r  ${AMB}⚠${NC} %-60s\n" "Download attempt $_attempt failed"
                 sleep 3
             done
+
+            if [[ "$_dl_success" != "true" ]] && _phase11_model_file_valid "$GGUF_DIR/$GGUF_FILE" "$GGUF_SHA256"; then
+                printf "\r  ${BGRN}✓${NC} %-60s\n" "Model present after download retries: $GGUF_FILE"
+                _dl_success=true
+            fi
 
             if [[ "$_dl_success" != "true" ]]; then
                 printf "\r  ${RED}✗${NC} %-60s\n" "Download failed after 3 attempts: $GGUF_FILE"

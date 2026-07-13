@@ -281,7 +281,7 @@ if ($dryRun) {
             foreach ($k in $tierConfig.Keys) { $fullTierConfig[$k] = $tierConfig[$k] }
             $tierConfig.GgufFile   = $script:BOOTSTRAP_GGUF_FILE
             $tierConfig.GgufUrl    = $script:BOOTSTRAP_GGUF_URL
-            $tierConfig.GgufSha256 = ""
+            $tierConfig.GgufSha256 = $script:BOOTSTRAP_GGUF_SHA256
             $tierConfig.LlmModel   = $script:BOOTSTRAP_LLM_MODEL
             $tierConfig.MaxContext  = $script:BOOTSTRAP_MAX_CONTEXT
             Write-AI "Fast-start mode: downloading bootstrap model (~1.5GB) for instant chat."
