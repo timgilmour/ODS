@@ -62,6 +62,21 @@ Enable/disable is a file rename (`compose.yaml` ↔ `compose.yaml.disabled`) dri
 `_sync_extension_compose` in `installers/phases/03-features.sh`. Never hand-edit `.compose-flags`
 — it is a cache the resolver regenerates.
 
+## Model control (dashboard)
+
+hipfire models are catalog entries in `config/model-library.json` with `"engine": "hipfire"`
+and a `model_file` instead of a GGUF. They appear on the dashboard's Models page whenever
+`ENABLE_HIPFIRE=true` (never as a download — hipfire pulls its own weights on container start).
+
+Activating one drives the normal path (`POST /api/models/{id}/load` → host-agent
+`/v1/model/activate`), which pins `HIPFIRE_MODEL` in `.env`, recreates the container,
+health-gates until the model is resident, and re-renders `config/litellm/lemonade.yaml` so
+`default` routes to hipfire. Activating a GGUF flips `default` back to llama-server/Lemonade.
+Either way both engines stay reachable via their named LiteLLM routes (`hipfire` / `lemonade`)
+— the routing is rendered from the template by `scripts/render-runtime-configs.py`, so a model
+swap can no longer wipe it. State keys: `HIPFIRE_MODEL` (what hipfire serves) and
+`HIPFIRE_ACTIVE` (whether it owns the `default` route).
+
 ## Notes
 
 - No `/v1/embeddings` (ODS runs a separate TEI service — unaffected) and **no auth**. Safe only

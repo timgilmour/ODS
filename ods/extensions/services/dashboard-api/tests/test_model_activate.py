@@ -21,6 +21,7 @@ _check_lemonade_health = _mod._check_lemonade_health
 _send_lemonade_warmup = _mod._send_lemonade_warmup
 _lemonade_completion_ready = _mod._lemonade_completion_ready
 _write_lemonade_config = _mod._write_lemonade_config
+_update_env_keys = _mod._update_env_keys
 _patch_hermes_model_config = _mod._patch_hermes_model_config
 _compose_restart_llama_server = _mod._compose_restart_llama_server
 _launch_native_llama_server = _mod._launch_native_llama_server
@@ -1051,3 +1052,81 @@ class TestNvidiaHealthUnchanged:
         assert '"ok"' in body
         # But Lemonade check would fail (no model_loaded key)
         assert _check_lemonade_health(body) is False
+
+
+# --- hipfire routing in _write_lemonade_config ---
+
+
+class TestWriteLemonadeConfigHipfire:
+    """A re-render must never wipe hipfire routing (the dashboard-Load clobber bug)."""
+
+    def _env(self, tmp_path, extra: str = ""):
+        litellm_dir = tmp_path / "config" / "litellm"
+        litellm_dir.mkdir(parents=True)
+        (tmp_path / ".env").write_text(
+            "ENABLE_HIPFIRE=true\nHIPFIRE_MODEL=qwen36-35b-a3b.mq4\n" + extra,
+            encoding="utf-8",
+        )
+        return litellm_dir
+
+    def test_active_hipfire_owns_default_route(self, tmp_path):
+        litellm_dir = self._env(tmp_path, "HIPFIRE_ACTIVE=true\n")
+        _write_lemonade_config(tmp_path, "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+
+        content = (litellm_dir / "lemonade.yaml").read_text()
+        hipfire_route = (
+            "    litellm_params:\n"
+            "      model: openai/qwen36-35b-a3b.mq4\n"
+            "      api_base: http://hipfire:11435/v1\n"
+            "      api_key: not-needed\n"
+        )
+        assert f"- model_name: default\n{hipfire_route}" in content
+        assert f'- model_name: "*"\n{hipfire_route}' in content
+        # Lemonade stays reachable as an explicit escape hatch.
+        assert "- model_name: lemonade\n    litellm_params:\n      model: openai/extra.Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" in content
+
+    def test_inactive_hipfire_keeps_named_route(self, tmp_path):
+        litellm_dir = self._env(tmp_path)
+        _write_lemonade_config(tmp_path, "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
+
+        content = (litellm_dir / "lemonade.yaml").read_text()
+        assert "- model_name: default\n    litellm_params:\n      model: openai/extra.Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" in content
+        assert "- model_name: hipfire\n    litellm_params:\n      model: openai/qwen36-35b-a3b.mq4" in content
+
+    def test_disabled_hipfire_renders_stock_wildcard(self, tmp_path):
+        litellm_dir = tmp_path / "config" / "litellm"
+        litellm_dir.mkdir(parents=True)
+        (tmp_path / ".env").write_text(
+            "HIPFIRE_MODEL=qwen36-35b-a3b.mq4\n", encoding="utf-8",
+        )
+        _write_lemonade_config(tmp_path, "Model.gguf")
+
+        content = (litellm_dir / "lemonade.yaml").read_text()
+        assert "hipfire" not in content
+        assert 'model_name: "*"' in content
+
+
+# --- _update_env_keys ---
+
+
+class TestUpdateEnvKeys:
+
+    def test_updates_existing_and_appends_missing(self, tmp_path):
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "# comment stays\nHIPFIRE_MODEL=old.mq4\nGGUF_FILE=Model.gguf\n",
+            encoding="utf-8",
+        )
+        _update_env_keys(env_path, {"HIPFIRE_MODEL": "new.mq4", "HIPFIRE_ACTIVE": "true"})
+
+        content = env_path.read_text(encoding="utf-8")
+        assert "HIPFIRE_MODEL=new.mq4" in content
+        assert "old.mq4" not in content
+        assert "HIPFIRE_ACTIVE=true" in content
+        assert "# comment stays" in content
+        assert "GGUF_FILE=Model.gguf" in content
+
+    def test_creates_file_when_missing(self, tmp_path):
+        env_path = tmp_path / ".env"
+        _update_env_keys(env_path, {"HIPFIRE_ACTIVE": "false"})
+        assert env_path.read_text(encoding="utf-8") == "HIPFIRE_ACTIVE=false\n"
