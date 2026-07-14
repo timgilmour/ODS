@@ -13,7 +13,14 @@ services:
       - no-new-privileges:true
     shm_size: 8g
     environment:
-      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+      # No HSA_OVERRIDE_GFX_VERSION. The image name says gfx1151, but the torch it
+      # ships is a stock ROCm 7.2 wheel whose arch list already includes gfx1201
+      # (RDNA4) — so RDNA4 cards need no spoofing. Forcing 11.5.1 here made ROCm
+      # hand gfx1151 (RDNA3.5) kernels to a gfx1201 card, which does not merely run
+      # slowly: it faults the card ("HW Exception by GPU node-N ... reason: GPU Hang").
+      # Do not "fix" this by setting the var to an empty string — ROCm checks whether
+      # it is *defined*, not whether it is non-empty, then fails parsing "".
+      # Leave it absent so each GPU is used as its native arch.
       - PYTORCH_TUNABLEOP_ENABLED=1
       - TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
     volumes:
