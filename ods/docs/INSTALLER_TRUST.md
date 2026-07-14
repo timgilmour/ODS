@@ -10,41 +10,65 @@ intentionally expose services to your LAN.
 
 ### Public Linux/macOS Bootstrap
 
-The README one-liner downloads this bootstrap script from GitHub:
+The canonical README one-liner downloads the ODS bootstrap from the hosted
+Osmantic endpoint:
 
 ```bash
-https://raw.githubusercontent.com/Light-Heart-Labs/ODS/main/ods/get-ods.sh
+curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
 
-That script:
+For the documented `curl` request, the endpoint serves the plain-text
+`ods/get-ods.sh` bootstrap. It is a distribution URL, not a source-version
+selector. The bootstrap:
 
 - detects Linux, WSL, or macOS;
 - installs or checks basic prerequisites where supported;
-- clones `https://github.com/Light-Heart-Labs/ODS.git` with sparse
+- clones `https://github.com/Osmantic/ODS.git` with sparse
   checkout for the `ods/` product tree;
 - copies the runtime product files into `~/ods`;
 - runs `./install.sh` from that copied runtime tree.
 
-By default the bootstrap follows `main`. To select a published release tag or
-another branch, set `ODS_REF` before running the script:
+Without `ODS_REF`, Git uses the repository's default branch, currently `main`.
+The hosted one-liner therefore tracks `main`; it does not pin the current stable
+release.
+
+To select a published release tag or another branch through the hosted path,
+apply `ODS_REF` to the `bash` process:
 
 ```bash
-ODS_REF=main bash get-ods.sh
+curl -fsSL https://install.osmantic.com/ods.sh | ODS_REF=v2.5.2 bash
 ```
+
+`ODS_REF` must name a branch or tag that `git clone --branch` can resolve. Use
+the manual source path below when you need to install an exact audited commit.
+
+The direct raw GitHub URL,
+`https://raw.githubusercontent.com/Osmantic/ODS/main/ods/get-ods.sh`, exposes
+the bootstrap source from `main`. It is an alternate transport for the
+bootstrap, not a separate stable release channel.
 
 ### Manual Source Install
 
-For the most auditable path, clone a known ref yourself and run the installer
+For a stable release tag, clone the known ref yourself and run the installer
 from the checked-out source:
 
 ```bash
-git clone --depth 1 --branch main https://github.com/Light-Heart-Labs/ODS.git
-cd ODS/ods
+git clone --depth 1 --branch v2.5.2 https://github.com/Osmantic/ODS.git
+cd ODS
 ./install.sh
 ```
 
-Use this path when you want to review diffs, pin an exact release tag, or make
-local modifications before install.
+For an exact audited commit, use a full clone so Git can resolve the commit:
+
+```bash
+git clone https://github.com/Osmantic/ODS.git
+cd ODS
+git checkout AUDITED_COMMIT_SHA
+./install.sh
+```
+
+Use the manual path when you want to review diffs, pin an exact commit, make
+local modifications, or avoid trusting the hosted bootstrap delivery path.
 
 ### Windows PowerShell Install
 
@@ -52,8 +76,8 @@ Windows users should install from a normal user PowerShell, not an elevated
 Administrator shell:
 
 ```powershell
-git clone --depth 1 --branch main https://github.com/Light-Heart-Labs/ODS.git
-cd ODS\ods
+git clone --depth 1 --branch v2.5.2 https://github.com/Osmantic/ODS.git
+cd ODS
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
 ```
@@ -73,16 +97,16 @@ If you do not want to pipe a remote script directly into a shell, download and
 inspect it first:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/Light-Heart-Labs/ODS/main/ods/get-ods.sh
+curl -fsSLo get-ods.sh https://install.osmantic.com/ods.sh
 less get-ods.sh
-ODS_REF=main bash get-ods.sh
+ODS_REF=v2.5.2 bash get-ods.sh
 ```
 
 On Windows, clone first and inspect `install.ps1` before running it:
 
 ```powershell
-git clone --depth 1 --branch main https://github.com/Light-Heart-Labs/ODS.git
-cd ODS\ods
+git clone --depth 1 --branch v2.5.2 https://github.com/Osmantic/ODS.git
+cd ODS
 notepad .\install.ps1
 .\install.ps1
 ```
@@ -91,7 +115,7 @@ notepad .\install.ps1
 
 ODS currently relies on:
 
-- GitHub-hosted source and HTTPS transport;
+- Osmantic-hosted bootstrap delivery, GitHub-hosted source, and HTTPS transport;
 - release tags or explicit refs for reproducible source selection;
 - local generated secrets instead of checked-in default credentials;
 - localhost-first service binding by default;

@@ -17,6 +17,9 @@ lint: ## Syntax check all shell scripts + Python compile check
 	@echo "All lint checks passed."
 
 test: ## Run unit and contract tests
+	@echo "=== Install documentation contract ==="
+	@bash tests/test-install-docs.sh
+	@echo ""
 	@echo "=== Tier map tests ==="
 	@bash tests/test-tier-map.sh
 	@bash tests/test-installer-context-parity.sh

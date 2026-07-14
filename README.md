@@ -61,7 +61,8 @@ Linux and macOS:
 curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
 
-Prefer to inspect before running or pin a release tag? See
+The hosted bootstrap clones `main` by default. To inspect it before running,
+pin a release tag with `ODS_REF`, or install from an audited commit, see
 [Installer Trust](ods/docs/INSTALLER_TRUST.md).
 
 Windows users should use the PowerShell installer shown below or follow the [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md).
@@ -158,7 +159,7 @@ We built ODS so you don't have to.
 <summary><b>Manual install (Linux)</b></summary>
 
 ```bash
-git clone https://github.com/Light-Heart-Labs/ODS.git
+git clone https://github.com/Osmantic/ODS.git
 cd ODS/ods
 ./install.sh
 ```
@@ -175,7 +176,7 @@ Open a normal **PowerShell** session and run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-git clone https://github.com/Light-Heart-Labs/ODS.git
+git clone https://github.com/Osmantic/ODS.git
 cd ODS
 .\install.ps1
 ```
@@ -194,7 +195,7 @@ Requires Apple Silicon (M1+) and [Docker Desktop](https://www.docker.com/product
 **Install Docker Desktop first and make sure it is running before you start.**
 
 ```bash
-git clone https://github.com/Light-Heart-Labs/ODS.git
+git clone https://github.com/Osmantic/ODS.git
 cd ODS/ods
 ./install.sh
 ```

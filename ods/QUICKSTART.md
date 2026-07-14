@@ -39,13 +39,17 @@ see [MACOS-QUICKSTART.md](docs/MACOS-QUICKSTART.md),
 ### Linux One-Liner
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Light-Heart-Labs/ODS/main/ods/get-ods.sh | bash
+curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
+
+The hosted bootstrap clones `main` by default. See
+[Installer Trust](docs/INSTALLER_TRUST.md) to inspect it first, pin a release
+tag with `ODS_REF`, or install from an audited commit.
 
 ### Manual Clone
 
 ```bash
-git clone https://github.com/Light-Heart-Labs/ODS.git
+git clone https://github.com/Osmantic/ODS.git
 cd ODS
 ./install.sh
 ```
@@ -54,7 +58,7 @@ cd ODS
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-git clone https://github.com/Light-Heart-Labs/ODS.git
+git clone https://github.com/Osmantic/ODS.git
 cd ODS
 .\install.ps1
 ```

@@ -175,8 +175,12 @@ Yes. Common use cases:
 **With install wizard:** Under 1 hour for someone comfortable with terminal.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Light-Heart-Labs/ODS/main/ods/get-ods.sh | bash
+curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
+
+The hosted bootstrap clones `main` by default. See
+[Installer Trust](INSTALLER_TRUST.md) to inspect it first, pin a release tag
+with `ODS_REF`, or install from an audited commit.
 
 The wizard:
 1. Detects your hardware

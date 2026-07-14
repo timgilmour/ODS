@@ -1,6 +1,6 @@
 #!/bin/bash
 # ODS Bootstrap Installer
-# curl -fsSL https://raw.githubusercontent.com/Osmantic/ODS/main/ods/get-ods.sh | bash
+# curl -fsSL https://install.osmantic.com/ods.sh | bash
 #
 # Detects OS, clones repo, runs installer.
 

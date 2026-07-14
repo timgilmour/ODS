@@ -43,13 +43,17 @@ Known-good version baselines: [`docs/KNOWN-GOOD-VERSIONS.md`](docs/KNOWN-GOOD-VE
 
 ```bash
 # One-line install (Linux — NVIDIA, AMD, Intel Arc, or CPU/cloud fallback)
-curl -fsSL https://raw.githubusercontent.com/Light-Heart-Labs/ODS/main/ods/get-ods.sh | bash
+curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
+
+The hosted bootstrap clones `main` by default. See
+[Installer Trust](docs/INSTALLER_TRUST.md) to inspect it first, pin a release
+tag with `ODS_REF`, or install from an audited commit.
 
 Or manually:
 
 ```bash
-git clone https://github.com/Light-Heart-Labs/ODS.git
+git clone https://github.com/Osmantic/ODS.git
 cd ODS
 ./install.sh
 ```
