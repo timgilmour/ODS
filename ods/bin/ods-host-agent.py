@@ -4017,9 +4017,16 @@ class AgentHandler(BaseHTTPRequestHandler):
                 time.sleep(5)
 
             if healthy:
-                # LiteLLM reads its config once at boot — restart to pick up routing.
-                subprocess.run(["docker", "restart", "ods-litellm"],
-                               capture_output=True, timeout=60)
+                # LiteLLM reads its config once at boot — restart to pick up
+                # routing. An unchecked failure here would report "activated"
+                # while every client still talks to the old routing.
+                result = subprocess.run(["docker", "restart", "ods-litellm"],
+                                        capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        "LiteLLM restart failed after hipfire came up healthy: "
+                        + ((result.stderr or result.stdout) or "").strip()
+                    )
                 committed = True
                 json_response(self, 200, {"status": "activated", "model_id": model_id, "engine": "hipfire"})
             else:
@@ -4028,12 +4035,28 @@ class AgentHandler(BaseHTTPRequestHandler):
                 _compose_recreate_hipfire()
                 json_response(self, 500, {"error": "hipfire health check failed — rolled back to previous model", "rolled_back": True})
         except Exception as exc:
-            if not committed:
-                try:
-                    restore_backups()
-                except OSError:
-                    logger.exception("Rollback write failed during hipfire-activate failure handling")
-            json_response(self, 500, {"error": f"hipfire model activation failed: {exc}"})
+            if committed:
+                json_response(self, 500, {"error": f"hipfire model activation failed: {exc}"})
+                return
+            logger.exception("hipfire activation failed — rolling back")
+            rolled_back = False
+            try:
+                restore_backups()
+                # Restoring the files is not enough: the container may already
+                # be recreated on the new pin (or be down entirely). Recreate
+                # on the restored pin so runtime state matches the files, and
+                # give LiteLLM a best-effort restart so a half-applied restart
+                # from the commit path cannot leave it stopped.
+                _compose_recreate_hipfire()
+                rolled_back = True
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                logger.exception("Rollback failed during hipfire-activate failure handling")
+            try:
+                subprocess.run(["docker", "restart", "ods-litellm"],
+                               capture_output=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                logger.exception("LiteLLM restart failed during hipfire-activate rollback")
+            json_response(self, 500, {"error": f"hipfire model activation failed: {exc}", "rolled_back": rolled_back})
 
     def _handle_model_delete(self):
         """Delete a downloaded GGUF model file."""

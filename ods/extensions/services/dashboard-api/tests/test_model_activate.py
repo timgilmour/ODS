@@ -1054,6 +1054,121 @@ class TestNvidiaHealthUnchanged:
         assert _check_lemonade_health(body) is False
 
 
+# --- _do_hipfire_activate failure paths ---
+
+
+def _write_hipfire_activation_fixture(tmp_path):
+    install_dir = tmp_path / "install"
+    litellm_dir = install_dir / "config" / "litellm"
+    litellm_dir.mkdir(parents=True)
+    env_text = (
+        "GPU_BACKEND=amd\n"
+        "ENABLE_HIPFIRE=true\n"
+        "GGUF_FILE=old-model.gguf\n"
+        "HIPFIRE_MODEL=old.mq4\n"
+        "HIPFIRE_ACTIVE=false\n"
+        "HIPFIRE_PORT=11435\n"
+    )
+    env_path = install_dir / ".env"
+    env_path.write_text(env_text, encoding="utf-8")
+    lemonade_yaml = litellm_dir / "lemonade.yaml"
+    lemonade_text = "model_list:\n  - model_name: old\n"
+    lemonade_yaml.write_text(lemonade_text, encoding="utf-8")
+    return install_dir, env_path, env_text, lemonade_yaml, lemonade_text
+
+
+class TestHipfireActivateRollback:
+    """Failure paths of _do_hipfire_activate must restore files AND container state."""
+
+    def _activate(self, monkeypatch, install_dir, *, curl_code="503",
+                  litellm_rc=0, recreate_effects=None):
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.delenv("ODS_HOST_INSTALL_DIR", raising=False)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+
+        recreate_calls = []
+        effects = list(recreate_effects or [])
+
+        def fake_recreate():
+            recreate_calls.append(True)
+            if effects:
+                effect = effects.pop(0)
+                if effect is not None:
+                    raise effect
+
+        monkeypatch.setattr(_mod, "_compose_recreate_hipfire", fake_recreate)
+
+        docker_calls = []
+
+        def fake_run(cmd, **_kwargs):
+            if cmd and cmd[0] == "curl":
+                return subprocess.CompletedProcess(cmd, 0, stdout=curl_code, stderr="")
+            docker_calls.append(list(cmd))
+            return subprocess.CompletedProcess(
+                cmd, litellm_rc, stdout="", stderr="boom" if litellm_rc else "",
+            )
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        handler = _ResponseHandler()
+        _mod.AgentHandler._do_hipfire_activate(
+            handler, "hip-model", {"model_file": "new.mq4"},
+        )
+        return handler, recreate_calls, docker_calls
+
+    def test_health_gate_failure_restores_files_and_recreates(self, tmp_path, monkeypatch):
+        install_dir, env_path, env_text, lemonade_yaml, lemonade_text = (
+            _write_hipfire_activation_fixture(tmp_path)
+        )
+        handler, recreate_calls, docker_calls = self._activate(
+            monkeypatch, install_dir, curl_code="503",
+        )
+        assert handler.response_code == 500
+        assert handler.parse_response()["rolled_back"] is True
+        assert env_path.read_text(encoding="utf-8") == env_text
+        assert lemonade_yaml.read_text(encoding="utf-8") == lemonade_text
+        # Once for the new pin, once more on the restored pin.
+        assert len(recreate_calls) == 2
+        # LiteLLM must not be restarted onto routing that never went healthy.
+        assert docker_calls == []
+
+    def test_recreate_failure_still_restores_container_state(self, tmp_path, monkeypatch):
+        install_dir, env_path, env_text, lemonade_yaml, lemonade_text = (
+            _write_hipfire_activation_fixture(tmp_path)
+        )
+        handler, recreate_calls, docker_calls = self._activate(
+            monkeypatch, install_dir,
+            recreate_effects=[RuntimeError("compose up failed"), None],
+        )
+        assert handler.response_code == 500
+        body = handler.parse_response()
+        assert body["rolled_back"] is True
+        assert "compose up failed" in body["error"]
+        assert env_path.read_text(encoding="utf-8") == env_text
+        assert lemonade_yaml.read_text(encoding="utf-8") == lemonade_text
+        assert len(recreate_calls) == 2
+        assert docker_calls == [["docker", "restart", "ods-litellm"]]
+
+    def test_litellm_restart_failure_is_not_reported_as_activated(self, tmp_path, monkeypatch):
+        install_dir, env_path, env_text, lemonade_yaml, lemonade_text = (
+            _write_hipfire_activation_fixture(tmp_path)
+        )
+        handler, recreate_calls, docker_calls = self._activate(
+            monkeypatch, install_dir, curl_code="200", litellm_rc=1,
+        )
+        assert handler.response_code == 500
+        body = handler.parse_response()
+        assert body.get("status") != "activated"
+        assert "LiteLLM restart failed" in body["error"]
+        assert body["rolled_back"] is True
+        assert env_path.read_text(encoding="utf-8") == env_text
+        assert len(recreate_calls) == 2
+        # Failed commit-path restart plus the best-effort rollback restart.
+        assert docker_calls == [
+            ["docker", "restart", "ods-litellm"],
+            ["docker", "restart", "ods-litellm"],
+        ]
+
+
 # --- hipfire routing in _write_lemonade_config ---
 
 
