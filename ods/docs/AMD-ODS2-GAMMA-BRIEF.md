@@ -122,23 +122,23 @@ flowchart LR
 ## Slide 9: Code Proof Points
 
 - Setup card QR generation:
-  <https://github.com/Osmantic/ODS/blob/main/ods/scripts/generate-setup-card.py#L51>
+  <https://github.com/Osmantic/ODS/blob/main/ods/scripts/generate-setup-card.py#L59>
 - First-boot wizard:
   <https://github.com/Osmantic/ODS/blob/main/ods/extensions/services/dashboard/src/pages/FirstBoot.jsx#L80>
 - Setup and Wi-Fi API:
   <https://github.com/Osmantic/ODS/blob/main/ods/extensions/services/dashboard-api/routers/setup.py#L315>
 - Host-side Wi-Fi control:
-  <https://github.com/Osmantic/ODS/blob/main/ods/bin/ods-host-agent.py#L1216>
+  <https://github.com/Osmantic/ODS/blob/main/ods/bin/ods-host-agent.py#L1830>
 - Magic-link QR and redemption:
   <https://github.com/Osmantic/ODS/blob/main/ods/extensions/services/dashboard-api/routers/magic_link.py#L382>
 - First-boot AP mode:
-  <https://github.com/Osmantic/ODS/blob/main/ods/scripts/ap-mode.sh#L2>
+  <https://github.com/Osmantic/ODS/blob/main/ods/scripts/ap-mode.sh#L258>
 - LAN discovery:
-  <https://github.com/Osmantic/ODS/blob/main/ods/bin/ods-mdns.py#L4>
+  <https://github.com/Osmantic/ODS/blob/main/ods/bin/ods-mdns.py#L173>
 - Local reverse proxy:
   <https://github.com/Osmantic/ODS/blob/main/ods/extensions/services/ods-proxy/Caddyfile#L65>
 - Hermes authenticated entry path:
-  <https://github.com/Osmantic/ODS/blob/main/ods/extensions/services/hermes-proxy/Caddyfile#L1>
+  <https://github.com/Osmantic/ODS/blob/main/ods/extensions/services/hermes-proxy/Caddyfile#L96>
 - OpenClaw integration:
   <https://github.com/Osmantic/ODS/blob/main/ods/docs/OPENCLAW-INTEGRATION.md>
 

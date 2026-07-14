@@ -73,6 +73,9 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== fleet-multi-distro keep-going on docker pull failure ==="
 	@bash tests/test-fleet-multi-distro-keep-going.sh
+	@echo ""
+	@echo "=== fleet host lock compatibility ==="
+	@bash tests/test-fleet-host-lock.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="

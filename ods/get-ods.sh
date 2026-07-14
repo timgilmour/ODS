@@ -31,7 +31,7 @@ NC='\033[0m'
 
 REPO_URL="${ODS_REPO_URL:-https://github.com/Osmantic/ODS.git}"
 INSTALL_DIR="${ODS_INSTALL_DIR:-$ODS_BOOTSTRAP_ROOT/ods}"
-PRE_ODS_INSTALL_DIR="${ODS_LEGACY_INSTALL_DIR:-$ODS_BOOTSTRAP_ROOT/dream-server}"
+PRE_ODS_INSTALL_DIR="${ODS_LEGACY_INSTALL_DIR:-${DREAMSERVER_INSTALL_DIR:-$ODS_BOOTSTRAP_ROOT/dream-server}}"
 ODS_REF="${ODS_REF:-${ODS_BOOTSTRAP_REF:-}}"
 BOOTSTRAP_FORCE=false
 BOOTSTRAP_NON_INTERACTIVE=false
@@ -71,7 +71,7 @@ is_truthy() {
 }
 
 refuse_legacy_install() {
-    is_truthy "${ODS_ALLOW_LEGACY_PARALLEL:-}" && return 0
+    is_truthy "${ODS_ALLOW_LEGACY_PARALLEL:-${ODS_ALLOW_DREAMSERVER_PARALLEL:-}}" && return 0
 
     local findings=()
     if [[ -d "$PRE_ODS_INSTALL_DIR" ]] && {
@@ -84,9 +84,11 @@ refuse_legacy_install() {
     fi
 
     if command -v docker >/dev/null 2>&1; then
-        local legacy_containers
-        legacy_containers=$(docker ps -a --filter "name=^/dream-" --format '{{.Names}}' 2>/dev/null || true)
-        [[ -n "$legacy_containers" ]] && findings+=("containers: $(echo "$legacy_containers" | tr '\n' ' ')")
+        local pre_ods_containers pre_ods_volumes
+        pre_ods_containers=$(docker ps -a --filter "name=^/dream-" --format '{{.Names}}' 2>/dev/null || true)
+        pre_ods_volumes=$(docker volume ls --filter "name=dream" --format '{{.Name}}' 2>/dev/null || true)
+        [[ -n "$pre_ods_containers" ]] && findings+=("containers: $(echo "$pre_ods_containers" | tr '\n' ' ')")
+        [[ -n "$pre_ods_volumes" ]] && findings+=("volumes: $(echo "$pre_ods_volumes" | tr '\n' ' ')")
     fi
 
     if (( ${#findings[@]} > 0 )); then

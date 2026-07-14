@@ -9,7 +9,7 @@ REPO_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
 CANONICAL_ENDPOINT="https://install.osmantic.com/ods.sh"
 CANONICAL_REPO_URL="https://github.com/Osmantic/ODS.git"
 STABLE_VERSION="$(
-    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ods_version"])' \
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["version"])' \
         "$ROOT_DIR/manifest.json"
 )"
 STABLE_TAG="v$STABLE_VERSION"
@@ -134,7 +134,8 @@ expected_legacy_product_files="$(
         ods/tests/contracts/test-amd-lemonade-contracts.sh \
         ods/tests/contracts/test-installer-contracts.sh \
         ods/tests/fleet-incus-vm.sh \
-        ods/tests/fleet-multi-distro.sh |
+        ods/tests/fleet-multi-distro.sh \
+        ods/tests/test-fleet-host-lock.sh |
         sort
 )"
 if [[ "$legacy_product_files" != "$expected_legacy_product_files" ]]; then
