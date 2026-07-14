@@ -103,26 +103,26 @@ _ods_truthy() {
     esac
 }
 
-if [[ ! -d "$INSTALL_DIR" ]] && ! _ods_truthy "${ODS_ALLOW_DREAMSERVER_PARALLEL:-}"; then
-    _legacy_dreamserver_dir="${DREAMSERVER_INSTALL_DIR:-$HOME/dream-server}"
-    _legacy_dreamserver_findings=()
-    if [[ -d "$_legacy_dreamserver_dir" ]] && {
-        [[ -f "$_legacy_dreamserver_dir/.env" ]] ||
-        [[ -f "$_legacy_dreamserver_dir/dream-cli" ]] ||
-        [[ -f "$_legacy_dreamserver_dir/docker-compose.yml" ]] ||
-        [[ -d "$_legacy_dreamserver_dir/data" ]]
+if [[ ! -d "$INSTALL_DIR" ]] && ! _ods_truthy "${ODS_ALLOW_LEGACY_PARALLEL:-}"; then
+    _pre_ods_install_dir="${ODS_LEGACY_INSTALL_DIR:-$HOME/dream-server}"
+    _pre_ods_findings=()
+    if [[ -d "$_pre_ods_install_dir" ]] && {
+        [[ -f "$_pre_ods_install_dir/.env" ]] ||
+        [[ -f "$_pre_ods_install_dir/dream-cli" ]] ||
+        [[ -f "$_pre_ods_install_dir/docker-compose.yml" ]] ||
+        [[ -d "$_pre_ods_install_dir/data" ]]
     }; then
-        _legacy_dreamserver_findings+=("install directory: $_legacy_dreamserver_dir")
+        _pre_ods_findings+=("install directory: $_pre_ods_install_dir")
     fi
     if command -v docker >/dev/null 2>&1; then
-        _legacy_dreamserver_containers=$(docker ps -a --filter "name=^/dream-" --format '{{.Names}}' 2>/dev/null || true)
-        [[ -n "$_legacy_dreamserver_containers" ]] && _legacy_dreamserver_findings+=("containers: $(echo "$_legacy_dreamserver_containers" | tr '\n' ' ')")
+        _pre_ods_containers=$(docker ps -a --filter "name=^/dream-" --format '{{.Names}}' 2>/dev/null || true)
+        [[ -n "$_pre_ods_containers" ]] && _pre_ods_findings+=("containers: $(echo "$_pre_ods_containers" | tr '\n' ' ')")
     fi
-    if (( ${#_legacy_dreamserver_findings[@]} > 0 )); then
-        printf '%s\n' "${_legacy_dreamserver_findings[@]}" | sed 's/^/[legacy DreamServer] /' >&2
-        error "Existing DreamServer install detected before first ODS install. Stop, uninstall, or migrate the old DreamServer stack first. To run both intentionally, set ODS_ALLOW_DREAMSERVER_PARALLEL=1 and choose non-conflicting ports/install paths."
+    if (( ${#_pre_ods_findings[@]} > 0 )); then
+        printf '%s\n' "${_pre_ods_findings[@]}" | sed 's/^/[pre-ODS install] /' >&2
+        error "Existing pre-ODS install detected before first ODS install. Stop, uninstall, or migrate the older stack first. To run both intentionally, set ODS_ALLOW_LEGACY_PARALLEL=1 and choose non-conflicting ports/install paths."
     fi
-    unset _legacy_dreamserver_dir _legacy_dreamserver_findings _legacy_dreamserver_containers
+    unset _pre_ods_install_dir _pre_ods_findings _pre_ods_containers
 fi
 
 # Existing installation — update in place (secrets and data are preserved)

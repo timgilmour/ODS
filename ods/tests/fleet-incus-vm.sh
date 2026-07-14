@@ -13,8 +13,15 @@ WAIT_TIMEOUT="600"
 KEEP_VMS=false
 RUN_INSTALLER_DRY_RUN=true
 HOST_LOCK=true
-LOCK_FILE="${ODS_FLEET_HOST_LOCK:-${DREAM_FLEET_HOST_LOCK:-/tmp/dream-fleet-heavy.lock}}"
-LOCK_TIMEOUT="${ODS_FLEET_HOST_LOCK_TIMEOUT_SECONDS:-${DREAM_FLEET_HOST_LOCK_TIMEOUT_SECONDS:-}}"
+PRE_ODS_LOCK_ENV="DREAM_FLEET_HOST_LOCK"
+PRE_ODS_LOCK_OVERRIDE="$(printenv "$PRE_ODS_LOCK_ENV" 2>/dev/null || true)"
+PRE_ODS_LOCK_TIMEOUT_OVERRIDE="$(printenv "${PRE_ODS_LOCK_ENV}_TIMEOUT_SECONDS" 2>/dev/null || true)"
+LOCK_FILE="${ODS_FLEET_HOST_LOCK:-${PRE_ODS_LOCK_OVERRIDE:-/tmp/ods-fleet-heavy.lock}}"
+LOCK_TIMEOUT="${ODS_FLEET_HOST_LOCK_TIMEOUT_SECONDS:-$PRE_ODS_LOCK_TIMEOUT_OVERRIDE}"
+PRE_ODS_DEFAULT_LOCK=""
+if [[ -z "${ODS_FLEET_HOST_LOCK:-}" && -z "$PRE_ODS_LOCK_OVERRIDE" ]]; then
+    PRE_ODS_DEFAULT_LOCK="/tmp/dream-fleet-heavy.lock"
+fi
 WORK_DIR=""
 
 declare -a CREATED_VMS=()
@@ -91,8 +98,8 @@ Options:
   --memory SIZE             Memory per VM (default: 4GiB)
   --timeout SECONDS         Wait timeout for VM agent readiness (default: 600)
   --lock-file PATH          Host lock path for coordinating with full fleet runs
-                            (default: ODS_FLEET_HOST_LOCK, DREAM_FLEET_HOST_LOCK,
-                             or /tmp/dream-fleet-heavy.lock)
+                            (default: ODS_FLEET_HOST_LOCK or
+                             /tmp/ods-fleet-heavy.lock)
   --lock-timeout SECONDS    Seconds to wait for the host lock before failing
                             (default: wait indefinitely)
   --no-host-lock            Do not take the shared host lock
@@ -154,6 +161,20 @@ acquire_host_lock() {
         flock 9
     fi
     log "Acquired fleet host lock: $LOCK_FILE"
+
+    if [[ -n "$PRE_ODS_DEFAULT_LOCK" && "$PRE_ODS_DEFAULT_LOCK" != "$LOCK_FILE" ]]; then
+        mkdir -p "$(dirname "$PRE_ODS_DEFAULT_LOCK")"
+        exec 8>"$PRE_ODS_DEFAULT_LOCK"
+        log "Acquiring pre-ODS compatibility lock"
+        if [[ -n "$LOCK_TIMEOUT" ]]; then
+            if ! flock -w "$LOCK_TIMEOUT" 8; then
+                fail "Timed out waiting for pre-ODS compatibility lock"
+            fi
+        else
+            flock 8
+        fi
+        log "Acquired pre-ODS compatibility lock"
+    fi
 }
 
 cleanup() {
@@ -208,6 +229,7 @@ while (($# > 0)); do
             ;;
         --lock-file)
             LOCK_FILE="${2:?missing value for --lock-file}"
+            PRE_ODS_DEFAULT_LOCK=""
             shift 2
             ;;
         --lock-timeout)

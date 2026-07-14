@@ -31,7 +31,7 @@ NC='\033[0m'
 
 REPO_URL="${ODS_REPO_URL:-https://github.com/Osmantic/ODS.git}"
 INSTALL_DIR="${ODS_INSTALL_DIR:-$ODS_BOOTSTRAP_ROOT/ods}"
-LEGACY_DREAMSERVER_DIR="${DREAMSERVER_INSTALL_DIR:-$ODS_BOOTSTRAP_ROOT/dream-server}"
+PRE_ODS_INSTALL_DIR="${ODS_LEGACY_INSTALL_DIR:-$ODS_BOOTSTRAP_ROOT/dream-server}"
 ODS_REF="${ODS_REF:-${ODS_BOOTSTRAP_REF:-}}"
 BOOTSTRAP_FORCE=false
 BOOTSTRAP_NON_INTERACTIVE=false
@@ -70,17 +70,17 @@ is_truthy() {
     esac
 }
 
-refuse_legacy_dreamserver_install() {
-    is_truthy "${ODS_ALLOW_DREAMSERVER_PARALLEL:-}" && return 0
+refuse_legacy_install() {
+    is_truthy "${ODS_ALLOW_LEGACY_PARALLEL:-}" && return 0
 
     local findings=()
-    if [[ -d "$LEGACY_DREAMSERVER_DIR" ]] && {
-        [[ -f "$LEGACY_DREAMSERVER_DIR/.env" ]] ||
-        [[ -f "$LEGACY_DREAMSERVER_DIR/dream-cli" ]] ||
-        [[ -f "$LEGACY_DREAMSERVER_DIR/docker-compose.yml" ]] ||
-        [[ -d "$LEGACY_DREAMSERVER_DIR/data" ]]
+    if [[ -d "$PRE_ODS_INSTALL_DIR" ]] && {
+        [[ -f "$PRE_ODS_INSTALL_DIR/.env" ]] ||
+        [[ -f "$PRE_ODS_INSTALL_DIR/dream-cli" ]] ||
+        [[ -f "$PRE_ODS_INSTALL_DIR/docker-compose.yml" ]] ||
+        [[ -d "$PRE_ODS_INSTALL_DIR/data" ]]
     }; then
-        findings+=("install directory: $LEGACY_DREAMSERVER_DIR")
+        findings+=("install directory: $PRE_ODS_INSTALL_DIR")
     fi
 
     if command -v docker >/dev/null 2>&1; then
@@ -91,9 +91,9 @@ refuse_legacy_dreamserver_install() {
 
     if (( ${#findings[@]} > 0 )); then
         echo ""
-        warn "Existing DreamServer install detected before first ODS install."
+        warn "Existing pre-ODS install detected before first ODS install."
         echo ""
-        echo "ODS uses the same default ports and service roles as DreamServer."
+        echo "ODS uses the same default ports and service roles as the older stack."
         echo "Resolve the old install intentionally before installing ODS, or run in"
         echo "parallel only after choosing separate ports and an explicit install dir."
         echo ""
@@ -101,7 +101,7 @@ refuse_legacy_dreamserver_install() {
         printf '  - %s\n' "${findings[@]}"
         echo ""
         echo "To proceed after you have isolated the old stack:"
-        echo "  ODS_ALLOW_DREAMSERVER_PARALLEL=1 ODS_INSTALL_DIR=\"$INSTALL_DIR\" bash get-ods.sh"
+        echo "  ODS_ALLOW_LEGACY_PARALLEL=1 ODS_INSTALL_DIR=\"$INSTALL_DIR\" bash get-ods.sh"
         echo ""
         exit 1
     fi
@@ -287,7 +287,7 @@ if [[ -d "$INSTALL_DIR" ]]; then
 fi
 
 # ── Clone repository ──────────────────────────────
-refuse_legacy_dreamserver_install
+refuse_legacy_install
 
 log "Cloning ODS..."
 if [[ -n "$ODS_REF" ]]; then

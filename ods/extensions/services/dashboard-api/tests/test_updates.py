@@ -356,7 +356,7 @@ def test_update_dry_run_normalizes_v_prefixed_version(test_client, tmp_path, mon
     """
     import routers.updates as updates_mod
 
-    install_dir = tmp_path / "dream-server"
+    install_dir = tmp_path / "ods-install"
     install_dir.mkdir()
     (install_dir / ".version").write_text("v2.0.1")
     monkeypatch.setattr(updates_mod, "INSTALL_DIR", str(install_dir))

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 const DEFAULT_REPO_URL: &str = "https://github.com/Osmantic/ODS.git";
+const TRANSFERRED_REPO_URL: &str = "https://github.com/Light-Heart-Labs/ODS.git";
 const DEFAULT_INSTALL_REF: &str = "main";
 
 fn repo_url() -> &'static str {
@@ -224,7 +225,7 @@ fn validate_checkout(install_dir: &Path) -> Result<(), String> {
     }
 
     let origin = run_git(install_dir, &["remote", "get-url", "origin"])?;
-    if normalize_repo_url(&origin) != normalize_repo_url(repo_url()) {
+    if repo_identity(&origin) != repo_identity(repo_url()) {
         return Err(format!(
             "{} is not a ODS checkout from {}.",
             install_dir.display(),
@@ -262,6 +263,15 @@ fn normalize_repo_url(url: &str) -> String {
         trimmed.to_string()
     };
     https.trim_end_matches(".git").to_ascii_lowercase()
+}
+
+fn repo_identity(url: &str) -> String {
+    let normalized = normalize_repo_url(url);
+    if normalized == normalize_repo_url(TRANSFERRED_REPO_URL) {
+        normalize_repo_url(DEFAULT_REPO_URL)
+    } else {
+        normalized
+    }
 }
 
 /// Parse a progress line from the installer.
@@ -359,6 +369,28 @@ mod tests {
         assert_eq!(
             normalize_repo_url("ssh://git@github.com/Osmantic/ODS.git/"),
             normalize_repo_url(DEFAULT_REPO_URL)
+        );
+    }
+
+    #[test]
+    fn repo_identity_accepts_transferred_repository_url() {
+        assert_eq!(
+            repo_identity(TRANSFERRED_REPO_URL),
+            repo_identity(DEFAULT_REPO_URL)
+        );
+        let transferred_ssh_url =
+            TRANSFERRED_REPO_URL.replacen("https://github.com/", "git@github.com:", 1);
+        assert_eq!(
+            repo_identity(&transferred_ssh_url),
+            repo_identity(DEFAULT_REPO_URL)
+        );
+    }
+
+    #[test]
+    fn repo_identity_rejects_unrelated_forks() {
+        assert_ne!(
+            repo_identity("https://github.com/example/ODS.git"),
+            repo_identity(DEFAULT_REPO_URL)
         );
     }
 }

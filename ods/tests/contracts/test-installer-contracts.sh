@@ -53,18 +53,24 @@ echo "[contract] bootstrap Docker hot-swap rollback"
 bash tests/test-bootstrap-upgrade-docker-rollback.sh
 
 echo "[contract] ODS rename migration guardrails"
-grep -qF 'ODS_ALLOW_DREAMSERVER_PARALLEL' get-ods.sh \
-  || { echo "[FAIL] get-ods.sh must require an explicit override before parallel DreamServer installs"; exit 1; }
+grep -qF 'ODS_ALLOW_LEGACY_PARALLEL' get-ods.sh \
+  || { echo "[FAIL] get-ods.sh must require an explicit override before parallel pre-ODS installs"; exit 1; }
+grep -qF 'ODS_LEGACY_INSTALL_DIR' get-ods.sh \
+  || { echo "[FAIL] get-ods.sh must allow an explicit pre-ODS install path"; exit 1; }
 grep -qF 'ODS_INSTALL_DIR' get-ods.sh \
   || { echo "[FAIL] get-ods.sh must allow an explicit ODS install dir for isolated parallel testing"; exit 1; }
 grep -qF 'dream-server' get-ods.sh \
-  || { echo "[FAIL] get-ods.sh must detect legacy ~/dream-server installs"; exit 1; }
+  || { echo "[FAIL] get-ods.sh must detect the pre-ODS default install directory"; exit 1; }
 grep -qF 'name=^/dream-' get-ods.sh \
-  || { echo "[FAIL] get-ods.sh must detect legacy DreamServer containers"; exit 1; }
-grep -qF 'ODS_ALLOW_DREAMSERVER_PARALLEL' installers/phases/01-preflight.sh \
-  || { echo "[FAIL] Linux installer preflight must gate legacy DreamServer coexistence"; exit 1; }
+  || { echo "[FAIL] get-ods.sh must detect pre-ODS containers"; exit 1; }
+grep -qF 'ODS_ALLOW_LEGACY_PARALLEL' installers/phases/01-preflight.sh \
+  || { echo "[FAIL] Linux installer preflight must gate pre-ODS coexistence"; exit 1; }
 grep -qF 'name=^/dream-' installers/phases/01-preflight.sh \
-  || { echo "[FAIL] Linux installer preflight must detect legacy DreamServer containers"; exit 1; }
+  || { echo "[FAIL] Linux installer preflight must detect pre-ODS containers"; exit 1; }
+if grep -Eq 'DreamServer|Dream Server' get-ods.sh installers/phases/01-preflight.sh; then
+  echo "[FAIL] public installer output and controls must use neutral pre-ODS terminology"
+  exit 1
+fi
 grep -qF 'ods/ods-cli text eol=lf' ../.gitattributes \
   || { echo "[FAIL] .gitattributes must force LF checkout for extensionless ods/ods-cli"; exit 1; }
 

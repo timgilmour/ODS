@@ -44,7 +44,7 @@ security policy, GitHub workflows, and project coordination docs. The
 `ods/` directory is the product runtime: services, installer phases,
 compose overlays, dashboard, CLI, tests, and operator docs.
 
-**Stable consumption:** `v2.5.2` is the current stable release. `main` moves
+**Stable consumption:** `v2.5.3` is the current stable release. `main` moves
 quickly; use it for active development and validation candidates. For forks,
 appliances, labs, or production-like installs, pin a tagged release or audited
 commit and keep your own validation receipt. Stable patch fixes land on
@@ -62,7 +62,8 @@ curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
 
 The hosted bootstrap clones `main` by default. To inspect it before running,
-pin a release tag with `ODS_REF`, or install from an audited commit, see
+select a compatible ref with `ODS_REF`, or install a stable release or audited
+commit manually; see
 [Installer Trust](ods/docs/INSTALLER_TRUST.md).
 
 Windows users should use the PowerShell installer shown below or follow the [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md).

@@ -32,15 +32,17 @@ Without `ODS_REF`, Git uses the repository's default branch, currently `main`.
 The hosted one-liner therefore tracks `main`; it does not pin the current stable
 release.
 
-To select a published release tag or another branch through the hosted path,
-apply `ODS_REF` to the `bash` process:
+`ODS_REF` can select a branch or tag only when that ref contains the current
+`ods/` product-tree layout used by the bootstrap's sparse checkout. For example:
 
 ```bash
-curl -fsSL https://install.osmantic.com/ods.sh | ODS_REF=v2.5.2 bash
+curl -fsSL https://install.osmantic.com/ods.sh | ODS_REF=main bash
 ```
 
-`ODS_REF` must name a branch or tag that `git clone --branch` can resolve. Use
-the manual source path below when you need to install an exact audited commit.
+The current stable tag, `v2.5.3`, predates that repository layout and must be
+installed through the manual source path below. Do not pass `v2.5.3` through
+`ODS_REF`. Use the manual source path for stable tags with the earlier layout
+and for exact audited commits.
 
 The direct raw GitHub URL,
 `https://raw.githubusercontent.com/Osmantic/ODS/main/ods/get-ods.sh`, exposes
@@ -53,7 +55,7 @@ For a stable release tag, clone the known ref yourself and run the installer
 from the checked-out source:
 
 ```bash
-git clone --depth 1 --branch v2.5.2 https://github.com/Osmantic/ODS.git
+git clone --depth 1 --branch v2.5.3 https://github.com/Osmantic/ODS.git
 cd ODS
 ./install.sh
 ```
@@ -76,7 +78,7 @@ Windows users should install from a normal user PowerShell, not an elevated
 Administrator shell:
 
 ```powershell
-git clone --depth 1 --branch v2.5.2 https://github.com/Osmantic/ODS.git
+git clone --depth 1 --branch v2.5.3 https://github.com/Osmantic/ODS.git
 cd ODS
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
@@ -99,13 +101,13 @@ inspect it first:
 ```bash
 curl -fsSLo get-ods.sh https://install.osmantic.com/ods.sh
 less get-ods.sh
-ODS_REF=v2.5.2 bash get-ods.sh
+ODS_REF=main bash get-ods.sh
 ```
 
 On Windows, clone first and inspect `install.ps1` before running it:
 
 ```powershell
-git clone --depth 1 --branch v2.5.2 https://github.com/Osmantic/ODS.git
+git clone --depth 1 --branch v2.5.3 https://github.com/Osmantic/ODS.git
 cd ODS
 notepad .\install.ps1
 .\install.ps1

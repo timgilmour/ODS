@@ -179,8 +179,9 @@ curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
 
 The hosted bootstrap clones `main` by default. See
-[Installer Trust](INSTALLER_TRUST.md) to inspect it first, pin a release tag
-with `ODS_REF`, or install from an audited commit.
+[Installer Trust](INSTALLER_TRUST.md) to inspect it first, select a
+compatible ref with `ODS_REF`, or install a stable release or audited commit
+manually.
 
 The wizard:
 1. Detects your hardware

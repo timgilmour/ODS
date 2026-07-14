@@ -68,8 +68,15 @@ PULL=false
 RUN_DRY_RUN=true
 KEEP_WORK=false
 HOST_LOCK=true
-LOCK_FILE="${ODS_FLEET_HOST_LOCK:-${DREAM_FLEET_HOST_LOCK:-/tmp/dream-fleet-heavy.lock}}"
-LOCK_TIMEOUT="${ODS_FLEET_HOST_LOCK_TIMEOUT_SECONDS:-${DREAM_FLEET_HOST_LOCK_TIMEOUT_SECONDS:-}}"
+PRE_ODS_LOCK_ENV="DREAM_FLEET_HOST_LOCK"
+PRE_ODS_LOCK_OVERRIDE="$(printenv "$PRE_ODS_LOCK_ENV" 2>/dev/null || true)"
+PRE_ODS_LOCK_TIMEOUT_OVERRIDE="$(printenv "${PRE_ODS_LOCK_ENV}_TIMEOUT_SECONDS" 2>/dev/null || true)"
+LOCK_FILE="${ODS_FLEET_HOST_LOCK:-${PRE_ODS_LOCK_OVERRIDE:-/tmp/ods-fleet-heavy.lock}}"
+LOCK_TIMEOUT="${ODS_FLEET_HOST_LOCK_TIMEOUT_SECONDS:-$PRE_ODS_LOCK_TIMEOUT_OVERRIDE}"
+PRE_ODS_DEFAULT_LOCK=""
+if [[ -z "${ODS_FLEET_HOST_LOCK:-}" && -z "$PRE_ODS_LOCK_OVERRIDE" ]]; then
+    PRE_ODS_DEFAULT_LOCK="/tmp/dream-fleet-heavy.lock"
+fi
 TARGETS=()
 
 usage() {
@@ -83,8 +90,7 @@ Options:
   --no-dry-run    Skip install-core.sh --dry-run inside each distro.
   --keep-work     Keep temporary host work directory for debugging.
   --lock-file P    Host lock path for coordinating with full fleet runs.
-                  Default: ODS_FLEET_HOST_LOCK, DREAM_FLEET_HOST_LOCK,
-                  or /tmp/dream-fleet-heavy.lock.
+                  Default: ODS_FLEET_HOST_LOCK or /tmp/ods-fleet-heavy.lock.
   --lock-timeout N Seconds to wait for the host lock before failing.
                   Default: wait indefinitely.
   --no-host-lock  Do not take the shared host lock.
@@ -135,6 +141,21 @@ acquire_host_lock() {
         flock 9
     fi
     echo "Acquired fleet host lock: $LOCK_FILE"
+
+    if [[ -n "$PRE_ODS_DEFAULT_LOCK" && "$PRE_ODS_DEFAULT_LOCK" != "$LOCK_FILE" ]]; then
+        mkdir -p "$(dirname "$PRE_ODS_DEFAULT_LOCK")"
+        exec 8>"$PRE_ODS_DEFAULT_LOCK"
+        echo "Acquiring pre-ODS compatibility lock"
+        if [[ -n "$LOCK_TIMEOUT" ]]; then
+            if ! flock -w "$LOCK_TIMEOUT" 8; then
+                echo "ERROR: timed out waiting for pre-ODS compatibility lock" >&2
+                exit 1
+            fi
+        else
+            flock 8
+        fi
+        echo "Acquired pre-ODS compatibility lock"
+    fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -153,6 +174,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --lock-file)
             LOCK_FILE="${2:?missing value for --lock-file}"
+            PRE_ODS_DEFAULT_LOCK=""
             shift 2
             ;;
         --lock-timeout)
