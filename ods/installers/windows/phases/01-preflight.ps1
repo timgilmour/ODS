@@ -67,6 +67,7 @@ try {
     $_winVer = [System.Environment]::OSVersion.Version
     Write-AISuccess "Windows $($_winVer.Major).$($_winVer.Minor) (build $_build) OK"
 } catch {
+    if ($_.FullyQualifiedErrorId -eq "ODS_INSTALL_ABORTED") { throw }
     Write-AIWarn "Could not determine Windows build -- continuing"
 }
 
