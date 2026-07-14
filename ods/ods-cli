@@ -3040,6 +3040,83 @@ cmd_mode() {
     success "Switched to $mode mode. Run 'ods restart' to apply."
 }
 
+# Regenerate config/litellm/lemonade.yaml for the currently-configured model.
+#
+# In lemonade mode this file is the ONLY config LiteLLM mounts
+# (./config/litellm/${ODS_MODE}.yaml:/app/config.yaml), and it names the model
+# explicitly on both its `default` and `"*"` entries — Lemonade exposes models as
+# "extra.<GGUF_FILE>" and 404s on anything else, so a wildcard passthrough is not an
+# option. Until now the file was written in exactly two places: phase 06 at install,
+# and bootstrap-upgrade.sh after a hot-swap. `ods model swap` wrote LLM_MODEL/GGUF_FILE
+# to .env and stopped there — so LiteLLM kept serving the OLD model, and every consumer
+# (Open WebUI, Hermes, OpenClaw, Perplexica) went with it, no matter what .env said.
+#
+# Mirrors the renderer invocation used by bootstrap-upgrade.sh:1557 — deliberately
+# WITHOUT its inline-heredoc fallback writer: a second hand-rolled writer would
+# drift from the renderer's output, and when the renderer fails this function says
+# so loudly instead of papering over it.
+_model_refresh_litellm_lemonade() {
+    local gguf="$1"
+    local mode
+    mode="$(_env_get_raw ODS_MODE | tr -d '"\047')"
+    [[ "$mode" == "lemonade" ]] || return 0
+    [[ -n "$gguf" ]] || { warn "No GGUF_FILE resolved; LiteLLM config left unchanged"; return 1; }
+
+    local key api_base location port
+    key="$(_env_get_raw LITELLM_LEMONADE_API_KEY | tr -d '"\047')"
+    : "${key:=sk-lemonade}"
+
+    # Container-to-container this is the compose SERVICE name, not the container name.
+    api_base="http://llama-server:8080/api/v1"
+    location="$(_env_get_raw AMD_INFERENCE_LOCATION | tr -d '"\047' | tr '[:upper:]' '[:lower:]')"
+    port="$(_env_get_raw AMD_INFERENCE_PORT | tr -d '"\047')"
+    : "${port:=8080}"
+    [[ "$location" == "host" ]] && api_base="http://host.docker.internal:${port}/api/v1"
+
+    local py="${ODS_PYTHON_CMD:-}"
+    if [[ -z "$py" && -f "$INSTALL_DIR/lib/python-cmd.sh" ]]; then
+        . "$INSTALL_DIR/lib/python-cmd.sh"
+        py="$(ods_detect_python_cmd 2>/dev/null || true)"
+    fi
+    : "${py:=python3}"
+
+    local script="$INSTALL_DIR/scripts/render-runtime-configs.py"
+    if [[ ! -f "$script" ]] || ! command -v "$py" >/dev/null 2>&1; then
+        warn "Runtime config renderer unavailable; LiteLLM still points at the previous model."
+        warn "  LiteLLM is what every client talks to, so the swap will NOT take effect."
+        return 1
+    fi
+
+    local render_out
+    if ! render_out="$("$py" "$script" \
+            --surface litellm-lemonade \
+            --ods-mode lemonade \
+            --gpu-backend amd \
+            --gguf-file "$gguf" \
+            --lemonade-api-base "$api_base" \
+            --litellm-key "$key" \
+            --output-root "$INSTALL_DIR" \
+            --write 2>&1)"; then
+        warn "Renderer failed; LiteLLM still points at the previous model."
+        [[ -n "$render_out" ]] && printf '%s\n' "$render_out" >&2
+        warn "  LiteLLM is what every client talks to, so the swap will NOT take effect."
+        return 1
+    fi
+
+    success "LiteLLM config updated → extra.${gguf}"
+
+    local restart_out
+    if docker ps --filter name=ods-litellm --format '{{.Names}}' 2>/dev/null | grep -q ods-litellm; then
+        if restart_out="$(docker restart ods-litellm 2>&1)"; then
+            success "Restarted ods-litellm"
+        else
+            warn "Could not restart ods-litellm — run: docker restart ods-litellm"
+            [[ -n "$restart_out" ]] && printf '%s\n' "$restart_out" >&2
+        fi
+    fi
+    return 0
+}
+
 cmd_model() {
     check_install; cd "$INSTALL_DIR"
     local subcmd="${1:-current}"
@@ -3085,7 +3162,15 @@ cmd_model() {
             _env_set "GGUF_URL" "$GGUF_URL"
             _env_set "CTX_SIZE" "$MAX_CONTEXT"
             _env_set "MAX_CONTEXT" "$MAX_CONTEXT"
-            success "Model set to $model (tier $tier, ctx=$MAX_CONTEXT). Run 'ods restart llama-server' to apply."
+            success "Model set to $model (tier $tier, ctx=$MAX_CONTEXT)"
+
+            # Writing .env is not enough in lemonade mode: LiteLLM pins the model by name
+            # in config/litellm/lemonade.yaml, and every client goes through LiteLLM. Without
+            # this the swap silently has no effect.
+            _model_refresh_litellm_lemonade "$GGUF_FILE" \
+                || warn "LiteLLM refresh failed (non-fatal — .env is updated, but clients keep the old model until it succeeds)"
+
+            success "Run 'ods restart llama-server' to apply."
             ;;
         *)
             error "Usage: ods model <current|list|swap>"
