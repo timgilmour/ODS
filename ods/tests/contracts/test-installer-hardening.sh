@@ -659,6 +659,7 @@ assert_contains "installers/windows/phases/07-devtools.ps1" 'winget install --ex
 assert_contains "installers/windows/phases/07-devtools.ps1" 'PrefixArgs' "Windows installer does not support py launcher -3 arguments"
 assert_contains "installers/windows/phases/07-devtools.ps1" 'Invoke-ODSNativeQuiet -FilePath \$_python3\.FilePath -Arguments \$_checkArgs' "Windows host-agent dependency probe should not abort on native Python stderr"
 assert_contains "installers/windows/phases/07-devtools.ps1" 'Invoke-ODSNativeQuiet -FilePath \$_python3\.FilePath -Arguments \$_installArgs -LogPath \$script:LOG_FILE' "Windows host-agent dependency install should not abort on native Python stderr"
+assert_not_contains "installers/windows/phases/07-devtools.ps1" 'Write-AIInfo' "Windows devtools phase should only call UI writer functions that exist"
 assert_contains "installers/windows/lib/ui.ps1" 'Invoke-ODSNativeQuiet -FilePath \$python\.FilePath -Arguments \$checkArgs' "Windows Hugging Face fallback dependency probe should not abort on native Python stderr"
 assert_contains "installers/windows/lib/ui.ps1" 'Invoke-ODSNativeQuiet -FilePath \$python\.FilePath -Arguments \$installArgs' "Windows Hugging Face fallback dependency install should not abort on native Python stderr"
 assert_contains "installers/windows/phases/07-devtools.ps1" 'Start-ScheduledTask -TaskName \$script:ODS_AGENT_TASK_NAME' "Windows installer should start host-agent through Scheduled Tasks"

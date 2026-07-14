@@ -335,7 +335,7 @@ if (Test-Path $_agentScript) {
         $_checkArgs = @($_python3.PrefixArgs) + @("-c", "import huggingface_hub, hf_xet")
         $_checkExit = Invoke-ODSNativeQuiet -FilePath $_python3.FilePath -Arguments $_checkArgs
         if ($_checkExit -ne 0) {
-            Write-AIInfo "Installing ODS host-agent model downloader dependencies..."
+            Write-AI "Installing ODS host-agent model downloader dependencies..."
             $_installArgs = @($_python3.PrefixArgs) + @("-m", "pip", "install", "--user", "-q", "huggingface_hub[hf_xet]>=0.27")
             $_installExit = Invoke-ODSNativeQuiet -FilePath $_python3.FilePath -Arguments $_installArgs -LogPath $script:LOG_FILE
             if ($_installExit -eq 0) {
