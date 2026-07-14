@@ -3299,7 +3299,7 @@ cmd_agent() {
                 # A listener on a *different* address means the agent bound a stale
                 # gateway — ods-network was recreated with a new subnet under it.
                 local actual
-                actual="$(ss -ltn 2>/dev/null | awk -v p=":${port}\$" '$4 ~ p {print $4}' | head -1)"
+                actual="$(ss -ltn 2>/dev/null | awk -v p=":${port}\$" '$4 ~ p {print $4}' | sed -n '1p')"
                 if [[ -n "$actual" ]]; then
                     warn "  but something IS listening on ${actual} — stale bind address."
                     warn "  Restart the agent so it rebinds: ods agent restart"
