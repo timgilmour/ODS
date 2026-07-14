@@ -2,6 +2,8 @@
 
 # ODS
 
+<img src="ods/docs/images/osmantic-lockup.png" alt="Osmantic" width="800">
+
 **Osmantic Deployment System**
 
 **Turn your PC, Mac, or Linux box into a private AI server.**
@@ -56,7 +58,7 @@ commit and keep your own validation receipt. Stable patch fixes land on
 Linux and macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Light-Heart-Labs/ODS/main/ods/get-ods.sh | bash
+curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
 
 Prefer to inspect before running or pin a release tag? See
