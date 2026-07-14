@@ -2023,7 +2023,7 @@ function Invoke-Model {
         [string[]]$SubArgs
     )
 
-    Test-Install
+    Test-ODSInstallFiles
     Push-Location $InstallDir
     try {
         switch ($Action.ToLower()) {

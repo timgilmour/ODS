@@ -74,6 +74,89 @@ info "Static: Show-Help EXAMPLES mention model swap"
 grep -q 'model swap' "$ODS_PS1" \
     || fail "Show-Help EXAMPLES do not include 'model swap'"
 pass "Show-Help EXAMPLES include model swap"
+# ============================================================================
+# Integration Test: Invoke-Model without requiring Docker
+# ============================================================================
+info "Integration: model subcommands work without running Docker"
+
+# Resolve a Windows-compatible temp directory
+TEMP_DIR=""
+set +e
+WIN_TEMP=$(powershell.exe -Command "[System.IO.Path]::GetTempPath()" 2>/dev/null | tr -d '\r\n')
+set -e
+if [[ -n "$WIN_TEMP" ]]; then
+    TEMP_DIR=$(wslpath -u "$WIN_TEMP")
+else
+    TEMP_DIR="/tmp"
+fi
+TEMP_DIR="${TEMP_DIR%/}"
+
+MOCK_BIN=$(mktemp -d "$TEMP_DIR/ods-docker-mock.XXXXXX")
+TEMP_INSTALL=$(mktemp -d "$TEMP_DIR/ods-install-mock.XXXXXX")
+
+# Create a failing docker stub (batch file for Windows execution)
+echo -e '@echo off\necho Mock docker failing >&2\nexit /b 1' > "$MOCK_BIN/docker.bat"
+chmod +x "$MOCK_BIN/docker.bat"
+
+# Create mock ODS installation files
+touch "$TEMP_INSTALL/docker-compose.base.yml"
+cat << 'EOF' > "$TEMP_INSTALL/.env"
+LLM_MODEL="mock-model"
+TIER="T0"
+EOF
+
+# Convert paths to Windows format for powershell.exe
+WIN_MOCK_BIN=$(wslpath -w "$MOCK_BIN")
+WIN_TEMP_INSTALL=$(wslpath -w "$TEMP_INSTALL")
+WIN_ODS_PS1=$(wslpath -w "$ODS_PS1")
+
+# Clean up function for this test block
+integration_cleanup() {
+    rm -rf "$MOCK_BIN"
+    rm -rf "$TEMP_INSTALL"
+}
+
+# Export the pre-translated Windows path for ODS_HOME and configure WSLENV
+export ODS_HOME="$WIN_TEMP_INSTALL"
+export WSLENV="ODS_HOME:PATH/l${WSLENV:+:$WSLENV}"
+
+# Run the powershell script using a custom PATH
+# Prepend the mock bin to PATH so the failing docker stub is resolved first.
+set +e
+out_list=$(PATH="$MOCK_BIN:$PATH" powershell.exe -ExecutionPolicy Bypass -File "$WIN_ODS_PS1" model list 2>&1)
+exit_list=$?
+
+out_current=$(PATH="$MOCK_BIN:$PATH" powershell.exe -ExecutionPolicy Bypass -File "$WIN_ODS_PS1" model current 2>&1)
+exit_current=$?
+set -e
+
+# Unset variables to clean up environment
+unset ODS_HOME
+unset WSLENV
+
+# Run cleanup
+integration_cleanup
+
+# Verify outputs
+if [[ $exit_list -ne 0 ]]; then
+    fail "model list command failed with exit code $exit_list. Output:\n$out_list"
+fi
+
+if [[ $exit_current -ne 0 ]]; then
+    fail "model current command failed with exit code $exit_current. Output:\n$out_current"
+fi
+
+if echo "$out_list" | grep -q "=== Available Tiers ==="; then
+    pass "model list succeeded and printed tiers without checking Docker"
+else
+    fail "model list did not output available tiers. Output:\n$out_list"
+fi
+
+if echo "$out_current" | grep -q "Current model: mock-model"; then
+    pass "model current succeeded and printed current model without checking Docker"
+else
+    fail "model current did not output the mock-model. Output:\n$out_current"
+fi
 
 echo ""
 echo -e "${GREEN}All windows-cli-model tests passed.${NC}"
