@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-const DEFAULT_REPO_URL: &str = "https://github.com/Light-Heart-Labs/ODS.git";
+const DEFAULT_REPO_URL: &str = "https://github.com/Osmantic/ODS.git";
 const DEFAULT_INSTALL_REF: &str = "main";
 
 fn repo_url() -> &'static str {
@@ -347,17 +347,17 @@ mod tests {
 
     #[test]
     fn default_repo_url_uses_canonical_ods_repo() {
-        assert_eq!(DEFAULT_REPO_URL, "https://github.com/Light-Heart-Labs/ODS.git");
+        assert_eq!(DEFAULT_REPO_URL, "https://github.com/Osmantic/ODS.git");
     }
 
     #[test]
     fn normalize_repo_url_accepts_common_github_forms() {
         assert_eq!(
-            normalize_repo_url("git@github.com:Light-Heart-Labs/ODS.git"),
+            normalize_repo_url("git@github.com:Osmantic/ODS.git"),
             normalize_repo_url(DEFAULT_REPO_URL)
         );
         assert_eq!(
-            normalize_repo_url("ssh://git@github.com/Light-Heart-Labs/ODS.git/"),
+            normalize_repo_url("ssh://git@github.com/Osmantic/ODS.git/"),
             normalize_repo_url(DEFAULT_REPO_URL)
         );
     }

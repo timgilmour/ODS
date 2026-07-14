@@ -12,8 +12,8 @@ AI server and homelab setup is rapidly becoming a solved problem.
 It should feel that way for everyone.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/Light-Heart-Labs/ODS)](https://github.com/Light-Heart-Labs/ODS/stargazers)
-[![Release](https://img.shields.io/github/v/release/Light-Heart-Labs/ODS)](https://github.com/Light-Heart-Labs/ODS/releases)
+[![GitHub Stars](https://img.shields.io/github/stars/Osmantic/ODS)](https://github.com/Osmantic/ODS/stargazers)
+[![Release](https://img.shields.io/github/v/release/Osmantic/ODS)](https://github.com/Osmantic/ODS/releases)
 
 [![Watch the demo](https://img.shields.io/badge/Demo-Watch%20on%20YouTube-red?logo=youtube)](https://youtu.be/nO8xFNHX-HA)
 
@@ -114,7 +114,7 @@ After install, open **http://localhost:3000** and start chatting.
 > | **Windows** (NVIDIA + AMD) | **Supported** — install and run today |
 > | **macOS** (Apple Silicon) | **Supported** — install and run today |
 >
-> **Tested Linux distros:** Ubuntu 24.04/22.04, Debian 12, Linux Mint 21.3, Fedora 41+, Rocky Linux 9, Arch Linux, Manjaro, CachyOS, and openSUSE Tumbleweed. Other distros using apt, dnf, pacman, or zypper should also work — [open an issue](https://github.com/Light-Heart-Labs/ODS/issues) if yours doesn't.
+> **Tested Linux distros:** Ubuntu 24.04/22.04, Debian 12, Linux Mint 21.3, Fedora 41+, Rocky Linux 9, Arch Linux, Manjaro, CachyOS, and openSUSE Tumbleweed. Other distros using apt, dnf, pacman, or zypper should also work — [open an issue](https://github.com/Osmantic/ODS/issues) if yours doesn't.
 >
 > **Release validation:** Operational changes run through a release-grade gate
 > that covers zero-prereq bootstrap, clean installs, product behavior,
@@ -471,6 +471,6 @@ Apache 2.0 — Use it, modify it, ship it. See [LICENSE](LICENSE).
 
 <div align="center">
 
-*Built by [Light Heart Labs](https://github.com/Light-Heart-Labs) and the growing resistance that refuses to rent what should be owned.*
+*Built by [Osmantic](https://github.com/Osmantic) and the growing resistance that refuses to rent what should be owned.*
 
 </div>

@@ -300,7 +300,7 @@ When the full model finishes, the system swaps it in automatically — you don't
 
 1. This documentation
 2. `TROUBLESHOOTING.md` for common issues
-3. GitHub Issues: https://github.com/Light-Heart-Labs/ODS/issues
+3. GitHub Issues: https://github.com/Osmantic/ODS/issues
 4. Discord community (link in README)
 
 ---
@@ -333,4 +333,4 @@ See "Cost & ROI" section above. TL;DR: Local is cheaper at scale, more private, 
 
 ---
 
-*Built by Light Heart Labs / The Collective*
+*Built by Osmantic / The Collective*

@@ -7,8 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
 
 CANONICAL_ENDPOINT="https://install.osmantic.com/ods.sh"
-LEGACY_RAW_ENDPOINT="https://raw.githubusercontent.com/Light-Heart-Labs/ODS/main/ods/get-ods.sh"
-LEGACY_CLONE_URL="https://github.com/Light-Heart-Labs/ODS.git"
+CANONICAL_REPO_URL="https://github.com/Osmantic/ODS.git"
 
 fail() {
     echo "[FAIL] $*"
@@ -26,16 +25,6 @@ require_literal() {
 
     grep -qF -- "$literal" "$file" \
         || fail "$description missing from ${file#"$REPO_ROOT"/}"
-}
-
-reject_literal() {
-    local file="$1"
-    local literal="$2"
-    local description="$3"
-
-    if grep -qF -- "$literal" "$file"; then
-        fail "$description remains in ${file#"$REPO_ROOT"/}"
-    fi
 }
 
 install_docs=(
@@ -57,12 +46,22 @@ clone_docs=(
 for file in "${install_docs[@]}"; do
     [[ -f "$file" ]] || fail "Expected install document missing: $file"
     require_literal "$file" "$CANONICAL_ENDPOINT" "Canonical install endpoint"
-    reject_literal "$file" "$LEGACY_RAW_ENDPOINT" "Legacy raw bootstrap endpoint"
 done
 
 for file in "${clone_docs[@]}"; do
-    reject_literal "$file" "$LEGACY_CLONE_URL" "Legacy clone URL"
+    require_literal "$file" "$CANONICAL_REPO_URL" "Canonical clone URL"
 done
+
+legacy_brand_matches="$(
+    git -C "$REPO_ROOT" grep -n -I -i -E \
+        'light[-_ ]?heart[-_ ]?labs' \
+        -- . ':!ods/tests/test-install-docs.sh' || true
+)"
+if [[ -n "$legacy_brand_matches" ]]; then
+    echo "[FAIL] Legacy organization references remain:"
+    echo "$legacy_brand_matches"
+    exit 1
+fi
 
 trust_doc="$ROOT_DIR/docs/INSTALLER_TRUST.md"
 require_literal "$trust_doc" 'currently `main`' "Default branch guidance"
