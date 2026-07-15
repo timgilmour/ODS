@@ -2,6 +2,12 @@
 
 # ODS
 
+<p align="center">
+  <a href="https://osmantic.com">
+    <img src="ods/docs/images/osmantic-lockup.png" alt="Osmantic" width="800">
+  </a>
+</p>
+
 **Osmantic Deployment System**
 
 **Turn your PC, Mac, or Linux box into a private AI server.**
@@ -16,12 +22,6 @@ It should feel that way for everyone.
 [![Watch the demo](https://img.shields.io/badge/Demo-Watch%20on%20YouTube-red?logo=youtube)](https://youtu.be/nO8xFNHX-HA)
 
 </div>
-
----
-
-<p align="center">
-  <img src="ods/docs/images/osmantic-lockup.png" alt="Osmantic" width="800">
-</p>
 
 ODS installs and wires together everything you need to run AI locally, so you do not have to assemble Ollama, Open WebUI, n8n, ComfyUI, and privacy tools by hand:
 
