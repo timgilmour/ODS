@@ -79,13 +79,47 @@ pass "Show-Help EXAMPLES include model swap"
 # ============================================================================
 info "Integration: model subcommands work without running Docker"
 
+to_unix_path() {
+    local p="$1"
+    if command -v wslpath >/dev/null 2>&1; then
+        wslpath -u "$p"
+    elif command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "$p"
+    else
+        if [[ "$p" =~ ^[a-zA-Z]: ]]; then
+            local drive="${p:0:1}"
+            drive=$(echo "$drive" | tr '[:upper:]' '[:lower:]')
+            echo "/${drive}${p:2}" | tr '\\' '/'
+        else
+            echo "$p"
+        fi
+    fi
+}
+
+to_win_path() {
+    local p="$1"
+    if command -v wslpath >/dev/null 2>&1; then
+        wslpath -w "$p"
+    elif command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$p"
+    else
+        if [[ "$p" =~ ^/[a-zA-Z]/ ]]; then
+            local drive="${p:1:1}"
+            drive=$(echo "$drive" | tr '[:lower:]' '[:upper:]')
+            echo "${drive}:${p:2}" | tr '/' '\\'
+        else
+            echo "$p"
+        fi
+    fi
+}
+
 # Resolve a Windows-compatible temp directory
 TEMP_DIR=""
 set +e
 WIN_TEMP=$(powershell.exe -Command "[System.IO.Path]::GetTempPath()" 2>/dev/null | tr -d '\r\n')
 set -e
 if [[ -n "$WIN_TEMP" ]]; then
-    TEMP_DIR=$(wslpath -u "$WIN_TEMP")
+    TEMP_DIR=$(to_unix_path "$WIN_TEMP")
 else
     TEMP_DIR="/tmp"
 fi
@@ -106,9 +140,8 @@ TIER="T0"
 EOF
 
 # Convert paths to Windows format for powershell.exe
-WIN_MOCK_BIN=$(wslpath -w "$MOCK_BIN")
-WIN_TEMP_INSTALL=$(wslpath -w "$TEMP_INSTALL")
-WIN_ODS_PS1=$(wslpath -w "$ODS_PS1")
+WIN_TEMP_INSTALL=$(to_win_path "$TEMP_INSTALL")
+WIN_ODS_PS1=$(to_win_path "$ODS_PS1")
 
 # Clean up function for this test block
 integration_cleanup() {
