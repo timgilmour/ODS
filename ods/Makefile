@@ -71,12 +71,14 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== macOS model download retry contract ==="
 	@bash tests/test-macos-download-retries.sh
-	@echo ""
 	@echo "=== fleet-multi-distro keep-going on docker pull failure ==="
 	@bash tests/test-fleet-multi-distro-keep-going.sh
 	@echo ""
 	@echo "=== fleet host lock behavior ==="
 	@bash tests/test-fleet-host-lock.sh
+	@echo ""
+	@echo "=== issue-to-pr security check ==="
+	@bash tests/test-issue-to-pr-security.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="
