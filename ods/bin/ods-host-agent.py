@@ -5020,6 +5020,12 @@ def _request_server_shutdown(server, signum=None):
 # stops serve_forever(). Without this the serve loop would exit on a rebind, or
 # spin back up after a SIGTERM.
 _SHUTTING_DOWN = threading.Event()
+# Set by the rebind watchdog when the gateway moved. Under systemd, main() exits
+# nonzero instead of rebinding in place, so Restart=on-failure re-runs
+# ExecStartPre (scripts/sync-host-agent-firewall.sh) and the UFW/firewalld rule
+# gets re-scoped to the NEW ods-network subnet — an in-place rebind would leave
+# the firewall allowing only the old subnet, blocking every container call.
+_BIND_ADDRESS_MOVED = threading.Event()
 _REBIND_POLL_SECONDS = 30
 
 
@@ -5049,6 +5055,7 @@ def _watch_for_bind_address_change(server, env, current_addr):
                 "Bind address changed (%s -> %s) — ods-network was probably recreated "
                 "with a new subnet. Rebinding.", current_addr, resolved,
             )
+            _BIND_ADDRESS_MOVED.set()
             _request_server_shutdown(server)
             return
 
@@ -5169,6 +5176,22 @@ def main():
             logger.info("Shutting down")
         finally:
             server.server_close()
+
+        if _BIND_ADDRESS_MOVED.is_set() and not _SHUTTING_DOWN.is_set():
+            if os.environ.get("INVOCATION_ID"):
+                # Running under systemd: exit nonzero so Restart=on-failure
+                # relaunches us and ExecStartPre re-syncs the firewall rule
+                # for the new ods-network subnet. Rebinding in place would
+                # leave UFW/firewalld scoped to the old subnet and every
+                # container->agent call blocked.
+                logger.warning(
+                    "Exiting for systemd restart so the firewall rule is "
+                    "re-synced to the new ods-network subnet (ExecStartPre)."
+                )
+                sys.exit(75)
+            # Not under systemd (manual run, launchd): rebind in place —
+            # there is no ExecStartPre to re-run, so exiting gains nothing.
+            _BIND_ADDRESS_MOVED.clear()
 
     logger.info("ODS Host Agent stopped")
 

@@ -55,8 +55,10 @@ class Harness:
 @pytest.fixture(autouse=True)
 def clean_shutdown_event():
     agent._SHUTTING_DOWN.clear()
+    agent._BIND_ADDRESS_MOVED.clear()
     yield
     agent._SHUTTING_DOWN.set()
+    agent._BIND_ADDRESS_MOVED.clear()
 
 
 def test_stable_gateway_never_triggers_rebind(monkeypatch):
@@ -64,6 +66,7 @@ def test_stable_gateway_never_triggers_rebind(monkeypatch):
     time.sleep(0.15)  # ~15 polls
     assert h.thread.is_alive(), "watchdog must keep watching while the gateway is stable"
     assert h.shutdown_calls == []
+    assert not agent._BIND_ADDRESS_MOVED.is_set()
     h.stop()
 
 
@@ -74,6 +77,10 @@ def test_moved_gateway_stops_server_for_rebind(monkeypatch):
     assert h.shutdown_calls == ["fake-server"]
     # A rebind is not a shutdown: the outer serve loop must be allowed to re-enter.
     assert not agent._SHUTTING_DOWN.is_set()
+    # Under systemd, main() uses this flag to exit nonzero instead of
+    # rebinding in place, so Restart=on-failure re-runs ExecStartPre and the
+    # firewall rule gets re-scoped to the new ods-network subnet.
+    assert agent._BIND_ADDRESS_MOVED.is_set()
 
 
 def test_resolver_error_does_not_kill_watchdog(monkeypatch):
