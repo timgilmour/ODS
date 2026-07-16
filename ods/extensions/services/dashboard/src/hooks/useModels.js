@@ -212,7 +212,7 @@ export function useModels() {
       const response = await fetch(`/api/models/${encodeURIComponent(modelId)}`, {
         method: 'DELETE'
       })
-      if (!response.ok) throw new Error('Failed to delete model')
+      if (!response.ok) throw new Error(await errorMessageFromResponse(response, 'Failed to delete model'))
       await fetchModels() // Refresh
     } catch (err) {
       setError(err.message)

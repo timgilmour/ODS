@@ -203,6 +203,28 @@ def _find_usable_bash() -> str | None:
     _usable_bash = False
     return None
 
+# Real ComfyUI model-type subdirs (confirmed against a live install's
+# data/comfyui/ComfyUI/models/ tree) — the allowlist for pull-hf's
+# "comfyui:<subdir>" target, so a request can't write outside this tree.
+_COMFYUI_MODEL_SUBDIRS = frozenset({
+    "audio_encoders", "checkpoints", "clip", "clip_vision", "configs",
+    "controlnet", "diffusers", "diffusion_models", "embeddings", "gligen",
+    "hypernetworks", "latent_upscale_models", "loras", "model_patches",
+    "photomaker", "style_models", "text_encoders", "unet", "upscale_models",
+    "vae", "vae_approx",
+})
+
+def _valid_hf_repo_path(repo_path: str) -> bool:
+    """Validate a path within an HF repo (used only in the download URL —
+    the local write path is always dest_dir/<bare filename>). Conservative
+    charset; every segment must be a real name (no '', '.', '..')."""
+    if not repo_path or len(repo_path) > 512:
+        return False
+    if not re.match(r"^[A-Za-z0-9._/-]+$", repo_path):
+        return False
+    return all(seg not in ("", ".", "..") for seg in repo_path.split("/"))
+
+
 # Model download state — only one download at a time
 _model_download_lock = threading.Lock()
 _model_download_thread: threading.Thread | None = None
@@ -1659,6 +1681,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_service_restart()
         elif self.path == "/v1/model/download":
             self._handle_model_download()
+        elif self.path == "/v1/model/pull-hf":
+            self._handle_model_pull_hf()
         elif self.path == "/v1/model/download/cancel":
             self._handle_model_download_cancel()
         elif self.path == "/v1/model/activate":
@@ -1669,6 +1693,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_invalidate_compose_cache()
         elif self.path == "/v1/env/update":
             self._handle_env_update()
+        elif self.path == "/v1/env/set-keys":
+            self._handle_env_set_keys()
         elif self.path in ("/v1/update/check", "/v1/update/backup", "/v1/update/start"):
             self._handle_update_action()
         elif self.path == "/v1/network/wifi-connect":
@@ -2266,6 +2292,77 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         logger.info(".env updated via host agent from %s (backup=%s)", client_ip, backup_relative_path or "none")
         json_response(self, 200, {"status": "ok", "backup_path": backup_relative_path})
+
+    def _handle_env_set_keys(self):
+        """Merge individual KEY=value updates into .env, reading the CURRENT
+        file from disk at write time. Callers must use this instead of
+        /v1/env/update whenever they only want to change specific keys:
+        dashboard-api's .env is a read-only single-file bind mount whose
+        inode is pinned at container start, so any full-file text it sends
+        was rebuilt from a stale snapshot and silently reverts every key
+        changed since its container started. A key-level merge done here,
+        against the live file, has no such window."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+
+        client_ip = self.client_address[0] if hasattr(self, "client_address") else "?"
+        updates = body.get("updates")
+        if not isinstance(updates, dict) or not (1 <= len(updates) <= 16):
+            json_response(self, 400, {"error": "updates must be an object of 1-16 key/value pairs"})
+            return
+
+        schema_path = INSTALL_DIR / ".env.schema.json"
+        try:
+            with open(schema_path, encoding="utf-8") as f:
+                schema = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("env_set_keys rejected: failed to read schema (request from %s): %s", schema_path, exc)
+            json_response(self, 500, {"error": f"Failed to read .env.schema.json: {exc}"})
+            return
+        allowed_keys = set(schema.get("properties", {}).keys())
+
+        for key, value in updates.items():
+            if not isinstance(key, str) or not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key):
+                json_response(self, 400, {"error": f"Invalid key name: {str(key)[:40]}"})
+                return
+            if key not in allowed_keys:
+                # Mirror env_update: warn but accept non-schema keys.
+                logger.info("env_set_keys: non-schema key %r from %s (accepted)", key, client_ip)
+            if not isinstance(value, str) or len(value) > 4096:
+                json_response(self, 400, {"error": f"Value for {key} must be a string of at most 4096 chars"})
+                return
+            # Values are written as single KEY=value lines — any control char
+            # (esp. \n/\r) would let one update smuggle in extra lines.
+            if any(ord(c) < 32 for c in value):
+                json_response(self, 400, {"error": f"Value contains control characters for key: {key}"})
+                return
+
+        # Coordinate with model activation and env_update, which also write
+        # .env under this lock.
+        if not _model_activate_lock.acquire(blocking=False):
+            json_response(self, 409, {"error": "Model activation or another env update in progress; try again shortly"})
+            return
+
+        env_path = INSTALL_DIR / ".env"
+        try:
+            backup_dir = DATA_DIR / "config-backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            if env_path.exists():
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                shutil.copy2(env_path, backup_dir / f".env.backup.{timestamp}")
+            _update_env_keys(env_path, updates)
+        except OSError as exc:
+            logger.warning("env_set_keys OSError from %s: %s", client_ip, exc)
+            json_response(self, 500, {"error": str(exc)})
+            return
+        finally:
+            _model_activate_lock.release()
+
+        logger.info(".env keys updated via host agent from %s: %s", client_ip, sorted(updates))
+        json_response(self, 200, {"status": "ok", "updated": sorted(updates)})
 
     def _handle_core_recreate(self):
         if not check_auth(self):
@@ -3254,118 +3351,18 @@ class AgentHandler(BaseHTTPRequestHandler):
                         if _model_download_cancel.is_set():
                             break
                         part_target = models_dir / part_file_name
-                        part_tmp = models_dir / f"{part_file_name}.part"
                         part_label = part_file_name if len(download_plan) == 1 else f"{part_file_name} (part {part_idx}/{len(download_plan)})"
 
-                        # Get real file size by following redirects and reading final Content-Length
-                        part_total = 0
-                        try:
-                            head_result = subprocess.run(
-                                ["curl", "-sI", "-L", "--connect-timeout", "10", part_url],
-                                capture_output=True, text=True, timeout=30,
-                            )
-                            # Take the LAST content-length header (after all redirects)
-                            for line in head_result.stdout.splitlines():
-                                if line.lower().startswith("content-length:"):
-                                    val = int(line.split(":", 1)[1].strip())
-                                    if val > 10000:  # Ignore redirect page sizes
-                                        part_total = val
-                        except (subprocess.TimeoutExpired, ValueError):
-                            pass
+                        part_total = _curl_head_content_length(part_url)
+                        outcome, err = _download_one_file(part_url, part_target, status_path, part_label, total=part_total)
 
-                        _write_model_status(status_path, "downloading", part_label, 0, part_total)
-
-                        # Progress polling: update status by checking .part file size.
-                        # Also kills the active curl process when cancel is requested.
-                        _stop_progress = threading.Event()
-
-                        def _poll_progress():
-                            while not _stop_progress.is_set():
-                                if _model_download_cancel.is_set():
-                                    proc_ref = _model_download_proc
-                                    if proc_ref is not None:
-                                        try:
-                                            proc_ref.kill()
-                                        except (OSError, AttributeError):
-                                            pass
-                                try:
-                                    if part_tmp.exists():
-                                        current = part_tmp.stat().st_size
-                                        _write_model_status(status_path, "downloading", part_label, current, part_total)
-                                except OSError:
-                                    pass
-                                _stop_progress.wait(2)  # Poll every 2 seconds
-
-                        progress_thread = threading.Thread(target=_poll_progress, daemon=True)
-                        progress_thread.start()
-
-                        # Download with retry. Use Popen (not run) so the process can
-                        # be killed from the cancel handler or _poll_progress thread.
-                        success = False
-                        last_error = ""
-                        for attempt in range(1, 4):
-                            if _model_download_cancel.is_set():
-                                break
-                            if attempt > 1:
-                                logger.info("Model download retry %d/3 for %s", attempt, part_file_name)
-                                # Use wait() instead of sleep() so cancel is honored immediately
-                                _model_download_cancel.wait(5)
-                            proc = subprocess.Popen(
-                                ["curl", "-fSL", "-C", "-", "--connect-timeout", "30",
-                                 "-o", str(part_tmp), part_url],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            )
-                            _model_download_proc = proc
-                            try:
-                                proc.wait(timeout=14400)
-                            except subprocess.TimeoutExpired:
-                                proc.kill()
-                                proc.wait(timeout=5)
-                            _model_download_proc = None
-
-                            if _model_download_cancel.is_set():
-                                break
-                            if proc.returncode == 0:
-                                try:
-                                    part_tmp.rename(part_target)
-                                except OSError as exc:
-                                    last_error = f"Download finished but final file could not be moved into place: {exc}"
-                                else:
-                                    if _model_file_ready(part_target):
-                                        success = True
-                                        break
-                                    last_error = "Download finished but model file is missing or empty"
-                                    part_target.unlink(missing_ok=True)
-                            else:
-                                last_error = f"curl exited with code {proc.returncode}"
-                            _write_model_status(
-                                status_path,
-                                "downloading",
-                                part_label,
-                                0,
-                                part_total,
-                                f"Retry {attempt}/3: {last_error}",
-                            )
-
-                        _stop_progress.set()
-                        progress_thread.join(timeout=3)
-
-                        if _model_download_cancel.is_set():
-                            part_tmp.unlink(missing_ok=True)
+                        if outcome == "cancelled":
                             _write_model_status(status_path, "cancelled", gguf_file, 0, 0, "Download cancelled by user")
                             logger.info("Model download cancelled: %s", gguf_file)
                             return
 
-                        if not success:
-                            part_tmp.unlink(missing_ok=True)
-                            _write_model_status(
-                                status_path,
-                                "failed",
-                                part_label,
-                                0,
-                                part_total,
-                                last_error or "Download failed after 3 attempts",
-                            )
+                        if outcome == "failed":
+                            _write_model_status(status_path, "failed", part_label, 0, part_total, err)
                             return
 
                     # Verify SHA256 for every downloaded part. Catalog is the
@@ -3373,7 +3370,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # in expected_sha_by_file, single-file models carry one
                     # entry. Empty checksum -> warn (do not silently skip), so
                     # missing catalog entries surface during operator review.
-                    import hashlib
                     if _model_download_cancel.is_set():
                         _write_model_status(status_path, "cancelled", gguf_file, 0, 0, "Download cancelled by user")
                         return
@@ -3390,34 +3386,12 @@ class AgentHandler(BaseHTTPRequestHandler):
                                 "Download finished but model file is missing or empty",
                             )
                             return
-                        if not expected:
-                            logger.warning(
-                                "SHA256 verification skipped for %s: no checksum in model-library.json",
-                                part_file_name,
-                            )
-                            continue
-                        final_size = final_target.stat().st_size
                         verify_label = (
                             part_file_name
                             if len(download_plan) == 1
                             else f"{part_file_name} (part {part_idx}/{len(download_plan)})"
                         )
-                        _write_model_status(status_path, "verifying", verify_label, final_size, final_size)
-                        sha = hashlib.sha256()
-                        with open(final_target, "rb") as f:
-                            for chunk in iter(lambda: f.read(1048576), b""):
-                                sha.update(chunk)
-                        actual = sha.hexdigest()
-                        if actual != expected:
-                            final_target.unlink(missing_ok=True)
-                            _write_model_status(
-                                status_path,
-                                "failed",
-                                part_file_name,
-                                0,
-                                0,
-                                f"SHA256 mismatch: expected {expected[:12]}..., got {actual[:12]}...",
-                            )
+                        if not _verify_sha256_or_fail(final_target, expected, status_path, verify_label):
                             return
 
                     _write_model_status(status_path, "complete", gguf_file, 0, 0)
@@ -3427,6 +3401,218 @@ class AgentHandler(BaseHTTPRequestHandler):
                     _write_model_status(status_path, "failed", gguf_file, 0, 0, str(exc))
 
             _model_download_thread = threading.Thread(target=_download, daemon=True)
+            _model_download_thread.start()
+
+        json_response(self, 200, {"status": "started"})
+
+    def _handle_model_pull_hf(self):
+        """Pull one or more files directly from a Hugging Face repo (bypassing
+        the model-library catalog). Each file carries its OWN target — a
+        repo can bundle independent components that belong in different
+        places (e.g. a FLUX-style repo: main weights -> comfyui:diffusion_models,
+        a VAE -> comfyui:vae, text encoders -> comfyui:text_encoders), which is
+        different from a *sharded* file (HF's <name>-00001-of-00005.<ext>
+        convention, used by both llama.cpp's gguf-split and sharded
+        safetensors saves) where every part is the same logical file and
+        must share one target — the caller (dashboard-api) is responsible for
+        assigning the same target to every shard of one file. Files may live
+        in repo subfolders: `repo_path` is the path within the repo used for
+        the download URL, while `filename` is the bare name the file lands as
+        in the target dir.
+
+        The handler does validation and the concurrency check only, then
+        responds "started" immediately — HEAD-based sizing and the
+        disk-space preflight happen inside the download thread (like the
+        catalog downloader), because a synchronous multi-file preflight can
+        outlive dashboard-api's request timeout and report failure for a
+        pull that then starts anyway.
+
+        Shares the download machinery (retry, resume, cancel, progress
+        reporting) with _handle_model_download via
+        _download_one_file/_verify_sha256_or_fail, but does its own
+        independent input validation — this is a new attack surface (URLs
+        and paths built from request params, not looked up from a trusted
+        catalog), so it must not rely on dashboard-api's validation alone.
+
+        On success, writes a manifest to data/hf-pulls/ recording exactly
+        which files landed where, so a future "remove this pull" action can
+        delete precisely what this pull placed rather than guessing.
+        """
+        global _model_download_thread
+        if not check_auth(self):
+            return
+        # Bypass read_json_body: its 16 KB cap truncates legitimate requests
+        # (128 files x long shard filenames + sha256s exceeds it easily).
+        MAX_PULL_BODY = 262144
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            json_response(self, 400, {"error": "Invalid Content-Length"})
+            return
+        if length <= 0:
+            json_response(self, 400, {"error": "Empty body"})
+            return
+        if length > MAX_PULL_BODY:
+            json_response(self, 413, {"error": f"Body too large: {length} > {MAX_PULL_BODY}"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            json_response(self, 400, {"error": f"Invalid JSON: {exc}"})
+            return
+
+        repo_id = body.get("repo_id", "")
+        revision = body.get("revision") or "main"
+        files = body.get("files", [])
+
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$", repo_id):
+            json_response(self, 400, {"error": "repo_id must look like 'org/name'"})
+            return
+        if not re.match(r"^[A-Za-z0-9._-]+$", revision):
+            json_response(self, 400, {"error": "invalid revision"})
+            return
+        if not isinstance(files, list) or not (1 <= len(files) <= 128):
+            json_response(self, 400, {"error": "files must be a non-empty list of at most 128 entries"})
+            return
+
+        # Validate everything before any filesystem side effects (mkdir
+        # happens in the download thread, after the request is accepted).
+        file_plan = []
+        for entry in files:
+            if not isinstance(entry, dict):
+                json_response(self, 400, {"error": "each files entry must be an object"})
+                return
+            filename = entry.get("filename", "")
+            if not filename or any(c in filename for c in ("/", "\\", "\x00")) or filename in (".", ".."):
+                json_response(self, 400, {"error": f"invalid filename: {filename!r}"})
+                return
+
+            repo_path = entry.get("repo_path") or filename
+            if not _valid_hf_repo_path(repo_path):
+                json_response(self, 400, {"error": f"invalid repo_path: {repo_path!r}"})
+                return
+
+            file_target = entry.get("target", "")
+            if file_target == "llama-server":
+                dest_dir = INSTALL_DIR / "data" / "models"
+            elif file_target.startswith("comfyui:") and file_target.split(":", 1)[1] in _COMFYUI_MODEL_SUBDIRS:
+                dest_dir = INSTALL_DIR / "data" / "comfyui" / "ComfyUI" / "models" / file_target.split(":", 1)[1]
+            else:
+                json_response(self, 400, {"error": f"invalid target for {filename!r}: {file_target!r}"})
+                return
+
+            final_target = (dest_dir / filename).resolve()
+            if not final_target.is_relative_to(dest_dir.resolve()):
+                json_response(self, 400, {"error": f"invalid filename: {filename!r}"})
+                return
+
+            size = entry.get("size")
+            file_plan.append({
+                "filename": filename,
+                "repo_path": repo_path,
+                "sha256": entry.get("sha256") or "",
+                "target": file_target,
+                "dest_dir": dest_dir,
+                "final_target": final_target,
+                "size": size if isinstance(size, int) and size > 0 else 0,
+            })
+
+        env = load_env(INSTALL_DIR / ".env")
+        hf_token = (env.get("HF_TOKEN") or "").strip()
+        extra_headers = [f"Authorization: Bearer {hf_token}"] if hf_token else []
+        extra_curl_args = []
+        for header in extra_headers:
+            extra_curl_args += ["-H", header]
+
+        status_path = INSTALL_DIR / "data" / "model-download-status.json"
+        overall_label = f"{repo_id}/{file_plan[0]['filename']}" if len(file_plan) == 1 else f"{repo_id} ({len(file_plan)} files)"
+
+        def _resolve_url(repo_path: str) -> str:
+            return f"https://huggingface.co/{repo_id}/resolve/{revision}/{repo_path}"
+
+        with _model_download_lock:
+            if _model_download_thread is not None and _model_download_thread.is_alive():
+                json_response(self, 409, {"error": "Another download is in progress"})
+                return
+
+            pending = [f for f in file_plan if not _model_file_ready(f["final_target"])]
+            if not pending:
+                # Safe to normalize a stale status here: we hold the lock and
+                # just confirmed no download thread is running, so this can't
+                # clobber an in-flight download's progress.
+                _write_model_status(status_path, "complete", overall_label, 0, 0)
+                json_response(self, 200, {"status": "already_downloaded"})
+                return
+
+            _model_download_cancel.clear()
+
+            def _pull():
+                try:
+                    for f in pending:
+                        f["dest_dir"].mkdir(parents=True, exist_ok=True)
+
+                    # Size + disk-space preflight. HEAD is best-effort; fall
+                    # back to the caller-provided size (from the HF file
+                    # listing) so an unreachable/odd HEAD response doesn't
+                    # silently skip the free-space check (fail-open).
+                    _write_model_status(status_path, "downloading", overall_label, 0, 0)
+                    needed_bytes_by_dest_dir = {}
+                    for f in pending:
+                        if _model_download_cancel.is_set():
+                            _write_model_status(status_path, "cancelled", overall_label, 0, 0, "Download cancelled by user")
+                            return
+                        f["total"] = _curl_head_content_length(_resolve_url(f["repo_path"]), extra_headers) or f["size"]
+                        needed_bytes_by_dest_dir[f["dest_dir"]] = needed_bytes_by_dest_dir.get(f["dest_dir"], 0) + f["total"]
+                    for dest_dir, needed in needed_bytes_by_dest_dir.items():
+                        if not needed:
+                            logger.warning("HF pull: unknown size for files in %s — skipping disk-space preflight for that dir", dest_dir)
+                            continue
+                        free_space = shutil.disk_usage(dest_dir).free
+                        if free_space < needed * 1.1:
+                            _write_model_status(
+                                status_path, "failed", overall_label, 0, needed,
+                                f"Not enough disk space: need ~{needed} bytes, {free_space} available in {dest_dir}",
+                            )
+                            return
+
+                    for idx, f in enumerate(pending, 1):
+                        if _model_download_cancel.is_set():
+                            break
+                        part_label = f["filename"] if len(pending) == 1 else f"{f['filename']} (part {idx}/{len(pending)})"
+                        outcome, err = _download_one_file(
+                            _resolve_url(f["repo_path"]), f["final_target"], status_path, part_label,
+                            extra_curl_args=extra_curl_args, total=f["total"],
+                        )
+                        if outcome == "cancelled":
+                            _write_model_status(status_path, "cancelled", overall_label, 0, 0, "Download cancelled by user")
+                            logger.info("HF pull cancelled: %s", overall_label)
+                            return
+                        if outcome == "failed":
+                            _write_model_status(status_path, "failed", part_label, 0, f["total"], err)
+                            return
+
+                    if _model_download_cancel.is_set():
+                        _write_model_status(status_path, "cancelled", overall_label, 0, 0, "Download cancelled by user")
+                        return
+
+                    # Verify only what THIS pull downloaded. Files that already
+                    # existed were never fetched from this repo — checking them
+                    # against this repo's checksums would delete a perfectly
+                    # good file whenever two repos ship different content under
+                    # the same generic name (ae.safetensors, clip_l.safetensors...).
+                    for idx, f in enumerate(pending, 1):
+                        verify_label = f["filename"] if len(pending) == 1 else f"{f['filename']} (part {idx}/{len(pending)})"
+                        if not _verify_sha256_or_fail(f["final_target"], f["sha256"], status_path, verify_label):
+                            return
+
+                    _write_hf_pull_manifest(repo_id, revision, file_plan)
+                    _write_model_status(status_path, "complete", overall_label, 0, 0)
+                    logger.info("HF pull complete: %s (%d files, %d downloaded)", overall_label, len(file_plan), len(pending))
+                except Exception as exc:
+                    logger.error("HF pull failed: %s", exc)
+                    _write_model_status(status_path, "failed", overall_label, 0, 0, str(exc))
+
+            _model_download_thread = threading.Thread(target=_pull, daemon=True)
             _model_download_thread.start()
 
         json_response(self, 200, {"status": "started"})
@@ -4968,6 +5154,187 @@ def _recreate_llama_server(env: dict, override_image: str = ""):
         logger.error("Failed to create llama-server: %s", result.stderr)
         raise RuntimeError(f"docker run failed: {result.stderr[-500:]}")
     logger.info("llama-server container created successfully")
+
+
+def _curl_head_content_length(url: str, extra_headers: list[str] | None = None) -> int:
+    """Return the real Content-Length after following redirects, or 0 if unknown."""
+    cmd = ["curl", "-sI", "-L", "--connect-timeout", "10"]
+    for header in extra_headers or []:
+        cmd += ["-H", header]
+    cmd.append(url)
+    total = 0
+    try:
+        head_result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        for line in head_result.stdout.splitlines():
+            if line.lower().startswith("content-length:"):
+                val = int(line.split(":", 1)[1].strip())
+                if val > 10000:  # Ignore redirect page sizes
+                    total = val
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+    return total
+
+
+def _download_one_file(
+    url: str,
+    target: Path,
+    status_path: Path,
+    label: str,
+    extra_curl_args: list[str] | None = None,
+    total: int = 0,
+) -> tuple[str, str]:
+    """Download url to target with resume/retry/cancel support, writing progress
+    into status_path along the way (does not write a terminal status — the
+    caller decides what label/status to write on cancel or failure, since
+    different callers label multi-part downloads differently).
+
+    Returns (outcome, error_message) where outcome is "success", "cancelled",
+    or "failed".
+    """
+    global _model_download_proc
+    tmp = target.with_name(f"{target.name}.part")
+
+    _write_model_status(status_path, "downloading", label, 0, total)
+
+    # Progress polling: update status by checking the .part file size.
+    # Also kills the active curl process when cancel is requested.
+    _stop_progress = threading.Event()
+
+    def _poll_progress():
+        while not _stop_progress.is_set():
+            if _model_download_cancel.is_set():
+                proc_ref = _model_download_proc
+                if proc_ref is not None:
+                    try:
+                        proc_ref.kill()
+                    except (OSError, AttributeError):
+                        pass
+            try:
+                if tmp.exists():
+                    current = tmp.stat().st_size
+                    _write_model_status(status_path, "downloading", label, current, total)
+            except OSError:
+                pass
+            _stop_progress.wait(2)  # Poll every 2 seconds
+
+    progress_thread = threading.Thread(target=_poll_progress, daemon=True)
+    progress_thread.start()
+
+    # Download with retry. Use Popen (not run) so the process can be killed
+    # from the cancel handler or _poll_progress thread.
+    success = False
+    last_error = ""
+    for attempt in range(1, 4):
+        if _model_download_cancel.is_set():
+            break
+        if attempt > 1:
+            logger.info("Download retry %d/3 for %s", attempt, label)
+            # Use wait() instead of sleep() so cancel is honored immediately
+            _model_download_cancel.wait(5)
+        cmd = ["curl", "-fSL", "-C", "-", "--connect-timeout", "30"]
+        cmd += list(extra_curl_args or [])
+        cmd += ["-o", str(tmp), url]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _model_download_proc = proc
+        try:
+            proc.wait(timeout=14400)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        _model_download_proc = None
+
+        if _model_download_cancel.is_set():
+            break
+        if proc.returncode == 0:
+            try:
+                tmp.rename(target)
+            except OSError as exc:
+                last_error = f"Download finished but final file could not be moved into place: {exc}"
+            else:
+                if _model_file_ready(target):
+                    success = True
+                    break
+                last_error = "Download finished but model file is missing or empty"
+                target.unlink(missing_ok=True)
+        else:
+            last_error = f"curl exited with code {proc.returncode}"
+        _write_model_status(status_path, "downloading", label, 0, total, f"Retry {attempt}/3: {last_error}")
+
+    _stop_progress.set()
+    progress_thread.join(timeout=3)
+
+    if _model_download_cancel.is_set():
+        tmp.unlink(missing_ok=True)
+        return "cancelled", "Download cancelled by user"
+
+    if not success:
+        tmp.unlink(missing_ok=True)
+        return "failed", last_error or "Download failed after 3 attempts"
+
+    return "success", ""
+
+
+def _verify_sha256_or_fail(target: Path, expected: str, status_path: Path, label: str) -> bool:
+    """Verify target's sha256 against expected, writing "verifying"/"failed"
+    status along the way. Skips (with a warning, not silently) if expected is
+    empty — catalog is the source of truth for checksums, and a missing entry
+    there should surface during operator review, not silently pass.
+
+    Returns True if verification passed (or was skipped), False on mismatch.
+    """
+    import hashlib
+
+    if not expected:
+        logger.warning("SHA256 verification skipped for %s: no checksum provided", label)
+        return True
+
+    size = target.stat().st_size
+    _write_model_status(status_path, "verifying", label, size, size)
+    sha = hashlib.sha256()
+    with open(target, "rb") as f:
+        for chunk in iter(lambda: f.read(1048576), b""):
+            sha.update(chunk)
+    actual = sha.hexdigest()
+    if actual != expected:
+        target.unlink(missing_ok=True)
+        _write_model_status(
+            status_path, "failed", label, 0, 0,
+            f"SHA256 mismatch: expected {expected[:12]}..., got {actual[:12]}...",
+        )
+        return False
+    return True
+
+
+def _write_hf_pull_manifest(repo_id: str, revision: str, file_plan: list) -> None:
+    """Record a receipt of a completed HF pull: exactly which files landed
+    where. file_plan entries are dicts with filename/repo_path/target/
+    final_target keys. This is deliberately just a receipt, not a staging
+    area — files are already live in their target dirs by the time this is
+    written; the manifest only exists so a future "remove this pull" action
+    can delete precisely what this pull placed instead of guessing from
+    filenames alone."""
+    manifest_dir = INSTALL_DIR / "data" / "hf-pulls"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", repo_id).strip("-")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    manifest_path = manifest_dir / f"{slug}-{timestamp}.json"
+    data = {
+        "repo_id": repo_id,
+        "revision": revision,
+        "pulled_at": _iso_now(),
+        "files": [
+            {
+                "filename": f["filename"],
+                "repo_path": f["repo_path"],
+                "target": f["target"],
+                "path": str(f["final_target"].relative_to(INSTALL_DIR)),
+            }
+            for f in file_plan
+        ],
+    }
+    tmp = manifest_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, manifest_path)
 
 
 def _write_model_status(path: Path, status: str, model: str, downloaded: int, total: int, error: str = ""):

@@ -17,6 +17,7 @@ import {
 import { Link } from 'react-router-dom'
 import { useModels } from '../hooks/useModels'
 import { useDownloadProgress } from '../hooks/useDownloadProgress'
+import { HuggingFacePullModal } from '../components/HuggingFacePullModal'
 
 const PAGE_SIZE = 10
 const TECH_PANEL_STYLE = {
@@ -55,6 +56,7 @@ export default function Models() {
 
   const [downloadStarting, setDownloadStarting] = useState(null)
   const [openMenuId, setOpenMenuId] = useState(null)
+  const [showHfModal, setShowHfModal] = useState(false)
   const [page, setPage] = useState(1)
   const [query, setQuery] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
@@ -170,6 +172,14 @@ export default function Models() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setShowHfModal(true)}
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/[0.08] bg-black/20 px-3 text-xs font-medium text-theme-text-secondary transition-colors hover:border-theme-accent/35 hover:text-theme-text"
+          >
+            <Download size={14} />
+            Pull from Hugging Face
+          </button>
+          <button
+            type="button"
             onClick={() => libraryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/[0.08] bg-black/20 px-3 text-xs font-medium text-theme-text-secondary transition-colors hover:border-theme-accent/35 hover:text-theme-text"
           >
@@ -186,6 +196,13 @@ export default function Models() {
           </button>
         </div>
       </header>
+
+      {showHfModal && (
+        <HuggingFacePullModal
+          onClose={() => setShowHfModal(false)}
+          onPulled={() => downloadProgress.refresh()}
+        />
+      )}
 
       {error && (
         <div className="mb-5 rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
@@ -547,6 +564,7 @@ function ModelTableRow({
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <h3 className="truncate text-sm font-semibold text-theme-text">{model.name}</h3>
               {model.quantization && <Badge>{model.quantization}</Badge>}
+              {model.engine === 'hipfire' && <Badge tone="purple">hipfire</Badge>}
             </div>
             <p className="mt-1 truncate text-[11px] text-theme-text-muted/75">{model.description}</p>
             <div className="mt-2 flex flex-wrap gap-1.5">
@@ -621,7 +639,7 @@ function ModelTableRow({
             {model.status === 'available' && (
               <MenuButton onClick={onDownload} icon={Download} disabled={downloadBusy}>Download</MenuButton>
             )}
-            {(isDownloaded || isLoaded) && (
+            {(isDownloaded || isLoaded) && model.engine !== 'hipfire' && (
               <MenuButton onClick={onDelete} icon={Trash2} danger>Delete file</MenuButton>
             )}
             {!isLoaded && !isDownloaded && model.status !== 'available' && (
@@ -714,7 +732,7 @@ function PrimaryAction({
 }
 
 function DownloadProgressBar({ progress, helpers }) {
-  const { formatBytes, formatEta } = helpers
+  const { formatBytes, formatEta, cancelDownload } = helpers
 
   if (progress.error) {
     return (
@@ -752,6 +770,13 @@ function DownloadProgressBar({ progress, helpers }) {
         <span className="text-lg font-bold text-theme-accent">
           {progress.percent?.toFixed(0) || 0}%
         </span>
+        <button
+          type="button"
+          onClick={cancelDownload}
+          className="shrink-0 rounded-lg border border-white/[0.08] bg-black/20 px-2.5 py-1 text-xs font-medium text-theme-text-secondary transition-colors hover:border-red-400/35 hover:text-red-300"
+        >
+          Cancel
+        </button>
       </div>
 
       <div className="h-2.5 overflow-hidden rounded-full bg-theme-border">
