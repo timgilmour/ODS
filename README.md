@@ -2,13 +2,13 @@
 
 # ODS
 
+**Osmantic Deployment System**
+
 <p align="center">
-  <a href="https://osmantic.com">
+  <a href="https://osmantic.com" target="_blank" rel="noopener noreferrer">
     <img src="ods/docs/images/osmantic-lockup.png" alt="Osmantic" width="800">
   </a>
 </p>
-
-**Osmantic Deployment System**
 
 **Turn your PC, Mac, or Linux box into a private AI server.**
 
