@@ -227,6 +227,12 @@ class TestBuildApiStatus:
         assert result["gpu"]["name"] == "RTX 4090"
         assert result["tier"] == "Prosumer"
         assert result["uptime"] == 3600
+        assert result["currentModel"] == "Test-32B"
+        assert result["loadedModel"] == "Test-32B"
+        assert result["configuredModel"] == "Test-32B"
+        assert result["model"]["currentModel"] == "Test-32B"
+        assert result["model"]["loadedModel"] == "Test-32B"
+        assert result["model"]["configuredModel"] == "Test-32B"
         assert result["inference"]["tokensPerSecond"] == 25.5
         assert result["inference"]["loadedModel"] == "Test-32B"
 
@@ -599,7 +605,9 @@ class TestPreflightRequiredPorts:
         monkeypatch.setattr("main.SERVICES", {
             "svc-a": {"name": "A", "port": 8000, "external_port": 8000},
         })
-        resp = test_client.get("/api/preflight/required-ports")
+        resp = test_client.get(
+            "/api/preflight/required-ports", headers=test_client.auth_headers
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert any(p["port"] == 8000 for p in data["ports"])
@@ -845,6 +853,8 @@ class TestApiStatusServiceSerialization:
             "status": "healthy",
             "port": 11434,
             "uptime": 42,
+            "url": "http://127.0.0.1:11434/",
+            "href": "http://127.0.0.1:11434/",
             "category": "core",
             "required": True,
             "impact": "core",
@@ -940,6 +950,8 @@ class TestApiStatusServiceSerialization:
             "status": "unknown",
             "port": 3002,
             "uptime": None,
+            "url": "http://127.0.0.1:3002/",
+            "href": "http://127.0.0.1:3002/",
             "category": "core",
             "required": True,
             "impact": "core",

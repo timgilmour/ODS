@@ -67,6 +67,8 @@ def normalize_llm_contract(value: Any) -> dict[str, Any] | None:
 
     swap_safe = bool(consumes and (route == "gateway" or pinning == "dynamic"))
     normalized["swap_safe"] = swap_safe
+    # camelCase alias: the fleet model-ui harness gates required probes on llm.swapSafe
+    normalized["swapSafe"] = swap_safe
     normalized["badge"] = "swap-safe" if swap_safe else "not-swap-safe"
     if not consumes:
         normalized["swap_safe_reason"] = "This service does not declare LLM inference consumption."

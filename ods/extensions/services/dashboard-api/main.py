@@ -522,6 +522,7 @@ HERMES_MIN_CONTEXT = 65536
 HERMES_TARGET_CONTEXT = 131072
 
 
+
 def _build_model_readiness_payload(
     *,
     model_info: Optional[ModelInfo],
@@ -624,9 +625,22 @@ def _service_semantics(service_id: str, status: str) -> dict:
     }
 
 
+def _service_public_url(service_id: str, port: int | None) -> Optional[str]:
+    if not port:
+        return None
+    config = SERVICES.get(service_id, {})
+    path = str(config.get("ui_path") or "/").strip() or "/"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"http://127.0.0.1:{port}{path}"
+
+
+
+
 def _serialize_services(service_statuses: list[ServiceStatus], uptime: int) -> list[dict]:
     serialized = []
     for service in service_statuses:
+        url = _service_public_url(service.id, service.external_port)
         item = {
             "id": service.id,
             "name": service.name,
@@ -634,6 +648,9 @@ def _serialize_services(service_statuses: list[ServiceStatus], uptime: int) -> l
             "port": service.external_port,
             "uptime": uptime if service.status == "healthy" else None,
         }
+        if url:
+            item["url"] = url
+            item["href"] = url
         llm_contract = SERVICES.get(service.id, {}).get("llm")
         if isinstance(llm_contract, dict):
             item["llm"] = llm_contract
@@ -648,6 +665,7 @@ def _fallback_services() -> list[dict]:
         external_port = config.get("external_port", config.get("port", 0))
         if not external_port:
             continue
+        url = _service_public_url(service_id, external_port)
         item = {
             "id": service_id,
             "name": config.get("name", service_id),
@@ -655,6 +673,9 @@ def _fallback_services() -> list[dict]:
             "port": external_port,
             "uptime": None,
         }
+        if url:
+            item["url"] = url
+            item["href"] = url
         llm_contract = config.get("llm")
         if isinstance(llm_contract, dict):
             item["llm"] = llm_contract
@@ -1103,9 +1124,14 @@ async def preflight_gpu():
     return {"available": False, "error": "No GPU detected. Ensure NVIDIA drivers or AMD amdgpu driver is loaded."}
 
 
-@app.get("/api/preflight/required-ports")
+@app.get("/api/preflight/required-ports", dependencies=[Depends(verify_api_key)])
 async def preflight_required_ports():
-    """Return the list of service ports for preflight checking (no auth required)."""
+    """Return the list of deployed service names and ports for preflight checking.
+
+    Gated like the sibling preflight endpoints (docker/gpu/ports/disk): the
+    response enumerates which services are live and on which ports, so it must
+    not be reachable unauthenticated.
+    """
     # When health cache exists, filter out services not in the compose stack
     cached = get_cached_services()
     deployed = {s.id for s in cached if s.status != "not_deployed"} if cached else None
@@ -1336,7 +1362,14 @@ async def _build_api_status() -> dict:
 
     model_data = None
     if model_info:
-        model_data = {"name": model_info.name, "tokensPerSecond": llama_metrics_data.get("tokens_per_second") or None, "contextLength": context_size or model_info.context_length}
+        model_data = {
+            "name": model_info.name,
+            "currentModel": model_info.name,
+            "configuredModel": model_info.name,
+            "loadedModel": loaded_model or model_info.name,
+            "tokensPerSecond": llama_metrics_data.get("tokens_per_second") or None,
+            "contextLength": context_size or model_info.context_length,
+        }
 
     bootstrap_data = None
     if bootstrap_info.active:
@@ -1350,17 +1383,23 @@ async def _build_api_status() -> dict:
 
     tier = _infer_tier(gpu_info)
 
+    loaded_model_name = loaded_model or (model_data["name"] if model_data else None)
+    configured_model_name = model_data["configuredModel"] if model_data else None
+
     result = {
         "gpu": gpu_data, "services": services_data, "model": model_data,
         "bootstrap": bootstrap_data, "uptime": uptime,
         "version": app.version, "tier": tier,
+        "currentModel": configured_model_name,
+        "loadedModel": loaded_model_name,
+        "configuredModel": configured_model_name,
         "cpu": cpu_metrics, "ram": ram_metrics,
         "disk": {"used_gb": disk_info.used_gb, "total_gb": disk_info.total_gb, "percent": disk_info.percent},
         "system": {"uptime": uptime, "hostname": os.environ.get("HOSTNAME", "ods")},
         "inference": {
             "tokensPerSecond": llama_metrics_data.get("tokens_per_second", 0),
             "lifetimeTokens": llama_metrics_data.get("lifetime_tokens", 0),
-            "loadedModel": loaded_model or (model_data["name"] if model_data else None),
+            "loadedModel": loaded_model_name,
             "contextSize": context_size or (model_data["contextLength"] if model_data else None),
         },
         "manifest_errors": MANIFEST_ERRORS,
@@ -1528,9 +1567,10 @@ async def api_settings_env_save(
             detail={"message": "ODS host agent is not reachable. Start the host agent, then try again."},
         ) from exc
     except OSError as exc:
+        logger.error("Failed to contact host agent for env update: %s", exc)
         raise HTTPException(
             status_code=500,
-            detail={"message": "Could not contact host agent to write environment file.", "reason": str(exc)},
+            detail={"message": "Could not contact host agent to write environment file."},
         ) from exc
     backup_relative = agent_resp.get("backup_path")
 
@@ -1591,7 +1631,7 @@ async def api_settings_env_apply(
         logger.exception("Settings apply failed")
         raise HTTPException(
             status_code=500,
-            detail={"message": f"Could not apply runtime changes: {exc}"},
+            detail={"message": "Could not apply runtime changes via host agent."},
         ) from exc
 
 
