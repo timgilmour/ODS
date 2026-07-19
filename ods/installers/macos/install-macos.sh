@@ -1813,7 +1813,7 @@ OPENCODE_EOF
         <string>127.0.0.1</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>${HOME}</string>
+    <string>${INSTALL_DIR}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
