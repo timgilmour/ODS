@@ -211,6 +211,74 @@ def test_hipfire_flag_without_model_renders_stock() -> None:
     assert "hipfire" not in content
 
 
+def test_hipfire_env_fallback_when_flags_absent() -> None:
+    # `ods model swap` invokes the renderer with no hipfire flags; routing
+    # state must come from the install tree's .env, not default to off.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / ".env").write_text(
+            "ENABLE_HIPFIRE=true\n"
+            "HIPFIRE_MODEL=qwen36-35b-a3b.mq4\n"
+            "HIPFIRE_ACTIVE=true\n",
+            encoding="utf-8",
+        )
+        payload = run_renderer(*_hipfire_args("--output-root", str(root)))
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+        hipfire_route = (
+            "    litellm_params:\n"
+            "      model: openai/qwen36-35b-a3b.mq4\n"
+            "      api_base: http://hipfire:11435/v1\n"
+            "      api_key: not-needed\n"
+        )
+        assert f"- model_name: default\n{hipfire_route}" in content
+        assert f"- model_name: hipfire\n{hipfire_route}" in content
+        assert "- model_name: lemonade\n    litellm_params:\n      model: openai/extra.Model.gguf" in content
+
+
+def test_hipfire_env_fallback_inactive_keeps_default_on_lemonade() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / ".env").write_text(
+            "ENABLE_HIPFIRE=true\n"
+            "HIPFIRE_MODEL=qwen36-35b-a3b.mq4\n"
+            "HIPFIRE_ACTIVE=false\n",
+            encoding="utf-8",
+        )
+        payload = run_renderer(*_hipfire_args("--output-root", str(root)))
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+        assert "- model_name: default\n    litellm_params:\n      model: openai/extra.Model.gguf" in content
+        assert "- model_name: hipfire\n    litellm_params:\n      model: openai/qwen36-35b-a3b.mq4" in content
+
+
+def test_hipfire_env_absent_renders_stock() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        payload = run_renderer(*_hipfire_args("--output-root", tmp))
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+        assert "hipfire" not in content
+
+
+def test_hipfire_explicit_flags_ignore_env() -> None:
+    # An explicit invocation is authoritative: env disagreement must not
+    # leak into the render (flags say inactive + a different model).
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / ".env").write_text(
+            "ENABLE_HIPFIRE=true\n"
+            "HIPFIRE_MODEL=env-model.mq4\n"
+            "HIPFIRE_ACTIVE=true\n",
+            encoding="utf-8",
+        )
+        payload = run_renderer(*_hipfire_args(
+            "--hipfire-enabled",
+            "--hipfire-model", "flag-model.mq4",
+            "--output-root", str(root),
+        ))
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+        assert "openai/flag-model.mq4" in content
+        assert "env-model.mq4" not in content
+        assert "- model_name: default\n    litellm_params:\n      model: openai/extra.Model.gguf" in content
+
+
 def main() -> int:
     tests = [
         test_all_surfaces_render,
@@ -223,6 +291,10 @@ def main() -> int:
         test_hipfire_active_routes_default_to_hipfire,
         test_hipfire_enabled_inactive_keeps_default_on_lemonade,
         test_hipfire_flag_without_model_renders_stock,
+        test_hipfire_env_fallback_when_flags_absent,
+        test_hipfire_env_fallback_inactive_keeps_default_on_lemonade,
+        test_hipfire_env_absent_renders_stock,
+        test_hipfire_explicit_flags_ignore_env,
     ]
     for test in tests:
         test()

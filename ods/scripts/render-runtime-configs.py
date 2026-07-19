@@ -243,7 +243,56 @@ def select_surfaces(surface: str) -> list[str]:
     return [surface]
 
 
+def read_env_values(path: Path, keys: tuple[str, ...]) -> dict[str, str]:
+    """Minimal .env reader: KEY=VALUE lines, surrounding quotes stripped,
+    later occurrences win — same semantics as the shell installers and the
+    host-agent's load_env."""
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        key = key.strip()
+        if key not in keys:
+            continue
+        value = raw.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def resolve_hipfire_state(args: argparse.Namespace) -> tuple[bool, bool, str]:
+    """Hipfire routing state: explicit flags win; otherwise read the install
+    tree's .env.
+
+    Flag-less callers (`ods model swap` today) must not wipe hipfire's routes
+    from lemonade.yaml just because they never learned the flags exist —
+    hipfire state lives in .env, so when the caller doesn't assert it, derive
+    it from --output-root/.env instead of assuming off. Callers that do pass
+    --hipfire-enabled read the same .env first, so both paths agree."""
+    if args.hipfire_enabled:
+        return True, args.hipfire_active, args.hipfire_model
+    env = read_env_values(
+        Path(args.output_root) / ".env",
+        ("ENABLE_HIPFIRE", "HIPFIRE_MODEL", "HIPFIRE_ACTIVE"),
+    )
+    if env.get("ENABLE_HIPFIRE", "").strip().lower() != "true":
+        return False, args.hipfire_active, args.hipfire_model
+    return (
+        True,
+        env.get("HIPFIRE_ACTIVE", "").strip().lower() == "true",
+        (env.get("HIPFIRE_MODEL") or "").strip(),
+    )
+
+
 def render(args: argparse.Namespace) -> dict[str, object]:
+    hipfire_enabled, hipfire_active, hipfire_model = resolve_hipfire_state(args)
     inputs = RenderInputs(
         model=args.model,
         gguf_file=args.gguf_file,
@@ -255,9 +304,9 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         litellm_key=args.litellm_key,
         opencode_port=args.opencode_port,
         context_length=args.context_length,
-        hipfire_enabled=args.hipfire_enabled,
-        hipfire_active=args.hipfire_active,
-        hipfire_model=args.hipfire_model,
+        hipfire_enabled=hipfire_enabled,
+        hipfire_active=hipfire_active,
+        hipfire_model=hipfire_model,
         hipfire_api_base=args.hipfire_api_base,
     )
     files = [RENDERERS[name](inputs) for name in select_surfaces(args.surface)]
