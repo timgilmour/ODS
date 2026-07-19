@@ -521,92 +521,6 @@ def _serialize_model(model_info) -> Optional[dict]:
 HERMES_MIN_CONTEXT = 65536
 HERMES_TARGET_CONTEXT = 131072
 
-_LLM_CONSUMER_CONTRACTS: dict[str, dict[str, Any]] = {
-    "open-webui": {
-        "consumes": True,
-        "route": "openai-compatible",
-        "pinning": "active-runtime-model",
-        "minContext": 0,
-        "probe": {
-            "kind": "chat",
-            "path": "/api/chat/completions",
-            "auth": "open-webui-probe-user",
-        },
-        "swapSafe": True,
-        "badge": "Chat",
-        "swapSafeReason": "Open WebUI chat completions are routed to the active ODS runtime model.",
-    },
-    "litellm": {
-        "consumes": True,
-        "route": "openai-compatible",
-        "pinning": "default-model",
-        "minContext": 0,
-        "probe": {
-            "kind": "chat",
-            "path": "/v1/chat/completions",
-            "auth": "env:LITELLM_KEY",
-        },
-        "swapSafe": True,
-        "badge": "Gateway",
-        "swapSafeReason": "LiteLLM forwards chat completions to the active ODS runtime model.",
-    },
-    "perplexica": {
-        "consumes": True,
-        "route": "perplexica-chat",
-        "pinning": "service-config",
-        "minContext": 0,
-        "probe": {
-            "kind": "chat",
-            "path": "/api/chat",
-            "auth": "",
-        },
-        "swapSafe": True,
-        "badge": "Research",
-        "swapSafeReason": "Perplexica research chat is expected to follow active ODS model swaps.",
-    },
-    "opencode": {
-        "consumes": True,
-        "route": "opencode-provider",
-        "pinning": "service-config",
-        "minContext": 0,
-        "probe": {
-            "kind": "chat",
-            "path": "/session",
-            "auth": "env:OPENCODE_SERVER_PASSWORD",
-        },
-        "swapSafe": True,
-        "badge": "Coding",
-        "swapSafeReason": "OpenCode sessions are expected to use the active ODS model provider.",
-    },
-    "openclaw": {
-        "consumes": True,
-        "route": "openai-compatible",
-        "pinning": "active-runtime-model",
-        "minContext": 0,
-        "probe": {
-            "kind": "chat",
-            "path": "/v1/chat/completions",
-            "auth": "env:OPENCLAW_TOKEN",
-        },
-        "swapSafe": True,
-        "badge": "Agent",
-        "swapSafeReason": "OpenClaw agent requests are routed through the active ODS runtime model.",
-    },
-    "privacy-shield": {
-        "consumes": True,
-        "route": "openai-compatible",
-        "pinning": "active-runtime-model",
-        "minContext": 0,
-        "probe": {
-            "kind": "chat",
-            "path": "/chat/completions",
-            "auth": "env:SHIELD_API_KEY",
-        },
-        "swapSafe": True,
-        "badge": "Proxy",
-        "swapSafeReason": "Privacy Shield proxies chat completions to the active ODS runtime model.",
-    },
-}
 
 
 def _build_model_readiness_payload(
@@ -721,15 +635,6 @@ def _service_public_url(service_id: str, port: int | None) -> Optional[str]:
     return f"http://127.0.0.1:{port}{path}"
 
 
-def _service_llm_contract(service_id: str, status: str) -> Optional[dict[str, Any]]:
-    contract = _LLM_CONSUMER_CONTRACTS.get(service_id)
-    if contract is None:
-        return None
-    if service_id != "open-webui" and status != "healthy":
-        return None
-    if service_id == "open-webui" and status == "not_deployed":
-        return None
-    return dict(contract)
 
 
 def _serialize_services(service_statuses: list[ServiceStatus], uptime: int) -> list[dict]:
@@ -746,8 +651,8 @@ def _serialize_services(service_statuses: list[ServiceStatus], uptime: int) -> l
         if url:
             item["url"] = url
             item["href"] = url
-        llm_contract = _service_llm_contract(service.id, service.status)
-        if llm_contract:
+        llm_contract = SERVICES.get(service.id, {}).get("llm")
+        if isinstance(llm_contract, dict):
             item["llm"] = llm_contract
         item.update(_service_semantics(service.id, service.status))
         serialized.append(item)
@@ -771,8 +676,8 @@ def _fallback_services() -> list[dict]:
         if url:
             item["url"] = url
             item["href"] = url
-        llm_contract = _service_llm_contract(service_id, "unknown")
-        if llm_contract:
+        llm_contract = config.get("llm")
+        if isinstance(llm_contract, dict):
             item["llm"] = llm_contract
         item.update(_service_semantics(service_id, "unknown"))
         links.append(item)

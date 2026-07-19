@@ -242,6 +242,19 @@ def _compute_extension_status(ext: dict, services_by_id: dict) -> str:
     return "not_installed"
 
 
+def _llm_contract_for_extension(ext: dict) -> dict | None:
+    """Return the manifest-derived LLM contract for a catalog row."""
+    ext_id = ext.get("id")
+    service_config = SERVICES.get(ext_id, {}) if isinstance(ext_id, str) else {}
+    service_llm = service_config.get("llm")
+    if isinstance(service_llm, dict):
+        return service_llm
+    catalog_llm = ext.get("llm")
+    if isinstance(catalog_llm, dict):
+        return catalog_llm
+    return None
+
+
 def _is_installable(ext_id: str) -> bool:
     """Check if an extension is available in the extensions library."""
     # Require a deployable compose.yaml — a directory with only compose.yaml.disabled
@@ -945,6 +958,9 @@ async def extensions_catalog(
             "dependents": [],
             "dependency_status": {},
         }
+        llm_contract = _llm_contract_for_extension(ext)
+        if llm_contract is not None:
+            enriched["llm"] = llm_contract
         # Surface install-failure reason inline. The progress file already
         # records `error` (set by _write_error_progress) but it lives behind
         # a separate /progress endpoint, so a caller seeing `status: "error"`
@@ -1079,6 +1095,8 @@ async def extension_detail(
 
     status = _compute_extension_status(ext, services_by_id)
     installable = _is_installable(service_id)
+    llm_contract = _llm_contract_for_extension(ext)
+    manifest = {**ext, **({"llm": llm_contract} if llm_contract is not None else {})}
 
     user_dir = USER_EXTENSIONS_DIR / service_id
     source = "user" if user_dir.is_dir() else ("core" if service_id in SERVICES else "library")
@@ -1098,7 +1116,8 @@ async def extension_detail(
         "error_message": error_message,
         "source": source,
         "installable": installable,
-        "manifest": ext,
+        "llm": llm_contract,
+        "manifest": manifest,
         "env_vars": ext.get("env_vars", []),
         "features": ext.get("features", []),
         "setup_instructions": {

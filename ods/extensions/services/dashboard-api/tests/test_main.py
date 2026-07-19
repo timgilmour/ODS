@@ -18,50 +18,6 @@ from main import (
 )
 
 
-def test_serialize_services_exposes_probeable_llm_consumers(monkeypatch):
-    from models import ServiceStatus
-
-    monkeypatch.setattr("main.SERVICES", {
-        "open-webui": {
-            "name": "Open WebUI",
-            "port": 8080,
-            "external_port": 3000,
-            "ui_path": "/",
-            "category": "core",
-        },
-        "litellm": {
-            "name": "LiteLLM",
-            "port": 4000,
-            "external_port": 4000,
-            "ui_path": "/ui/",
-            "category": "recommended",
-        },
-        "perplexica": {
-            "name": "Perplexica",
-            "port": 3000,
-            "external_port": 3004,
-            "ui_path": "/",
-            "category": "optional",
-        },
-    })
-
-    services = _serialize_services([
-        ServiceStatus(id="open-webui", name="Open WebUI", port=8080, external_port=3000, status="healthy"),
-        ServiceStatus(id="litellm", name="LiteLLM", port=4000, external_port=4000, status="healthy"),
-        ServiceStatus(id="perplexica", name="Perplexica", port=3000, external_port=3004, status="not_deployed"),
-    ], uptime=42)
-
-    by_id = {service["id"]: service for service in services}
-    assert by_id["open-webui"]["url"] == "http://127.0.0.1:3000/"
-    assert by_id["open-webui"]["llm"]["consumes"] is True
-    assert by_id["open-webui"]["llm"]["probe"]["kind"] == "chat"
-    assert by_id["open-webui"]["llm"]["probe"]["path"] == "/api/chat/completions"
-    assert by_id["open-webui"]["llm"]["swapSafe"] is True
-    assert by_id["litellm"]["url"] == "http://127.0.0.1:4000/ui/"
-    assert by_id["litellm"]["llm"]["probe"]["path"] == "/v1/chat/completions"
-    assert "llm" not in by_id["perplexica"]
-
-
 # --- get_allowed_origins ---
 
 
@@ -930,6 +886,31 @@ class TestApiStatusServiceSerialization:
         assert serialized[0]["severity"] == "disabled"
         assert serialized[0]["countsAsIssue"] is False
 
+    def test_serialize_services_includes_llm_contract(self, monkeypatch):
+        from models import ServiceStatus
+        llm_contract = {
+            "consumes": True,
+            "route": "gateway",
+            "pinning": "none",
+            "swap_safe": True,
+        }
+        monkeypatch.setattr("main.SERVICES", {
+            "open-webui": {"category": "core", "llm": llm_contract},
+        })
+        services = [
+            ServiceStatus(
+                id="open-webui",
+                name="Open WebUI (Chat)",
+                port=8080,
+                external_port=3000,
+                status="healthy",
+            )
+        ]
+
+        serialized = _serialize_services(services, uptime=42)
+
+        assert serialized[0]["llm"] == llm_contract
+
     def test_optional_unknown_does_not_count_as_issue(self, monkeypatch):
         from models import ServiceStatus
         monkeypatch.setattr("main.SERVICES", {
@@ -978,6 +959,27 @@ class TestApiStatusServiceSerialization:
             "severity": "critical",
             "countsAsIssue": True,
         }]
+
+    def test_fallback_services_include_llm_contract(self, monkeypatch):
+        llm_contract = {
+            "consumes": True,
+            "route": "direct",
+            "pinning": "none",
+            "swap_safe": False,
+        }
+        monkeypatch.setattr("main.SERVICES", {
+            "openclaw": {
+                "name": "OpenClaw",
+                "port": 18789,
+                "external_port": 7860,
+                "category": "optional",
+                "llm": llm_contract,
+            }
+        })
+
+        serialized = _fallback_services()
+
+        assert serialized[0]["llm"] == llm_contract
 
 
 # --- /api/status fallback on exception ---

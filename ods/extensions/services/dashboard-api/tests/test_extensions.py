@@ -93,6 +93,39 @@ class TestExtensionsCatalog:
         assert "summary" in data
         assert data["gpu_backend"] == "nvidia"
 
+    def test_catalog_merges_manifest_llm_contract(self, test_client, monkeypatch, tmp_path):
+        """Catalog rows expose the runtime manifest LLM contract."""
+        catalog = [_make_catalog_ext("llm-app", "LLM App")]
+        services = {
+            "llm-app": {
+                "host": "localhost",
+                "port": 8080,
+                "name": "LLM App",
+                "llm": {
+                    "consumes": True,
+                    "route": "direct",
+                    "pinning": "none",
+                    "swap_safe": False,
+                    "badge": "not-swap-safe",
+                },
+            },
+        }
+        _patch_extensions_config(monkeypatch, catalog, services, tmp_path=tmp_path)
+
+        mock_svc = _make_service_status("llm-app", "healthy")
+        with patch("helpers.get_all_services", new_callable=AsyncMock,
+                   return_value=[mock_svc]):
+            resp = test_client.get(
+                "/api/extensions/catalog",
+                headers=test_client.auth_headers,
+            )
+
+        assert resp.status_code == 200
+        llm = resp.json()["extensions"][0]["llm"]
+        assert llm["consumes"] is True
+        assert llm["route"] == "direct"
+        assert llm["swap_safe"] is False
+
     def test_catalog_category_filter(self, test_client, monkeypatch, tmp_path):
         """Category filter returns only matching extensions."""
         catalog = [

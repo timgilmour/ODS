@@ -111,6 +111,37 @@ class TestLoadExtensionManifests:
         assert len(features) == 1
         assert features[0]["id"] == "test-feature"
 
+    def test_normalizes_llm_contract(self, tmp_path):
+        svc_dir = tmp_path / "llm-app"
+        svc_dir.mkdir()
+        (svc_dir / "manifest.yaml").write_text(
+            "schema_version: ods.services.v1\n"
+            "service:\n"
+            "  id: llm-app\n"
+            "  name: LLM App\n"
+            "  port: 8080\n"
+            "  health: /health\n"
+            "  llm:\n"
+            "    consumes: true\n"
+            "    route: direct\n"
+            "    pinning: none\n"
+            "    min_context: 65536\n"
+            "    probe:\n"
+            "      kind: chat\n"
+            "      path: /v1/chat/completions\n"
+        )
+
+        services, _, _ = load_extension_manifests(tmp_path, "nvidia")
+
+        llm = services["llm-app"]["llm"]
+        assert llm["consumes"] is True
+        assert llm["route"] == "direct"
+        assert llm["pinning"] == "none"
+        assert llm["min_context"] == 65536
+        assert llm["probe"]["kind"] == "chat"
+        assert llm["swap_safe"] is False
+        assert llm["badge"] == "not-swap-safe"
+
     def test_external_port_default_zero_disables_external_port_fallback(self, tmp_path):
         svc_dir = tmp_path / "internal-service"
         svc_dir.mkdir()
