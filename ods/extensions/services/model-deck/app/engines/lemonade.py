@@ -62,7 +62,16 @@ class LemonadeClient:
         return {"loaded": resp.json().get("model_loaded")}
 
     def load(self, model_name: str) -> None:
-        self._request("POST", "/api/v1/load", json={"model_name": model_name})
+        # Lemonade's load blocks until weights are resident — a 20 GB GGUF
+        # takes ~20-30 s, far beyond the default 5 s client timeout (which
+        # abandons the request client-side while the server keeps loading,
+        # producing spurious load-failed events). Verified live 2026-07-21.
+        self._request(
+            "POST",
+            "/api/v1/load",
+            json={"model_name": model_name},
+            timeout=httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=5.0),
+        )
 
     def unload(self, model_name: str) -> None:
         self._request("POST", "/api/v1/unload", json={"model_name": model_name})

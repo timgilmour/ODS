@@ -815,3 +815,15 @@ def test_lemonade_activity_uses_separate_metrics_url():
     )
     assert client.activity() == 10
     assert seen == ["http://metrics-host:8001/metrics"]
+
+
+def test_lemonade_load_uses_long_read_timeout():
+    seen = {}
+
+    def handler(request):
+        seen.update(request.extensions.get("timeout", {}))
+        return httpx.Response(200, json={})
+
+    client = LemonadeClient("http://h:8080", "k", transport=httpx.MockTransport(handler))
+    client.load("extra.m.gguf")
+    assert seen.get("read") == 180.0
