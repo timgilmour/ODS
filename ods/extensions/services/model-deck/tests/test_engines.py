@@ -11,10 +11,11 @@ import json
 import httpx
 import pytest
 
-from app.engines import EngineError, GuardError
+from app.engines import BusyError, EngineError, GuardError
 from app.engines.comfyui import ComfyClient
 from app.engines.docker_ctl import DockerCtl
 from app.engines.hipfire import HipfireClient
+from app.engines.hostagent import HostAgent
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
 
@@ -734,3 +735,64 @@ def test_hipfire_resume_starts_container_and_does_not_poll_status():
     assert len(calls) == 1
     assert calls[0].method == "POST"
     assert calls[0].url.path == "/containers/ods-hipfire/start"
+
+
+# --- HostAgent.activate() ---
+
+
+def test_hostagent_activate_posts_correct_path_body_and_auth_header():
+    handler = _recording_handler(200, {"status": "activated"})
+    agent = HostAgent("http://host-agent:7331", "testkey", transport=_transport(handler))
+
+    agent.activate("extra.Qwen3.5-27B-Q4_K_M.gguf")
+
+    assert len(handler.calls) == 1
+    req = handler.calls[0]
+    assert req.method == "POST"
+    assert req.url.path == "/v1/model/activate"
+    assert req.headers["authorization"] == "Bearer testkey"
+    assert json.loads(req.content) == {"model_id": "extra.Qwen3.5-27B-Q4_K_M.gguf"}
+
+
+def test_hostagent_activate_returns_parsed_json_on_200():
+    handler = _json_handler(200, {"status": "activated", "model_id": "extra.foo.gguf"})
+    agent = HostAgent("http://host-agent:7331", "testkey", transport=_transport(handler))
+
+    assert agent.activate("extra.foo.gguf") == {"status": "activated", "model_id": "extra.foo.gguf"}
+
+
+def test_hostagent_activate_raises_busyerror_on_409():
+    handler = _json_handler(409, {"error": "activation already in progress"})
+    agent = HostAgent("http://host-agent:7331", "testkey", transport=_transport(handler))
+
+    with pytest.raises(BusyError):
+        agent.activate("extra.foo.gguf")
+
+
+def test_hostagent_activate_raises_engineerror_on_500():
+    def handler(request):
+        return httpx.Response(500, text="internal error", request=request)
+
+    agent = HostAgent("http://host-agent:7331", "testkey", transport=_transport(handler))
+
+    with pytest.raises(EngineError, match="internal error"):
+        agent.activate("extra.foo.gguf")
+
+
+def test_hostagent_activate_raises_engineerror_on_transport_failure():
+    handler = _raising_handler(httpx.ConnectError("connection refused"))
+    agent = HostAgent("http://host-agent:7331", "testkey", transport=_transport(handler))
+
+    with pytest.raises(EngineError):
+        agent.activate("extra.foo.gguf")
+
+
+def test_hostagent_read_timeout_is_600_seconds():
+    handler = _json_handler(200, {"status": "activated"})
+    agent = HostAgent("http://host-agent:7331", "testkey", transport=_transport(handler))
+
+    timeout = agent._client.timeout
+    assert timeout.connect == 5.0
+    assert timeout.read == 600.0
+    assert timeout.write == 30.0
+    assert timeout.pool == 5.0

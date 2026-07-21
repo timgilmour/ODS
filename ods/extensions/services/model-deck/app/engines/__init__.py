@@ -13,6 +13,12 @@ different kind of failure: the call reached the engine fine, but a safety
 guard refused to proceed (e.g. ComfyClient.free() sees a non-empty queue).
 Callers that want to distinguish "engine is broken" from "guard tripped,
 try again later" need these to be unrelated exception types.
+
+BusyError is similarly NOT an EngineError subclass. It signals that the
+host agent reached the request fine but refused it with HTTP 409 because
+it already holds its own model-activation lock. Callers that want to
+distinguish "host agent is broken" from "host agent is busy, try again
+later" need these to be unrelated exception types.
 """
 
 
@@ -22,3 +28,7 @@ class EngineError(Exception):
 
 class GuardError(Exception):
     """A safety guard refused an engine operation (e.g. ComfyUI queue non-empty)."""
+
+
+class BusyError(Exception):
+    """The host agent returned HTTP 409: it is already busy with another activation."""
