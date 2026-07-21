@@ -13,6 +13,8 @@ import pytest
 
 from app.engines import EngineError, GuardError
 from app.engines.comfyui import ComfyClient
+from app.engines.docker_ctl import DockerCtl
+from app.engines.hipfire import HipfireClient
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
 
@@ -397,3 +399,338 @@ def test_litellm_raises_engineerror_on_transport_failure():
 
     with pytest.raises(EngineError):
         client.route_table()
+
+
+# --- DockerCtl ---
+
+
+def _dockerctl(handler, allowlist=("ods-hipfire",)):
+    return DockerCtl("http://docker-ctl:2375", list(allowlist), transport=_transport(handler))
+
+
+def test_dockerctl_stop_raises_guarderror_naming_container_when_not_allowlisted():
+    handler = _recording_handler(204, {})
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(GuardError, match="ods-comfyui"):
+        ctl.stop("ods-comfyui")
+
+    assert handler.calls == []  # no HTTP call made
+
+
+def test_dockerctl_start_raises_guarderror_naming_container_when_not_allowlisted():
+    handler = _recording_handler(204, {})
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(GuardError, match="ods-comfyui"):
+        ctl.start("ods-comfyui")
+
+    assert handler.calls == []  # no HTTP call made
+
+
+def test_dockerctl_stop_hits_correct_path():
+    handler = _recording_handler(204, {})
+    ctl = _dockerctl(handler)
+
+    result = ctl.stop("ods-hipfire")
+
+    assert result is None
+    assert len(handler.calls) == 1
+    req = handler.calls[0]
+    assert req.method == "POST"
+    assert req.url.path == "/containers/ods-hipfire/stop"
+
+
+def test_dockerctl_start_hits_correct_path():
+    handler = _recording_handler(204, {})
+    ctl = _dockerctl(handler)
+
+    result = ctl.start("ods-hipfire")
+
+    assert result is None
+    assert len(handler.calls) == 1
+    req = handler.calls[0]
+    assert req.method == "POST"
+    assert req.url.path == "/containers/ods-hipfire/start"
+
+
+def test_dockerctl_stop_treats_304_as_success():
+    def handler(request):
+        return httpx.Response(304, text="already stopped", request=request)
+
+    ctl = _dockerctl(handler)
+
+    assert ctl.stop("ods-hipfire") is None
+
+
+def test_dockerctl_start_treats_304_as_success():
+    def handler(request):
+        return httpx.Response(304, text="already running", request=request)
+
+    ctl = _dockerctl(handler)
+
+    assert ctl.start("ods-hipfire") is None
+
+
+def test_dockerctl_stop_raises_engineerror_with_response_text_on_other_non_2xx():
+    def handler(request):
+        return httpx.Response(500, text="boom", request=request)
+
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError, match="boom"):
+        ctl.stop("ods-hipfire")
+
+
+def test_dockerctl_stop_raises_engineerror_on_transport_failure():
+    handler = _raising_handler(httpx.ConnectError("connection refused"))
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError):
+        ctl.stop("ods-hipfire")
+
+
+def test_dockerctl_start_raises_engineerror_on_transport_failure():
+    handler = _raising_handler(httpx.ConnectError("connection refused"))
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError):
+        ctl.start("ods-hipfire")
+
+
+def test_dockerctl_running_true_when_state_running_true():
+    handler = _json_handler(200, {"State": {"Running": True}})
+    ctl = _dockerctl(handler)
+
+    assert ctl.running("ods-hipfire") is True
+
+
+def test_dockerctl_running_false_when_state_running_false():
+    handler = _json_handler(200, {"State": {"Running": False}})
+    ctl = _dockerctl(handler)
+
+    assert ctl.running("ods-hipfire") is False
+
+
+def test_dockerctl_running_hits_correct_path():
+    handler = _recording_handler(200, {"State": {"Running": True}})
+    ctl = _dockerctl(handler)
+
+    ctl.running("ods-hipfire")
+
+    assert len(handler.calls) == 1
+    req = handler.calls[0]
+    assert req.method == "GET"
+    assert req.url.path == "/containers/ods-hipfire/json"
+
+
+def test_dockerctl_running_raises_engineerror_on_404():
+    def handler(request):
+        return httpx.Response(404, text="no such container", request=request)
+
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError, match="no such container"):
+        ctl.running("ods-hipfire")
+
+
+def test_dockerctl_running_raises_engineerror_on_transport_failure():
+    handler = _raising_handler(httpx.ConnectError("connection refused"))
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError):
+        ctl.running("ods-hipfire")
+
+
+def test_dockerctl_running_not_gated_by_allowlist():
+    """running() is a read; only stop()/start() enforce the allowlist."""
+    handler = _json_handler(200, {"State": {"Running": True}})
+    ctl = _dockerctl(handler)
+
+    assert ctl.running("ods-comfyui") is True
+
+
+# --- HipfireClient ---
+
+
+def _litellm(handler):
+    return LiteLLMClient("http://litellm:4000", "testkey", transport=_transport(handler))
+
+
+def _litellm_default_targets_hipfire(value):
+    body = json.loads(json.dumps(_MODEL_INFO_BODY))  # deep copy
+    if value:
+        body["data"][0]["litellm_params"]["api_base"] = "http://hipfire:11435/v1"
+    return _litellm(_json_handler(200, body))
+
+
+def test_hipfire_status_parked_when_container_not_running():
+    dockerctl = _dockerctl(_json_handler(200, {"State": {"Running": False}}))
+    litellm = _litellm_default_targets_hipfire(False)
+    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm)
+
+    assert client.status() == "parked"
+
+
+def test_hipfire_status_running_when_container_running_and_health_200():
+    dockerctl = _dockerctl(_json_handler(200, {"State": {"Running": True}}))
+    litellm = _litellm_default_targets_hipfire(False)
+
+    def health_handler(request):
+        return httpx.Response(200, text="ok", request=request)
+
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        dockerctl,
+        "ods-hipfire",
+        litellm,
+        transport=_transport(health_handler),
+    )
+
+    assert client.status() == "running"
+
+
+def test_hipfire_status_loading_when_container_running_and_health_503():
+    dockerctl = _dockerctl(_json_handler(200, {"State": {"Running": True}}))
+    litellm = _litellm_default_targets_hipfire(False)
+
+    def health_handler(request):
+        return httpx.Response(503, text="loading", request=request)
+
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        dockerctl,
+        "ods-hipfire",
+        litellm,
+        transport=_transport(health_handler),
+    )
+
+    assert client.status() == "loading"
+
+
+def test_hipfire_status_loading_on_other_non_2xx_health_response():
+    dockerctl = _dockerctl(_json_handler(200, {"State": {"Running": True}}))
+    litellm = _litellm_default_targets_hipfire(False)
+
+    def health_handler(request):
+        return httpx.Response(500, text="error", request=request)
+
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        dockerctl,
+        "ods-hipfire",
+        litellm,
+        transport=_transport(health_handler),
+    )
+
+    assert client.status() == "loading"
+
+
+def test_hipfire_status_raises_engineerror_when_health_transport_fails_while_running():
+    dockerctl = _dockerctl(_json_handler(200, {"State": {"Running": True}}))
+    litellm = _litellm_default_targets_hipfire(False)
+    health_handler = _raising_handler(httpx.ConnectError("connection refused"))
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        dockerctl,
+        "ods-hipfire",
+        litellm,
+        transport=_transport(health_handler),
+    )
+
+    with pytest.raises(EngineError):
+        client.status()
+
+
+def test_hipfire_status_does_not_check_health_when_parked():
+    """Parked (container not running) short-circuits before any health GET."""
+    calls = []
+
+    def health_handler(request):
+        calls.append(request)
+        return httpx.Response(200, text="ok", request=request)
+
+    dockerctl = _dockerctl(_json_handler(200, {"State": {"Running": False}}))
+    litellm = _litellm_default_targets_hipfire(False)
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        dockerctl,
+        "ods-hipfire",
+        litellm,
+        transport=_transport(health_handler),
+    )
+
+    assert client.status() == "parked"
+    assert calls == []
+
+
+def test_hipfire_park_raises_guarderror_when_default_targets_hipfire_and_never_stops():
+    stop_calls = []
+
+    def dockerctl_handler(request):
+        stop_calls.append(request)
+        return httpx.Response(204, request=request)
+
+    dockerctl = _dockerctl(dockerctl_handler)
+    litellm = _litellm_default_targets_hipfire(True)
+    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm)
+
+    with pytest.raises(GuardError):
+        client.park()
+
+    assert stop_calls == []  # /stop never fired
+
+
+def test_hipfire_park_propagates_engineerror_when_route_check_transport_fails():
+    stop_calls = []
+
+    def dockerctl_handler(request):
+        stop_calls.append(request)
+        return httpx.Response(204, request=request)
+
+    dockerctl = _dockerctl(dockerctl_handler)
+    litellm = _litellm(_raising_handler(httpx.ConnectError("connection refused")))
+    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm)
+
+    with pytest.raises(EngineError):
+        client.park()
+
+    assert stop_calls == []  # fails safe: /stop never fired
+
+
+def test_hipfire_park_stops_container_when_default_does_not_target_hipfire():
+    calls = []
+
+    def dockerctl_handler(request):
+        calls.append(request)
+        return httpx.Response(204, request=request)
+
+    dockerctl = _dockerctl(dockerctl_handler)
+    litellm = _litellm_default_targets_hipfire(False)
+    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm)
+
+    result = client.park()
+
+    assert result is None
+    assert len(calls) == 1
+    assert calls[0].method == "POST"
+    assert calls[0].url.path == "/containers/ods-hipfire/stop"
+
+
+def test_hipfire_resume_starts_container_and_does_not_poll_status():
+    calls = []
+
+    def dockerctl_handler(request):
+        calls.append(request)
+        return httpx.Response(204, request=request)
+
+    dockerctl = _dockerctl(dockerctl_handler)
+    litellm = _litellm_default_targets_hipfire(False)
+    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm)
+
+    result = client.resume()
+
+    assert result is None
+    assert len(calls) == 1
+    assert calls[0].method == "POST"
+    assert calls[0].url.path == "/containers/ods-hipfire/start"
