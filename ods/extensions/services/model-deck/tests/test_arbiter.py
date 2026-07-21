@@ -18,7 +18,7 @@ start()/stop() runs at least one tick and joins promptly.
 import threading
 import time
 
-from app.arbiter import Watcher, decide
+from app.arbiter import HealSuppressor, Watcher, decide
 from app.engines import EngineError, GuardError
 from app.events import tail_events
 
@@ -505,7 +505,10 @@ def _settings(**overrides):
     return Settings(**kwargs)
 
 
-def _make_watcher(tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None, **sett):
+def _make_watcher(
+    tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
+    heal_suppressor=None, **sett,
+):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
         settings=_settings(**sett),
@@ -518,6 +521,7 @@ def _make_watcher(tmp_path, world, registry, policy, lemonade=None, comfy=None, 
         policy_store=FakePolicyStore(policy),
         events_path=events_path,
         read_gpus=read_gpus if read_gpus is not None else RecordingReadGpus(),
+        heal_suppressor=heal_suppressor,
     )
     return watcher, events_path
 
@@ -645,10 +649,33 @@ def test_watcher_tick_error_swallowed_and_loop_survives(tmp_path):
     watcher.tick()  # first tick errors...
     watcher.tick()  # ...and the second still runs (loop survives)
 
+    # Loop survived both ticks: snapshot() was attempted twice.
+    assert world.calls == 2
+    # But consecutive IDENTICAL tick-errors collapse to a single log line (I6).
     events = tail_events(events_path)
     tick_errors = [e for e in events if e["kind"] == "tick-error"]
-    assert len(tick_errors) == 2
+    assert len(tick_errors) == 1
     assert "boom" in tick_errors[0]["detail"]["error"]
+
+
+def test_watcher_tick_error_dedup_resets_on_different_detail(tmp_path):
+    """Repeated identical tick-errors log once; a different error detail in
+    between resets the suppression so the next one logs again (I6)."""
+    world = FakeWorld(snapshot=None, raises=KeyError("boom"))
+    watcher, events_path = _make_watcher(tmp_path, world, FakeRegistry(), _policy())
+
+    watcher.tick()  # 'boom' -> logged
+    watcher.tick()  # 'boom' again -> deduped
+    world._raises = KeyError("different")
+    watcher.tick()  # 'different' -> resets + logged
+    world._raises = KeyError("boom")
+    watcher.tick()  # 'boom' again, but preceded by 'different' -> logged
+
+    tick_errors = [e for e in tail_events(events_path) if e["kind"] == "tick-error"]
+    assert len(tick_errors) == 3
+    assert "boom" in tick_errors[0]["detail"]["error"]
+    assert "different" in tick_errors[1]["detail"]["error"]
+    assert "boom" in tick_errors[2]["detail"]["error"]
 
 
 def test_watcher_suppresses_consecutive_duplicate_noop(tmp_path):
@@ -741,3 +768,166 @@ def test_watcher_thread_runs_a_tick_and_stops_promptly(tmp_path):
 
     assert elapsed < 2.0
     assert "model-deck-watcher" not in {t.name for t in threading.enumerate()}
+
+
+# ===========================================================================
+# C2 — HealSuppressor (unit) + watcher suppression behavior
+# ===========================================================================
+
+
+class FakeClock:
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_heal_suppressor_notes_and_expires():
+    clock = FakeClock(100.0)
+    s = HealSuppressor(window_s=600, clock=clock)
+
+    assert s.suppressed() is False  # fresh -> not suppressed
+    s.note_deck_unload()
+    assert s.suppressed() is True  # armed
+
+    clock.t = 100.0 + 599  # still inside the window
+    assert s.suppressed() is True
+    clock.t = 100.0 + 600  # window elapsed (>= boundary)
+    assert s.suppressed() is False  # expired
+    assert s.suppressed() is False  # stays disarmed
+
+
+def test_heal_suppressor_clear_disarms():
+    s = HealSuppressor(window_s=600, clock=FakeClock(0.0))
+    s.note_deck_unload()
+    assert s.suppressed() is True
+    s.clear()  # a deck-initiated load clears it
+    assert s.suppressed() is False
+
+
+def test_watcher_suppressed_skips_pending_inference(tmp_path):
+    """While suppressed, the watcher does NOT infer a pending load, so a
+    contention it would normally heal is left alone (idle rules still run, but
+    here nothing is idle past its TTL)."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=29 * GIB)],  # free = 5 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=10),  # below TTL: no idle free
+        default_route="extra.model.gguf",
+    )
+    lemonade, comfy = FakeLemonade(), FakeComfy()
+    suppressor = HealSuppressor(window_s=600, clock=FakeClock(0.0))
+    suppressor.note_deck_unload()  # armed -> suppressed
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        lemonade=lemonade,
+        comfy=comfy,
+        heal_suppressor=suppressor,
+    )
+
+    watcher.tick()
+
+    # No contention healing happened: comfy not freed, nothing reloaded.
+    assert comfy.freed == 0
+    assert lemonade.loaded == []
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "free_comfyui" not in kinds
+    assert "load-retriggered" not in kinds
+
+
+def test_watcher_not_suppressed_heals_same_scenario(tmp_path):
+    """Control for the test above: with suppression OFF, the very same
+    snapshot DOES heal the contention (proving suppression is what blocks it)."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=29 * GIB)],  # free = 5 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=10),
+        default_route="extra.model.gguf",
+    )
+    lemonade, comfy = FakeLemonade(), FakeComfy()
+    watcher, _ = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        lemonade=lemonade,
+        comfy=comfy,
+    )
+
+    watcher.tick()
+
+    assert comfy.freed == 1
+    assert lemonade.loaded == ["extra.model.gguf"]
+
+
+def test_watcher_unload_engages_suppressor(tmp_path):
+    """The watcher's own deck-initiated unload (here an idle release) arms the
+    suppressor so a later tick won't heal it back."""
+    model = "extra.idle.gguf"
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model=model, footprint=10 * GIB, idle_s=1000),
+        default_route=None,
+    )
+    suppressor = HealSuppressor(window_s=600, clock=FakeClock(0.0))
+    watcher, _ = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(),
+        _policy(lem_idle=900),
+        lemonade=FakeLemonade(),
+        heal_suppressor=suppressor,
+    )
+
+    assert suppressor.suppressed() is False
+    watcher.tick()  # idle release unloads lemonade
+    assert suppressor.suppressed() is True
+
+
+def test_watcher_heal_load_clears_suppressor(tmp_path):
+    """A heal re-trigger LOAD clears a previously-armed suppression."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],  # free = 12 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    # Start suppressed but with an OLD unload; a fresh tick that heals + loads
+    # must clear it. (suppressed() is checked each tick; inject a clock so the
+    # window hasn't expired, proving the LOAD — not expiry — cleared it.)
+    suppressor = HealSuppressor(window_s=600, clock=FakeClock(0.0))
+    watcher, _ = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        lemonade=FakeLemonade(),
+        comfy=FakeComfy(),
+        heal_suppressor=suppressor,
+    )
+
+    watcher.tick()  # not suppressed -> heals contention -> loads -> clears
+    assert suppressor.suppressed() is False
+
+
+# ===========================================================================
+# I1 — watcher yields to an in-flight set apply
+# ===========================================================================
+
+
+def test_watcher_tick_noop_while_apply_holds_lock(tmp_path):
+    """While a set apply holds the module lock, tick() is a clean no-op: no
+    snapshot is taken and no event is logged."""
+    import app.sets as sets_mod
+
+    world = FakeWorld(_world())
+    watcher, events_path = _make_watcher(tmp_path, world, FakeRegistry(), _policy())
+
+    with sets_mod._apply_lock:
+        watcher.tick()
+
+    assert world.calls == 0  # no snapshot attempted
+    assert tail_events(events_path) == []  # nothing logged

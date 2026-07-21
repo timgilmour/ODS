@@ -646,6 +646,17 @@ input[type="password"] {
   flex: 0 0 auto;
 }
 
+.badge-policy-overrides {
+  align-self: flex-start;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+}
+
 /* ---------------------------------------------------------------- policy table */
 
 .policy-table {

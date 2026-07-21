@@ -103,4 +103,5 @@ def apply_set(slug: str, request: Request) -> dict:
         policy_store=deck["policy_store"],
         store=deck["set_store"],
         events_path=deck["events_path"],
+        heal_suppressor=deck["heal_suppressor"],
     )

@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     )
     watch_interval: float = 2.0
 
+    # Seconds a deliberate lemonade unload (manual, set-apply, or the
+    # watcher's own idle release) suppresses contention healing's pending-load
+    # inference, so healing can't immediately revert it. A subsequent load
+    # clears it early. See app.arbiter.HealSuppressor.
+    heal_suppress_s: int = 600
+
     # GPU list indices in read_gpus' filtered order (0-based over qualifying
     # cards). On this box hipfire owns index 0; lemonade + comfyui share
     # index 1 (the arbiter only ever contends for VRAM on the lemonade GPU).

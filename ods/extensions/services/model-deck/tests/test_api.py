@@ -341,6 +341,39 @@ def test_lemonade_load(tmp_path, monkeypatch):
     assert deck["lemonade"].calls == [("load", "extra.new.gguf")]
 
 
+def test_lemonade_load_bare_name_is_extra_prefixed(tmp_path, monkeypatch):
+    """The Deck select carries bare GGUF filenames; the load route prefixes
+    them with 'extra.' before handing them to Lemonade (I2)."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    resp = TestClient(app).post(
+        "/api/tenants/lemonade/load", json={"model": "Qwen3.5-27B.gguf"}, headers=AUTH
+    )
+    assert resp.status_code == 200
+    assert deck["lemonade"].calls == [("load", "extra.Qwen3.5-27B.gguf")]
+
+
+def test_lemonade_load_clears_heal_suppressor(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["heal_suppressor"].note_deck_unload()
+    assert deck["heal_suppressor"].suppressed() is True
+    resp = TestClient(app).post(
+        "/api/tenants/lemonade/load", json={"model": "extra.new.gguf"}, headers=AUTH
+    )
+    assert resp.status_code == 200
+    assert deck["heal_suppressor"].suppressed() is False
+
+
+def test_lemonade_unload_engages_heal_suppressor(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
+    assert deck["heal_suppressor"].suppressed() is False
+    resp = TestClient(app).post(
+        "/api/tenants/lemonade/unload", json={"model": "extra.m.gguf"}, headers=AUTH
+    )
+    assert resp.status_code == 200
+    assert deck["heal_suppressor"].suppressed() is True
+
+
 def test_lemonade_unload_explicit_model(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")

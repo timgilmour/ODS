@@ -241,16 +241,43 @@ def plan_apply(cfgset: ConfigSet, world: dict) -> list[dict]:
         else:
             steps.append({"step": "warn", "reason": "comfyui-busy-skipped"})
 
-    # --- Park --------------------------------------------------------------
+    # --- Park + Activate ---------------------------------------------------
+    # Normally park comes BEFORE activate (free the GPU, then re-point the
+    # route). But when the activate MOVES the default route off hipfire and
+    # the route currently targets hipfire, parking first would yank the GPU
+    # out from under the still-default hipfire model — so park AFTER activate
+    # in that one case. (hipfire.park()'s own guard also refuses to park while
+    # it serves the default route; ordering activate first is what lets the
+    # park succeed.)
+    park_step = None
     if hip_desired == "parked" and hip_world["state"] in ("running", "loading"):
-        steps.append({"step": "park_hipfire"})
+        park_step = {"step": "park_hipfire"}
 
-    # --- Activate (durable default-route change) ---------------------------
+    activate_step = None
     if durable is not None and durable.default_route_model != world["default_route"]:
         if durable.activate_model_id is not None:
-            steps.append({"step": "activate", "model_id": durable.activate_model_id})
+            activate_step = {"step": "activate", "model_id": durable.activate_model_id}
         else:
-            steps.append({"step": "warn", "reason": "durable-revert-unavailable"})
+            activate_step = {"step": "warn", "reason": "durable-revert-unavailable"}
+
+    route_on_hipfire = (
+        hip_world["model"] is not None and world["default_route"] == hip_world["model"]
+    )
+    park_after_activate = (
+        park_step is not None
+        and activate_step is not None
+        and activate_step["step"] == "activate"
+        and route_on_hipfire
+    )
+
+    if park_after_activate:
+        steps.append(activate_step)
+        steps.append(park_step)
+    else:
+        if park_step is not None:
+            steps.append(park_step)
+        if activate_step is not None:
+            steps.append(activate_step)
 
     # --- Resume ------------------------------------------------------------
     if hip_desired == "running" and hip_world["state"] == "parked":
@@ -281,6 +308,16 @@ def plan_apply(cfgset: ConfigSet, world: dict) -> list[dict]:
 # must never interleave real evictions/parks/activations on a live box.
 _apply_lock = threading.Lock()
 
+
+def apply_in_progress() -> bool:
+    """True if an apply currently holds the module lock, WITHOUT acquiring it.
+
+    A non-blocking peek the arbiter watcher uses to yield a tick to an
+    in-flight set apply — the two must never interleave real evictions/loads
+    on the live box.
+    """
+    return _apply_lock.locked()
+
 # The set of exceptions that halt an apply mid-plan (vs. crashing it). Each is
 # a known, meaningful "this step could not proceed" signal from a client.
 _HALT_EXCEPTIONS = (GuardError, EngineError, BusyError, ValueError)
@@ -297,8 +334,15 @@ def apply(
     policy_store,
     store: SetStore,
     events_path: Path,
+    heal_suppressor=None,
 ) -> dict:
     """Execute ``cfgset`` against the live box, serialized under a module lock.
+
+    ``heal_suppressor`` (optional; None tolerated) is the arbiter's shared
+    ``HealSuppressor``: an ``unload_lemonade`` step arms it so contention
+    healing can't revert this deliberate unload, and a ``load_lemonade`` step
+    clears it. None (e.g. in unit tests without the arbiter) simply skips that
+    coordination.
 
     Returns an ApplyReport dict:
         {"completed": [<step>, ...], "failed": <step>|None,
@@ -315,11 +359,22 @@ def apply(
             policy_store=policy_store,
             store=store,
             events_path=events_path,
+            heal_suppressor=heal_suppressor,
         )
 
 
 def _run_apply(
-    cfgset, *, world, lemonade, comfy, hipfire, hostagent, policy_store, store, events_path
+    cfgset,
+    *,
+    world,
+    lemonade,
+    comfy,
+    hipfire,
+    hostagent,
+    policy_store,
+    store,
+    events_path,
+    heal_suppressor=None,
 ) -> dict:
     log_event(events_path, "apply-start", {"name": cfgset.name})
 
@@ -338,7 +393,9 @@ def _run_apply(
             continue
 
         try:
-            _execute_step(step, lemonade, comfy, hipfire, hostagent, policy_store)
+            _execute_step(
+                step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor
+            )
         except _HALT_EXCEPTIONS as exc:
             report["failed"] = step
             report["error"] = str(exc)
@@ -356,12 +413,20 @@ def _run_apply(
     return report
 
 
-def _execute_step(step, lemonade, comfy, hipfire, hostagent, policy_store) -> None:
+def _execute_step(
+    step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor=None
+) -> None:
     name = step["step"]
     if name == "unload_lemonade":
         lemonade.unload(step["model"])
+        # Deliberate unload: arm suppression so the arbiter doesn't heal it back.
+        if heal_suppressor is not None:
+            heal_suppressor.note_deck_unload()
     elif name == "load_lemonade":
         lemonade.load(step["model"])
+        # Deliberate load: the model is wanted resident, so clear suppression.
+        if heal_suppressor is not None:
+            heal_suppressor.clear()
     elif name == "free_comfyui":
         comfy.free()
     elif name == "park_hipfire":
@@ -371,7 +436,17 @@ def _execute_step(step, lemonade, comfy, hipfire, hostagent, policy_store) -> No
     elif name == "activate":
         hostagent.activate(step["model_id"])
     elif name == "policy_patch":
-        policy_store.put(step["policies"])
+        # Merge each field-partial per-tenant override onto the current stored
+        # values before writing, so {"comfyui": {"priority": 90}} keeps the
+        # other two fields intact. put() still validates the merged records
+        # (an unknown tenant merges onto {} and is rejected there).
+        current = policy_store.get()
+        merged = {}
+        for tenant, override in step["policies"].items():
+            base = dict(current.get(tenant, {}))
+            base.update(override)
+            merged[tenant] = base
+        policy_store.put(merged)
     else:  # pragma: no cover - plan_apply is the sole producer of steps
         raise AssertionError(f"unknown step {name!r}")
 

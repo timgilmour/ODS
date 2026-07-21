@@ -13,14 +13,17 @@ import threading
 import pytest
 from pydantic import ValidationError
 
+from app.arbiter import HealSuppressor
 from app.engines import BusyError, EngineError, GuardError
 from app.events import tail_events
+from app.policy import DEFAULT_POLICIES, PolicyStore
 from app.sets import (
     PREVIOUS_NAME,
     RESERVED_SLUG,
     ConfigSet,
     SetStore,
     apply,
+    apply_in_progress,
     plan_apply,
     slugify,
 )
@@ -113,9 +116,17 @@ class RecHostAgent:
 
 
 class RecPolicyStore:
-    def __init__(self):
+    def __init__(self, current=None):
         self.calls = []
         self.fail = None
+        self._current = (
+            current
+            if current is not None
+            else {tenant: dict(pol) for tenant, pol in DEFAULT_POLICIES.items()}
+        )
+
+    def get(self):
+        return {tenant: dict(pol) for tenant, pol in self._current.items()}
 
     def put(self, policies):
         self.calls.append(policies)
@@ -768,3 +779,160 @@ def test_apply_is_serialized_second_waits_for_first(tmp_path):
     assert fast_lem.calls == [("load", "extra.d.gguf")]
     assert results["t1"]["failed"] is None
     assert results["t2"]["failed"] is None
+
+
+# ===========================================================================
+# I4 — park AFTER activate when the durable change moves the route off hipfire
+# ===========================================================================
+
+
+def test_park_after_activate_when_route_moves_off_hipfire():
+    """When the current default route targets hipfire and the set both parks
+    hipfire and activates a different model, park is emitted AFTER activate so
+    the GPU isn't yanked out from under the still-default hipfire model."""
+    world = make_world(
+        lemonade=("unloaded", None),
+        comfy=("idle", 0),
+        hipfire="running",
+        default_route="extra.hip-model",
+    )
+    world["tenants"]["hipfire"]["model"] = "extra.hip-model"  # route IS hipfire
+    cfg = ConfigSet(
+        name="off-hipfire",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-9"},
+        ephemeral={
+            "lemonade": {"state": "loaded"},
+            "comfyui": {"state": "free"},
+            "hipfire": {"state": "parked"},
+        },
+    )
+    assert plan_apply(cfg, world) == [
+        {"step": "free_comfyui"},
+        {"step": "activate", "model_id": "cat-9"},
+        {"step": "park_hipfire"},
+        {"step": "load_lemonade", "model": "extra.new.gguf"},
+    ]
+
+
+def test_park_before_activate_when_route_not_on_hipfire():
+    """Complement: route NOT on hipfire (hipfire.model != default_route) keeps
+    the normal park-BEFORE-activate order, even with both steps present."""
+    world = make_world(
+        lemonade=("unloaded", None),
+        comfy=("idle", 0),
+        hipfire="running",
+        default_route="extra.old.gguf",
+    )
+    world["tenants"]["hipfire"]["model"] = "extra.hip-model"  # != default_route
+    cfg = ConfigSet(
+        name="normal",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-9"},
+        ephemeral={"hipfire": {"state": "parked"}},
+    )
+    assert plan_apply(cfg, world) == [
+        {"step": "park_hipfire"},
+        {"step": "activate", "model_id": "cat-9"},
+    ]
+
+
+# ===========================================================================
+# I5b — policy_patch merges field-partial per-tenant overrides
+# ===========================================================================
+
+
+def test_policy_patch_merges_partial_override(tmp_path):
+    """A partial override ({"comfyui": {"priority": 90}}) merges onto the
+    tenant's current stored values before put()."""
+    world = make_world()
+    cfg = ConfigSet(name="pol", policy_overrides={"comfyui": {"priority": 90}})
+    report, clients = run_apply(cfg, world, tmp_path)
+
+    assert report["failed"] is None
+    assert clients["policy_store"].calls == [
+        {"comfyui": {"priority": 90, "pinned": False, "idle_ttl": 300}}
+    ]
+
+
+def test_policy_patch_full_record_override_still_works(tmp_path):
+    """A full 3-field override survives the merge unchanged."""
+    world = make_world()
+    full = {"lemonade": {"priority": 7, "pinned": True, "idle_ttl": 42}}
+    cfg = ConfigSet(name="pol", policy_overrides=full)
+    report, clients = run_apply(cfg, world, tmp_path)
+
+    assert report["failed"] is None
+    assert clients["policy_store"].calls == [full]
+
+
+def test_policy_patch_partial_merge_persists_via_real_store(tmp_path):
+    """End-to-end with the real PolicyStore: a partial override lands with the
+    other two fields intact and leaves untouched tenants alone."""
+    world = make_world()
+    store = PolicyStore(tmp_path / "policy.json")
+    cfg = ConfigSet(name="pol", policy_overrides={"comfyui": {"priority": 90}})
+    run_apply(cfg, world, tmp_path, policy_store=store)
+
+    assert store.get()["comfyui"] == {"priority": 90, "pinned": False, "idle_ttl": 300}
+    assert store.get()["lemonade"] == DEFAULT_POLICIES["lemonade"]
+
+
+def test_policy_patch_unknown_tenant_still_fails(tmp_path):
+    """An unknown tenant merges onto {} and is rejected by put's validation."""
+    world = make_world()
+    store = PolicyStore(tmp_path / "policy.json")
+    cfg = ConfigSet(name="pol", policy_overrides={"nosuch": {"priority": 1}})
+    report, _ = run_apply(cfg, world, tmp_path, policy_store=store)
+
+    assert report["failed"] == {"step": "policy_patch", "policies": {"nosuch": {"priority": 1}}}
+    assert "nosuch" in report["error"]
+
+
+# ===========================================================================
+# I1 — apply_in_progress() peeks the module lock without acquiring it
+# ===========================================================================
+
+
+def test_apply_in_progress_reflects_lock_state():
+    import app.sets as sets_mod
+
+    assert apply_in_progress() is False
+    with sets_mod._apply_lock:
+        assert apply_in_progress() is True
+    assert apply_in_progress() is False
+
+
+# ===========================================================================
+# C2 — set-apply unload arms / load clears the heal suppressor
+# ===========================================================================
+
+
+def test_apply_unload_step_engages_heal_suppressor(tmp_path):
+    world = make_world(lemonade=("loaded", "extra.live.gguf"))
+    cfg = ConfigSet(name="unload", ephemeral={"lemonade": {"state": "unloaded"}})
+    suppressor = HealSuppressor(window_s=600, clock=lambda: 0.0)
+    run_apply(cfg, world, tmp_path, heal_suppressor=suppressor)
+
+    assert suppressor.suppressed() is True
+
+
+def test_apply_load_step_clears_heal_suppressor(tmp_path):
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfg = ConfigSet(name="load", ephemeral={"lemonade": {"state": "loaded"}})
+    suppressor = HealSuppressor(window_s=600, clock=lambda: 0.0)
+    suppressor.note_deck_unload()
+    assert suppressor.suppressed() is True
+
+    run_apply(cfg, world, tmp_path, heal_suppressor=suppressor)
+
+    assert suppressor.suppressed() is False
+
+
+def test_apply_tolerates_no_heal_suppressor(tmp_path):
+    """heal_suppressor defaults to None (unit tests without the arbiter) and
+    apply must run the unload step without error."""
+    world = make_world(lemonade=("loaded", "extra.live.gguf"))
+    cfg = ConfigSet(name="unload", ephemeral={"lemonade": {"state": "unloaded"}})
+    report, clients = run_apply(cfg, world, tmp_path)  # no heal_suppressor
+
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("unload", "extra.live.gguf")]

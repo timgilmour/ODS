@@ -83,6 +83,7 @@ def _build_deck(settings: Settings) -> dict:
     if cached is not None and cached[0] is settings:
         return cached[1]
 
+    from app.arbiter import HealSuppressor
     from app.engines.comfyui import ComfyClient
     from app.engines.docker_ctl import DockerCtl
     from app.engines.hipfire import HipfireClient
@@ -124,6 +125,10 @@ def _build_deck(settings: Settings) -> dict:
         "read_gpus": read_gpus,
         "drm_root": settings.drm_root,
         "kfd_root": settings.kfd_root,
+        # Shared between the watcher and the HTTP routers (manual load/unload,
+        # set-apply) so every deck-initiated unload/load coordinates on one
+        # suppression window.
+        "heal_suppressor": HealSuppressor(settings.heal_suppress_s),
     }
     _deck_by_settings_id[id(settings)] = (settings, deck)
     return deck
@@ -147,6 +152,7 @@ def _build_watcher(settings: Settings):
         policy_store=deck["policy_store"],
         events_path=deck["events_path"],
         read_gpus=deck["read_gpus"],
+        heal_suppressor=deck["heal_suppressor"],
     )
 
 

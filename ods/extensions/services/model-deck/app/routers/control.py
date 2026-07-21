@@ -19,6 +19,10 @@ from app.security import require_admin
 
 router = APIRouter(prefix="/tenants", tags=["control"], dependencies=[Depends(require_admin)])
 
+# Lemonade registers store GGUFs under an "extra." namespace. The Deck select
+# carries bare GGUF filenames, so a manual load must prefix them to match.
+_EXTRA_PREFIX = "extra."
+
 
 class LemonadeLoadBody(BaseModel):
     model: str
@@ -31,7 +35,13 @@ class LemonadeUnloadBody(BaseModel):
 
 @router.post("/lemonade/load")
 def lemonade_load(body: LemonadeLoadBody, request: Request) -> dict:
-    request.app.state.deck["lemonade"].load(body.model)
+    deck = request.app.state.deck
+    model = body.model
+    if not model.startswith(_EXTRA_PREFIX):
+        model = f"{_EXTRA_PREFIX}{model}"
+    deck["lemonade"].load(model)
+    # Deliberate load: clear any suppression from a prior unload.
+    deck["heal_suppressor"].clear()
     return {"status": "ok"}
 
 
@@ -44,6 +54,8 @@ def lemonade_unload(body: LemonadeUnloadBody, request: Request) -> dict:
         if not model:
             raise HTTPException(status_code=409, detail="no model is currently loaded")
     deck["lemonade"].unload(model)
+    # Deliberate unload: arm suppression so the arbiter doesn't heal it back.
+    deck["heal_suppressor"].note_deck_unload()
     return {"status": "ok"}
 
 

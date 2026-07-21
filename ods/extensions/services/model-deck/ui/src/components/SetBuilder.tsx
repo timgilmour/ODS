@@ -15,6 +15,7 @@ import {
   type HipfireEphemeral,
   type LemonadeEphemeral,
   type ModelFile,
+  type TenantPolicy,
   type World,
 } from "../api";
 import ApplyModal from "./ApplyModal";
@@ -83,6 +84,10 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
   const [placedModel, setPlacedModel] = useState<string | null>(null);
   const [catalogId, setCatalogId] = useState("");
   const [reserveGb, setReserveGb] = useState(24);
+  // policy_overrides is not editable in v1, but must survive load->save
+  // verbatim (a loaded set that carries overrides keeps them on the next
+  // save). New drafts keep it null; a badge surfaces its presence.
+  const [policyOverrides, setPolicyOverrides] = useState<Record<string, TenantPolicy> | null>(null);
 
   // Save flow.
   const [saving, setSaving] = useState(false);
@@ -119,6 +124,7 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
     setPlacedModel(null);
     setCatalogId("");
     setReserveGb(24);
+    setPolicyOverrides(null);
     setSaveError(null);
     setOverwriteSnapshot(null);
     setDeleteArmed(false);
@@ -136,6 +142,9 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
     setHipfire(cfgset.ephemeral?.hipfire ?? null);
     setCatalogId(cfgset.durable?.activate_model_id ?? "");
     setReserveGb(cfgset.ephemeral?.comfyui?.reserve_gb ?? 24);
+    // Carry policy_overrides through verbatim — not editable in v1, but a
+    // loaded set that carries them must not silently drop them on re-save.
+    setPolicyOverrides(cfgset.policy_overrides ?? null);
     // Best-effort: only durable.default_route_model with the "extra."
     // prefix + an active "loaded" ephemeral intent can be traced back to a
     // library model file. A set that names some other litellm route can't be
@@ -171,7 +180,7 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
       notes,
       durable,
       ephemeral: emptyEphemeral(lemonade, comfyui, hipfire),
-      policy_overrides: null,
+      policy_overrides: policyOverrides,
     };
   }
 
@@ -401,6 +410,12 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
                   placeholder="optional notes shown in the preview/apply modal"
                 />
               </label>
+
+              {policyOverrides !== null && (
+                <div className="badge-policy-overrides" title="this set carries per-tenant policy overrides (not editable here in v1; preserved on save)">
+                  policy overrides present
+                </div>
+              )}
 
               {saveError && (
                 <div className="banner-error">

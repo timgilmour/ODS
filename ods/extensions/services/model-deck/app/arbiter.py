@@ -42,18 +42,84 @@ Design notes that are load-bearing (and tested):
 * Feasibility-first eviction: if the FULL set of eligible evictions still
   can't free enough VRAM, ``decide`` emits ``noop "wont-fit"`` and evicts
   NOTHING. We never kill a tenant for a load that won't fit anyway.
+
+* HEAL SUPPRESSION (``HealSuppressor``): contention healing infers a pending
+  default-route load whenever the route is set, lemonade is unloaded, and
+  free VRAM < footprint. Left unchecked that inference auto-REVERTS any
+  deliberate unload — a manual unload, a set-apply ``unload_lemonade`` step,
+  or even the watcher's own idle release (the idle-GPU-burn fix). To stop
+  that, EVERY deck-initiated lemonade unload arms a shared, monotonic-clock
+  suppression window (``note_deck_unload()``); while it's active the watcher
+  skips pending-load inference entirely (idle rules still run). Any
+  deck-initiated lemonade LOAD (manual, set-apply, or the watcher's own heal
+  re-trigger) means the model is wanted resident again, so it clears the
+  suppression. Accepted trade-off: during the window a chat request against a
+  full GPU can still fail Lemonade-side (no auto-heal); healing resumes once
+  the window expires. A future refinement would replace the timer with a real
+  load-failure signal (e.g. tailing the llama-server log via the docker
+  proxy) so healing can distinguish "user unloaded on purpose" from "a load
+  actually OOM'd".
+
+* The watcher YIELDS to an in-flight set apply: if ``app.sets`` holds its
+  apply lock, ``tick()`` returns immediately (no snapshot, no actions) so the
+  two never interleave real evictions/loads on the live box.
 """
 
 import threading
+import time
 
 from app.engines import EngineError, GuardError
 from app.events import log_event
+from app.sets import apply_in_progress
 
 # VRAM overhead slack subtracted when estimating comfyui's reclaimable bytes
 # from raw GPU usage (fragmentation, driver/runtime overhead, small tenants).
 _SLACK_BYTES = 1024**3  # 1 GiB
 
 _EXTRA_PREFIX = "extra."
+
+
+# ===========================================================================
+# Heal suppression — shared flag guarding deliberate unloads
+# ===========================================================================
+
+
+class HealSuppressor:
+    """A shared, monotonic-clock suppression window that stops the watcher's
+    contention healing from auto-reverting a deliberate lemonade unload.
+
+    ``note_deck_unload()`` (arm) is called by EVERY deck-initiated lemonade
+    unload — watcher idle-release and contention evictions, the set-apply
+    ``unload_lemonade`` step, and the manual unload route. While
+    ``suppressed()`` is True the watcher skips pending-load inference entirely.
+
+    Any deck-initiated lemonade LOAD calls ``clear()`` — the model is wanted
+    resident again, so there is nothing to protect from re-loading.
+
+    The clock is injectable so tests can advance the window without sleeping.
+    """
+
+    def __init__(self, window_s: float, clock=time.monotonic) -> None:
+        self._window_s = window_s
+        self._clock = clock
+        self._until: float | None = None
+
+    def note_deck_unload(self) -> None:
+        """Arm (or re-arm) the suppression window from now."""
+        self._until = self._clock() + self._window_s
+
+    def clear(self) -> None:
+        """Disarm the window (a deck-initiated load wants the model resident)."""
+        self._until = None
+
+    def suppressed(self) -> bool:
+        """True while the window is active. Lazily disarms once it expires."""
+        if self._until is None:
+            return False
+        if self._clock() >= self._until:
+            self._until = None
+            return False
+        return True
 
 
 # ===========================================================================
@@ -213,6 +279,7 @@ class Watcher:
         policy_store,
         events_path,
         read_gpus,
+        heal_suppressor=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -224,6 +291,13 @@ class Watcher:
         self._policy_store = policy_store
         self._events_path = events_path
         self._read_gpus = read_gpus
+        # Shared across the HTTP routers (set-apply, manual load/unload) via
+        # the deck namespace; a standalone default keeps unit tests simple.
+        self._heal_suppressor = (
+            heal_suppressor
+            if heal_suppressor is not None
+            else HealSuppressor(settings.heal_suppress_s)
+        )
         self._interval = settings.watch_interval
 
         self._stop = threading.Event()
@@ -255,6 +329,13 @@ class Watcher:
     # --- one tick ----------------------------------------------------------
 
     def tick(self) -> None:
+        # Yield to an in-flight set apply: the two must never interleave real
+        # evictions/loads on the live box. Checked WITHOUT acquiring the lock
+        # (a peek), so a running apply makes this tick a clean no-op — no
+        # snapshot, no actions.
+        if apply_in_progress():
+            return
+
         # DELIBERATE broad catch: this is a supervisor loop. A crash in any
         # single tick (malformed engine body, transient client bug, a bad
         # snapshot) must NOT take the whole arbiter down — loop survival
@@ -266,11 +347,14 @@ class Watcher:
                 gpus, self._lemonade, self._comfy, self._hipfire, self._litellm, self._registry
             )
             policy = self._policy_store.get()
-            pending = self._infer_pending(world)
+            # While a deliberate unload's suppression window is active, skip
+            # pending-load inference entirely so healing can't revert it. Idle
+            # rules (decide with pending=None) still run.
+            pending = None if self._heal_suppressor.suppressed() else self._infer_pending(world)
             actions = decide(world, policy, pending)
             self._execute(actions, pending)
         except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above
-            log_event(self._events_path, "tick-error", {"error": str(exc)})
+            self._log("tick-error", {"error": str(exc)})
 
     def _infer_pending(self, world: dict) -> dict | None:
         """Infer a pending default-route load waiting on VRAM.
@@ -306,6 +390,9 @@ class Watcher:
             kind = action["type"]
             if kind == "unload_lemonade":
                 self._lemonade.unload(action["model"])
+                # Deck-initiated unload (idle release OR contention eviction):
+                # arm suppression so healing can't immediately revert it.
+                self._heal_suppressor.note_deck_unload()
                 self._log(kind, {"model": action["model"]})
             elif kind == "free_comfyui":
                 try:
@@ -333,14 +420,22 @@ class Watcher:
                 # and let the loop survive; the next tick re-evaluates.
                 self._log("load-failed", {"error": str(exc)})
             else:
+                # Deck-initiated load: the model is wanted resident again, so
+                # clear any suppression left by a prior deliberate unload.
+                self._heal_suppressor.clear()
                 self._log("load-retriggered", {"model": pending["model"]})
 
+    # Event kinds whose consecutive identical repeats are collapsed to a
+    # single log line, so a persistent state (a stuck 'wont-fit', a crashing
+    # tick, a comfy queue that keeps racing) doesn't spam the audit log every
+    # tick. A different kind — or the same kind with a different detail — in
+    # between resets the suppression. Real one-shot actions (unloads, frees,
+    # loads) are NEVER deduped and always logged.
+    _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced"})
+
     def _log(self, kind: str, detail: dict) -> None:
-        # Suppress only consecutive duplicate *noop* events so a persistent
-        # 'fits'/'wont-fit' state doesn't spam the audit log every tick. Real
-        # actions are always logged.
         key = (kind, tuple(sorted(detail.items())))
-        if kind == "noop" and key == self._last_event_key:
+        if kind in self._DEDUP_KINDS and key == self._last_event_key:
             return
         log_event(self._events_path, kind, detail)
         self._last_event_key = key

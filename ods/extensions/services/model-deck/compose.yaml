@@ -17,6 +17,10 @@ services:
       - ./data/models:/gguf-store:ro,z
       - /sys/class/drm:/sysdrm:ro
       - /sys/class/kfd/kfd/proc:/syskfd:ro
+    # Sits on BOTH the stack default network (ods-network — keeps litellm,
+    # llama-server, comfyui, hipfire DNS resolving) AND the private deck-ctl
+    # network it shares only with the socket proxy.
+    networks: [default, deck-ctl]
     depends_on: [docker-ctl]
   docker-ctl:
     image: tecnativa/docker-socket-proxy:0.3.0
@@ -24,3 +28,14 @@ services:
     restart: unless-stopped
     environment: { CONTAINERS: 1, POST: 1, ALLOW_START: 1, ALLOW_STOP: 1 }
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    # ONLY on the private, internal deck-ctl network — no sibling stack
+    # container can reach the docker socket proxy, only model-deck can.
+    networks: [deck-ctl]
+
+networks:
+  # Private, host-isolated bridge shared by model-deck and the socket proxy
+  # only. Declared here and merged with the base stack's `default`
+  # (ods-network) — mirrors docker-compose.base.yml's networks convention.
+  deck-ctl:
+    name: ods-deck-ctl
+    internal: true
