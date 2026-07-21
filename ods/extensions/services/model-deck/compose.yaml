@@ -10,7 +10,7 @@ services:
       - MODEL_DECK_PROXY_KEY=${MODEL_DECK_PROXY_KEY:-}
       - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
       - LITELLM_KEY=${LITELLM_KEY:-}
-      - HOST_AGENT_KEY=${HOST_AGENT_KEY:-}
+      - HOST_AGENT_KEY=${ODS_AGENT_KEY:-} # live installs name the agent key ODS_AGENT_KEY
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ./data/model-deck:/data:z
