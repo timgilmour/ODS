@@ -1,0 +1,25 @@
+services:
+  model-deck:
+    build: { context: ./extensions/services/model-deck }
+    image: ods-model-deck:latest
+    container_name: ods-model-deck
+    restart: unless-stopped
+    ports: ["${MODEL_DECK_PORT:-3015}:3015"]
+    environment:
+      - MODEL_DECK_ADMIN_TOKEN=${MODEL_DECK_ADMIN_TOKEN:?set in .env}
+      - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
+      - LITELLM_KEY=${LITELLM_KEY:-}
+      - HOST_AGENT_KEY=${HOST_AGENT_KEY:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./data/model-deck:/data:z
+      - ./data/models:/gguf-store:ro,z
+      - /sys/class/drm:/sysdrm:ro
+      - /sys/class/kfd/kfd/proc:/syskfd:ro
+    depends_on: [docker-ctl]
+  docker-ctl:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: ods-docker-ctl
+    restart: unless-stopped
+    environment: { CONTAINERS: 1, POST: 1, ALLOW_START: 1, ALLOW_STOP: 1 }
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]

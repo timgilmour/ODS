@@ -1,0 +1,19 @@
+schema_version: ods.services.v1
+compatibility: { ods_min: "2.0.0" }
+service:
+  id: model-deck
+  name: Model Deck (VRAM Control)
+  aliases: []
+  container_name: ods-model-deck
+  host_env: MODEL_DECK_HOST
+  default_host: model-deck
+  port: 3015
+  external_port_env: MODEL_DECK_PORT
+  external_port_default: 3015
+  health: /health
+  ui_path: /
+  type: docker
+  gpu_backends: [all]
+  compose_file: compose.yaml
+  category: optional
+  depends_on: [litellm]
