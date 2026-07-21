@@ -1,0 +1,770 @@
+"""Tests for app.sets — config sets: schema, slug store, diff planner, apply engine.
+
+A ConfigSet is user-authored JSON (the one place Model Deck uses pydantic to
+validate it). ``plan_apply`` is a PURE diff of a set against a world snapshot,
+emitting only the steps that change reality, in a fixed safety order. ``apply``
+is the imperative shell: it snapshots pre-apply reality as the ``_previous``
+revert set FIRST, executes the plan serialized under a module lock, and halts
+on the first failing step with an exact report. Clients are recording fakes.
+"""
+
+import threading
+
+import pytest
+from pydantic import ValidationError
+
+from app.engines import BusyError, EngineError, GuardError
+from app.events import tail_events
+from app.sets import (
+    PREVIOUS_NAME,
+    RESERVED_SLUG,
+    ConfigSet,
+    SetStore,
+    apply,
+    plan_apply,
+    slugify,
+)
+
+
+# ===========================================================================
+# Fakes + builders
+# ===========================================================================
+
+
+def make_world(
+    *,
+    lemonade=("unloaded", None),
+    comfy=("idle", 0),
+    hipfire="running",
+    default_route=None,
+):
+    lem_state, lem_model = lemonade
+    comfy_state, comfy_queue = comfy
+    return {
+        "gpus": [],
+        "tenants": {
+            "lemonade": {
+                "state": lem_state,
+                "model": lem_model,
+                "footprint": None,
+                "idle_s": None,
+            },
+            "comfyui": {"state": comfy_state, "queue": comfy_queue, "idle_s": None},
+            "hipfire": {"state": hipfire, "model": None, "footprint": 0},
+        },
+        "externals": [],
+        "default_route": default_route,
+    }
+
+
+class RecLemonade:
+    def __init__(self):
+        self.calls = []
+        self.fail = {}
+
+    def load(self, model):
+        self.calls.append(("load", model))
+        if "load" in self.fail:
+            raise self.fail["load"]
+
+    def unload(self, model):
+        self.calls.append(("unload", model))
+        if "unload" in self.fail:
+            raise self.fail["unload"]
+
+
+class RecComfy:
+    def __init__(self):
+        self.calls = []
+        self.fail = None
+
+    def free(self):
+        self.calls.append("free")
+        if self.fail:
+            raise self.fail
+
+
+class RecHipfire:
+    def __init__(self):
+        self.calls = []
+        self.fail = {}
+
+    def park(self):
+        self.calls.append("park")
+        if "park" in self.fail:
+            raise self.fail["park"]
+
+    def resume(self):
+        self.calls.append("resume")
+        if "resume" in self.fail:
+            raise self.fail["resume"]
+
+
+class RecHostAgent:
+    def __init__(self):
+        self.calls = []
+        self.fail = None
+
+    def activate(self, model_id):
+        self.calls.append(model_id)
+        if self.fail:
+            raise self.fail
+        return {"activated": model_id}
+
+
+class RecPolicyStore:
+    def __init__(self):
+        self.calls = []
+        self.fail = None
+
+    def put(self, policies):
+        self.calls.append(policies)
+        if self.fail:
+            raise self.fail
+
+
+def run_apply(cfgset, world, tmp_path, **overrides):
+    """Invoke apply with recording fakes; returns (report, clients-dict)."""
+    clients = {
+        "lemonade": RecLemonade(),
+        "comfy": RecComfy(),
+        "hipfire": RecHipfire(),
+        "hostagent": RecHostAgent(),
+        "policy_store": RecPolicyStore(),
+        "store": SetStore(tmp_path / "sets"),
+        "events_path": tmp_path / "events.jsonl",
+    }
+    clients.update(overrides)
+    report = apply(cfgset, world=world, **clients)
+    return report, clients
+
+
+# ===========================================================================
+# ConfigSet schema (pydantic)
+# ===========================================================================
+
+
+def test_minimal_configset_defaults():
+    cfg = ConfigSet(name="Fresh")
+    assert cfg.name == "Fresh"
+    assert cfg.notes == ""
+    assert cfg.durable is None
+    assert cfg.ephemeral is None
+    assert cfg.policy_overrides is None
+
+
+def test_name_required_nonempty():
+    with pytest.raises(ValidationError):
+        ConfigSet(name="")
+
+
+def test_name_whitespace_only_rejected():
+    with pytest.raises(ValidationError):
+        ConfigSet(name="   ")
+
+
+def test_name_is_trimmed():
+    assert ConfigSet(name="  Image session  ").name == "Image session"
+
+
+def test_comfyui_reserve_gb_defaults_to_24():
+    cfg = ConfigSet(name="x", ephemeral={"comfyui": {"state": "free"}})
+    assert cfg.ephemeral.comfyui.reserve_gb == 24
+
+
+def test_ephemeral_rejects_bad_lemonade_state():
+    with pytest.raises(ValidationError):
+        ConfigSet(name="x", ephemeral={"lemonade": {"state": "sleeping"}})
+
+
+def test_durable_activate_model_id_optional():
+    cfg = ConfigSet(name="x", durable={"default_route_model": "extra.m.gguf"})
+    assert cfg.durable.default_route_model == "extra.m.gguf"
+    assert cfg.durable.activate_model_id is None
+
+
+def test_configset_rejects_unknown_top_level_field():
+    with pytest.raises(ValidationError):
+        ConfigSet(name="x", bogus=1)
+
+
+# ===========================================================================
+# slugify
+# ===========================================================================
+
+
+def test_slugify_spaces_to_dashes():
+    assert slugify("Image session") == "image-session"
+
+
+def test_slugify_collapses_punct_runs_and_trims():
+    assert slugify("  Hello,  World!! ") == "hello-world"
+
+
+def test_slugify_keeps_digits():
+    assert slugify("GPT4 Turbo v2") == "gpt4-turbo-v2"
+
+
+def test_slugify_slashes_and_symbols():
+    assert slugify("Model A/B (fast)") == "model-a-b-fast"
+
+
+def test_slugify_previous_display_name_collapses_to_previous():
+    assert slugify(PREVIOUS_NAME) == "previous"
+
+
+def test_slugify_all_punct_is_empty():
+    assert slugify("!!! ???") == ""
+
+
+# ===========================================================================
+# SetStore CRUD
+# ===========================================================================
+
+
+def test_save_returns_slug_and_writes_file(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    slug = store.save(ConfigSet(name="Image Session"))
+    assert slug == "image-session"
+    assert (tmp_path / "sets" / "image-session.json").is_file()
+
+
+def test_save_get_roundtrip(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    cfg = ConfigSet(
+        name="Chat",
+        notes="for talking",
+        durable={"default_route_model": "extra.m.gguf", "activate_model_id": "cat-1"},
+        ephemeral={"comfyui": {"state": "free", "reserve_gb": 12}},
+        policy_overrides={"lemonade": {"priority": 5, "pinned": False, "idle_ttl": 10}},
+    )
+    slug = store.save(cfg)
+    got = store.get(slug)
+    assert got == cfg
+
+
+def test_get_missing_returns_none(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    assert store.get("nope") is None
+
+
+def test_list_sorted_by_name(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    store.save(ConfigSet(name="Zulu"))
+    store.save(ConfigSet(name="Alpha"))
+    store.save(ConfigSet(name="Mike"))
+    assert [c.name for c in store.list()] == ["Alpha", "Mike", "Zulu"]
+
+
+def test_list_empty_when_dir_absent(tmp_path):
+    assert SetStore(tmp_path / "never").list() == []
+
+
+def test_delete_removes_file(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    slug = store.save(ConfigSet(name="Temp"))
+    store.delete(slug)
+    assert store.get(slug) is None
+    assert [c.name for c in store.list()] == []
+
+
+def test_delete_missing_is_noop(tmp_path):
+    SetStore(tmp_path / "sets").delete("ghost")  # must not raise
+
+
+def test_save_write_is_atomic_no_temp_files_left(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    store.save(ConfigSet(name="Atomic"))
+    assert list((tmp_path / "sets").glob("*.tmp")) == []
+
+
+def test_save_parent_dir_created(tmp_path):
+    store = SetStore(tmp_path / "deep" / "nested" / "sets")
+    store.save(ConfigSet(name="Deep"))
+    assert (tmp_path / "deep" / "nested" / "sets" / "deep.json").is_file()
+
+
+# --- reserved slug ---
+
+
+@pytest.mark.parametrize("name", ["previous", "Previous", "· previous", "_previous"])
+def test_save_rejects_reserved_slug(tmp_path, name):
+    store = SetStore(tmp_path / "sets")
+    with pytest.raises(ValueError):
+        store.save(ConfigSet(name=name))
+
+
+def test_save_rejects_empty_slug(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    with pytest.raises(ValueError):
+        store.save(ConfigSet(name="!!! ???"))
+
+
+def test_save_previous_writes_reserved_file(tmp_path):
+    store = SetStore(tmp_path / "sets")
+    slug = store.save_previous(ConfigSet(name=PREVIOUS_NAME))
+    assert slug == RESERVED_SLUG
+    assert (tmp_path / "sets" / f"{RESERVED_SLUG}.json").is_file()
+    assert store.get(RESERVED_SLUG).name == PREVIOUS_NAME
+
+
+# ===========================================================================
+# plan_apply — pure diff
+# ===========================================================================
+
+
+def test_empty_plan_when_reality_matches():
+    world = make_world(
+        lemonade=("loaded", "extra.d.gguf"),
+        comfy=("idle", 0),
+        hipfire="running",
+        default_route="extra.d.gguf",
+    )
+    cfg = ConfigSet(
+        name="steady",
+        durable={"default_route_model": "extra.d.gguf", "activate_model_id": "cat-1"},
+        ephemeral={
+            "lemonade": {"state": "loaded"},
+            "comfyui": {"state": "leave"},
+            "hipfire": {"state": "running"},
+        },
+    )
+    assert plan_apply(cfg, world) == []
+
+
+def test_omitted_subsections_touch_nothing():
+    world = make_world(lemonade=("loaded", "extra.x.gguf"), hipfire="parked")
+    cfg = ConfigSet(name="empty-eph", ephemeral={})
+    assert plan_apply(cfg, world) == []
+
+
+def test_cheap_path_durable_unchanged_no_activate():
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfg = ConfigSet(
+        name="cheap",
+        durable={"default_route_model": "extra.d.gguf", "activate_model_id": "cat-1"},
+        ephemeral={"lemonade": {"state": "loaded"}},
+    )
+    plan = plan_apply(cfg, world)
+    assert plan == [{"step": "load_lemonade", "model": "extra.d.gguf"}]
+    assert not any(s["step"] == "activate" for s in plan)
+
+
+def test_load_uses_world_default_route_when_no_durable():
+    world = make_world(lemonade=("unloaded", None), default_route="extra.world.gguf")
+    cfg = ConfigSet(name="noload-durable", ephemeral={"lemonade": {"state": "loaded"}})
+    assert plan_apply(cfg, world) == [
+        {"step": "load_lemonade", "model": "extra.world.gguf"}
+    ]
+
+
+def test_no_model_to_load_warn():
+    world = make_world(lemonade=("unloaded", None), default_route=None)
+    cfg = ConfigSet(name="nomodel", ephemeral={"lemonade": {"state": "loaded"}})
+    assert plan_apply(cfg, world) == [{"step": "warn", "reason": "no-model-to-load"}]
+
+
+def test_unload_uses_worlds_loaded_model():
+    world = make_world(lemonade=("loaded", "extra.live.gguf"))
+    cfg = ConfigSet(name="unload", ephemeral={"lemonade": {"state": "unloaded"}})
+    assert plan_apply(cfg, world) == [
+        {"step": "unload_lemonade", "model": "extra.live.gguf"}
+    ]
+
+
+def test_comfy_free_only_when_queue_zero():
+    world = make_world(comfy=("idle", 0))
+    cfg = ConfigSet(name="free", ephemeral={"comfyui": {"state": "free"}})
+    assert plan_apply(cfg, world) == [{"step": "free_comfyui"}]
+
+
+def test_comfy_busy_warns_not_frees():
+    world = make_world(comfy=("busy", 3))
+    cfg = ConfigSet(name="free", ephemeral={"comfyui": {"state": "free"}})
+    assert plan_apply(cfg, world) == [
+        {"step": "warn", "reason": "comfyui-busy-skipped"}
+    ]
+
+
+def test_comfy_unknown_queue_is_not_freed():
+    world = make_world(comfy=("unknown", None))
+    cfg = ConfigSet(name="free", ephemeral={"comfyui": {"state": "free"}})
+    assert plan_apply(cfg, world) == [
+        {"step": "warn", "reason": "comfyui-busy-skipped"}
+    ]
+
+
+def test_hipfire_park_when_running():
+    world = make_world(hipfire="running")
+    cfg = ConfigSet(name="park", ephemeral={"hipfire": {"state": "parked"}})
+    assert plan_apply(cfg, world) == [{"step": "park_hipfire"}]
+
+
+def test_hipfire_park_when_loading():
+    world = make_world(hipfire="loading")
+    cfg = ConfigSet(name="park", ephemeral={"hipfire": {"state": "parked"}})
+    assert plan_apply(cfg, world) == [{"step": "park_hipfire"}]
+
+
+def test_hipfire_resume_when_parked():
+    world = make_world(hipfire="parked")
+    cfg = ConfigSet(name="resume", ephemeral={"hipfire": {"state": "running"}})
+    assert plan_apply(cfg, world) == [{"step": "resume_hipfire"}]
+
+
+def test_durable_change_with_id_emits_activate():
+    world = make_world(default_route="extra.old.gguf")
+    cfg = ConfigSet(
+        name="switch",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-9"},
+    )
+    assert plan_apply(cfg, world) == [{"step": "activate", "model_id": "cat-9"}]
+
+
+def test_durable_revert_unavailable_warn():
+    world = make_world(default_route="extra.old.gguf")
+    cfg = ConfigSet(
+        name="revert",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": None},
+    )
+    assert plan_apply(cfg, world) == [
+        {"step": "warn", "reason": "durable-revert-unavailable"}
+    ]
+
+
+def test_policy_patch_always_emitted():
+    world = make_world()
+    overrides = {"lemonade": {"priority": 1, "pinned": False, "idle_ttl": 5}}
+    cfg = ConfigSet(name="pol", policy_overrides=overrides)
+    assert plan_apply(cfg, world) == [{"step": "policy_patch", "policies": overrides}]
+
+
+def test_full_ordering_park_activate_load_policy():
+    # evictions (free) -> park -> activate -> load -> policy
+    world = make_world(
+        lemonade=("unloaded", None),
+        comfy=("idle", 0),
+        hipfire="running",
+        default_route="extra.old.gguf",
+    )
+    overrides = {"comfyui": {"priority": 9, "pinned": True, "idle_ttl": 0}}
+    cfg = ConfigSet(
+        name="big",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
+        ephemeral={
+            "lemonade": {"state": "loaded"},
+            "comfyui": {"state": "free"},
+            "hipfire": {"state": "parked"},
+        },
+        policy_overrides=overrides,
+    )
+    assert plan_apply(cfg, world) == [
+        {"step": "free_comfyui"},
+        {"step": "park_hipfire"},
+        {"step": "activate", "model_id": "cat-7"},
+        {"step": "load_lemonade", "model": "extra.new.gguf"},
+        {"step": "policy_patch", "policies": overrides},
+    ]
+
+
+def test_full_ordering_unload_activate_resume():
+    # evictions (unload, free) -> activate -> resume -> policy
+    world = make_world(
+        lemonade=("loaded", "extra.live.gguf"),
+        comfy=("idle", 0),
+        hipfire="parked",
+        default_route="extra.old.gguf",
+    )
+    overrides = {"hipfire": {"priority": 100, "pinned": True, "idle_ttl": 0}}
+    cfg = ConfigSet(
+        name="big2",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-3"},
+        ephemeral={
+            "lemonade": {"state": "unloaded"},
+            "comfyui": {"state": "free"},
+            "hipfire": {"state": "running"},
+        },
+        policy_overrides=overrides,
+    )
+    assert plan_apply(cfg, world) == [
+        {"step": "unload_lemonade", "model": "extra.live.gguf"},
+        {"step": "free_comfyui"},
+        {"step": "activate", "model_id": "cat-3"},
+        {"step": "resume_hipfire"},
+        {"step": "policy_patch", "policies": overrides},
+    ]
+
+
+# ===========================================================================
+# apply — imperative shell
+# ===========================================================================
+
+
+def test_apply_executes_steps_in_order(tmp_path):
+    world = make_world(
+        lemonade=("unloaded", None),
+        comfy=("idle", 0),
+        hipfire="running",
+        default_route="extra.old.gguf",
+    )
+    overrides = {"lemonade": {"priority": 1, "pinned": False, "idle_ttl": 5}}
+    cfg = ConfigSet(
+        name="do-it",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
+        ephemeral={
+            "lemonade": {"state": "loaded"},
+            "comfyui": {"state": "free"},
+            "hipfire": {"state": "parked"},
+        },
+        policy_overrides=overrides,
+    )
+    report, clients = run_apply(cfg, world, tmp_path)
+
+    assert report["failed"] is None
+    assert report["error"] is None
+    assert report["warnings"] == []
+    assert [s["step"] for s in report["completed"]] == [
+        "free_comfyui",
+        "park_hipfire",
+        "activate",
+        "load_lemonade",
+        "policy_patch",
+    ]
+    assert clients["comfy"].calls == ["free"]
+    assert clients["hipfire"].calls == ["park"]
+    assert clients["hostagent"].calls == ["cat-7"]
+    assert clients["lemonade"].calls == [("load", "extra.new.gguf")]
+    assert clients["policy_store"].calls == [overrides]
+
+
+def test_apply_warn_recorded_not_executed(tmp_path):
+    world = make_world(comfy=("busy", 2))
+    cfg = ConfigSet(name="skip", ephemeral={"comfyui": {"state": "free"}})
+    report, clients = run_apply(cfg, world, tmp_path)
+
+    assert report["warnings"] == ["comfyui-busy-skipped"]
+    assert report["completed"] == []
+    assert report["failed"] is None
+    assert clients["comfy"].calls == []
+
+
+def test_apply_halts_at_failing_step_with_exact_report(tmp_path):
+    world = make_world(
+        comfy=("idle", 0),
+        hipfire="running",
+        default_route="extra.old.gguf",
+    )
+    cfg = ConfigSet(
+        name="halt",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
+        ephemeral={"comfyui": {"state": "free"}, "hipfire": {"state": "parked"}},
+    )
+    hipfire = RecHipfire()
+    hipfire.fail = {"park": GuardError("default routes to hipfire")}
+    report, clients = run_apply(cfg, world, tmp_path, hipfire=hipfire)
+
+    assert report["completed"] == [{"step": "free_comfyui"}]
+    assert report["failed"] == {"step": "park_hipfire"}
+    assert report["error"] == "default routes to hipfire"
+    assert report["warnings"] == []
+    # comfy ran, hipfire.park attempted, activate NEVER reached
+    assert clients["comfy"].calls == ["free"]
+    assert clients["hipfire"].calls == ["park"]
+    assert clients["hostagent"].calls == []
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [GuardError("g"), EngineError("e"), BusyError("b"), ValueError("v")],
+)
+def test_apply_halts_on_each_expected_exception(tmp_path, exc):
+    world = make_world(default_route="extra.old.gguf")
+    cfg = ConfigSet(
+        name="boom",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
+    )
+    hostagent = RecHostAgent()
+    hostagent.fail = exc
+    report, _ = run_apply(cfg, world, tmp_path, hostagent=hostagent)
+
+    assert report["failed"] == {"step": "activate", "model_id": "cat-7"}
+    assert report["error"] == str(exc)
+
+
+def test_apply_logs_start_and_end_ok(tmp_path):
+    world = make_world()
+    cfg = ConfigSet(name="Logged", ephemeral={})
+    _, clients = run_apply(cfg, world, tmp_path)
+
+    events = tail_events(clients["events_path"])
+    kinds = [e["kind"] for e in events]
+    assert kinds[0] == "apply-start"
+    assert events[0]["detail"] == {"name": "Logged"}
+    assert kinds[-1] == "apply-end"
+    assert events[-1]["detail"]["outcome"] == "ok"
+
+
+def test_apply_logs_end_failed_on_halt(tmp_path):
+    world = make_world(default_route="extra.old.gguf")
+    cfg = ConfigSet(
+        name="Failer",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "c"},
+    )
+    hostagent = RecHostAgent()
+    hostagent.fail = EngineError("boom")
+    _, clients = run_apply(cfg, world, tmp_path, hostagent=hostagent)
+
+    events = tail_events(clients["events_path"])
+    end = events[-1]
+    assert end["kind"] == "apply-end"
+    assert end["detail"]["outcome"] == "failed"
+    assert end["detail"]["step"] == "activate"
+
+
+def test_apply_logs_each_real_step_by_name(tmp_path):
+    world = make_world(comfy=("idle", 0), hipfire="running")
+    cfg = ConfigSet(
+        name="Two",
+        ephemeral={"comfyui": {"state": "free"}, "hipfire": {"state": "parked"}},
+    )
+    _, clients = run_apply(cfg, world, tmp_path)
+    kinds = [e["kind"] for e in tail_events(clients["events_path"])]
+    assert "free_comfyui" in kinds
+    assert "park_hipfire" in kinds
+
+
+# --- _previous snapshot ---
+
+
+def test_previous_captures_pre_apply_reality(tmp_path):
+    world = make_world(
+        lemonade=("loaded", "extra.live.gguf"),
+        comfy=("busy", 4),
+        hipfire="running",
+        default_route="extra.d.gguf",
+    )
+    # A no-op-ish set (leave everything) so apply changes nothing but still snapshots.
+    cfg = ConfigSet(name="noop", ephemeral={"comfyui": {"state": "leave"}})
+    _, clients = run_apply(cfg, world, tmp_path)
+
+    prev = clients["store"].get(RESERVED_SLUG)
+    assert prev.name == PREVIOUS_NAME
+    assert prev.ephemeral.lemonade.state == "loaded"
+    assert prev.ephemeral.comfyui.state == "leave"
+    assert prev.ephemeral.hipfire.state == "running"
+    assert prev.durable.default_route_model == "extra.d.gguf"
+    assert prev.durable.activate_model_id is None
+    assert prev.notes
+
+
+def test_previous_durable_none_when_no_default_route(tmp_path):
+    world = make_world(
+        lemonade=("unloaded", None), hipfire="parked", default_route=None
+    )
+    cfg = ConfigSet(name="noop", ephemeral={})
+    _, clients = run_apply(cfg, world, tmp_path)
+
+    prev = clients["store"].get(RESERVED_SLUG)
+    assert prev.durable is None
+    assert prev.ephemeral.lemonade.state == "unloaded"
+    assert prev.ephemeral.hipfire.state == "parked"
+
+
+def test_previous_hipfire_loading_snapshots_as_running(tmp_path):
+    world = make_world(hipfire="loading")
+    cfg = ConfigSet(name="noop", ephemeral={})
+    _, clients = run_apply(cfg, world, tmp_path)
+    assert clients["store"].get(RESERVED_SLUG).ephemeral.hipfire.state == "running"
+
+
+def test_previous_captured_before_any_step_runs(tmp_path):
+    # apply halts on the very first step, yet _previous must already be on disk.
+    world = make_world(
+        lemonade=("loaded", "extra.live.gguf"), default_route="extra.d.gguf"
+    )
+    cfg = ConfigSet(name="halt-first", ephemeral={"lemonade": {"state": "unloaded"}})
+    lemonade = RecLemonade()
+    lemonade.fail = {"unload": EngineError("nope")}
+    report, clients = run_apply(cfg, world, tmp_path, lemonade=lemonade)
+
+    assert report["failed"] == {"step": "unload_lemonade", "model": "extra.live.gguf"}
+    prev = clients["store"].get(RESERVED_SLUG)
+    assert prev is not None
+    assert prev.ephemeral.lemonade.state == "loaded"
+
+
+# --- serialization under the module lock ---
+
+
+def test_apply_is_serialized_second_waits_for_first(tmp_path):
+    """A slow apply holds the module lock; a second apply must block until it
+    releases. Proven by lock state + thread liveness, not by sleeps."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingLemonade:
+        def __init__(self):
+            self.calls = []
+
+        def load(self, model):
+            self.calls.append(("load", model))
+            entered.set()
+            release.wait(timeout=5)
+
+        def unload(self, model):  # pragma: no cover - unused here
+            self.calls.append(("unload", model))
+
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfg1 = ConfigSet(name="slow", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg2 = ConfigSet(name="fast", ephemeral={"lemonade": {"state": "loaded"}})
+
+    store = SetStore(tmp_path / "sets")
+    events_path = tmp_path / "events.jsonl"
+    slow_lem = BlockingLemonade()
+    fast_lem = RecLemonade()
+
+    def base_clients(lem):
+        return {
+            "lemonade": lem,
+            "comfy": RecComfy(),
+            "hipfire": RecHipfire(),
+            "hostagent": RecHostAgent(),
+            "policy_store": RecPolicyStore(),
+            "store": store,
+            "events_path": events_path,
+        }
+
+    results = {}
+
+    t1 = threading.Thread(
+        target=lambda: results.__setitem__(
+            "t1", apply(cfg1, world=world, **base_clients(slow_lem))
+        )
+    )
+    t1.start()
+    assert entered.wait(timeout=5), "first apply never reached its blocking step"
+
+    import app.sets as sets_mod
+
+    assert sets_mod._apply_lock.locked()
+
+    t2 = threading.Thread(
+        target=lambda: results.__setitem__(
+            "t2", apply(cfg2, world=world, **base_clients(fast_lem))
+        )
+    )
+    t2.start()
+
+    # While t1 holds the lock, t2 cannot proceed: it stays alive and never calls.
+    t2.join(timeout=0.5)
+    assert t2.is_alive()
+    assert fast_lem.calls == []
+
+    release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    assert fast_lem.calls == [("load", "extra.d.gguf")]
+    assert results["t1"]["failed"] is None
+    assert results["t2"]["failed"] is None
