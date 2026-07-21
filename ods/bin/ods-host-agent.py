@@ -9837,6 +9837,109 @@ def _update_env_keys(env_path: Path, updates: dict[str, str]):
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
+class _EnvTransaction:
+    """Key-scoped .env rollback primitive for the model-activate flow.
+
+    Records the prior raw value (or absence) of every key an activation
+    writes, then re-applies those priors on ``rollback()`` against the
+    CURRENT file — so a rollback restores only the keys the activation
+    actually touched and never resurrects drift or clobbers a concurrent
+    edit made to some other line. This replaces the wholesale snapshot
+    restore of ``.env`` (live incident 2026-07-21: a wholesale restore
+    re-installed the stale ``LLAMA_SERVER_GPU_INDICES=0,1`` line — outside
+    the write-set — that had caused the activation to fail, after the
+    operator had fixed it mid-activation).
+
+    Two ways to record, both feeding the same prior map:
+    - ``update(updates)`` records priors then delegates the write to the
+      shared ``_update_env_keys`` upsert writer (the hipfire activate path).
+    - ``record(keys)`` records priors for a caller that performs its own
+      write — the GGUF activate block, whose inline rewrite also *deletes*
+      stale keys, something ``_update_env_keys`` cannot express.
+
+    First write of a key wins, so repeated writes of the same key still
+    roll back to the original value. ``rollback()`` is an atomic single
+    rewrite (preserving mode/uid/gid via ``_atomic_write_text``) and a no-op
+    when nothing was written.
+    """
+
+    def __init__(self, env_path: Path):
+        self._env_path = env_path
+        # Insertion order is first-seen order; value None means "absent before".
+        self._priors: dict[str, str | None] = {}
+
+    def _read_lines(self) -> list[str]:
+        if not self._env_path.exists():
+            return []
+        return self._env_path.read_text(encoding="utf-8").splitlines()
+
+    @staticmethod
+    def _line_key(line: str) -> str | None:
+        # Mirror _update_env_keys' parsing exactly so routing is behavior-neutral.
+        return line.split("=", 1)[0] if "=" in line and not line.startswith("#") else None
+
+    def _current_value(self, key: str, lines: list[str]) -> str | None:
+        for line in lines:
+            if self._line_key(line) == key:
+                return line.split("=", 1)[1]
+        return None
+
+    def record(self, keys) -> None:
+        """Record prior raw values for keys about to be mutated externally.
+
+        First-seen wins, so this is safe to call before every write."""
+        lines = None
+        for key in keys:
+            if key in self._priors:
+                continue
+            if lines is None:
+                lines = self._read_lines()
+            self._priors[key] = self._current_value(key, lines)
+
+    def update(self, updates: dict[str, str]) -> None:
+        """Record priors for the keys, then upsert them via _update_env_keys."""
+        self.record(updates.keys())
+        _update_env_keys(self._env_path, updates)
+
+    def written_keys(self) -> set:
+        return set(self._priors)
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self._priors)
+
+    def rollback(self) -> dict:
+        """Restore only the recorded keys against the CURRENT file.
+
+        Keys that were absent before are deleted; keys present before are set
+        back to their prior raw value. Every other line is left byte-for-byte
+        intact. Returns ``{key: (prior, current_before_rollback)}`` for
+        logging. No-op returning ``{}`` when nothing was written.
+        """
+        if not self._priors:
+            return {}
+        lines = self._read_lines()
+        current = {key: self._current_value(key, lines) for key in self._priors}
+        restore = {key: val for key, val in self._priors.items() if val is not None}
+        delete = {key for key, val in self._priors.items() if val is None}
+        new_lines: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            key = self._line_key(line)
+            if key and key in delete:
+                continue
+            if key and key in restore:
+                new_lines.append(f"{key}={restore[key]}")
+                seen.add(key)
+            else:
+                new_lines.append(line)
+        for key, val in restore.items():
+            if key not in seen:
+                new_lines.append(f"{key}={val}")
+        _atomic_write_text(self._env_path, "\n".join(new_lines) + "\n")
+        return {key: (prior, current[key]) for key, prior in self._priors.items()}
+
+
 def _compose_recreate_hipfire():
     """Recreate the hipfire container so it picks up new .env values.
 
