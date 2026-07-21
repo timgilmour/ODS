@@ -4,7 +4,7 @@ services:
     image: ods-model-deck:latest
     container_name: ods-model-deck
     restart: unless-stopped
-    ports: ["${MODEL_DECK_PORT:-3015}:3015"]
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${MODEL_DECK_PORT:-3015}:3015"]
     environment:
       - MODEL_DECK_ADMIN_TOKEN=${MODEL_DECK_ADMIN_TOKEN:?set in .env}
       - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
