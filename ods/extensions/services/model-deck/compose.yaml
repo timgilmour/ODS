@@ -24,10 +24,24 @@ services:
     networks: [default, deck-ctl]
     depends_on: [docker-ctl]
   docker-ctl:
-    image: tecnativa/docker-socket-proxy:0.3.0
+    # wollomatic over tecnativa: tecnativa's env ACL cannot express
+    # "start/stop yes, create no" (POST=1 also opens /containers/create —
+    # a host-root primitive, verified live; without POST=1 nothing mutates).
+    # wollomatic takes explicit per-method path regexes.
+    image: wollomatic/socket-proxy:1
     container_name: ods-docker-ctl
     restart: unless-stopped
-    environment: { CONTAINERS: 1, POST: 1, ALLOW_START: 1, ALLOW_STOP: 1 }
+    # Non-root image; needs the host docker group to read the socket.
+    group_add: ["${DOCKER_SOCK_GID:-984}"]
+    command:
+      - -listenip=0.0.0.0
+      - -proxyport=2375
+      - -allowfrom=0.0.0.0/0 # source control = the internal-only network
+      # wollomatic auto-anchors patterns — no explicit ^…$ here.
+      - -allowGET=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/json
+      - -allowPOST=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(start|stop)
+      - -watchdoginterval=300
+      - -shutdowngracetime=5
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
     # ONLY on the private, internal deck-ctl network — no sibling stack
     # container can reach the docker socket proxy, only model-deck can.
