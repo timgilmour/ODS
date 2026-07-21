@@ -1,0 +1,334 @@
+"""
+Model Deck priority arbiter — the core decision engine.
+
+Two pieces:
+
+* ``decide(world, policy, pending_load) -> list[dict]`` — a PURE function
+  (no I/O, deterministic) that turns one world snapshot plus the tenant
+  policy plus an optional inferred pending load into a list of action dicts.
+  This is where every eviction guard lives, so it is exhaustively unit
+  tested in isolation without any thread or client.
+
+* ``class Watcher`` — the imperative shell: a daemon thread that, every
+  ``settings.watch_interval`` seconds, reads GPUs -> snapshots the world ->
+  infers a pending load -> calls ``decide`` -> executes the returned actions
+  via the engine clients -> logs each executed action. It owns exactly one
+  ``World`` instance for its whole lifetime (idle clocks live there).
+
+Action dicts (the only three shapes ``decide`` ever returns):
+    {"type": "unload_lemonade", "model": <str>}
+    {"type": "free_comfyui"}
+    {"type": "noop", "reason": <str>}   # reason in {"fits", "wont-fit"}
+
+Design notes that are load-bearing (and tested):
+
+* IDLE RELEASE (rule 1) is allowed on the default-route lemonade model. That
+  is the deliberate idle-GPU-burn fix — a resident-but-idle llama.cpp model
+  pins a card at 100%/86 W doing nothing; unloading drops it to ~17 W and the
+  next request reloads it in ~4 s. This exception applies ONLY to idle
+  release, never to contention.
+
+* CONTENTION HEALING (rule 2) NEVER evicts the default-route lemonade model,
+  no matter how much VRAM that would free. It also never touches hipfire
+  (which lives on a different GPU and is pinned) and never frees a busy or
+  unknown-state comfy queue. Candidates on the pending GPU are considered in
+  ascending eviction priority: comfyui (40) before lemonade (50). Because on
+  this box lemonade and comfyui share the one GPU that pending loads target,
+  ``decide`` doesn't need per-GPU attribution — the pending GPU's candidates
+  are always {comfyui, lemonade}, and hipfire is structurally excluded.
+
+* Feasibility-first eviction: if the FULL set of eligible evictions still
+  can't free enough VRAM, ``decide`` emits ``noop "wont-fit"`` and evicts
+  NOTHING. We never kill a tenant for a load that won't fit anyway.
+"""
+
+import threading
+
+from app.engines import GuardError
+from app.events import log_event
+
+# VRAM overhead slack subtracted when estimating comfyui's reclaimable bytes
+# from raw GPU usage (fragmentation, driver/runtime overhead, small tenants).
+_SLACK_BYTES = 1024**3  # 1 GiB
+
+_EXTRA_PREFIX = "extra."
+
+
+# ===========================================================================
+# Pure decision function
+# ===========================================================================
+
+
+def decide(world: dict, policy: dict, pending_load: dict | None) -> list[dict]:
+    """Pure arbitration: world snapshot + policy + optional pending load ->
+    ordered list of action dicts. No I/O, no engine calls.
+
+    A pending load (contention) takes precedence over idle release: when a
+    load is waiting for VRAM we heal the contention rather than idly release.
+    """
+    if pending_load is not None:
+        return _decide_contention(world, policy, pending_load)
+    return _decide_idle_release(world, policy)
+
+
+def _decide_idle_release(world: dict, policy: dict) -> list[dict]:
+    actions: list[dict] = []
+    tenants = world["tenants"]
+
+    lem = tenants["lemonade"]
+    lem_pol = policy["lemonade"]
+    if (
+        lem["state"] == "loaded"
+        and not lem_pol["pinned"]
+        and lem_pol["idle_ttl"] > 0
+        and lem["idle_s"] is not None
+        and lem["idle_s"] >= lem_pol["idle_ttl"]
+    ):
+        # NOTE: the default-route model is intentionally NOT guarded here —
+        # idle release on it is the idle-GPU-burn fix (reload ~4 s).
+        actions.append({"type": "unload_lemonade", "model": lem["model"]})
+
+    comfy = tenants["comfyui"]
+    comfy_pol = policy["comfyui"]
+    if (
+        comfy["state"] == "idle"
+        and comfy["queue"] == 0
+        and not comfy_pol["pinned"]
+        and comfy_pol["idle_ttl"] > 0
+        and comfy["idle_s"] is not None
+        and comfy["idle_s"] >= comfy_pol["idle_ttl"]
+    ):
+        actions.append({"type": "free_comfyui"})
+
+    return actions
+
+
+def _decide_contention(world: dict, policy: dict, pending_load: dict) -> list[dict]:
+    footprint = pending_load["footprint"]
+    gpu = _find_gpu(world["gpus"], pending_load["gpu_index"])
+    if gpu is None:
+        return [_noop("wont-fit")]
+
+    free = gpu["free"]
+    if free >= footprint:
+        return [_noop("fits")]
+
+    candidates = _eviction_candidates(world, policy, gpu)
+
+    # Feasibility first: only evict when the eligible set actually resolves
+    # the contention. Never kill a tenant for a load that won't fit.
+    total_reclaimable = sum(reclaimable for _, reclaimable in candidates)
+    if free + total_reclaimable < footprint:
+        return [_noop("wont-fit")]
+
+    # Feasible — emit the minimal ascending-priority prefix that fits.
+    actions: list[dict] = []
+    projected = free
+    for action, reclaimable in candidates:
+        actions.append(action)
+        projected += reclaimable
+        if projected >= footprint:
+            break
+    return actions
+
+
+def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dict, int]]:
+    """Evictable tenants on the pending GPU as ``(action, reclaimable_bytes)``,
+    in ascending eviction priority: comfyui (40) then lemonade (50).
+
+    hipfire is never a candidate (it lives on the other GPU and is pinned) —
+    the guard against touching it is by structural omission here.
+    """
+    tenants = world["tenants"]
+    lem = tenants["lemonade"]
+    comfy = tenants["comfyui"]
+
+    lem_loaded_footprint = (
+        lem["footprint"] if lem["state"] == "loaded" and lem["footprint"] else 0
+    )
+
+    candidates: list[tuple[dict, int]] = []
+
+    # comfyui — never free a busy/unknown queue, never if pinned. Its VRAM
+    # presence isn't in world.tenants, so estimate reclaimable from the GPU
+    # usage gap (per plan): used - lemonade-footprint-if-loaded - slack.
+    if (
+        not policy["comfyui"]["pinned"]
+        and comfy["state"] == "idle"
+        and comfy["queue"] == 0
+    ):
+        reclaimable = max(0, gpu["used"] - lem_loaded_footprint - _SLACK_BYTES)
+        candidates.append(({"type": "free_comfyui"}, reclaimable))
+
+    # lemonade — never evict the default-route model (ABSOLUTE for rule 2),
+    # never if pinned, and only if its footprint is known (else unquantifiable).
+    if (
+        lem["state"] == "loaded"
+        and not policy["lemonade"]["pinned"]
+        and lem["model"] != world["default_route"]
+        and lem["footprint"]
+    ):
+        candidates.append(
+            ({"type": "unload_lemonade", "model": lem["model"]}, lem["footprint"])
+        )
+
+    return candidates
+
+
+def _find_gpu(gpus: list[dict], gpu_index: int) -> dict | None:
+    return next((g for g in gpus if g["index"] == gpu_index), None)
+
+
+def _noop(reason: str) -> dict:
+    return {"type": "noop", "reason": reason}
+
+
+# ===========================================================================
+# Watcher — imperative shell (daemon thread)
+# ===========================================================================
+
+
+class Watcher:
+    """Periodic arbiter loop. Owns one ``World`` and drives ``decide`` on a
+    timer, executing actions against the engine clients and logging each.
+
+    All deps are injected (including ``read_gpus``) so tests need no thread to
+    cover behavior; one thread test covers start()/stop() liveness.
+    """
+
+    def __init__(
+        self,
+        settings,
+        world,
+        lemonade,
+        comfy,
+        hipfire,
+        litellm,
+        registry,
+        policy_store,
+        events_path,
+        read_gpus,
+    ) -> None:
+        self._settings = settings
+        self._world = world
+        self._lemonade = lemonade
+        self._comfy = comfy
+        self._hipfire = hipfire
+        self._litellm = litellm
+        self._registry = registry
+        self._policy_store = policy_store
+        self._events_path = events_path
+        self._read_gpus = read_gpus
+        self._interval = settings.watch_interval
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_event_key = None
+
+    # --- lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="model-deck-watcher", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            # Interval-bounded join: the loop waits on the Event, so it wakes
+            # immediately on stop; the timeout is a safety net, not the norm.
+            self._thread.join(timeout=self._interval + 5.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.tick()
+            if self._stop.wait(self._interval):
+                break
+
+    # --- one tick ----------------------------------------------------------
+
+    def tick(self) -> None:
+        # DELIBERATE broad catch: this is a supervisor loop. A crash in any
+        # single tick (malformed engine body, transient client bug, a bad
+        # snapshot) must NOT take the whole arbiter down — loop survival
+        # trumps the house 'let it crash' default HERE, and only here. The
+        # error is logged so it's never silent.
+        try:
+            gpus = self._read_gpus(self._settings.drm_root, self._settings.kfd_root)
+            world = self._world.snapshot(
+                gpus, self._lemonade, self._comfy, self._hipfire, self._litellm, self._registry
+            )
+            policy = self._policy_store.get()
+            pending = self._infer_pending(world)
+            actions = decide(world, policy, pending)
+            self._execute(actions, pending)
+        except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above
+            log_event(self._events_path, "tick-error", {"error": str(exc)})
+
+    def _infer_pending(self, world: dict) -> dict | None:
+        """Infer a pending default-route load waiting on VRAM.
+
+        Only when: a default route is configured, lemonade currently has
+        nothing loaded, the model is a GGUF we know how to size, and the
+        lemonade GPU's free VRAM is below that footprint.
+        """
+        default_route = world["default_route"]
+        if not default_route:
+            return None
+        if world["tenants"]["lemonade"]["state"] != "unloaded":
+            return None
+
+        key = default_route.removeprefix(_EXTRA_PREFIX)
+        try:
+            footprint = self._registry.footprint(key)
+        except FileNotFoundError:
+            return None  # not a loadable GGUF -> nothing to heal
+
+        gpu_index = self._settings.lemonade_gpu_index
+        gpu = _find_gpu(world["gpus"], gpu_index)
+        if gpu is None or gpu["free"] >= footprint:
+            return None
+
+        return {"model": default_route, "footprint": footprint, "gpu_index": gpu_index}
+
+    def _execute(self, actions: list[dict], pending: dict | None) -> None:
+        wont_fit = False
+        eviction_raced = False
+
+        for action in actions:
+            kind = action["type"]
+            if kind == "unload_lemonade":
+                self._lemonade.unload(action["model"])
+                self._log(kind, {"model": action["model"]})
+            elif kind == "free_comfyui":
+                try:
+                    self._comfy.free()
+                except GuardError:
+                    # Race: comfy's queue filled between decide and execute.
+                    # The VRAM was NOT reclaimed — log and skip the reload.
+                    eviction_raced = True
+                    self._log("free-raced", {})
+                else:
+                    self._log(kind, {})
+            elif kind == "noop":
+                if action["reason"] == "wont-fit":
+                    wont_fit = True
+                self._log("noop", {"reason": action["reason"]})
+
+        # After healing a pending load's contention (or finding it already
+        # fit), re-trigger the default-route load with its FULL name. Skip if
+        # the contention can't be healed (wont-fit) or an eviction raced.
+        if pending is not None and not wont_fit and not eviction_raced:
+            self._lemonade.load(pending["model"])
+
+    def _log(self, kind: str, detail: dict) -> None:
+        # Suppress only consecutive duplicate *noop* events so a persistent
+        # 'fits'/'wont-fit' state doesn't spam the audit log every tick. Real
+        # actions are always logged.
+        key = (kind, tuple(sorted(detail.items())))
+        if kind == "noop" and key == self._last_event_key:
+            return
+        log_event(self._events_path, kind, detail)
+        self._last_event_key = key

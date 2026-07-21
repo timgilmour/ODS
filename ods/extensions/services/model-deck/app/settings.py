@@ -16,6 +16,8 @@ always set ``MODEL_DECK_ADMIN_TOKEN`` because compose.yaml's ``:?`` guard
 refuses to start the container without a non-empty value.
 """
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -56,3 +58,13 @@ class Settings(BaseSettings):
         default_factory=lambda: ["ods-hipfire", "ods-comfyui", "ods-llama-server"]
     )
     watch_interval: float = 2.0
+
+    # GPU list indices in read_gpus' filtered order (0-based over qualifying
+    # cards). On this box hipfire owns index 0; lemonade + comfyui share
+    # index 1 (the arbiter only ever contends for VRAM on the lemonade GPU).
+    lemonade_gpu_index: int = 1
+    hipfire_gpu_index: int = 0
+
+    # Container binds for the sysfs GPU reader (see compose.yaml volumes).
+    drm_root: Path = Path("/sysdrm")
+    kfd_root: Path = Path("/syskfd")
