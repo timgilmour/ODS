@@ -200,6 +200,13 @@ input[type="password"] {
   font-weight: bold;
 }
 
+/* Sits above the (disabled-while-pending) builder form rather than inside
+ * .panel, so it stays visible and interactive regardless of the fieldset
+ * state below it. */
+.builder-overwrite-banner {
+  margin-bottom: 1rem;
+}
+
 /* ---------------------------------------------------------------- GPUs */
 
 .gpu-row {
@@ -245,6 +252,13 @@ input[type="password"] {
 
 .meter-red {
   background: var(--meter-red);
+}
+
+/* Hipfire's GPU 0 meter when the draft's hipfire choice is "don't touch"
+ * (null): shows the live footprint rather than a drafted one, so it's
+ * styled subdued to read as "current state," not "this draft's plan." */
+.meter-fill-subdued {
+  opacity: 0.45;
 }
 
 .meter-label {
@@ -465,6 +479,22 @@ input[type="password"] {
   align-items: flex-start;
 }
 
+/* Wraps ModelLibrary + the builder form so `disabled` (native fieldset
+ * cascade to every input/textarea/select/button inside, across component
+ * boundaries) can lock the entire draft while an overwrite confirmation is
+ * pending — see SetBuilder.tsx's overwriteSnapshot. Reset to look like a
+ * plain flex container, not a browser-default fieldset. */
+.builder-fieldset {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
 .builder-main {
   flex: 1 1 auto;
   min-width: 0;
@@ -588,6 +618,32 @@ input[type="password"] {
   font-size: 0.82rem;
   color: var(--text-dim);
   padding: 0.5rem 0;
+}
+
+/* A loaded set's `durable` can outlive any derivable placedModel chip (e.g.
+ * default_route_model without the "extra." prefix) — this keeps it visible
+ * instead of a silently-persisting value behind an apparently-empty
+ * dropzone. See SetBuilder.tsx's fallback branch. */
+.durable-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  border: 1px dashed var(--panel-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+}
+
+.durable-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.durable-chip button {
+  flex: 0 0 auto;
 }
 
 /* ---------------------------------------------------------------- policy table */

@@ -116,12 +116,15 @@ export default function PolicyModal({ policy, onClose, onSaved }: PolicyModalPro
                   <input
                     type="number"
                     min={0}
+                    step={1}
                     aria-label={`${tenant} idle ttl seconds`}
                     value={idleTtl[tenant]}
                     onChange={(e) =>
                       setIdleTtl((p) => ({
                         ...p,
-                        [tenant]: Math.max(0, Number(e.target.value) || 0),
+                        // Whole seconds only — fractional input causes an
+                        // avoidable server 422.
+                        [tenant]: Math.max(0, Math.round(Number(e.target.value) || 0)),
                       }))
                     }
                   />

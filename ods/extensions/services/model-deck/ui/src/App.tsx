@@ -108,6 +108,7 @@ export default function App() {
           <SetBuilder
             models={state.models}
             gpus={state.world.gpus}
+            world={state.world}
             token={token}
             onModalOpenChange={setModalOpen}
           />

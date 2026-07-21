@@ -15,6 +15,7 @@ import {
   type HipfireEphemeral,
   type LemonadeEphemeral,
   type ModelFile,
+  type World,
 } from "../api";
 import ApplyModal from "./ApplyModal";
 import ModelLibrary from "./ModelLibrary";
@@ -22,6 +23,7 @@ import ModelLibrary from "./ModelLibrary";
 interface SetBuilderProps {
   models: ModelFile[];
   gpus: Gpu[];
+  world: World;
   token: string;
   onModalOpenChange: (open: boolean) => void;
 }
@@ -43,9 +45,19 @@ const EXTRA_PREFIX = "extra.";
 function emptyEphemeral(
   lemonade: LemonadeEphemeral | null,
   comfyui: ComfyuiEphemeral | null,
-  hipfire: HipfireEphemeral,
+  hipfire: HipfireEphemeral | null,
 ) {
   return { lemonade, comfyui, hipfire };
+}
+
+// Snapshot taken the instant a 409 fires on save: the exact draft + the
+// slug it collided with. Frozen at that moment rather than re-derived from
+// live state later, so Overwrite can never act on a draft edited (or a
+// different name typed) after the confirm banner appeared — see CRITICAL 1
+// in the review that produced this fix.
+interface OverwriteSnapshot {
+  draft: ConfigSet;
+  slug: string;
 }
 
 /** Drag-and-drop set editor: GPU 0 (hipfire toggle, not a drop target) and
@@ -53,7 +65,7 @@ function emptyEphemeral(
  * engine->GPU placement (see GpuColumn.tsx:GPU_TENANTS) but render bespoke
  * controls per tenant rather than TenantCard's live-status view — this is
  * a *draft* of desired state, not a live status card. */
-export default function SetBuilder({ models, gpus, token, onModalOpenChange }: SetBuilderProps) {
+export default function SetBuilder({ models, gpus, world, token, onModalOpenChange }: SetBuilderProps) {
   // Existing sets, for the load/duplicate/delete select.
   const [sets, setSets] = useState<ConfigSet[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -65,7 +77,9 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
   const [durable, setDurable] = useState<Durable | null>(null);
   const [lemonade, setLemonade] = useState<LemonadeEphemeral | null>(null);
   const [comfyui, setComfyui] = useState<ComfyuiEphemeral | null>(null);
-  const [hipfire, setHipfire] = useState<HipfireEphemeral>({ state: "running" });
+  // null = "don't touch" (matches lemonade/comfyui's pattern) — must never
+  // be defaulted to a concrete state, see CRITICAL 2.
+  const [hipfire, setHipfire] = useState<HipfireEphemeral | null>(null);
   const [placedModel, setPlacedModel] = useState<string | null>(null);
   const [catalogId, setCatalogId] = useState("");
   const [reserveGb, setReserveGb] = useState(24);
@@ -73,7 +87,7 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
   // Save flow.
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [overwriteSnapshot, setOverwriteSnapshot] = useState<OverwriteSnapshot | null>(null);
   const [savedSlug, setSavedSlug] = useState<string | null>(null);
   const [savedSet, setSavedSet] = useState<ConfigSet | null>(null);
 
@@ -101,12 +115,12 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
     setDurable(null);
     setLemonade(null);
     setComfyui(null);
-    setHipfire({ state: "running" });
+    setHipfire(null);
     setPlacedModel(null);
     setCatalogId("");
     setReserveGb(24);
     setSaveError(null);
-    setConfirmOverwrite(false);
+    setOverwriteSnapshot(null);
     setDeleteArmed(false);
   }
 
@@ -116,7 +130,10 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
     setDurable(cfgset.durable);
     setLemonade(cfgset.ephemeral?.lemonade ?? null);
     setComfyui(cfgset.ephemeral?.comfyui ?? null);
-    setHipfire(cfgset.ephemeral?.hipfire ?? { state: "running" });
+    // Preserve null through load->save — a set that never mentioned
+    // hipfire must stay "don't touch," never silently gain a "running"
+    // directive on the next save (CRITICAL 2).
+    setHipfire(cfgset.ephemeral?.hipfire ?? null);
     setCatalogId(cfgset.durable?.activate_model_id ?? "");
     setReserveGb(cfgset.ephemeral?.comfyui?.reserve_gb ?? 24);
     // Best-effort: only durable.default_route_model with the "extra."
@@ -128,7 +145,7 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
       : null;
     setPlacedModel(cfgset.ephemeral?.lemonade?.state === "loaded" ? derived : null);
     setSaveError(null);
-    setConfirmOverwrite(false);
+    setOverwriteSnapshot(null);
     setDeleteArmed(false);
   }
 
@@ -161,25 +178,34 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
   const draft = buildDraft();
   const isSavedUnchanged = savedSet !== null && JSON.stringify(draft) === JSON.stringify(savedSet);
 
+  // overwrite=true always saves the frozen snapshot from the moment the 409
+  // fired, never the live `draft` — the form is disabled while a snapshot
+  // is pending (see the fieldset below), but this keeps the save call
+  // itself provably safe even if that ever changes. See CRITICAL 1.
   async function handleSave(overwrite: boolean) {
-    if (!draft.name) return;
+    const target = overwrite ? overwriteSnapshot?.draft : draft;
+    if (!target || !target.name) return;
     setSaving(true);
     setSaveError(null);
     try {
-      const { slug } = await saveSet(draft, overwrite);
+      const { slug } = await saveSet(target, overwrite);
       setSavedSlug(slug);
-      setSavedSet(draft);
-      setConfirmOverwrite(false);
+      setSavedSet(target);
+      setOverwriteSnapshot(null);
       refreshSets();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        setConfirmOverwrite(true);
+        setOverwriteSnapshot({ draft, slug: slugify(draft.name) });
       } else {
         setSaveError(err instanceof Error ? err.message : String(err));
       }
     } finally {
       setSaving(false);
     }
+  }
+
+  function cancelOverwrite() {
+    setOverwriteSnapshot(null);
   }
 
   async function confirmDelete() {
@@ -226,12 +252,28 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
 
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
+    // The GPU 1 drop target isn't a form control, so the disabled
+    // <fieldset> around the rest of the form doesn't block it natively —
+    // guard explicitly so a drag can't mutate the draft while an overwrite
+    // confirmation is pending (CRITICAL 1).
+    if (overwriteSnapshot) return;
     const file = e.dataTransfer.getData("text/plain");
     // Malformed/unknown drops (empty payload, or a file not in the current
     // registry scan) are ignored silently rather than surfaced as an error
     // — a stray drag from elsewhere on the page shouldn't corrupt the draft.
     if (!file || !models.some((m) => m.file === file)) return;
     placeModel(file);
+  }
+
+  // --- Hipfire three-way (don't touch / running / parked) -----------------
+  // Mirrors lemonade/comfyui's null-means-"don't touch" pattern exactly.
+
+  function setHipfireChoice(choice: "none" | "running" | "parked") {
+    if (choice === "none") {
+      setHipfire(null);
+      return;
+    }
+    setHipfire({ state: choice });
   }
 
   // --- ComfyUI three-way (don't touch / leave-reserve / free) -------------
@@ -244,8 +286,9 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
     setComfyui({ state: choice, reserve_gb: reserveGb });
   }
 
+  // Whole GB only — fractional input causes an avoidable server 422.
   function updateReserveGb(value: number) {
-    const clamped = Math.max(0, value || 0);
+    const clamped = Math.max(1, Math.round(value || 0));
     setReserveGb(clamped);
     if (comfyui) setComfyui({ ...comfyui, reserve_gb: clamped });
   }
@@ -260,266 +303,316 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
     : 0;
   const comfyReserveBytes = comfyui?.state === "leave" ? comfyui.reserve_gb * 1e9 : 0;
 
-  const gpu0Bytes = hipfire.state === "running" ? HIPFIRE_FOOTPRINT_BYTES : 0;
+  // null ("don't touch") shows the CURRENT live footprint (world state
+  // already reports 0 when hipfire isn't running, see
+  // app/state.py:HIPFIRE_FOOTPRINT-if-running-else-0) rather than a guessed
+  // number — the meter gets a subdued style below so it reads as "this is
+  // what's there now," not "this is what the draft will do."
+  const gpu0Bytes =
+    hipfire === null
+      ? world.tenants.hipfire.footprint
+      : hipfire.state === "running"
+        ? HIPFIRE_FOOTPRINT_BYTES
+        : 0;
   const gpu1Bytes = placedFootprint + comfyReserveBytes;
 
   const gpu0Pct = gpu0Total > 0 ? (gpu0Bytes / gpu0Total) * 100 : 0;
   const gpu1Pct = gpu1Total > 0 ? (gpu1Bytes / gpu1Total) * 100 : 0;
 
+  const hipfireChoice: "none" | "running" | "parked" = hipfire === null ? "none" : hipfire.state;
   const comfyChoice: "none" | "leave" | "free" = comfyui === null ? "none" : comfyui.state;
 
   return (
-    <div className="builder-layout">
-      <ModelLibrary models={models} onPlace={placeModel} />
-
-      <div className="builder-main">
-        <div className="panel">
-          <h2>Set Builder</h2>
-
-          {!token && (
-            <div className="banner-error">
-              <span>read-only — set an admin token to save, delete, or preview sets</span>
-            </div>
-          )}
-
-          <div className="builder-load-row">
-            <select
-              aria-label="load an existing set"
-              value={selectedSlug}
-              onChange={(e) => setSelectedSlug(e.target.value)}
-            >
-              <option value="">select a saved set…</option>
-              {sets.map((s) => (
-                <option key={s.name} value={slugify(s.name)}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-            <button onClick={handleLoad} disabled={!selectedSlug}>
-              Load
-            </button>
-            <button onClick={handleDuplicate} disabled={!selectedSlug}>
-              Duplicate
-            </button>
-          </div>
-          {listError && <div className="banner-error"><span>{listError}</span></div>}
-
-          <label className="builder-field">
-            name
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Chat mode"
-            />
-          </label>
-
-          <label className="builder-field">
-            notes
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={3}
-              placeholder="optional notes shown in the preview/apply modal"
-            />
-          </label>
-
-          {saveError && (
-            <div className="banner-error">
-              <span>{saveError}</span>
-              <button onClick={() => setSaveError(null)} aria-label="dismiss error">
-                ×
-              </button>
-            </div>
-          )}
-
-          {confirmOverwrite && (
-            <div className="banner-error">
-              <span>A set with this slug exists — overwrite?</span>
-              <button onClick={() => handleSave(true)} disabled={saving}>
-                Overwrite
-              </button>
-              <button onClick={() => setConfirmOverwrite(false)}>Cancel</button>
-            </div>
-          )}
-
-          <div className="builder-actions">
-            <button
-              className="primary"
-              onClick={() => handleSave(false)}
-              disabled={!token || saving || !draft.name}
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-
-            {!deleteArmed ? (
-              <button
-                onClick={() => setDeleteArmed(true)}
-                disabled={!token || !savedSlug}
-                title={!savedSlug ? "load or save a set first" : undefined}
-              >
-                Delete
-              </button>
-            ) : (
-              <>
-                <button className="primary" onClick={confirmDelete}>
-                  Really delete?
-                </button>
-                <button onClick={() => setDeleteArmed(false)}>Cancel</button>
-              </>
-            )}
-
-            <button
-              onClick={() => {
-                setPreviewOpen(true);
-                onModalOpenChange(true);
-              }}
-              disabled={!token || !savedSlug || !isSavedUnchanged}
-              title={
-                !savedSlug
-                  ? "save the set first"
-                  : !isSavedUnchanged
-                    ? "unsaved changes — save first"
-                    : undefined
-              }
-            >
-              Preview steps
-            </button>
-          </div>
+    <>
+      {/* Rendered OUTSIDE the disabled fieldset below so Overwrite/Cancel
+          stay clickable while every draft-mutating control is locked — the
+          target name is read from the frozen snapshot, never the
+          (now-disabled, but belt-and-suspenders-safe) live draft. */}
+      {overwriteSnapshot && (
+        <div className="banner-error builder-overwrite-banner">
+          <span>Overwrite set '{overwriteSnapshot.slug}'?</span>
+          <button className="primary" onClick={() => handleSave(true)} disabled={saving}>
+            Overwrite
+          </button>
+          <button onClick={cancelOverwrite} disabled={saving}>
+            Cancel
+          </button>
         </div>
+      )}
 
-        <div className="gpu-row">
-          <div className="gpu-column">
-            <h2>GPU 0</h2>
-            {gpu0Pct > 90 && (
-              <div className="banner-error">
-                <span>Over budget — loads may fail</span>
-              </div>
-            )}
-            <div className="gpu-meter">
-              <div className="meter-track">
-                <div
-                  className={meterFillClass(gpu0Pct)}
-                  style={{ width: `${Math.min(gpu0Pct, 100)}%` }}
-                />
-              </div>
-              <div className="meter-label">
-                {bytesToGB(gpu0Bytes)} / {bytesToGB(gpu0Total)} GB ({gpu0Pct.toFixed(0)}%)
-              </div>
-            </div>
+      <div className="builder-layout">
+        {/* Disabled as a whole (native fieldset cascade covers every
+            input/textarea/select/button inside, including ModelLibrary's
+            Place buttons) whenever an overwrite confirmation is pending —
+            see CRITICAL 1. The GPU 1 drop target isn't a form control, so
+            handleDrop also short-circuits explicitly while a snapshot is
+            pending. */}
+        <fieldset className="builder-fieldset" disabled={overwriteSnapshot !== null}>
+          <ModelLibrary models={models} onPlace={placeModel} />
 
-            <div className="tenant-card">
-              <div className="tenant-card-head">
-                <span className="tenant-name">hipfire</span>
-              </div>
-              <div className="tenant-actions">
-                <button
-                  className={hipfire.state === "running" ? "primary" : undefined}
-                  onClick={() => setHipfire({ state: "running" })}
-                >
-                  Running
-                </button>
-                <button
-                  className={hipfire.state === "parked" ? "primary" : undefined}
-                  onClick={() => setHipfire({ state: "parked" })}
-                >
-                  Parked
-                </button>
-              </div>
-            </div>
-          </div>
+          <div className="builder-main">
+            <div className="panel">
+              <h2>Set Builder</h2>
 
-          <div
-            className="gpu-column set-builder-drop"
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={handleDrop}
-          >
-            <h2>GPU 1</h2>
-            {gpu1Pct > 90 && (
-              <div className="banner-error">
-                <span>Over budget — loads may fail</span>
-              </div>
-            )}
-            <div className="gpu-meter">
-              <div className="meter-track">
-                <div
-                  className={meterFillClass(gpu1Pct)}
-                  style={{ width: `${Math.min(gpu1Pct, 100)}%` }}
-                />
-              </div>
-              <div className="meter-label">
-                {bytesToGB(gpu1Bytes)} / {bytesToGB(gpu1Total)} GB ({gpu1Pct.toFixed(0)}%)
-              </div>
-            </div>
-
-            <div className="tenant-card">
-              <div className="tenant-card-head">
-                <span className="tenant-name">lemonade</span>
-              </div>
-              {placedModel ? (
-                <>
-                  <div className="tenant-meta">
-                    <span title={placedModel}>{truncateMiddle(placedModel)}</span>
-                    <span>{bytesToGB(placedFootprint)} GB</span>
-                  </div>
-                  <p className="helper-text">Placed model becomes the default chat route.</p>
-                  <input
-                    type="text"
-                    className="builder-catalog-id"
-                    placeholder="catalog id (optional, enables durable revert)"
-                    value={catalogId}
-                    onChange={(e) => updateCatalogId(e.target.value)}
-                  />
-                  <div className="tenant-actions">
-                    <button onClick={removeModel}>remove model</button>
-                  </div>
-                </>
-              ) : (
-                <div className="dropzone-empty">
-                  Drag a model here from the library, or use its Place button.
-                  {lemonade?.state === "unloaded" && " (currently set to unload)"}
+              {!token && (
+                <div className="banner-error">
+                  <span>read-only — set an admin token to save, delete, or preview sets</span>
                 </div>
               )}
+
+              <div className="builder-load-row">
+                <select
+                  aria-label="load an existing set"
+                  value={selectedSlug}
+                  onChange={(e) => setSelectedSlug(e.target.value)}
+                >
+                  <option value="">select a saved set…</option>
+                  {sets.map((s) => (
+                    <option key={s.name} value={slugify(s.name)}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+                <button onClick={handleLoad} disabled={!selectedSlug}>
+                  Load
+                </button>
+                <button onClick={handleDuplicate} disabled={!selectedSlug}>
+                  Duplicate
+                </button>
+              </div>
+              {listError && <div className="banner-error"><span>{listError}</span></div>}
+
+              <label className="builder-field">
+                name
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Chat mode"
+                />
+              </label>
+
+              <label className="builder-field">
+                notes
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  rows={3}
+                  placeholder="optional notes shown in the preview/apply modal"
+                />
+              </label>
+
+              {saveError && (
+                <div className="banner-error">
+                  <span>{saveError}</span>
+                  <button onClick={() => setSaveError(null)} aria-label="dismiss error">
+                    ×
+                  </button>
+                </div>
+              )}
+
+              <div className="builder-actions">
+                <button
+                  className="primary"
+                  onClick={() => handleSave(false)}
+                  disabled={!token || saving || !draft.name}
+                >
+                  {saving ? "Saving…" : "Save"}
+                </button>
+
+                {!deleteArmed ? (
+                  <button
+                    onClick={() => setDeleteArmed(true)}
+                    disabled={!token || !savedSlug}
+                    title={!savedSlug ? "load or save a set first" : undefined}
+                  >
+                    Delete
+                  </button>
+                ) : (
+                  <>
+                    <button className="primary" onClick={confirmDelete}>
+                      Really delete?
+                    </button>
+                    <button onClick={() => setDeleteArmed(false)}>Cancel</button>
+                  </>
+                )}
+
+                <button
+                  onClick={() => {
+                    setPreviewOpen(true);
+                    onModalOpenChange(true);
+                  }}
+                  disabled={!token || !savedSlug || !isSavedUnchanged}
+                  title={
+                    !savedSlug
+                      ? "save the set first"
+                      : !isSavedUnchanged
+                        ? "unsaved changes — save first"
+                        : undefined
+                  }
+                >
+                  Preview steps
+                </button>
+              </div>
             </div>
 
-            <div className="tenant-card">
-              <div className="tenant-card-head">
-                <span className="tenant-name">comfyui</span>
+            <div className="gpu-row">
+              <div className="gpu-column">
+                <h2>GPU 0</h2>
+                {gpu0Pct > 90 && (
+                  <div className="banner-error">
+                    <span>Over budget — loads may fail</span>
+                  </div>
+                )}
+                <div className="gpu-meter">
+                  <div className="meter-track">
+                    <div
+                      className={
+                        hipfire === null
+                          ? "meter-fill meter-fill-subdued"
+                          : meterFillClass(gpu0Pct)
+                      }
+                      style={{ width: `${Math.min(gpu0Pct, 100)}%` }}
+                    />
+                  </div>
+                  <div className="meter-label">
+                    {bytesToGB(gpu0Bytes)} / {bytesToGB(gpu0Total)} GB ({gpu0Pct.toFixed(0)}%)
+                    {hipfire === null && " · current live state"}
+                  </div>
+                </div>
+
+                <div className="tenant-card">
+                  <div className="tenant-card-head">
+                    <span className="tenant-name">hipfire</span>
+                  </div>
+                  <div className="tenant-actions">
+                    <button
+                      className={hipfireChoice === "none" ? "primary" : undefined}
+                      onClick={() => setHipfireChoice("none")}
+                    >
+                      don't touch
+                    </button>
+                    <button
+                      className={hipfireChoice === "running" ? "primary" : undefined}
+                      onClick={() => setHipfireChoice("running")}
+                    >
+                      Running
+                    </button>
+                    <button
+                      className={hipfireChoice === "parked" ? "primary" : undefined}
+                      onClick={() => setHipfireChoice("parked")}
+                    >
+                      Parked
+                    </button>
+                  </div>
+                </div>
               </div>
-              <div className="tenant-actions">
-                <button
-                  className={comfyChoice === "none" ? "primary" : undefined}
-                  onClick={() => setComfyChoice("none")}
-                >
-                  don't touch
-                </button>
-                <button
-                  className={comfyChoice === "leave" ? "primary" : undefined}
-                  onClick={() => setComfyChoice("leave")}
-                >
-                  leave (reserve)
-                </button>
-                <button
-                  className={comfyChoice === "free" ? "primary" : undefined}
-                  onClick={() => setComfyChoice("free")}
-                >
-                  free
-                </button>
+
+              <div
+                className="gpu-column set-builder-drop"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={handleDrop}
+              >
+                <h2>GPU 1</h2>
+                {gpu1Pct > 90 && (
+                  <div className="banner-error">
+                    <span>Over budget — loads may fail</span>
+                  </div>
+                )}
+                <div className="gpu-meter">
+                  <div className="meter-track">
+                    <div
+                      className={meterFillClass(gpu1Pct)}
+                      style={{ width: `${Math.min(gpu1Pct, 100)}%` }}
+                    />
+                  </div>
+                  <div className="meter-label">
+                    {bytesToGB(gpu1Bytes)} / {bytesToGB(gpu1Total)} GB ({gpu1Pct.toFixed(0)}%)
+                  </div>
+                </div>
+
+                <div className="tenant-card">
+                  <div className="tenant-card-head">
+                    <span className="tenant-name">lemonade</span>
+                  </div>
+                  {placedModel ? (
+                    <>
+                      <div className="tenant-meta">
+                        <span title={placedModel}>{truncateMiddle(placedModel)}</span>
+                        <span>{bytesToGB(placedFootprint)} GB</span>
+                      </div>
+                      <p className="helper-text">Placed model becomes the default chat route.</p>
+                      <input
+                        type="text"
+                        className="builder-catalog-id"
+                        placeholder="catalog id (optional, enables durable revert)"
+                        value={catalogId}
+                        onChange={(e) => updateCatalogId(e.target.value)}
+                      />
+                      <div className="tenant-actions">
+                        <button onClick={removeModel}>remove model</button>
+                      </div>
+                    </>
+                  ) : durable ? (
+                    // durable persists even though no placedModel could be
+                    // derived from it (e.g. default_route_model without the
+                    // "extra." prefix) — surfaced explicitly so it can
+                    // never silently ride along on save. See IMPORTANT 4.
+                    <div className="durable-chip">
+                      <span>durable route: {durable.default_route_model}</span>
+                      <button onClick={() => setDurable(null)} aria-label="clear durable route">
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="dropzone-empty">
+                      Drag a model here from the library, or use its Place button.
+                      {lemonade?.state === "unloaded" && " (currently set to unload)"}
+                    </div>
+                  )}
+                </div>
+
+                <div className="tenant-card">
+                  <div className="tenant-card-head">
+                    <span className="tenant-name">comfyui</span>
+                  </div>
+                  <div className="tenant-actions">
+                    <button
+                      className={comfyChoice === "none" ? "primary" : undefined}
+                      onClick={() => setComfyChoice("none")}
+                    >
+                      don't touch
+                    </button>
+                    <button
+                      className={comfyChoice === "leave" ? "primary" : undefined}
+                      onClick={() => setComfyChoice("leave")}
+                    >
+                      leave (reserve)
+                    </button>
+                    <button
+                      className={comfyChoice === "free" ? "primary" : undefined}
+                      onClick={() => setComfyChoice("free")}
+                    >
+                      free
+                    </button>
+                  </div>
+                  {comfyChoice === "leave" && (
+                    <label className="builder-field builder-field-inline">
+                      reserve GB
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={reserveGb}
+                        onChange={(e) => updateReserveGb(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                </div>
               </div>
-              {comfyChoice === "leave" && (
-                <label className="builder-field builder-field-inline">
-                  reserve GB
-                  <input
-                    type="number"
-                    min={0}
-                    value={reserveGb}
-                    onChange={(e) => updateReserveGb(Number(e.target.value))}
-                  />
-                </label>
-              )}
             </div>
           </div>
-        </div>
+        </fieldset>
       </div>
 
       {previewOpen && savedSlug && savedSet && (
@@ -532,6 +625,6 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
           }}
         />
       )}
-    </div>
+    </>
   );
 }
