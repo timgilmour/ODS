@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     proxy_key: str = ""
 
     # --- Lemonade ---
-    lemonade_url: str = "http://host.docker.internal:13305"
+    lemonade_url: str = "http://llama-server:8080"
     lemonade_key: str = Field(default="", validation_alias="LEMONADE_API_KEY")
 
     # --- ComfyUI ---
@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     lemonade_gpu_index: int = 1
     hipfire_gpu_index: int = 0
 
-    # Container binds for the sysfs GPU reader (see compose.yaml volumes).
-    drm_root: Path = Path("/sysdrm")
-    kfd_root: Path = Path("/syskfd")
+    # Container bind for the sysfs GPU reader (see compose.yaml volumes).
+    # /sys is mounted whole at /sysfs so the /sys/class/drm symlinks into
+    # /sys/devices resolve inside the container.
+    drm_root: Path = Path("/sysfs/class/drm")
+    kfd_root: Path = Path("/sysfs/class/kfd/kfd/proc")

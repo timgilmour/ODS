@@ -15,8 +15,9 @@ services:
     volumes:
       - ./data/model-deck:/data:z
       - ./data/models:/gguf-store:ro,z
-      - /sys/class/drm:/sysdrm:ro
-      - /sys/class/kfd/kfd/proc:/syskfd:ro
+      # Whole-/sys ro mount: /sys/class/drm entries are symlinks into
+      # /sys/devices, so binding the class dir alone leaves them dangling.
+      - /sys:/sysfs:ro
     # Sits on BOTH the stack default network (ods-network — keeps litellm,
     # llama-server, comfyui, hipfire DNS resolving) AND the private deck-ctl
     # network it shares only with the socket proxy.
