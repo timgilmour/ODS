@@ -796,3 +796,22 @@ def test_hostagent_read_timeout_is_600_seconds():
     assert timeout.read == 600.0
     assert timeout.write == 30.0
     assert timeout.pool == 5.0
+
+
+def test_lemonade_activity_uses_separate_metrics_url():
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if request.url.host == "metrics-host":
+            return httpx.Response(200, text="llamacpp:prompt_tokens_total 7\nllamacpp:tokens_predicted_total 3\n")
+        return httpx.Response(404)
+
+    client = LemonadeClient(
+        "http://lemonade-host:8080",
+        "k",
+        transport=httpx.MockTransport(handler),
+        metrics_url="http://metrics-host:8001/metrics",
+    )
+    assert client.activity() == 10
+    assert seen == ["http://metrics-host:8001/metrics"]

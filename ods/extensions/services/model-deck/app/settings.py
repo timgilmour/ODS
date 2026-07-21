@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # --- Lemonade ---
     lemonade_url: str = "http://llama-server:8080"
     lemonade_key: str = Field(default="", validation_alias="LEMONADE_API_KEY")
+    # The wrapped llama-server's own port (Lemonade passes --host 0.0.0.0
+    # --metrics through); the wrapper's /metrics serves its web UI instead.
+    lemonade_metrics_url: str = "http://llama-server:8001/metrics"
 
     # --- ComfyUI ---
     comfyui_url: str = "http://comfyui:8188"

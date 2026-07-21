@@ -42,6 +42,7 @@ class LemonadeClient:
         base_url: str,
         api_key: str,
         transport: httpx.BaseTransport | None = None,
+        metrics_url: str | None = None,
     ) -> None:
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = httpx.Client(
@@ -50,6 +51,11 @@ class LemonadeClient:
             timeout=_TIMEOUT,
             transport=transport,
         )
+        # Lemonade's wrapper serves its web UI at /metrics; the wrapped
+        # llama-server exposes the real Prometheus counters on its own port
+        # (e.g. http://llama-server:8001/metrics). Default keeps the old
+        # base-relative path for setups without a separate metrics port.
+        self._metrics_url = metrics_url or f"{base_url.rstrip('/')}/metrics"
 
     def status(self) -> dict:
         resp = self._request("GET", "/api/v1/health")
@@ -63,7 +69,7 @@ class LemonadeClient:
 
     def activity(self) -> int | None:
         try:
-            resp = self._client.get("/metrics")
+            resp = self._client.get(self._metrics_url)
         except httpx.TransportError:
             return None
         if not resp.is_success:

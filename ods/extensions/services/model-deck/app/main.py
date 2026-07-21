@@ -98,7 +98,11 @@ def _build_deck(settings: Settings) -> dict:
 
     data_dir = Path(settings.data_dir)
 
-    lemonade = LemonadeClient(settings.lemonade_url, settings.lemonade_key)
+    lemonade = LemonadeClient(
+        settings.lemonade_url,
+        settings.lemonade_key,
+        metrics_url=settings.lemonade_metrics_url,
+    )
     comfy = ComfyClient(settings.comfyui_url)
     litellm = LiteLLMClient(settings.litellm_url, settings.litellm_key)
     dockerctl = DockerCtl(settings.dockerctl_url, settings.park_allowlist)
