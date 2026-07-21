@@ -31,9 +31,11 @@ Design notes that are load-bearing (and tested):
 * CONTENTION HEALING (rule 2) NEVER evicts the default-route lemonade model,
   no matter how much VRAM that would free. It also never touches hipfire
   (which lives on a different GPU and is pinned) and never frees a busy or
-  unknown-state comfy queue. Candidates on the pending GPU are considered in
-  ascending eviction priority: comfyui (40) before lemonade (50). Because on
-  this box lemonade and comfyui share the one GPU that pending loads target,
+  unknown-state comfy queue. Candidates on the pending GPU are sorted
+  ascending by ``policy[tenant]["priority"]`` (lowest priority evicted
+  first) — with the default policies (comfyui 40, lemonade 50) this
+  reproduces the historical comfyui-then-lemonade order. Because on this box
+  lemonade and comfyui share the one GPU that pending loads target,
   ``decide`` doesn't need per-GPU attribution — the pending GPU's candidates
   are always {comfyui, lemonade}, and hipfire is structurally excluded.
 
@@ -44,7 +46,7 @@ Design notes that are load-bearing (and tested):
 
 import threading
 
-from app.engines import GuardError
+from app.engines import EngineError, GuardError
 from app.events import log_event
 
 # VRAM overhead slack subtracted when estimating comfyui's reclaimable bytes
@@ -134,7 +136,9 @@ def _decide_contention(world: dict, policy: dict, pending_load: dict) -> list[di
 
 def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dict, int]]:
     """Evictable tenants on the pending GPU as ``(action, reclaimable_bytes)``,
-    in ascending eviction priority: comfyui (40) then lemonade (50).
+    sorted ascending by ``policy[tenant]["priority"]`` (lowest priority
+    evicted first). Eligibility guards are unchanged from before; only the
+    resulting order is policy-driven.
 
     hipfire is never a candidate (it lives on the other GPU and is pinned) —
     the guard against touching it is by structural omission here.
@@ -147,7 +151,7 @@ def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dic
         lem["footprint"] if lem["state"] == "loaded" and lem["footprint"] else 0
     )
 
-    candidates: list[tuple[dict, int]] = []
+    candidates: list[tuple[str, dict, int]] = []
 
     # comfyui — never free a busy/unknown queue, never if pinned. Its VRAM
     # presence isn't in world.tenants, so estimate reclaimable from the GPU
@@ -158,7 +162,7 @@ def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dic
         and comfy["queue"] == 0
     ):
         reclaimable = max(0, gpu["used"] - lem_loaded_footprint - _SLACK_BYTES)
-        candidates.append(({"type": "free_comfyui"}, reclaimable))
+        candidates.append(("comfyui", {"type": "free_comfyui"}, reclaimable))
 
     # lemonade — never evict the default-route model (ABSOLUTE for rule 2),
     # never if pinned, and only if its footprint is known (else unquantifiable).
@@ -169,10 +173,11 @@ def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dic
         and lem["footprint"]
     ):
         candidates.append(
-            ({"type": "unload_lemonade", "model": lem["model"]}, lem["footprint"])
+            ("lemonade", {"type": "unload_lemonade", "model": lem["model"]}, lem["footprint"])
         )
 
-    return candidates
+    candidates.sort(key=lambda c: policy[c[0]]["priority"])
+    return [(action, reclaimable) for _, action, reclaimable in candidates]
 
 
 def _find_gpu(gpus: list[dict], gpu_index: int) -> dict | None:
@@ -321,7 +326,14 @@ class Watcher:
         # fit), re-trigger the default-route load with its FULL name. Skip if
         # the contention can't be healed (wont-fit) or an eviction raced.
         if pending is not None and not wont_fit and not eviction_raced:
-            self._lemonade.load(pending["model"])
+            try:
+                self._lemonade.load(pending["model"])
+            except EngineError as exc:
+                # Load failed (engine unreachable, bad response, etc.) — log
+                # and let the loop survive; the next tick re-evaluates.
+                self._log("load-failed", {"error": str(exc)})
+            else:
+                self._log("load-retriggered", {"model": pending["model"]})
 
     def _log(self, kind: str, detail: dict) -> None:
         # Suppress only consecutive duplicate *noop* events so a persistent

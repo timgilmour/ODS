@@ -19,7 +19,7 @@ import threading
 import time
 
 from app.arbiter import Watcher, decide
-from app.engines import GuardError
+from app.engines import EngineError, GuardError
 from app.events import tail_events
 
 GIB = 1024**3
@@ -395,6 +395,32 @@ def test_contention_gpu_index_not_found_is_wont_fit():
     assert result == [{"type": "noop", "reason": "wont-fit"}]
 
 
+def test_contention_honors_policy_priority_low_evicted_first():
+    """Policy priority drives eviction order: with comfyui set to a HIGHER
+    priority (90) than lemonade (50) — the inverse of the defaults — the
+    lower-priority tenant (lemonade) is evicted first. Since lemonade alone
+    suffices, comfyui must be left untouched (minimal set, honoring the new
+    order)."""
+    policy = {
+        "hipfire": {"priority": 100, "pinned": True, "idle_ttl": 0},
+        "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900},
+        "comfyui": {"priority": 90, "pinned": False, "idle_ttl": 300},
+    }
+    world = _world(
+        gpus=[_gpu(index=1, total=60 * GIB, used=55 * GIB)],  # free = 5 GiB
+        lemonade=_lem(state="loaded", model="extra.other.gguf", footprint=10 * GIB, idle_s=10),
+        comfyui=_comfy(state="idle", queue=0, idle_s=10),
+        default_route="extra.diff.gguf",
+    )
+    # lemonade reclaimable = 10 GiB; free(5) + 10 = 15 >= 14 -> lemonade alone
+    # suffices. comfy reclaimable would be 55 - 10 - 1 = 44 GiB (also
+    # feasible alone), but lemonade's lower priority (50 < 90) sorts it first.
+
+    result = decide(world, policy, _pending(footprint=14 * GIB, gpu_index=1))
+
+    assert result == [{"type": "unload_lemonade", "model": "extra.other.gguf"}]
+
+
 # ===========================================================================
 # WATCHER — thread + execution shell (stub deps)
 # ===========================================================================
@@ -436,14 +462,17 @@ class FakePolicyStore:
 
 
 class FakeLemonade:
-    def __init__(self):
+    def __init__(self, raise_on_load=None):
         self.unloaded = []
         self.loaded = []
+        self._raise_on_load = raise_on_load
 
     def unload(self, model):
         self.unloaded.append(model)
 
     def load(self, model):
+        if self._raise_on_load is not None:
+            raise self._raise_on_load
         self.loaded.append(model)
 
 
@@ -516,9 +545,46 @@ def test_watcher_tick_heals_contention_then_reloads(tmp_path):
 
     assert comfy.freed == 1
     assert lemonade.loaded == ["extra.model.gguf"]  # re-triggered with full name
-    kinds = [e["kind"] for e in tail_events(events_path)]
+    events = tail_events(events_path)
+    kinds = [e["kind"] for e in events]
     assert "free_comfyui" in kinds
     assert read_gpus.calls  # read_gpus was actually invoked with the sysfs roots
+    assert "load-retriggered" in kinds
+    retrig = next(e for e in events if e["kind"] == "load-retriggered")
+    assert retrig["detail"] == {"model": "extra.model.gguf"}
+
+
+def test_watcher_tick_heals_contention_load_failure_logged(tmp_path):
+    """If the re-triggered lemonade.load() raises EngineError (engine
+    unreachable, bad response, ...), the watcher logs 'load-failed' with the
+    error string, does NOT crash, and the loop survives for the next tick."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],  # free = 12 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    lemonade = FakeLemonade(raise_on_load=EngineError("connection refused"))
+    comfy = FakeComfy()
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        lemonade=lemonade,
+        comfy=comfy,
+    )
+
+    watcher.tick()  # must not raise
+
+    assert comfy.freed == 1
+    assert lemonade.loaded == []  # load raised -> nothing recorded as loaded
+    events = tail_events(events_path)
+    kinds = [e["kind"] for e in events]
+    assert "load-failed" in kinds
+    assert "load-retriggered" not in kinds
+    failed = next(e for e in events if e["kind"] == "load-failed")
+    assert "connection refused" in failed["detail"]["error"]
 
 
 def test_watcher_tick_idle_release_unloads_and_logs(tmp_path):
