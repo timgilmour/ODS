@@ -1,21 +1,18 @@
-import { bytesToGB, type Gpu, type ModelFile, type PolicyMap, type TenantName, type World } from "../api";
+import { bytesToGB, meterFillClass, type Gpu, type ModelFile, type PolicyMap, type TenantName, type World } from "../api";
 import TenantCard from "./TenantCard";
 
 // Mirrors the backend's fixed engine->GPU placement (compose GPU device
 // assignment / app/settings.py): hipfire is pinned to GPU 0; lemonade and
 // comfyui share GPU 1. Not derived from any API field — the world snapshot
 // carries no per-tenant GPU attribution (see app/state.py's externals-only
-// GPU->pid mapping).
+// GPU->pid mapping). SetBuilder.tsx hardcodes the same fixed placement for
+// its (differently-shaped, drag/drop) GPU 0/1 columns rather than importing
+// this — kept un-exported to avoid a needless coupling between the two
+// components' very different rendering.
 const GPU_TENANTS: Record<number, TenantName[]> = {
   0: ["hipfire"],
   1: ["lemonade", "comfyui"],
 };
-
-function meterFillClass(pct: number): string {
-  if (pct >= 95) return "meter-fill meter-red";
-  if (pct >= 80) return "meter-fill meter-amber";
-  return "meter-fill meter-neutral";
-}
 
 interface GpuColumnProps {
   gpu: Gpu;

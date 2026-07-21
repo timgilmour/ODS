@@ -151,6 +151,21 @@ interface ErrorBody {
   detail?: string;
 }
 
+/** Thrown by request() instead of a plain Error, so callers that need to
+ * branch on the HTTP status (e.g. SetBuilder's 409-means-"exists" overwrite
+ * confirm) can do so without re-parsing status out of a message string.
+ * Still an Error, so every existing `err instanceof Error ? err.message :
+ * ...` call site keeps working unchanged. */
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 function authHeaders(): HeadersInit {
   const token = localStorage.getItem(TOKEN_KEY);
   return token ? { "X-Deck-Token": token } : {};
@@ -164,7 +179,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     const body: ErrorBody | null = await res.json().catch(() => null);
-    throw new Error(body?.detail ?? `${res.status} ${res.statusText}`);
+    throw new ApiError(res.status, body?.detail ?? `${res.status} ${res.statusText}`);
   }
 
   if (res.status === 204) {
@@ -210,6 +225,31 @@ export function applySet(slug: string): Promise<ApplyReport> {
   });
 }
 
+/** POST /api/sets. Throws ApiError(409) when the slug already exists and
+ * `overwrite` is false — callers surface that as an inline confirm and
+ * retry with `overwrite: true` rather than treating it as a hard failure. */
+export function saveSet(cfgset: ConfigSet, overwrite = false): Promise<{ slug: string }> {
+  return request<{ slug: string }>(`/api/sets?overwrite=${overwrite}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cfgset),
+  });
+}
+
+export function deleteSet(slug: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/sets/${encodeURIComponent(slug)}`, {
+    method: "DELETE",
+  });
+}
+
+export function putPolicy(policies: PolicyMap): Promise<PolicyMap> {
+  return request<PolicyMap>("/api/policy", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policies),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Small display/formatting helpers shared by 3+ components (GpuColumn's
 // meter + externals rows, TenantCard's footprint) — kept here rather than
@@ -219,6 +259,14 @@ export function applySet(slug: string): Promise<ApplyReport> {
 export function bytesToGB(bytes: number | null | undefined, decimals = 1): string {
   if (bytes == null) return "—";
   return (bytes / 1e9).toFixed(decimals);
+}
+
+/** Shared meter fill color thresholds — used by GpuColumn (live VRAM) and
+ * SetBuilder (hypothetical post-apply footprint) so the two never drift. */
+export function meterFillClass(pct: number): string {
+  if (pct >= 95) return "meter-fill meter-red";
+  if (pct >= 80) return "meter-fill meter-amber";
+  return "meter-fill meter-neutral";
 }
 
 export function truncateMiddle(text: string, max = 28): string {

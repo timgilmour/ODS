@@ -449,3 +449,174 @@ input[type="password"] {
   border-bottom: 1px solid var(--panel-border);
   padding: 0.15rem 0;
 }
+
+/* ---------------------------------------------------------------- view tabs */
+
+.view-tabs {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* ---------------------------------------------------------------- set builder */
+
+.builder-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.builder-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.model-library {
+  flex: 0 0 260px;
+}
+
+.model-library-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.model-library-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  cursor: grab;
+}
+
+.model-library-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.model-library-footprint {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.builder-load-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.builder-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 0.75rem;
+}
+
+.builder-field input[type="text"],
+.builder-field input[type="number"],
+.builder-field textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  resize: vertical;
+}
+
+.builder-field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.builder-field-inline input {
+  width: 6rem;
+}
+
+.builder-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+.builder-catalog-id {
+  display: block;
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.builder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.set-builder-drop {
+  border: 1px dashed var(--panel-border);
+  border-radius: 10px;
+  padding: 0.5rem;
+}
+
+.dropzone-empty {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  padding: 0.5rem 0;
+}
+
+/* ---------------------------------------------------------------- policy table */
+
+.policy-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  font-size: 0.85rem;
+}
+
+.policy-table th,
+.policy-table td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.policy-table input[type="number"] {
+  width: 6rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+}
+
+.policy-reorder {
+  display: flex;
+  gap: 0.3rem;
+}
