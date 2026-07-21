@@ -67,7 +67,6 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
   const [comfyui, setComfyui] = useState<ComfyuiEphemeral | null>(null);
   const [hipfire, setHipfire] = useState<HipfireEphemeral>({ state: "running" });
   const [placedModel, setPlacedModel] = useState<string | null>(null);
-  const [makeDefault, setMakeDefault] = useState(true);
   const [catalogId, setCatalogId] = useState("");
   const [reserveGb, setReserveGb] = useState(24);
 
@@ -104,7 +103,6 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
     setComfyui(null);
     setHipfire({ state: "running" });
     setPlacedModel(null);
-    setMakeDefault(true);
     setCatalogId("");
     setReserveGb(24);
     setSaveError(null);
@@ -119,14 +117,12 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
     setLemonade(cfgset.ephemeral?.lemonade ?? null);
     setComfyui(cfgset.ephemeral?.comfyui ?? null);
     setHipfire(cfgset.ephemeral?.hipfire ?? { state: "running" });
-    setMakeDefault(cfgset.durable !== null);
     setCatalogId(cfgset.durable?.activate_model_id ?? "");
     setReserveGb(cfgset.ephemeral?.comfyui?.reserve_gb ?? 24);
     // Best-effort: only durable.default_route_model with the "extra."
     // prefix + an active "loaded" ephemeral intent can be traced back to a
-    // library model file. A set that names some other litellm route, or
-    // that was saved with "make default route" unchecked, can't be — the
-    // model chip is left blank and the user re-drops to pin one down.
+    // library model file. A set that names some other litellm route can't be
+    // — the model chip is left blank and the user re-drops to pin one down.
     const derived = cfgset.durable?.default_route_model.startsWith(EXTRA_PREFIX)
       ? cfgset.durable.default_route_model.slice(EXTRA_PREFIX.length)
       : null;
@@ -206,29 +202,15 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
   function placeModel(file: string) {
     setPlacedModel(file);
     setLemonade({ state: "loaded" });
-    setDurable(
-      makeDefault
-        ? { default_route_model: `${EXTRA_PREFIX}${file}`, activate_model_id: catalogId.trim() || null }
-        : null,
-    );
-  }
-
-  function toggleMakeDefault(checked: boolean) {
-    setMakeDefault(checked);
-    if (!placedModel) return;
-    setDurable(
-      checked
-        ? {
-            default_route_model: `${EXTRA_PREFIX}${placedModel}`,
-            activate_model_id: catalogId.trim() || null,
-          }
-        : null,
-    );
+    setDurable({
+      default_route_model: `${EXTRA_PREFIX}${file}`,
+      activate_model_id: catalogId.trim() || null,
+    });
   }
 
   function updateCatalogId(value: string) {
     setCatalogId(value);
-    if (placedModel && makeDefault) {
+    if (placedModel) {
       setDurable({
         default_route_model: `${EXTRA_PREFIX}${placedModel}`,
         activate_model_id: value.trim() || null,
@@ -480,23 +462,14 @@ export default function SetBuilder({ models, gpus, token, onModalOpenChange }: S
                     <span title={placedModel}>{truncateMiddle(placedModel)}</span>
                     <span>{bytesToGB(placedFootprint)} GB</span>
                   </div>
-                  <label className="builder-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={makeDefault}
-                      onChange={(e) => toggleMakeDefault(e.target.checked)}
-                    />
-                    make default route
-                  </label>
-                  {makeDefault && (
-                    <input
-                      type="text"
-                      className="builder-catalog-id"
-                      placeholder="catalog id (optional, enables durable revert)"
-                      value={catalogId}
-                      onChange={(e) => updateCatalogId(e.target.value)}
-                    />
-                  )}
+                  <p className="helper-text">Placed model becomes the default chat route.</p>
+                  <input
+                    type="text"
+                    className="builder-catalog-id"
+                    placeholder="catalog id (optional, enables durable revert)"
+                    value={catalogId}
+                    onChange={(e) => updateCatalogId(e.target.value)}
+                  />
                   <div className="tenant-actions">
                     <button onClick={removeModel}>remove model</button>
                   </div>
