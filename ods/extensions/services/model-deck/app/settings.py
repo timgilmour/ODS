@@ -56,7 +56,12 @@ class Settings(BaseSettings):
     litellm_key: str = Field(default="", validation_alias="LITELLM_KEY")
 
     # --- Host agent ---
-    hostagent_url: str = "http://host.docker.internal:7710"
+    # Empty = auto-derive from this container's default gateway. The host
+    # agent binds the ods-network host-side gateway (e.g. 172.18.0.1), which
+    # host.docker.internal does NOT reach (it maps to the default bridge,
+    # blocked by Docker's inter-network isolation). Mirrors dashboard-api's
+    # config.py:_detect_container_default_gateway.
+    hostagent_url: str = ""
     hostagent_key: str = Field(default="", validation_alias="HOST_AGENT_KEY")
 
     # --- Docker control (tecnativa/docker-socket-proxy sidecar) ---

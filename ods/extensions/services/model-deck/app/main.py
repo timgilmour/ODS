@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.engines import BusyError, EngineError, GuardError
+from app.gateway import detect_default_gateway
 from app.routers import control, policy, sets, status
 from app.settings import Settings
 
@@ -112,7 +113,10 @@ def _build_deck(settings: Settings) -> dict:
         container=settings.hipfire_container,
         litellm=litellm,
     )
-    hostagent = HostAgent(settings.hostagent_url, settings.hostagent_key)
+    hostagent_url = settings.hostagent_url or (
+        f"http://{detect_default_gateway() or 'host.docker.internal'}:7710"
+    )
+    hostagent = HostAgent(hostagent_url, settings.hostagent_key)
 
     deck = {
         "settings": settings,
