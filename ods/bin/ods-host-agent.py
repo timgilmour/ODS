@@ -5675,6 +5675,13 @@ class AgentHandler(BaseHTTPRequestHandler):
         hermes_live_config = INSTALL_DIR / "data" / "hermes" / "config.yaml"
         hermes_template_config = INSTALL_DIR / "extensions" / "services" / "hermes" / "cli-config.yaml.template"
 
+        # Key-scoped .env rollback: records the prior of every key this
+        # activation writes so a failure restores ONLY those keys, never the
+        # whole file (which would resurrect drift or clobber a concurrent edit
+        # outside the write-set — live incident 2026-07-21). The wholesale
+        # env_snapshot below is retained solely for the pre-mutation assert.
+        env_txn = _EnvTransaction(env_path)
+
         # Hoisted so the outer except's rollback can reference them safely.
         # None means the snapshot was not captured, so rollback must skip it.
         env_snapshot: dict | None = None
@@ -5707,8 +5714,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         final_runtime_proof: dict[str, object] | None = None
 
         def restore_backups():
-            if env_snapshot is not None:
-                _restore_text_file(env_path, env_snapshot)
+            # .env is key-scoped: restore ONLY the keys this activation wrote,
+            # leaving concurrent edits to other lines intact. Every other file
+            # below is a rendered single-writer artifact — wholesale restore.
+            _log_env_rollback(env_txn.rollback())
             if ini_snapshot is not None:
                 _restore_text_file(models_ini, ini_snapshot)
             if lemonade_snapshot is not None:
@@ -6047,6 +6056,11 @@ class AgentHandler(BaseHTTPRequestHandler):
                 # macOS runs llama-server natively (no Docker image to pull).
                 if llama_server_image and gpu_backend != "apple":
                     updates["LLAMA_SERVER_IMAGE"] = llama_server_image
+                # Record priors for every key this inline write touches — both
+                # the upserted keys and the deleted ones — so rollback restores
+                # exactly this write-set. The write itself is unchanged (it also
+                # deletes stale keys, which _update_env_keys cannot express).
+                env_txn.record(set(updates) | remove_keys)
                 new_lines = []
                 seen = set()
                 for line in lines:
@@ -6248,6 +6262,11 @@ class AgentHandler(BaseHTTPRequestHandler):
 
             if healthy:
                 if lemonade_runtime:
+                    # Post-readiness LEMONADE_MODEL refresh: record its prior
+                    # (idempotent — first-seen wins, so it defers to the prior
+                    # captured with the main write-set above) so a later failure
+                    # still rolls this key back with the rest.
+                    env_txn.record({"LEMONADE_MODEL"})
                     _upsert_env_value(env_path, "LEMONADE_MODEL", lemonade_model_id)
                     env["LEMONADE_MODEL"] = lemonade_model_id
                     if lemonade_yaml.exists() or env.get("ODS_MODE") == "lemonade":
@@ -6543,21 +6562,23 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 501, {"error": "hipfire activation requires the host-native agent"})
             return
 
-        env_backup: str | None = None
+        env_txn = _EnvTransaction(env_path)
         lemonade_backup: str | None = None
         committed = False
 
         def restore_backups():
-            if env_backup is not None:
-                env_path.write_text(env_backup, encoding="utf-8")
+            # .env is key-scoped — only HIPFIRE_MODEL/HIPFIRE_ACTIVE are
+            # written here, so rollback restores just those and leaves any
+            # concurrent edit to other lines intact. lemonade.yaml is a
+            # rendered single-writer file — wholesale restore stays correct.
+            _log_env_rollback(env_txn.rollback())
             if lemonade_backup is not None:
                 lemonade_yaml.write_text(lemonade_backup, encoding="utf-8")
 
         try:
-            env_backup = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
             lemonade_backup = lemonade_yaml.read_text(encoding="utf-8") if lemonade_yaml.exists() else None
 
-            _update_env_keys(env_path, {"HIPFIRE_MODEL": model_file, "HIPFIRE_ACTIVE": "true"})
+            env_txn.update({"HIPFIRE_MODEL": model_file, "HIPFIRE_ACTIVE": "true"})
             if lemonade_yaml.exists():
                 _write_lemonade_config(INSTALL_DIR, env_pre.get("GGUF_FILE", ""))
 
@@ -9938,6 +9959,21 @@ class _EnvTransaction:
                 new_lines.append(f"{key}={val}")
         _atomic_write_text(self._env_path, "\n".join(new_lines) + "\n")
         return {key: (prior, current[key]) for key, prior in self._priors.items()}
+
+
+def _log_env_rollback(restored: dict) -> None:
+    """WARNING-log the keys a scoped .env rollback restored, so rollbacks are
+    never invisible. ``restored`` is ``{key: (prior, current_before_rollback)}``
+    as returned by ``_EnvTransaction.rollback``; each pair is logged current->
+    restored. No-op when nothing was restored."""
+    if not restored:
+        return
+    logger.warning(
+        "rollback restored .env keys: %s",
+        ", ".join(
+            f"{key}={cur!r}->{old!r}" for key, (old, cur) in restored.items()
+        ),
+    )
 
 
 def _compose_recreate_hipfire():
