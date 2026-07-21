@@ -197,6 +197,17 @@ def test_lemonade_activity_returns_none_on_non_2xx():
     assert client.activity() is None
 
 
+def test_lemonade_activity_returns_none_on_malformed_metric_value():
+    metrics_text = "llamacpp:prompt_tokens_total notanumber\n"
+
+    def handler(request):
+        return httpx.Response(200, text=metrics_text, request=request)
+
+    client = LemonadeClient("http://lemonade:8000", "testkey", transport=_transport(handler))
+
+    assert client.activity() is None
+
+
 # --- ComfyClient.queue_len() ---
 
 

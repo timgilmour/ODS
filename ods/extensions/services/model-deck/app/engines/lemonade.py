@@ -82,18 +82,22 @@ class LemonadeClient:
 
 def _sum_activity_metrics(metrics_text: str) -> int | None:
     """Sum values of Prometheus lines whose metric name starts with one of
-    _ACTIVITY_METRIC_PREFIXES. Returns None if neither metric appears."""
+    _ACTIVITY_METRIC_PREFIXES. Returns None if neither metric appears, or on
+    any metric value parse error."""
     total = 0.0
     found = False
-    for line in metrics_text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        name, value = parts
-        if name.startswith(_ACTIVITY_METRIC_PREFIXES):
-            total += float(value)
-            found = True
+    try:
+        for line in metrics_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            name, value = parts
+            if name.startswith(_ACTIVITY_METRIC_PREFIXES):
+                total += float(value)
+                found = True
+    except ValueError:
+        return None
     return int(round(total)) if found else None
