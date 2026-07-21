@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # compose.yaml's :? guard refuses to start the container without it.
     admin_token: str = ""
 
+    # Shared secret the reverse proxy (ods-lan Caddy) injects as
+    # X-Deck-Proxy-Key alongside Authelia's Remote-Groups header, proving the
+    # Remote-Groups header actually came through the proxy rather than being
+    # forged by a sibling compose container. Empty string disables the
+    # Remote-Groups auth branch entirely (see app.security.require_admin).
+    proxy_key: str = ""
+
     # --- Lemonade ---
     lemonade_url: str = "http://host.docker.internal:13305"
     lemonade_key: str = Field(default="", validation_alias="LEMONADE_API_KEY")

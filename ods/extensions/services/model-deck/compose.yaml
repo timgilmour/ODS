@@ -7,6 +7,7 @@ services:
     ports: ["${BIND_ADDRESS:-127.0.0.1}:${MODEL_DECK_PORT:-3015}:3015"]
     environment:
       - MODEL_DECK_ADMIN_TOKEN=${MODEL_DECK_ADMIN_TOKEN:?set in .env}
+      - MODEL_DECK_PROXY_KEY=${MODEL_DECK_PROXY_KEY:-}
       - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
       - LITELLM_KEY=${LITELLM_KEY:-}
       - HOST_AGENT_KEY=${HOST_AGENT_KEY:-}

@@ -23,6 +23,7 @@ from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
 
 ADMIN_TOKEN = "s3cr3t"
 AUTH = {"X-Deck-Token": ADMIN_TOKEN}
+PROXY_KEY = "pr0xy-s3cr3t"
 
 
 # ===========================================================================
@@ -155,15 +156,23 @@ class FakeReadGpus:
 # ===========================================================================
 
 
-def make_app(tmp_path, monkeypatch, *, admin_token=ADMIN_TOKEN):
+def make_app(tmp_path, monkeypatch, *, admin_token=ADMIN_TOKEN, proxy_key=None):
     """create_app() with MODEL_DECK_NO_WATCHER=1 and every engine client /
     read_gpus swapped for a fake; policy_store/set_store point at tmp_path
-    (real, not faked — their own test files already cover their behavior)."""
+    (real, not faked — their own test files already cover their behavior).
+
+    proxy_key defaults to unset (empty), which disables the Remote-Groups
+    auth branch entirely — tests that exercise it must pass proxy_key
+    explicitly, same as admin_token."""
     monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
     if admin_token is not None:
         monkeypatch.setenv("MODEL_DECK_ADMIN_TOKEN", admin_token)
     else:
         monkeypatch.delenv("MODEL_DECK_ADMIN_TOKEN", raising=False)
+    if proxy_key is not None:
+        monkeypatch.setenv("MODEL_DECK_PROXY_KEY", proxy_key)
+    else:
+        monkeypatch.delenv("MODEL_DECK_PROXY_KEY", raising=False)
 
     app = create_app()
     deck = app.state.deck
@@ -203,9 +212,10 @@ def test_mutating_endpoint_200_with_deck_token(tmp_path, monkeypatch):
 
 
 def test_mutating_endpoint_200_with_remote_groups_admins(tmp_path, monkeypatch):
-    app, deck = make_app(tmp_path, monkeypatch)
+    app, deck = make_app(tmp_path, monkeypatch, proxy_key=PROXY_KEY)
     resp = TestClient(app).post(
-        "/api/tenants/comfyui/free", headers={"Remote-Groups": "users, admins"}
+        "/api/tenants/comfyui/free",
+        headers={"Remote-Groups": "users, admins", "X-Deck-Proxy-Key": PROXY_KEY},
     )
     assert resp.status_code == 200
     assert deck["comfy"].calls == ["free"]
@@ -220,9 +230,30 @@ def test_mutating_endpoint_401_wrong_token(tmp_path, monkeypatch):
 
 
 def test_mutating_endpoint_401_remote_groups_without_admins(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch, proxy_key=PROXY_KEY)
+    resp = TestClient(app).post(
+        "/api/tenants/comfyui/free",
+        headers={"Remote-Groups": "users, editors", "X-Deck-Proxy-Key": PROXY_KEY},
+    )
+    assert resp.status_code == 401
+
+
+def test_mutating_endpoint_401_remote_groups_no_proxy_key_configured(tmp_path, monkeypatch):
+    # Server has no MODEL_DECK_PROXY_KEY set at all — the Remote-Groups
+    # branch must be fully disabled, even though the header alone is
+    # forgeable by any sibling compose container.
     app, _ = make_app(tmp_path, monkeypatch)
     resp = TestClient(app).post(
-        "/api/tenants/comfyui/free", headers={"Remote-Groups": "users, editors"}
+        "/api/tenants/comfyui/free", headers={"Remote-Groups": "admins"}
+    )
+    assert resp.status_code == 401
+
+
+def test_mutating_endpoint_401_remote_groups_wrong_proxy_key(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch, proxy_key=PROXY_KEY)
+    resp = TestClient(app).post(
+        "/api/tenants/comfyui/free",
+        headers={"Remote-Groups": "admins", "X-Deck-Proxy-Key": "wrong"},
     )
     assert resp.status_code == 401
 
@@ -236,9 +267,10 @@ def test_empty_admin_token_disables_token_auth_even_with_empty_header(tmp_path, 
 
 
 def test_remote_groups_still_works_when_admin_token_empty(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch, admin_token=None)
+    app, _ = make_app(tmp_path, monkeypatch, admin_token=None, proxy_key=PROXY_KEY)
     resp = TestClient(app).post(
-        "/api/tenants/comfyui/free", headers={"Remote-Groups": "admins"}
+        "/api/tenants/comfyui/free",
+        headers={"Remote-Groups": "admins", "X-Deck-Proxy-Key": PROXY_KEY},
     )
     assert resp.status_code == 200
 
