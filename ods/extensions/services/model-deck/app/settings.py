@@ -11,7 +11,9 @@ duplicating it under a Model Deck-specific name.
 
 All fields default to a usable value so ``Settings()`` never requires an
 environment — ``admin_token`` defaults to the empty string, which disables
-mutating endpoints until an operator opts in via ``.env``.
+mutating endpoints for tests and bare-uvicorn runs only; real deployments
+always set ``MODEL_DECK_ADMIN_TOKEN`` because compose.yaml's ``:?`` guard
+refuses to start the container without a non-empty value.
 """
 
 from pydantic import Field
@@ -25,8 +27,9 @@ class Settings(BaseSettings):
     data_dir: str = "/data"
 
     # --- Auth ---
-    # Empty string disables mutating endpoints (read-only until an operator
-    # sets MODEL_DECK_ADMIN_TOKEN).
+    # Empty string disables mutating endpoints (for tests and bare-uvicorn runs
+    # only); real deployments always set MODEL_DECK_ADMIN_TOKEN because
+    # compose.yaml's :? guard refuses to start the container without it.
     admin_token: str = ""
 
     # --- Lemonade ---
