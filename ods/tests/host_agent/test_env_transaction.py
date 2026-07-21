@@ -165,3 +165,116 @@ def test_record_captures_priors_for_externally_written_keys(tmp_path):
     assert "DROP=keep" in text  # deleted-by-activation key restored
     assert "NEW" not in text  # added-by-activation key removed
     assert restored == {"A": ("1", "10"), "NEW": (None, "x"), "DROP": ("keep", None)}
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — incident replay: a concurrent .env fix must survive rollback
+#
+# 2026-07-21 live incident: a stale LLAMA_SERVER_GPU_INDICES=0,1 line — OUTSIDE
+# the activation's write-set — caused activation to fail. The operator fixed
+# that line mid-activation; the old wholesale snapshot restore then rolled the
+# whole file back and resurrected the stale 0,1. These tests drive the two
+# activate closures the way they now drive the transaction and prove the fix.
+# ---------------------------------------------------------------------------
+
+
+def _apply_gguf_inline_write(env_path: Path, updates: dict, remove_keys: set) -> None:
+    """Byte-for-byte replica of _do_model_activate's inline .env write:
+    upsert every key in ``updates`` and delete every key in ``remove_keys``."""
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    new_lines = []
+    seen = set()
+    for line in lines:
+        key = line.split("=", 1)[0] if "=" in line and not line.startswith("#") else None
+        if key and key in updates:
+            new_lines.append(f"{key}={updates[key]}")
+            seen.add(key)
+        elif key and key in remove_keys:
+            continue
+        else:
+            new_lines.append(line)
+    for key, val in updates.items():
+        if key not in seen:
+            new_lines.append(f"{key}={val}")
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+def _parse_env(text: str) -> dict:
+    return dict(
+        line.split("=", 1)
+        for line in text.splitlines()
+        if "=" in line and not line.startswith("#")
+    )
+
+
+def test_incident_replay_gguf_activation_concurrent_fix_survives(tmp_path):
+    # Seed the .env as the failing GGUF activation saw it: route keys, a stale
+    # spec-decode arg the activation drops, the stale failure-causing GPU line
+    # OUTSIDE the write-set, and an unrelated line.
+    env_path = _seed(
+        tmp_path,
+        "# ODS environment\n"
+        "GGUF_FILE=old-model.gguf\n"
+        "LLM_MODEL=old-model\n"
+        "CTX_SIZE=8192\n"
+        "LLAMA_ARG_SPEC_TYPE=draft\n"       # stale key the activation deletes
+        "LLAMA_SERVER_GPU_INDICES=0,1\n"    # stale, failure-causing line
+        "UNTOUCHED=keep-me\n",
+    )
+    txn = agent._EnvTransaction(env_path)
+
+    updates = {"GGUF_FILE": "new-model.gguf", "LLM_MODEL": "new-model", "CTX_SIZE": "16384"}
+    remove_keys = {"LLAMA_ARG_SPEC_TYPE"}
+
+    # Closure step: record the mutation set, then perform the inline write.
+    txn.record(set(updates) | remove_keys)
+    _apply_gguf_inline_write(env_path, updates, remove_keys)
+
+    # Mid-activation warm-up, the operator fixes the stale line via the
+    # /v1/env/set-keys endpoint (which calls _update_env_keys directly).
+    agent._update_env_keys(env_path, {"LLAMA_SERVER_GPU_INDICES": "1"})
+
+    # Health gate fails → rollback.
+    restored = txn.rollback()
+
+    route = _parse_env(_read(env_path))
+    # Route keys reverted to priors; the deleted stale key came back.
+    assert route["GGUF_FILE"] == "old-model.gguf"
+    assert route["LLM_MODEL"] == "old-model"
+    assert route["CTX_SIZE"] == "8192"
+    assert route["LLAMA_ARG_SPEC_TYPE"] == "draft"
+    # THE FIX: the operator's concurrent correction SURVIVES — the stale 0,1
+    # the old wholesale restore would have resurrected is gone for good.
+    assert route["LLAMA_SERVER_GPU_INDICES"] == "1"
+    assert route["UNTOUCHED"] == "keep-me"
+    # Restored-pairs dict names ONLY the write-set, never the concurrent fix.
+    assert set(restored) == set(updates) | remove_keys
+    assert "LLAMA_SERVER_GPU_INDICES" not in restored
+
+
+def test_incident_replay_hipfire_activation_concurrent_fix_survives(tmp_path):
+    env_path = _seed(
+        tmp_path,
+        "HIPFIRE_MODEL=old.mq4\n"
+        "HIPFIRE_ACTIVE=false\n"
+        "LLAMA_SERVER_GPU_INDICES=0,1\n"    # stale line outside the write-set
+        "UNTOUCHED=keep-me\n",
+    )
+    txn = agent._EnvTransaction(env_path)
+
+    # Closure step: _do_hipfire_activate routes its write through update().
+    txn.update({"HIPFIRE_MODEL": "new.mq4", "HIPFIRE_ACTIVE": "true"})
+    assert _parse_env(_read(env_path))["HIPFIRE_MODEL"] == "new.mq4"
+
+    # Concurrent operator fix to the unrelated stale line.
+    agent._update_env_keys(env_path, {"LLAMA_SERVER_GPU_INDICES": "1"})
+
+    restored = txn.rollback()
+
+    route = _parse_env(_read(env_path))
+    assert route["HIPFIRE_MODEL"] == "old.mq4"
+    assert route["HIPFIRE_ACTIVE"] == "false"
+    assert route["LLAMA_SERVER_GPU_INDICES"] == "1"   # the fix survives
+    assert route["UNTOUCHED"] == "keep-me"
+    assert set(restored) == {"HIPFIRE_MODEL", "HIPFIRE_ACTIVE"}
+    assert "LLAMA_SERVER_GPU_INDICES" not in restored
