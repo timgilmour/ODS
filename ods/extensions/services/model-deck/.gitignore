@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# UI build output — the Dockerfile's `npm run build` produces this; not
+# committed (ui/.gitignore also covers it, this is belt-and-suspenders).
+ui/dist/
+ui/node_modules/

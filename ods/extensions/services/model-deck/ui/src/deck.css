@@ -1,0 +1,451 @@
+/* Model Deck — single plain stylesheet, no framework/CSS-in-JS.
+   Light/dark handled entirely via prefers-color-scheme; every state is
+   conveyed by text as well as color (chips, meters), never color alone. */
+
+:root {
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --panel-border: #d7dae0;
+  --text: #1a1d23;
+  --text-dim: #5a6472;
+  --accent: #2b6cb0;
+  --accent-text: #ffffff;
+  --danger: #b3261e;
+  --danger-bg: #fbeceb;
+  --meter-track: #e2e5ea;
+  --meter-neutral: #3a7ca5;
+  --meter-amber: #b8860b;
+  --meter-red: #b3261e;
+  --chip-loaded-bg: #d9f2e3;
+  --chip-loaded-fg: #0f5c33;
+  --chip-unloaded-bg: #e6e8eb;
+  --chip-unloaded-fg: #40474f;
+  --chip-unknown-bg: #f3d9d6;
+  --chip-unknown-fg: #7a231b;
+  --chip-busy-bg: #fdecc8;
+  --chip-busy-fg: #7a5200;
+  --chip-idle-bg: #dbe7f6;
+  --chip-idle-fg: #1c4a78;
+  --chip-running-bg: #d9f2e3;
+  --chip-running-fg: #0f5c33;
+  --chip-loading-bg: #fdecc8;
+  --chip-loading-fg: #7a5200;
+  --chip-parked-bg: #e6e8eb;
+  --chip-parked-fg: #40474f;
+  --overlay-bg: rgba(20, 22, 26, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --panel: #1d2025;
+    --panel-border: #33383f;
+    --text: #eaecef;
+    --text-dim: #a3adb8;
+    --accent: #5b9bd9;
+    --accent-text: #0b1720;
+    --danger: #ff9b93;
+    --danger-bg: #3a1613;
+    --meter-track: #2a2e35;
+    --meter-neutral: #5b9bd9;
+    --meter-amber: #e0b74d;
+    --meter-red: #ff6b60;
+    --chip-loaded-bg: #123522;
+    --chip-loaded-fg: #7fe0aa;
+    --chip-unloaded-bg: #2a2e35;
+    --chip-unloaded-fg: #c3cad3;
+    --chip-unknown-bg: #3a1e1c;
+    --chip-unknown-fg: #ff9b93;
+    --chip-busy-bg: #3a2e0d;
+    --chip-busy-fg: #f0c766;
+    --chip-idle-bg: #17293d;
+    --chip-idle-fg: #8fbdea;
+    --chip-running-bg: #123522;
+    --chip-running-fg: #7fe0aa;
+    --chip-loading-bg: #3a2e0d;
+    --chip-loading-fg: #f0c766;
+    --chip-parked-bg: #2a2e35;
+    --chip-parked-fg: #c3cad3;
+    --overlay-bg: rgba(0, 0, 0, 0.65);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#root {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--panel-border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+select,
+input[type="password"] {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+
+/* ---------------------------------------------------------------- header */
+
+.deck-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.deck-header h1 {
+  font-size: 1.4rem;
+  margin: 0;
+}
+
+.deck-subtitle {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.admin-gate {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.admin-gate-status {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  min-width: 4.5rem;
+}
+
+/* ---------------------------------------------------------------- panels */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.load-error {
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------------------- banner */
+
+.banner-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+  margin: 0.5rem 0;
+}
+
+.banner-error button {
+  background: transparent;
+  border: none;
+  color: inherit;
+  padding: 0 0.25rem;
+  font-weight: bold;
+}
+
+/* ---------------------------------------------------------------- GPUs */
+
+.gpu-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.gpu-column {
+  flex: 1 1 320px;
+  min-width: 300px;
+}
+
+.gpu-column h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.gpu-meter {
+  margin-bottom: 0.75rem;
+}
+
+.meter-track {
+  height: 10px;
+  border-radius: 5px;
+  background: var(--meter-track);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: 5px;
+}
+
+.meter-neutral {
+  background: var(--meter-neutral);
+}
+
+.meter-amber {
+  background: var(--meter-amber);
+}
+
+.meter-red {
+  background: var(--meter-red);
+}
+
+.meter-label {
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.external-row {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 0.2rem 0;
+}
+
+/* ---------------------------------------------------------------- tenant card */
+
+.tenant-card {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.tenant-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.tenant-name {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.chip {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+}
+
+.chip-loaded {
+  background: var(--chip-loaded-bg);
+  color: var(--chip-loaded-fg);
+}
+
+.chip-unloaded {
+  background: var(--chip-unloaded-bg);
+  color: var(--chip-unloaded-fg);
+}
+
+.chip-unknown {
+  background: var(--chip-unknown-bg);
+  color: var(--chip-unknown-fg);
+}
+
+.chip-busy {
+  background: var(--chip-busy-bg);
+  color: var(--chip-busy-fg);
+}
+
+.chip-idle {
+  background: var(--chip-idle-bg);
+  color: var(--chip-idle-fg);
+}
+
+.chip-running {
+  background: var(--chip-running-bg);
+  color: var(--chip-running-fg);
+}
+
+.chip-loading {
+  background: var(--chip-loading-bg);
+  color: var(--chip-loading-fg);
+}
+
+.chip-parked {
+  background: var(--chip-parked-bg);
+  color: var(--chip-parked-fg);
+}
+
+.tenant-meta {
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.tenant-meta .badge-pinned {
+  font-size: 0.85rem;
+}
+
+.tenant-actions {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* ---------------------------------------------------------------- set strip */
+
+.set-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.set-btn-previous {
+  border-style: dashed;
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------------- modal */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 50;
+}
+
+.modal-box {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  max-width: 560px;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.modal-box h3 {
+  margin-top: 0;
+}
+
+.modal-notes {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+.step-list {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.5rem 0.65rem;
+  margin: 0.5rem 0;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.step-list div {
+  padding: 0.1rem 0;
+}
+
+.modal-actions {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.apply-report .warnings {
+  color: var(--meter-amber);
+}
+
+.apply-report .failed {
+  color: var(--danger);
+}
+
+/* ---------------------------------------------------------------- events */
+
+.event-log-body {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.event-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-bottom: 1px solid var(--panel-border);
+  padding: 0.15rem 0;
+}
