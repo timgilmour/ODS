@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ApiError,
   bytesToGB,
   postAction,
   truncateMiddle,
@@ -15,7 +16,6 @@ type TenantCardProps =
       name: "lemonade";
       data: LemonadeTenant;
       policy: TenantPolicy;
-      token: string;
       models: ModelFile[];
       onRefresh: () => void;
     }
@@ -23,33 +23,40 @@ type TenantCardProps =
       name: "comfyui";
       data: ComfyuiTenant;
       policy: TenantPolicy;
-      token: string;
       onRefresh: () => void;
     }
   | {
       name: "hipfire";
       data: HipfireTenant;
       policy: TenantPolicy;
-      token: string;
       onRefresh: () => void;
     };
 
-/** One tenant's live status + (when a token is set) its control buttons.
+/** One tenant's live status + its control buttons (no auth — the admin
+ * gate was removed 2026-07-22; every control is always available).
  * Every action optimistic-disables while in flight, surfaces the response's
- * `detail` in a dismissible banner on failure, and refetches state either way. */
+ * `detail` in a dismissible banner on failure, and refetches state either way.
+ *
+ * hipfire's park can 409 off the conversation-guard (a chat is in flight
+ * or was active within the activity window); that specific failure also
+ * arms a "Force park" button in the banner so the override is one click,
+ * not a curl command. */
 export default function TenantCard(props: TenantCardProps) {
-  const { data, policy, token, onRefresh } = props;
+  const { data, policy, onRefresh } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [offerForcePark, setOfferForcePark] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
 
-  async function runAction(action: () => Promise<unknown>) {
+  async function runAction(action: () => Promise<unknown>, opts?: { parkGuard?: boolean }) {
     setBusy(true);
     try {
       await action();
       setError(null);
+      setOfferForcePark(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setOfferForcePark(Boolean(opts?.parkGuard) && err instanceof ApiError && err.status === 409);
     } finally {
       setBusy(false);
       onRefresh();
@@ -61,6 +68,14 @@ export default function TenantCard(props: TenantCardProps) {
       <div className="tenant-card-head">
         <span className="tenant-name">{props.name}</span>
         <span className={`chip chip-${data.state}`}>{data.state}</span>
+        {props.name === "hipfire" && (props.data.queue_depth ?? 0) > 0 && (
+          <span
+            className="chip chip-busy"
+            title="a conversation turn is being served right now — park/apply will refuse without force"
+          >
+            in use
+          </span>
+        )}
       </div>
 
       <div className="tenant-meta">
@@ -85,15 +100,24 @@ export default function TenantCard(props: TenantCardProps) {
       {error && (
         <div className="banner-error">
           <span>{error}</span>
+          {offerForcePark && (
+            <button
+              onClick={() =>
+                runAction(() => postAction("/tenants/hipfire/park?force=true"))
+              }
+              disabled={busy}
+            >
+              Force park
+            </button>
+          )}
           <button onClick={() => setError(null)} aria-label="dismiss error">
             ×
           </button>
         </div>
       )}
 
-      {token && (
-        <div className="tenant-actions">
-          {props.name === "lemonade" && (
+      <div className="tenant-actions">
+        {props.name === "lemonade" && (
             <LemonadeActions
               data={props.data}
               models={props.models}
@@ -117,12 +141,13 @@ export default function TenantCard(props: TenantCardProps) {
             <HipfireActions
               data={props.data}
               busy={busy}
-              onPark={() => runAction(() => postAction("/tenants/hipfire/park"))}
+              onPark={() =>
+                runAction(() => postAction("/tenants/hipfire/park"), { parkGuard: true })
+              }
               onResume={() => runAction(() => postAction("/tenants/hipfire/resume"))}
             />
           )}
         </div>
-      )}
     </div>
   );
 }

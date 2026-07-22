@@ -1,8 +1,8 @@
 """
 Control router — direct tenant lifecycle actions (load/unload/free/park/
-resume), each a thin wrapper over exactly one engine client call. Every
-route here mutates the live box, so the whole router carries
-``Depends(require_admin)``.
+resume), each a thin wrapper over exactly one engine client call. No auth:
+the deck runs ops-first on a single-operator box (admin gate deliberately
+removed 2026-07-22; the LAN path still sits behind Authelia via ods-lan).
 
 Engine exceptions (GuardError, BusyError, EngineError) are deliberately left
 to propagate uncaught — ``app.main`` registers app-wide exception handlers
@@ -12,12 +12,10 @@ house "let it crash" policy: a 500 with a full traceback is the correct
 signal for a real bug, not a guessed-at error code.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.security import require_admin
-
-router = APIRouter(prefix="/tenants", tags=["control"], dependencies=[Depends(require_admin)])
+router = APIRouter(prefix="/tenants", tags=["control"])
 
 # Lemonade registers store GGUFs under an "extra." namespace. The Deck select
 # carries bare GGUF filenames, so a manual load must prefix them to match.

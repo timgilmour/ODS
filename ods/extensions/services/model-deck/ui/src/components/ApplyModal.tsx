@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  ApiError,
   applySet,
   previewSet,
   type ApplyReport,
@@ -29,6 +30,9 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [report, setReport] = useState<ApplyReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Armed when the apply 409s off the hipfire conversation-guard, so the
+  // retry can offer force=true as one click instead of a curl command.
+  const [offerForce, setOfferForce] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,14 +51,16 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
     };
   }, [slug]);
 
-  async function confirmApply() {
+  async function confirmApply(force = false) {
     setPhase("applying");
     try {
-      const r = await applySet(slug);
+      const r = await applySet(slug, force);
       setReport(r);
       setPhase("result");
+      setOfferForce(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setOfferForce(err instanceof ApiError && err.status === 409);
       setPhase("confirm");
     }
   }
@@ -112,7 +118,15 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
           {phase === "confirm" && (
             <>
               <button onClick={onClose}>Cancel</button>
-              <button className="primary" onClick={confirmApply}>
+              {offerForce && (
+                <button
+                  onClick={() => confirmApply(true)}
+                  title="override the hipfire conversation-guard — the live/recent conversation will lose its cache and its next turn will re-read the whole history"
+                >
+                  Force apply
+                </button>
+              )}
+              <button className="primary" onClick={() => confirmApply()}>
                 Confirm
               </button>
             </>

@@ -10,10 +10,9 @@ aliasing here keeps a single source of truth per credential rather than
 duplicating it under a Model Deck-specific name.
 
 All fields default to a usable value so ``Settings()`` never requires an
-environment — ``admin_token`` defaults to the empty string, which disables
-mutating endpoints for tests and bare-uvicorn runs only; real deployments
-always set ``MODEL_DECK_ADMIN_TOKEN`` because compose.yaml's ``:?`` guard
-refuses to start the container without a non-empty value.
+environment. There is deliberately NO auth config: the admin-token/proxy-key
+gate was removed 2026-07-22 (ops-first on a single-operator box; the LAN
+path still sits behind Authelia via ods-lan).
 """
 
 from pathlib import Path
@@ -27,19 +26,6 @@ class Settings(BaseSettings):
 
     # --- Storage ---
     data_dir: str = "/data"
-
-    # --- Auth ---
-    # Empty string disables mutating endpoints (for tests and bare-uvicorn runs
-    # only); real deployments always set MODEL_DECK_ADMIN_TOKEN because
-    # compose.yaml's :? guard refuses to start the container without it.
-    admin_token: str = ""
-
-    # Shared secret the reverse proxy (ods-lan Caddy) injects as
-    # X-Deck-Proxy-Key alongside Authelia's Remote-Groups header, proving the
-    # Remote-Groups header actually came through the proxy rather than being
-    # forged by a sibling compose container. Empty string disables the
-    # Remote-Groups auth branch entirely (see app.security.require_admin).
-    proxy_key: str = ""
 
     # --- Lemonade ---
     lemonade_url: str = "http://llama-server:8080"

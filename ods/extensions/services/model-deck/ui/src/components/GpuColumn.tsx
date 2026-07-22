@@ -19,11 +19,10 @@ interface GpuColumnProps {
   world: World;
   policy: PolicyMap;
   models: ModelFile[];
-  token: string;
   onRefresh: () => void;
 }
 
-export default function GpuColumn({ gpu, world, policy, models, token, onRefresh }: GpuColumnProps) {
+export default function GpuColumn({ gpu, world, policy, models, onRefresh }: GpuColumnProps) {
   const pct = gpu.total > 0 ? (gpu.used / gpu.total) * 100 : 0;
   const tenants = GPU_TENANTS[gpu.index] ?? [];
   const externals = world.externals.filter((e) => e.gpu === gpu.index);
@@ -49,7 +48,6 @@ export default function GpuColumn({ gpu, world, policy, models, token, onRefresh
           name="hipfire"
           data={world.tenants.hipfire}
           policy={policy.hipfire}
-          token={token}
           onRefresh={onRefresh}
         />
       )}
@@ -58,7 +56,6 @@ export default function GpuColumn({ gpu, world, policy, models, token, onRefresh
           name="lemonade"
           data={world.tenants.lemonade}
           policy={policy.lemonade}
-          token={token}
           models={models}
           onRefresh={onRefresh}
         />
@@ -68,7 +65,6 @@ export default function GpuColumn({ gpu, world, policy, models, token, onRefresh
           name="comfyui"
           data={world.tenants.comfyui}
           policy={policy.comfyui}
-          token={token}
           onRefresh={onRefresh}
         />
       )}

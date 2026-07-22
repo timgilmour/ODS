@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getState, TOKEN_KEY, type StateResponse } from "./api";
-import AdminGate from "./components/AdminGate";
+import { getState, type StateResponse } from "./api";
 import EventLog from "./components/EventLog";
 import GpuColumn from "./components/GpuColumn";
 import PolicyModal from "./components/PolicyModal";
@@ -12,7 +11,6 @@ const POLL_MS = 3000;
 type View = "deck" | "builder";
 
 export default function App() {
-  const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [state, setState] = useState<StateResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [view, setView] = useState<View>("deck");
@@ -67,14 +65,9 @@ export default function App() {
             Set Builder
           </button>
         </nav>
-        <button
-          onClick={() => setPolicyModalOpen(true)}
-          disabled={!token || !state}
-          title={!token ? "admin token required" : undefined}
-        >
+        <button onClick={() => setPolicyModalOpen(true)} disabled={!state}>
           Policy
         </button>
-        <AdminGate token={token} onTokenChange={setToken} />
       </header>
 
       {loadError && (
@@ -83,7 +76,7 @@ export default function App() {
 
       {view === "deck" && (
         <>
-          <SetStrip token={token} onModalOpenChange={setModalOpen} onChanged={refreshAll} />
+          <SetStrip onModalOpenChange={setModalOpen} onChanged={refreshAll} />
 
           {state && (
             <div className="gpu-row">
@@ -94,7 +87,6 @@ export default function App() {
                   world={state.world}
                   policy={state.policy}
                   models={state.models}
-                  token={token}
                   onRefresh={refreshAll}
                 />
               ))}
@@ -109,7 +101,6 @@ export default function App() {
             models={state.models}
             gpus={state.world.gpus}
             world={state.world}
-            token={token}
             onModalOpenChange={setModalOpen}
           />
         ) : (

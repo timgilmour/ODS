@@ -6,8 +6,8 @@ services:
     restart: unless-stopped
     ports: ["${BIND_ADDRESS:-127.0.0.1}:${MODEL_DECK_PORT:-3015}:3015"]
     environment:
-      - MODEL_DECK_ADMIN_TOKEN=${MODEL_DECK_ADMIN_TOKEN:?set in .env}
-      - MODEL_DECK_PROXY_KEY=${MODEL_DECK_PROXY_KEY:-}
+      # No MODEL_DECK_ADMIN_TOKEN/PROXY_KEY: the admin gate was deliberately
+      # removed 2026-07-22 (ops-first; LAN path still behind Authelia).
       - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
       - LITELLM_KEY=${LITELLM_KEY:-}
       - HOST_AGENT_KEY=${ODS_AGENT_KEY:-} # live installs name the agent key ODS_AGENT_KEY

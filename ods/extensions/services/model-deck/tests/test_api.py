@@ -1,10 +1,10 @@
-"""Tests for the Model Deck HTTP API — app.security + app.routers.*.
+"""Tests for the Model Deck HTTP API — app.routers.* (no auth: the admin
+gate was deliberately removed 2026-07-22; every endpoint is open).
 
 TestClient against app.main.create_app(), with individual app.state.deck
 entries swapped for recording fakes AFTER construction — no env vars beyond
-MODEL_DECK_NO_WATCHER=1 (so no background thread starts) and, per test,
-MODEL_DECK_ADMIN_TOKEN (read once at Settings() construction time, before
-create_app() returns). No real sockets are ever touched.
+MODEL_DECK_NO_WATCHER=1 (so no background thread starts). No real sockets
+are ever touched.
 
 Fakes track only *mutating* calls in `.calls` (load/unload/free/park/resume/
 activate/policy put) — read-only calls a World snapshot legitimately makes
@@ -20,10 +20,6 @@ from app.engines import EngineError, GuardError
 from app.main import create_app
 from app.policy import DEFAULT_POLICIES, PolicyStore
 from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
-
-ADMIN_TOKEN = "s3cr3t"
-AUTH = {"X-Deck-Token": ADMIN_TOKEN}
-PROXY_KEY = "pr0xy-s3cr3t"
 
 
 # ===========================================================================
@@ -170,23 +166,12 @@ class FakeReadGpus:
 # ===========================================================================
 
 
-def make_app(tmp_path, monkeypatch, *, admin_token=ADMIN_TOKEN, proxy_key=None):
+def make_app(tmp_path, monkeypatch):
     """create_app() with MODEL_DECK_NO_WATCHER=1 and every engine client /
     read_gpus swapped for a fake; policy_store/set_store point at tmp_path
     (real, not faked — their own test files already cover their behavior).
-
-    proxy_key defaults to unset (empty), which disables the Remote-Groups
-    auth branch entirely — tests that exercise it must pass proxy_key
-    explicitly, same as admin_token."""
+    No auth setup: the admin gate was deliberately removed 2026-07-22."""
     monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
-    if admin_token is not None:
-        monkeypatch.setenv("MODEL_DECK_ADMIN_TOKEN", admin_token)
-    else:
-        monkeypatch.delenv("MODEL_DECK_ADMIN_TOKEN", raising=False)
-    if proxy_key is not None:
-        monkeypatch.setenv("MODEL_DECK_PROXY_KEY", proxy_key)
-    else:
-        monkeypatch.delenv("MODEL_DECK_PROXY_KEY", raising=False)
 
     app = create_app()
     deck = app.state.deck
@@ -208,85 +193,6 @@ def make_app(tmp_path, monkeypatch, *, admin_token=ADMIN_TOKEN, proxy_key=None):
 
 
 # ===========================================================================
-# Auth
-# ===========================================================================
-
-
-def test_mutating_endpoint_401_without_token(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post("/api/tenants/comfyui/free")
-    assert resp.status_code == 401
-
-
-def test_mutating_endpoint_200_with_deck_token(tmp_path, monkeypatch):
-    app, deck = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post("/api/tenants/comfyui/free", headers=AUTH)
-    assert resp.status_code == 200
-    assert deck["comfy"].calls == ["free"]
-
-
-def test_mutating_endpoint_200_with_remote_groups_admins(tmp_path, monkeypatch):
-    app, deck = make_app(tmp_path, monkeypatch, proxy_key=PROXY_KEY)
-    resp = TestClient(app).post(
-        "/api/tenants/comfyui/free",
-        headers={"Remote-Groups": "users, admins", "X-Deck-Proxy-Key": PROXY_KEY},
-    )
-    assert resp.status_code == 200
-    assert deck["comfy"].calls == ["free"]
-
-
-def test_mutating_endpoint_401_wrong_token(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post(
-        "/api/tenants/comfyui/free", headers={"X-Deck-Token": "wrong"}
-    )
-    assert resp.status_code == 401
-
-
-def test_mutating_endpoint_401_remote_groups_without_admins(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch, proxy_key=PROXY_KEY)
-    resp = TestClient(app).post(
-        "/api/tenants/comfyui/free",
-        headers={"Remote-Groups": "users, editors", "X-Deck-Proxy-Key": PROXY_KEY},
-    )
-    assert resp.status_code == 401
-
-
-def test_mutating_endpoint_401_remote_groups_no_proxy_key_configured(tmp_path, monkeypatch):
-    # Server has no MODEL_DECK_PROXY_KEY set at all — the Remote-Groups
-    # branch must be fully disabled, even though the header alone is
-    # forgeable by any sibling compose container.
-    app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post(
-        "/api/tenants/comfyui/free", headers={"Remote-Groups": "admins"}
-    )
-    assert resp.status_code == 401
-
-
-def test_mutating_endpoint_401_remote_groups_wrong_proxy_key(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch, proxy_key=PROXY_KEY)
-    resp = TestClient(app).post(
-        "/api/tenants/comfyui/free",
-        headers={"Remote-Groups": "admins", "X-Deck-Proxy-Key": "wrong"},
-    )
-    assert resp.status_code == 401
-
-
-def test_empty_admin_token_disables_token_auth_even_with_empty_header(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch, admin_token=None)
-    resp = TestClient(app).post(
-        "/api/tenants/comfyui/free", headers={"X-Deck-Token": ""}
-    )
-    assert resp.status_code == 401
-
-
-def test_remote_groups_still_works_when_admin_token_empty(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch, admin_token=None, proxy_key=PROXY_KEY)
-    resp = TestClient(app).post(
-        "/api/tenants/comfyui/free",
-        headers={"Remote-Groups": "admins", "X-Deck-Proxy-Key": PROXY_KEY},
-    )
-    assert resp.status_code == 200
 
 
 def test_gets_are_open_without_auth(tmp_path, monkeypatch):
@@ -349,7 +255,7 @@ def test_api_events_returns_tail(tmp_path, monkeypatch):
 def test_lemonade_load(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     resp = TestClient(app).post(
-        "/api/tenants/lemonade/load", json={"model": "extra.new.gguf"}, headers=AUTH
+        "/api/tenants/lemonade/load", json={"model": "extra.new.gguf"}
     )
     assert resp.status_code == 200
     assert deck["lemonade"].calls == [("load", "extra.new.gguf")]
@@ -360,7 +266,7 @@ def test_lemonade_load_bare_name_is_extra_prefixed(tmp_path, monkeypatch):
     them with 'extra.' before handing them to Lemonade (I2)."""
     app, deck = make_app(tmp_path, monkeypatch)
     resp = TestClient(app).post(
-        "/api/tenants/lemonade/load", json={"model": "Qwen3.5-27B.gguf"}, headers=AUTH
+        "/api/tenants/lemonade/load", json={"model": "Qwen3.5-27B.gguf"}
     )
     assert resp.status_code == 200
     assert deck["lemonade"].calls == [("load", "extra.Qwen3.5-27B.gguf")]
@@ -371,7 +277,7 @@ def test_lemonade_load_clears_heal_suppressor(tmp_path, monkeypatch):
     deck["heal_suppressor"].note_deck_unload()
     assert deck["heal_suppressor"].suppressed() is True
     resp = TestClient(app).post(
-        "/api/tenants/lemonade/load", json={"model": "extra.new.gguf"}, headers=AUTH
+        "/api/tenants/lemonade/load", json={"model": "extra.new.gguf"}
     )
     assert resp.status_code == 200
     assert deck["heal_suppressor"].suppressed() is False
@@ -382,7 +288,7 @@ def test_lemonade_unload_engages_heal_suppressor(tmp_path, monkeypatch):
     deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
     assert deck["heal_suppressor"].suppressed() is False
     resp = TestClient(app).post(
-        "/api/tenants/lemonade/unload", json={"model": "extra.m.gguf"}, headers=AUTH
+        "/api/tenants/lemonade/unload", json={"model": "extra.m.gguf"}
     )
     assert resp.status_code == 200
     assert deck["heal_suppressor"].suppressed() is True
@@ -392,7 +298,7 @@ def test_lemonade_unload_explicit_model(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
     resp = TestClient(app).post(
-        "/api/tenants/lemonade/unload", json={"model": "extra.m.gguf"}, headers=AUTH
+        "/api/tenants/lemonade/unload", json={"model": "extra.m.gguf"}
     )
     assert resp.status_code == 200
     assert deck["lemonade"].calls == [("unload", "extra.m.gguf")]
@@ -401,7 +307,7 @@ def test_lemonade_unload_explicit_model(tmp_path, monkeypatch):
 def test_lemonade_unload_omitted_model_uses_currently_loaded(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
-    resp = TestClient(app).post("/api/tenants/lemonade/unload", json={}, headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/lemonade/unload", json={})
     assert resp.status_code == 200
     assert deck["lemonade"].calls == [("unload", "extra.m.gguf")]
 
@@ -409,7 +315,7 @@ def test_lemonade_unload_omitted_model_uses_currently_loaded(tmp_path, monkeypat
 def test_lemonade_unload_no_model_loaded_409(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded=None)
-    resp = TestClient(app).post("/api/tenants/lemonade/unload", json={}, headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/lemonade/unload", json={})
     assert resp.status_code == 409
     assert deck["lemonade"].calls == []
 
@@ -417,7 +323,7 @@ def test_lemonade_unload_no_model_loaded_409(tmp_path, monkeypatch):
 def test_comfy_free_guard_error_409(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["comfy"].fail = GuardError("ComfyUI queue is not empty")
-    resp = TestClient(app).post("/api/tenants/comfyui/free", headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/comfyui/free")
     assert resp.status_code == 409
     assert resp.json()["detail"] == "ComfyUI queue is not empty"
 
@@ -425,7 +331,7 @@ def test_comfy_free_guard_error_409(tmp_path, monkeypatch):
 def test_comfy_free_engine_error_502(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["comfy"].fail = EngineError("comfyui unreachable")
-    resp = TestClient(app).post("/api/tenants/comfyui/free", headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/comfyui/free")
     assert resp.status_code == 502
     assert resp.json()["detail"] == "comfyui unreachable"
 
@@ -433,13 +339,13 @@ def test_comfy_free_engine_error_502(tmp_path, monkeypatch):
 def test_hipfire_park_guard_error_409(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["hipfire"].fail = GuardError("litellm default route targets hipfire")
-    resp = TestClient(app).post("/api/tenants/hipfire/park", headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/hipfire/park")
     assert resp.status_code == 409
 
 
 def test_hipfire_resume_success(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post("/api/tenants/hipfire/resume", headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/hipfire/resume")
     assert resp.status_code == 200
     assert deck["hipfire"].calls == ["resume"]
 
@@ -447,7 +353,7 @@ def test_hipfire_resume_success(tmp_path, monkeypatch):
 def test_hipfire_resume_engine_error_502(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["hipfire"].fail = EngineError("dockerctl unreachable")
-    resp = TestClient(app).post("/api/tenants/hipfire/resume", headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/hipfire/resume")
     assert resp.status_code == 502
 
 
@@ -461,7 +367,7 @@ def test_sets_create_get_roundtrip(tmp_path, monkeypatch):
     client = TestClient(app)
 
     resp = client.post(
-        "/api/sets", json={"name": "Chat mode", "notes": "n"}, headers=AUTH
+        "/api/sets", json={"name": "Chat mode", "notes": "n"}
     )
     assert resp.status_code == 200
     assert resp.json() == {"slug": "chat-mode"}
@@ -472,15 +378,9 @@ def test_sets_create_get_roundtrip(tmp_path, monkeypatch):
     assert got.json()["notes"] == "n"
 
 
-def test_sets_create_without_auth_401(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post("/api/sets", json={"name": "x"})
-    assert resp.status_code == 401
-
-
 def test_sets_create_bad_payload_422(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post("/api/sets", json={"name": ""}, headers=AUTH)
+    resp = TestClient(app).post("/api/sets", json={"name": ""})
     assert resp.status_code == 422
 
 
@@ -488,19 +388,19 @@ def test_sets_create_duplicate_without_overwrite_409(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
     body = {"name": "Chat mode"}
-    client.post("/api/sets", json=body, headers=AUTH)
+    client.post("/api/sets", json=body)
 
-    resp = client.post("/api/sets", json=body, headers=AUTH)
+    resp = client.post("/api/sets", json=body)
     assert resp.status_code == 409
 
 
 def test_sets_create_duplicate_with_overwrite_true_succeeds(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
-    client.post("/api/sets", json={"name": "Chat mode", "notes": "v1"}, headers=AUTH)
+    client.post("/api/sets", json={"name": "Chat mode", "notes": "v1"})
 
     resp = client.post(
-        "/api/sets?overwrite=true", json={"name": "Chat mode", "notes": "v2"}, headers=AUTH
+        "/api/sets?overwrite=true", json={"name": "Chat mode", "notes": "v2"}
     )
     assert resp.status_code == 200
 
@@ -514,16 +414,9 @@ def test_sets_get_missing_404(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
-def test_sets_delete_requires_auth_401(tmp_path, monkeypatch):
-    app, deck = make_app(tmp_path, monkeypatch)
-    deck["set_store"].save(ConfigSet(name="X"))
-    resp = TestClient(app).delete("/api/sets/x")
-    assert resp.status_code == 401
-
-
 def test_sets_delete_missing_404(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).delete("/api/sets/nope", headers=AUTH)
+    resp = TestClient(app).delete("/api/sets/nope")
     assert resp.status_code == 404
 
 
@@ -531,7 +424,7 @@ def test_sets_delete_reserved_403(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["set_store"].save_previous(ConfigSet(name=PREVIOUS_NAME))
 
-    resp = TestClient(app).delete(f"/api/sets/{RESERVED_SLUG}", headers=AUTH)
+    resp = TestClient(app).delete(f"/api/sets/{RESERVED_SLUG}")
 
     assert resp.status_code == 403
     assert deck["set_store"].get(RESERVED_SLUG) is not None
@@ -540,9 +433,9 @@ def test_sets_delete_reserved_403(tmp_path, monkeypatch):
 def test_sets_delete_success(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
-    client.post("/api/sets", json={"name": "Temp"}, headers=AUTH)
+    client.post("/api/sets", json={"name": "Temp"})
 
-    resp = client.delete("/api/sets/temp", headers=AUTH)
+    resp = client.delete("/api/sets/temp")
 
     assert resp.status_code == 200
     assert client.get("/api/sets/temp").status_code == 404
@@ -571,16 +464,9 @@ def test_sets_list_previous_null_when_absent(tmp_path, monkeypatch):
 # ===========================================================================
 
 
-def test_preview_requires_auth_401(tmp_path, monkeypatch):
-    app, deck = make_app(tmp_path, monkeypatch)
-    deck["set_store"].save(ConfigSet(name="X"))
-    resp = TestClient(app).post("/api/sets/x/preview")
-    assert resp.status_code == 401
-
-
 def test_preview_unknown_slug_404(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post("/api/sets/nope/preview", headers=AUTH)
+    resp = TestClient(app).post("/api/sets/nope/preview")
     assert resp.status_code == 404
 
 
@@ -604,10 +490,10 @@ def test_preview_no_exec_and_estimate_arithmetic(tmp_path, monkeypatch):
             },
             "policy_overrides": {"lemonade": {"priority": 10, "pinned": False, "idle_ttl": 60}},
         },
-        headers=AUTH,
+       
     )
 
-    resp = client.post("/api/sets/full-switch/preview", headers=AUTH)
+    resp = client.post("/api/sets/full-switch/preview")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -637,10 +523,10 @@ def test_preview_warn_step_costs_zero(tmp_path, monkeypatch):
     client.post(
         "/api/sets",
         json={"name": "Free Comfy", "ephemeral": {"comfyui": {"state": "free"}}},
-        headers=AUTH,
+       
     )
 
-    resp = client.post("/api/sets/free-comfy/preview", headers=AUTH)
+    resp = client.post("/api/sets/free-comfy/preview")
 
     body = resp.json()
     assert body["steps"] == [{"step": "warn", "reason": "comfyui-busy-skipped"}]
@@ -652,16 +538,9 @@ def test_preview_warn_step_costs_zero(tmp_path, monkeypatch):
 # ===========================================================================
 
 
-def test_apply_requires_auth_401(tmp_path, monkeypatch):
-    app, deck = make_app(tmp_path, monkeypatch)
-    deck["set_store"].save(ConfigSet(name="X"))
-    resp = TestClient(app).post("/api/sets/x/apply")
-    assert resp.status_code == 401
-
-
 def test_apply_unknown_slug_404(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).post("/api/sets/nope/apply", headers=AUTH)
+    resp = TestClient(app).post("/api/sets/nope/apply")
     assert resp.status_code == 404
 
 
@@ -672,13 +551,13 @@ def test_apply_executes_and_uses_a_fresh_snapshot(tmp_path, monkeypatch):
     client.post(
         "/api/sets",
         json={"name": "Load It", "ephemeral": {"lemonade": {"state": "loaded"}}},
-        headers=AUTH,
+       
     )
 
     client.get("/api/state")  # already calls read_gpus once
     calls_before = len(deck["read_gpus"].calls)
 
-    resp = client.post("/api/sets/load-it/apply", headers=AUTH)
+    resp = client.post("/api/sets/load-it/apply")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -697,10 +576,10 @@ def test_apply_captures_previous_snapshot(tmp_path, monkeypatch):
     client.post(
         "/api/sets",
         json={"name": "Noop", "ephemeral": {"hipfire": {"state": "running"}}},
-        headers=AUTH,
+       
     )
 
-    resp = client.post("/api/sets/noop/apply", headers=AUTH)
+    resp = client.post("/api/sets/noop/apply")
 
     assert resp.status_code == 200
     previous = deck["set_store"].get(RESERVED_SLUG)
@@ -718,10 +597,10 @@ def test_apply_hipfire_busy_veto_409_and_no_mutation(tmp_path, monkeypatch):
     client.post(
         "/api/sets",
         json={"name": "Park It", "ephemeral": {"hipfire": {"state": "parked"}}},
-        headers=AUTH,
+       
     )
 
-    resp = client.post("/api/sets/park-it/apply", headers=AUTH)
+    resp = client.post("/api/sets/park-it/apply")
 
     assert resp.status_code == 409
     assert "in flight" in resp.json()["detail"]
@@ -739,10 +618,10 @@ def test_apply_force_skips_hipfire_busy_veto(tmp_path, monkeypatch):
     client.post(
         "/api/sets",
         json={"name": "Park It", "ephemeral": {"hipfire": {"state": "parked"}}},
-        headers=AUTH,
+       
     )
 
-    resp = client.post("/api/sets/park-it/apply?force=true", headers=AUTH)
+    resp = client.post("/api/sets/park-it/apply?force=true")
 
     assert resp.status_code == 200
     assert resp.json()["failed"] is None
@@ -759,7 +638,7 @@ def test_hipfire_park_busy_409(tmp_path, monkeypatch):
         )
     )
 
-    resp = TestClient(app).post("/api/tenants/hipfire/park", headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/hipfire/park")
 
     assert resp.status_code == 409
     assert "activity window" in resp.json()["detail"]
@@ -770,7 +649,7 @@ def test_hipfire_park_force_query_param(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["hipfire"] = FakeHipfire(busy_error=GuardError("busy"))
 
-    resp = TestClient(app).post("/api/tenants/hipfire/park?force=true", headers=AUTH)
+    resp = TestClient(app).post("/api/tenants/hipfire/park?force=true")
 
     assert resp.status_code == 200
     assert deck["hipfire"].park_forces == [True]
@@ -789,14 +668,6 @@ def test_policy_get_default(tmp_path, monkeypatch):
     assert resp.json() == DEFAULT_POLICIES
 
 
-def test_policy_put_requires_auth_401(tmp_path, monkeypatch):
-    app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).put(
-        "/api/policy", json={"lemonade": {"priority": 5, "pinned": True, "idle_ttl": 0}}
-    )
-    assert resp.status_code == 401
-
-
 def test_policy_put_roundtrip_partial_by_tenant(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
@@ -804,7 +675,7 @@ def test_policy_put_roundtrip_partial_by_tenant(tmp_path, monkeypatch):
     resp = client.put(
         "/api/policy",
         json={"lemonade": {"priority": 5, "pinned": True, "idle_ttl": 0}},
-        headers=AUTH,
+       
     )
 
     assert resp.status_code == 200
@@ -821,7 +692,7 @@ def test_policy_put_unknown_tenant_422(tmp_path, monkeypatch):
     resp = TestClient(app).put(
         "/api/policy",
         json={"bogus": {"priority": 5, "pinned": True, "idle_ttl": 0}},
-        headers=AUTH,
+       
     )
     assert resp.status_code == 422
 
@@ -831,6 +702,36 @@ def test_policy_put_bad_field_type_422(tmp_path, monkeypatch):
     resp = TestClient(app).put(
         "/api/policy",
         json={"lemonade": {"priority": "high", "pinned": True, "idle_ttl": 0}},
-        headers=AUTH,
+       
     )
     assert resp.status_code == 422
+
+
+# ===========================================================================
+# Open access — no admin token required (auth deliberately removed)
+# ===========================================================================
+
+
+def test_mutating_endpoints_open_without_any_auth(tmp_path, monkeypatch):
+    """Ops-first mode: every endpoint works with zero auth headers. The
+    admin-token/proxy-key gate was removed 2026-07-22 (Tim: config and
+    operations now, security later)."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    resp = client.post("/api/tenants/comfyui/free")
+    assert resp.status_code == 200
+    assert deck["comfy"].calls == ["free"]
+
+    resp = client.post("/api/sets", json={"name": "Open"})
+    assert resp.status_code == 200
+
+    resp = client.put(
+        "/api/policy",
+        json={
+            "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900},
+            "comfyui": {"priority": 60, "pinned": False, "idle_ttl": 300},
+            "hipfire": {"priority": 90, "pinned": True, "idle_ttl": 0},
+        },
+    )
+    assert resp.status_code == 200

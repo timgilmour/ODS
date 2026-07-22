@@ -1,12 +1,9 @@
 /**
  * Model Deck API client — typed wrappers over the FastAPI backend mounted
- * under /api (see app/routers/*.py). Every request re-reads the admin
- * token from localStorage at call time (rather than caching it), so a
- * token set/cleared via AdminGate takes effect on the very next call with
- * no extra plumbing.
+ * under /api (see app/routers/*.py). No auth: the admin-token gate was
+ * deliberately removed 2026-07-22 (ops-first; the LAN path still sits
+ * behind Authelia via ods-lan).
  */
-
-const TOKEN_KEY = "deck-token";
 
 // ---------------------------------------------------------------------------
 // Types — mirror app/state.py, app/sets.py, app/policy.py, app/registry.py,
@@ -45,6 +42,11 @@ export interface HipfireTenant {
   state: "running" | "loading" | "parked" | "unknown";
   model: string | null;
   footprint: number;
+  /** In-flight requests holding hipfire's single admission slot (from the
+   * daemon's /stats); null when parked/unreachable. > 0 means a
+   * conversation turn is being served RIGHT NOW — park/apply will refuse
+   * without force. */
+  queue_depth: number | null;
 }
 
 export interface World {
@@ -166,16 +168,8 @@ export class ApiError extends Error {
   }
 }
 
-function authHeaders(): HeadersInit {
-  const token = localStorage.getItem(TOKEN_KEY);
-  return token ? { "X-Deck-Token": token } : {};
-}
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { ...authHeaders(), ...(init?.headers ?? {}) },
-  });
+  const res = await fetch(path, init);
 
   if (!res.ok) {
     const body: ErrorBody | null = await res.json().catch(() => null);
@@ -219,10 +213,15 @@ export function previewSet(slug: string): Promise<PreviewResponse> {
   });
 }
 
-export function applySet(slug: string): Promise<ApplyReport> {
-  return request<ApplyReport>(`/api/sets/${encodeURIComponent(slug)}/apply`, {
-    method: "POST",
-  });
+/** POST /api/sets/{slug}/apply. Throws ApiError(409) when the hipfire
+ * conversation-guard vetoes the apply (a chat is in flight or recently
+ * active) — callers surface that as a "Force apply" offer and retry with
+ * `force: true` rather than treating it as a hard failure. */
+export function applySet(slug: string, force = false): Promise<ApplyReport> {
+  return request<ApplyReport>(
+    `/api/sets/${encodeURIComponent(slug)}/apply?force=${force}`,
+    { method: "POST" },
+  );
 }
 
 /** POST /api/sets. Throws ApiError(409) when the slug already exists and
@@ -290,5 +289,3 @@ export function slugify(name: string): string {
 // app/sets.py RESERVED_SLUG) — never produced by slugify() for a
 // user-authored name, so it's kept as its own constant rather than derived.
 export const PREVIOUS_SLUG = "_previous";
-
-export { TOKEN_KEY };

@@ -4,13 +4,13 @@ ODS Model Deck — GPU/VRAM supervisor.
 FastAPI backend that monitors and arbitrates GPU/VRAM usage across ODS
 inference engines (Lemonade, hipfire, ComfyUI, llama-server), parking
 containers under memory pressure. This module wires the app factory, the
-HTTP API (routers/ + security.py), the health endpoint, and the arbiter
+HTTP API (routers/), the health endpoint, and the arbiter
 watcher's lifecycle into the FastAPI lifespan.
 
 Modules:
   settings.py  — Settings (pydantic-settings), env-driven configuration
   arbiter.py   — decide() (pure) + Watcher (daemon thread)
-  security.py  — require_admin, the one auth dependency mutating routes use
+  (no auth module — the admin gate was deliberately removed 2026-07-22)
   routers/     — the HTTP API, one module per resource area, mounted under /api
   main.py      — create_app() factory + module-level app for uvicorn
 

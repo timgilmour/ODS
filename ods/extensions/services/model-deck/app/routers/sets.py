@@ -1,8 +1,8 @@
 """
 Sets router — CRUD over saved config sets, plus preview (pure ``plan_apply``,
 no execution) and apply (executes against the live box, serialized under
-``app.sets``' module lock). GETs are open; every mutation is gated by
-``require_admin``.
+``app.sets``' module lock). No auth on any route (admin gate deliberately
+removed 2026-07-22 — ops-first; LAN path still behind Authelia).
 
 Slug lookups that miss return 404. The reserved ``_previous`` revert slot
 (written only by ``apply()``) is readable through GET like any other set,
@@ -19,10 +19,9 @@ what lets a slow/blocked apply (serialized under ``app.sets``' lock) not
 stall the event loop.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.routers import build_world_snapshot
-from app.security import require_admin
 from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, plan_apply, slugify
 from app.sets import apply as sets_apply
 
@@ -43,7 +42,7 @@ def list_sets(request: Request) -> dict:
     return {"sets": user_sets, "previous": previous}
 
 
-@router.post("", dependencies=[Depends(require_admin)])
+@router.post("")
 def create_set(cfgset: ConfigSet, request: Request, overwrite: bool = False) -> dict:
     store = request.app.state.deck["set_store"]
     slug = slugify(cfgset.name)
@@ -61,7 +60,7 @@ def get_set(slug: str, request: Request) -> ConfigSet:
     return cfgset
 
 
-@router.delete("/{slug}", dependencies=[Depends(require_admin)])
+@router.delete("/{slug}")
 def delete_set(slug: str, request: Request) -> dict:
     if slug == RESERVED_SLUG:
         raise HTTPException(status_code=403, detail="cannot delete the reserved revert snapshot")
@@ -72,7 +71,7 @@ def delete_set(slug: str, request: Request) -> dict:
     return {"status": "ok"}
 
 
-@router.post("/{slug}/preview", dependencies=[Depends(require_admin)])
+@router.post("/{slug}/preview")
 def preview_set(slug: str, request: Request) -> dict:
     deck = request.app.state.deck
     cfgset = deck["set_store"].get(slug)
@@ -85,7 +84,7 @@ def preview_set(slug: str, request: Request) -> dict:
     return {"steps": steps, "estimate_s": estimate_s}
 
 
-@router.post("/{slug}/apply", dependencies=[Depends(require_admin)])
+@router.post("/{slug}/apply")
 def apply_set(slug: str, request: Request, force: bool = False) -> dict:
     # ?force=true skips the hipfire conversation-guard (an operator
     # overriding an abandoned conversation); mirrors create_set's

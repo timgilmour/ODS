@@ -25,7 +25,6 @@ interface SetBuilderProps {
   models: ModelFile[];
   gpus: Gpu[];
   world: World;
-  token: string;
   onModalOpenChange: (open: boolean) => void;
 }
 
@@ -66,7 +65,7 @@ interface OverwriteSnapshot {
  * engine->GPU placement (see GpuColumn.tsx:GPU_TENANTS) but render bespoke
  * controls per tenant rather than TenantCard's live-status view — this is
  * a *draft* of desired state, not a live status card. */
-export default function SetBuilder({ models, gpus, world, token, onModalOpenChange }: SetBuilderProps) {
+export default function SetBuilder({ models, gpus, world, onModalOpenChange }: SetBuilderProps) {
   // Existing sets, for the load/duplicate/delete select.
   const [sets, setSets] = useState<ConfigSet[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -363,12 +362,6 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
             <div className="panel">
               <h2>Set Builder</h2>
 
-              {!token && (
-                <div className="banner-error">
-                  <span>read-only — set an admin token to save, delete, or preview sets</span>
-                </div>
-              )}
-
               <div className="builder-load-row">
                 <select
                   aria-label="load an existing set"
@@ -430,7 +423,7 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
                 <button
                   className="primary"
                   onClick={() => handleSave(false)}
-                  disabled={!token || saving || !draft.name}
+                  disabled={saving || !draft.name}
                 >
                   {saving ? "Saving…" : "Save"}
                 </button>
@@ -438,7 +431,7 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
                 {!deleteArmed ? (
                   <button
                     onClick={() => setDeleteArmed(true)}
-                    disabled={!token || !savedSlug}
+                    disabled={!savedSlug}
                     title={!savedSlug ? "load or save a set first" : undefined}
                   >
                     Delete
@@ -457,7 +450,7 @@ export default function SetBuilder({ models, gpus, world, token, onModalOpenChan
                     setPreviewOpen(true);
                     onModalOpenChange(true);
                   }}
-                  disabled={!token || !savedSlug || !isSavedUnchanged}
+                  disabled={!savedSlug || !isSavedUnchanged}
                   title={
                     !savedSlug
                       ? "save the set first"

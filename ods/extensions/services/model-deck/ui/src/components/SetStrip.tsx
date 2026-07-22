@@ -3,7 +3,6 @@ import { getSets, slugify, PREVIOUS_SLUG, type ConfigSet } from "../api";
 import ApplyModal from "./ApplyModal";
 
 interface SetStripProps {
-  token: string;
   onModalOpenChange: (open: boolean) => void;
   onChanged: () => void;
 }
@@ -16,7 +15,7 @@ interface ActiveSet {
 /** Horizontal row of saved config-set buttons. Click -> ApplyModal (preview
  * -> confirm -> apply -> report). Close refetches everything (both this
  * component's own set list and the parent's world state, via onChanged). */
-export default function SetStrip({ token, onModalOpenChange, onChanged }: SetStripProps) {
+export default function SetStrip({ onModalOpenChange, onChanged }: SetStripProps) {
   const [sets, setSets] = useState<ConfigSet[]>([]);
   const [previous, setPrevious] = useState<ConfigSet | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -52,12 +51,7 @@ export default function SetStrip({ token, onModalOpenChange, onChanged }: SetStr
       {listError && <div className="banner-error"><span>{listError}</span></div>}
       <div className="set-strip">
         {sets.map((s) => (
-          <button
-            key={s.name}
-            onClick={() => openPreview(slugify(s.name), s)}
-            disabled={!token}
-            title={!token ? "admin token required" : undefined}
-          >
+          <button key={s.name} onClick={() => openPreview(slugify(s.name), s)}>
             {s.name}
           </button>
         ))}
@@ -65,8 +59,6 @@ export default function SetStrip({ token, onModalOpenChange, onChanged }: SetStr
           <button
             className="set-btn-previous"
             onClick={() => openPreview(PREVIOUS_SLUG, previous)}
-            disabled={!token}
-            title={!token ? "admin token required" : undefined}
           >
             {previous.name}
           </button>
