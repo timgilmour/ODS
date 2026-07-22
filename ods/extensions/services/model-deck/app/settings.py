@@ -69,6 +69,12 @@ class Settings(BaseSettings):
 
     # --- Parking / arbitration ---
     hipfire_container: str = "ods-hipfire"
+    # Seconds after hipfire's last observed served request during which
+    # park/apply refuse to restart it (the single-slot conversation cache
+    # means a restart between turns costs the next turn minutes of
+    # re-prefill). 0 disables the recency rule; an in-flight request
+    # (queue_depth > 0) always refuses. See HipfireClient.ensure_not_busy.
+    hipfire_activity_window_s: float = 600.0
     park_allowlist: list[str] = Field(
         default_factory=lambda: ["ods-hipfire", "ods-comfyui", "ods-llama-server"]
     )

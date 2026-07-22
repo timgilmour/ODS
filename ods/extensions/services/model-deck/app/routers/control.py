@@ -66,8 +66,9 @@ def comfyui_free(request: Request) -> dict:
 
 
 @router.post("/hipfire/park")
-def hipfire_park(request: Request) -> dict:
-    request.app.state.deck["hipfire"].park()
+def hipfire_park(request: Request, force: bool = False) -> dict:
+    # ?force=true skips the conversation-guard, never the route guard.
+    request.app.state.deck["hipfire"].park(force=force)
     return {"status": "ok"}
 
 

@@ -335,6 +335,7 @@ def apply(
     store: SetStore,
     events_path: Path,
     heal_suppressor=None,
+    force: bool = False,
 ) -> dict:
     """Execute ``cfgset`` against the live box, serialized under a module lock.
 
@@ -343,6 +344,10 @@ def apply(
     healing can't revert this deliberate unload, and a ``load_lemonade`` step
     clears it. None (e.g. in unit tests without the arbiter) simply skips that
     coordination.
+
+    ``force=True`` skips the hipfire conversation-guard (both the pre-veto
+    and the per-step rechecks) for an operator overriding an abandoned
+    conversation; it does NOT skip park()'s litellm route guard.
 
     Returns an ApplyReport dict:
         {"completed": [<step>, ...], "failed": <step>|None,
@@ -360,6 +365,7 @@ def apply(
             store=store,
             events_path=events_path,
             heal_suppressor=heal_suppressor,
+            force=force,
         )
 
 
@@ -375,16 +381,33 @@ def _run_apply(
     store,
     events_path,
     heal_suppressor=None,
+    force=False,
 ) -> dict:
+    steps = plan_apply(cfgset, world)
+
+    # Veto BEFORE any mutation (and before the _previous snapshot — a refused
+    # apply changes nothing, so there is nothing to revert): a plan that would
+    # park hipfire or flip the durable route (litellm restart severs in-flight
+    # streams; a hipfire-direction activate recreates the container outright)
+    # is refused while a hipfire conversation is live. GuardError propagates
+    # to the route -> 409. The per-step rechecks below cover the gap between
+    # this veto and the step actually running.
+    if not force and any(s["step"] in ("park_hipfire", "activate") for s in steps):
+        try:
+            hipfire.ensure_not_busy(f"apply set {cfgset.name!r}")
+        except _HALT_EXCEPTIONS:
+            log_event(events_path, "apply-vetoed", {"name": cfgset.name})
+            raise
+
     log_event(events_path, "apply-start", {"name": cfgset.name})
 
-    # FIRST: capture pre-apply reality as the one-click revert set, before any
-    # step touches the box.
+    # FIRST mutation: capture pre-apply reality as the one-click revert set,
+    # before any step touches the box.
     store.save_previous(_previous_set(world))
 
     report: dict = {"completed": [], "failed": None, "error": None, "warnings": []}
 
-    for step in plan_apply(cfgset, world):
+    for step in steps:
         name = step["step"]
 
         if name == "warn":
@@ -394,7 +417,14 @@ def _run_apply(
 
         try:
             _execute_step(
-                step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor
+                step,
+                lemonade,
+                comfy,
+                hipfire,
+                hostagent,
+                policy_store,
+                heal_suppressor,
+                force=force,
             )
         except _HALT_EXCEPTIONS as exc:
             report["failed"] = step
@@ -414,7 +444,8 @@ def _run_apply(
 
 
 def _execute_step(
-    step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor=None
+    step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor=None,
+    force=False,
 ) -> None:
     name = step["step"]
     if name == "unload_lemonade":
@@ -430,10 +461,15 @@ def _execute_step(
     elif name == "free_comfyui":
         comfy.free()
     elif name == "park_hipfire":
-        hipfire.park()
+        hipfire.park(force=force)
     elif name == "resume_hipfire":
         hipfire.resume()
     elif name == "activate":
+        # Recheck at execution time: a request may have landed on hipfire
+        # since the pre-veto (activation restarts litellm, severing in-flight
+        # streams; a hipfire-direction activate recreates the container).
+        if not force:
+            hipfire.ensure_not_busy(f"activate {step['model_id']!r}")
         hostagent.activate(step["model_id"])
     elif name == "policy_patch":
         # Merge each field-partial per-tenant override onto the current stored

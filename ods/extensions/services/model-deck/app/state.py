@@ -175,11 +175,22 @@ class World:
         try:
             state = hipfire.status()
         except EngineError:
-            return {"state": "unknown", "model": None, "footprint": 0}
+            return {"state": "unknown", "model": None, "footprint": 0, "queue_depth": None}
+
+        # Poll /stats while running: besides surfacing queue_depth, this is
+        # what feeds the HipfireClient conversation-activity tracker every
+        # watcher tick (the park/apply busy guard reads that tracker). A
+        # stats failure must not take down the snapshot — unknown, not fatal.
+        queue_depth = None
+        if state == "running":
+            try:
+                queue_depth = hipfire.stats().get("queue_depth")
+            except EngineError:
+                queue_depth = None
 
         model = None if routes is None else _strip_prefix(routes.get("hipfire"), _OPENAI_PREFIX)
         footprint = HIPFIRE_FOOTPRINT if state == "running" else 0
-        return {"state": state, "model": model, "footprint": footprint}
+        return {"state": state, "model": model, "footprint": footprint, "queue_depth": queue_depth}
 
     def _externals(self, gpus, lemonade_tenant, comfy_tenant, hipfire_tenant) -> list[dict]:
         any_tenant_active = (

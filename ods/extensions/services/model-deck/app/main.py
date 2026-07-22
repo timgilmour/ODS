@@ -112,6 +112,8 @@ def _build_deck(settings: Settings) -> dict:
         dockerctl=dockerctl,
         container=settings.hipfire_container,
         litellm=litellm,
+        stats_url=f"http://{settings.hipfire_container}:{_HIPFIRE_PORT}/stats",
+        activity_window_s=settings.hipfire_activity_window_s,
     )
     hostagent_url = settings.hostagent_url or (
         f"http://{detect_default_gateway() or 'host.docker.internal'}:7710"

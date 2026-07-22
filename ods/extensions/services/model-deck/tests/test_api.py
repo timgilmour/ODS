@@ -72,18 +72,32 @@ class FakeComfy:
 
 
 class FakeHipfire:
-    def __init__(self, state="running"):
+    def __init__(self, state="running", busy_error=None):
         self.calls = []  # mutating only: "park" / "resume"
         self.fail = None
+        self.busy_error = busy_error  # raised by ensure_not_busy / unforced park
+        self.busy_checks = []
+        self.park_forces = []
         self._state = state
 
     def status(self):
         return self._state
 
-    def park(self):
+    def stats(self):
+        return {"queue_depth": 0, "requests_served": 0}
+
+    def ensure_not_busy(self, action):
+        self.busy_checks.append(action)
+        if self.busy_error:
+            raise self.busy_error
+
+    def park(self, force=False):
         self.calls.append("park")
+        self.park_forces.append(force)
         if self.fail:
             raise self.fail
+        if not force and self.busy_error:
+            raise self.busy_error
         self._state = "parked"
 
     def resume(self):
@@ -692,6 +706,75 @@ def test_apply_captures_previous_snapshot(tmp_path, monkeypatch):
     previous = deck["set_store"].get(RESERVED_SLUG)
     assert previous is not None
     assert previous.name == PREVIOUS_NAME
+
+
+def test_apply_hipfire_busy_veto_409_and_no_mutation(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hipfire"] = FakeHipfire(
+        state="running",
+        busy_error=GuardError("hipfire request in flight (queue_depth=1)"),
+    )
+    client = TestClient(app)
+    client.post(
+        "/api/sets",
+        json={"name": "Park It", "ephemeral": {"hipfire": {"state": "parked"}}},
+        headers=AUTH,
+    )
+
+    resp = client.post("/api/sets/park-it/apply", headers=AUTH)
+
+    assert resp.status_code == 409
+    assert "in flight" in resp.json()["detail"]
+    assert deck["hipfire"].calls == []
+    assert deck["set_store"].get(RESERVED_SLUG) is None
+
+
+def test_apply_force_skips_hipfire_busy_veto(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hipfire"] = FakeHipfire(
+        state="running",
+        busy_error=GuardError("hipfire request in flight (queue_depth=1)"),
+    )
+    client = TestClient(app)
+    client.post(
+        "/api/sets",
+        json={"name": "Park It", "ephemeral": {"hipfire": {"state": "parked"}}},
+        headers=AUTH,
+    )
+
+    resp = client.post("/api/sets/park-it/apply?force=true", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json()["failed"] is None
+    assert deck["hipfire"].calls == ["park"]
+    assert deck["hipfire"].park_forces == [True]
+
+
+def test_hipfire_park_busy_409(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hipfire"] = FakeHipfire(
+        busy_error=GuardError(
+            "hipfire served a request 12s ago (activity window 600s; "
+            "pass force=true to override)"
+        )
+    )
+
+    resp = TestClient(app).post("/api/tenants/hipfire/park", headers=AUTH)
+
+    assert resp.status_code == 409
+    assert "activity window" in resp.json()["detail"]
+    assert deck["hipfire"]._state == "running"
+
+
+def test_hipfire_park_force_query_param(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hipfire"] = FakeHipfire(busy_error=GuardError("busy"))
+
+    resp = TestClient(app).post("/api/tenants/hipfire/park?force=true", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert deck["hipfire"].park_forces == [True]
+    assert deck["hipfire"]._state == "parked"
 
 
 # ===========================================================================

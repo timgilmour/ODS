@@ -91,9 +91,22 @@ class RecHipfire:
     def __init__(self):
         self.calls = []
         self.fail = {}
+        self.busy_checks = []  # action strings passed to ensure_not_busy
+        self.park_forces = []  # force flag per park call
 
-    def park(self):
+    def ensure_not_busy(self, action):
+        self.busy_checks.append(action)
+        spec = self.fail.get("ensure_not_busy")
+        if isinstance(spec, list):  # successive per-call behaviors; None = pass
+            exc = spec.pop(0) if spec else None
+        else:
+            exc = spec
+        if exc is not None:
+            raise exc
+
+    def park(self, force=False):
         self.calls.append("park")
+        self.park_forces.append(force)
         if "park" in self.fail:
             raise self.fail["park"]
 
@@ -582,6 +595,91 @@ def test_apply_halts_at_failing_step_with_exact_report(tmp_path):
     assert clients["comfy"].calls == ["free"]
     assert clients["hipfire"].calls == ["park"]
     assert clients["hostagent"].calls == []
+
+
+def test_apply_vetoes_before_any_mutation_when_hipfire_busy(tmp_path):
+    """A plan that would park hipfire or flip the durable route is refused
+    up front while a hipfire conversation is live: GuardError propagates
+    (-> 409 at the route), nothing executes, no _previous snapshot is
+    written (there is nothing to revert)."""
+    world = make_world(
+        comfy=("idle", 0), hipfire="running", default_route="extra.old.gguf"
+    )
+    cfg = ConfigSet(
+        name="veto",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
+        ephemeral={"comfyui": {"state": "free"}, "hipfire": {"state": "parked"}},
+    )
+    hipfire = RecHipfire()
+    hipfire.fail = {
+        "ensure_not_busy": GuardError("hipfire request in flight (queue_depth=1)")
+    }
+    store = SetStore(tmp_path / "sets")
+    comfy = RecComfy()
+    hostagent = RecHostAgent()
+
+    with pytest.raises(GuardError, match="in flight"):
+        run_apply(
+            cfg, world, tmp_path,
+            hipfire=hipfire, store=store, comfy=comfy, hostagent=hostagent,
+        )
+
+    assert hipfire.busy_checks == ["apply set 'veto'"]
+    assert hipfire.calls == []
+    assert comfy.calls == []
+    assert hostagent.calls == []
+    assert store.get("_previous") is None
+
+
+def test_apply_force_skips_veto_and_threads_into_park(tmp_path):
+    world = make_world(hipfire="running")
+    cfg = ConfigSet(name="forced", ephemeral={"hipfire": {"state": "parked"}})
+    hipfire = RecHipfire()
+    hipfire.fail = {"ensure_not_busy": GuardError("busy")}
+
+    report, _ = run_apply(cfg, world, tmp_path, hipfire=hipfire, force=True)
+
+    assert report["failed"] is None
+    assert hipfire.busy_checks == []  # veto skipped entirely
+    assert hipfire.calls == ["park"]
+    assert hipfire.park_forces == [True]
+
+
+def test_apply_without_hipfire_steps_never_busy_checks(tmp_path):
+    world = make_world(lemonade=("loaded", "extra.m.gguf"), hipfire="running")
+    cfg = ConfigSet(name="lem-only", ephemeral={"lemonade": {"state": "unloaded"}})
+    hipfire = RecHipfire()
+
+    report, clients = run_apply(cfg, world, tmp_path, hipfire=hipfire)
+
+    assert report["failed"] is None
+    assert hipfire.busy_checks == []
+    assert clients["lemonade"].calls == [("unload", "extra.m.gguf")]
+
+
+def test_apply_activate_step_rechecks_busy_and_halts(tmp_path):
+    """The pre-veto passes, then a request lands on hipfire before the
+    activate step runs (TOCTOU): the in-step recheck halts the apply with
+    the ordinary failed-step report and the host agent is never called."""
+    world = make_world(default_route="extra.old.gguf")
+    cfg = ConfigSet(
+        name="flip",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
+    )
+    hipfire = RecHipfire()
+    hipfire.fail = {
+        "ensure_not_busy": [
+            None,
+            GuardError("hipfire request in flight (queue_depth=1)"),
+        ]
+    }
+
+    report, clients = run_apply(cfg, world, tmp_path, hipfire=hipfire)
+
+    assert report["failed"] == {"step": "activate", "model_id": "cat-7"}
+    assert "in flight" in report["error"]
+    assert clients["hostagent"].calls == []
+    assert hipfire.busy_checks == ["apply set 'flip'", "activate 'cat-7'"]
 
 
 @pytest.mark.parametrize(

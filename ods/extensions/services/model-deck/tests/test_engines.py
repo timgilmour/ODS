@@ -700,22 +700,14 @@ def test_hipfire_park_propagates_engineerror_when_route_check_transport_fails():
 
 
 def test_hipfire_park_stops_container_when_default_does_not_target_hipfire():
-    calls = []
-
-    def dockerctl_handler(request):
-        calls.append(request)
-        return httpx.Response(204, request=request)
-
-    dockerctl = _dockerctl(dockerctl_handler)
-    litellm = _litellm_default_targets_hipfire(False)
-    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm)
+    client = _busy_client([{"queue_depth": 0, "requests_served": 0}])
 
     result = client.park()
 
     assert result is None
-    assert len(calls) == 1
-    assert calls[0].method == "POST"
-    assert calls[0].url.path == "/containers/ods-hipfire/stop"
+    assert len(client._dockerctl.calls) == 1
+    assert client._dockerctl.calls[0].method == "POST"
+    assert client._dockerctl.calls[0].url.path == "/containers/ods-hipfire/stop"
 
 
 def test_hipfire_resume_starts_container_and_does_not_poll_status():
@@ -735,6 +727,204 @@ def test_hipfire_resume_starts_container_and_does_not_poll_status():
     assert len(calls) == 1
     assert calls[0].method == "POST"
     assert calls[0].url.path == "/containers/ods-hipfire/start"
+
+
+# --- HipfireClient.stats() + busy guard ---
+
+
+def _dockerctl_lifecycle(running: bool):
+    """DockerCtl whose GET .../json reports `running` and whose POST
+    .../{stop,start} succeeds, recording lifecycle calls in .calls."""
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"State": {"Running": running}}, request=request)
+        calls.append(request)
+        return httpx.Response(204, request=request)
+
+    ctl = _dockerctl(handler)
+    ctl.calls = calls
+    return ctl
+
+
+def _stats_transport(bodies):
+    """health/stats transport: /health -> 200 ok; /stats -> successive JSON
+    bodies from `bodies` (last one repeats)."""
+    served = {"i": 0}
+
+    def handler(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, text="ok", request=request)
+        body = bodies[min(served["i"], len(bodies) - 1)]
+        served["i"] += 1
+        return httpx.Response(200, json=body, request=request)
+
+    return _transport(handler)
+
+
+def _busy_client(bodies, *, running=True, window_s=600.0, clock=None, route_on_hipfire=False):
+    kwargs = {"transport": _stats_transport(bodies), "activity_window_s": window_s}
+    if clock is not None:
+        kwargs["clock"] = clock
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        _dockerctl_lifecycle(running),
+        "ods-hipfire",
+        _litellm_default_targets_hipfire(route_on_hipfire),
+        **kwargs,
+    )
+    return client
+
+
+def test_hipfire_stats_returns_parsed_body():
+    client = _busy_client([{"queue_depth": 1, "requests_served": 7}])
+
+    assert client.stats() == {"queue_depth": 1, "requests_served": 7}
+
+
+def test_hipfire_stats_raises_engineerror_on_transport_failure():
+    dockerctl = _dockerctl_lifecycle(True)
+    litellm = _litellm_default_targets_hipfire(False)
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        dockerctl,
+        "ods-hipfire",
+        litellm,
+        transport=_transport(_raising_handler(httpx.ConnectError("connection refused"))),
+    )
+
+    with pytest.raises(EngineError):
+        client.stats()
+
+
+def test_hipfire_park_raises_guarderror_when_request_in_flight():
+    client = _busy_client([{"queue_depth": 1, "requests_served": 3}])
+
+    with pytest.raises(GuardError, match="queue_depth=1"):
+        client.park()
+
+    assert client._dockerctl.calls == []  # /stop never fired
+
+
+def test_hipfire_park_force_skips_busy_guard_but_still_stops():
+    client = _busy_client([{"queue_depth": 1, "requests_served": 3}])
+
+    client.park(force=True)
+
+    assert len(client._dockerctl.calls) == 1
+    assert client._dockerctl.calls[0].url.path == "/containers/ods-hipfire/stop"
+
+
+def test_hipfire_park_force_does_not_skip_route_guard():
+    client = _busy_client([{"queue_depth": 0, "requests_served": 0}], route_on_hipfire=True)
+
+    with pytest.raises(GuardError, match="default route"):
+        client.park(force=True)
+
+    assert client._dockerctl.calls == []
+
+
+def test_hipfire_park_ok_when_idle_and_no_requests_ever_served():
+    """requests_served == 0 means no request since daemon start — never busy,
+    even on the very first observation."""
+    client = _busy_client([{"queue_depth": 0, "requests_served": 0}])
+
+    client.park()
+
+    assert len(client._dockerctl.calls) == 1
+
+
+def test_hipfire_park_busy_within_activity_window_after_observed_request():
+    """A requests_served increase marks activity; parking inside the window
+    is refused, and allowed again once the window has elapsed."""
+    now = {"t": 100.0}
+    client = _busy_client(
+        [
+            {"queue_depth": 0, "requests_served": 0},
+            {"queue_depth": 0, "requests_served": 5},
+            {"queue_depth": 0, "requests_served": 5},
+            {"queue_depth": 0, "requests_served": 5},
+        ],
+        window_s=600.0,
+        clock=lambda: now["t"],
+    )
+
+    client.stats()  # baseline: nothing served yet
+    now["t"] = 200.0
+    client.stats()  # observes the increase -> activity at t=200
+
+    now["t"] = 300.0  # 100s later, inside the 600s window
+    with pytest.raises(GuardError, match="activity window"):
+        client.park()
+
+    now["t"] = 900.0  # 700s after activity, outside the window
+    client.park()
+    assert len(client._dockerctl.calls) == 1
+
+
+def test_hipfire_park_busy_on_first_sight_of_prior_requests():
+    """First-ever observation with requests_served > 0: we cannot know how
+    recent the traffic was, so be conservative until the window elapses."""
+    now = {"t": 100.0}
+    client = _busy_client(
+        [{"queue_depth": 0, "requests_served": 42}],
+        window_s=600.0,
+        clock=lambda: now["t"],
+    )
+
+    with pytest.raises(GuardError, match="activity window"):
+        client.park()
+
+    now["t"] = 800.0  # window elapsed with no further change
+    client.park()
+    assert len(client._dockerctl.calls) == 1
+
+
+def test_hipfire_park_ok_when_window_disabled():
+    """activity_window_s=0 disables the recency rule; only queue_depth guards."""
+    client = _busy_client([{"queue_depth": 0, "requests_served": 42}], window_s=0.0)
+
+    client.park()
+
+    assert len(client._dockerctl.calls) == 1
+
+
+def test_hipfire_ensure_not_busy_skips_stats_when_parked():
+    """A parked container has nothing in flight; /stats is never queried."""
+    stats_calls = []
+
+    def handler(request):
+        stats_calls.append(request)
+        return httpx.Response(200, json={}, request=request)
+
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        _dockerctl_lifecycle(False),
+        "ods-hipfire",
+        _litellm_default_targets_hipfire(False),
+        transport=_transport(handler),
+    )
+
+    client.ensure_not_busy("park it")
+    assert stats_calls == []
+
+
+def test_hipfire_ensure_not_busy_propagates_engineerror_when_stats_unreachable():
+    """Running but /stats unreachable -> we can't tell -> fail safe."""
+    dockerctl = _dockerctl_lifecycle(True)
+    client = HipfireClient(
+        "http://hipfire:11435/health",
+        dockerctl,
+        "ods-hipfire",
+        _litellm_default_targets_hipfire(False),
+        transport=_transport(_raising_handler(httpx.ConnectError("connection refused"))),
+    )
+
+    with pytest.raises(EngineError):
+        client.ensure_not_busy("park it")
+
+    assert dockerctl.calls == []
 
 
 # --- HostAgent.activate() ---
@@ -827,3 +1017,21 @@ def test_lemonade_load_uses_long_read_timeout():
     client = LemonadeClient("http://h:8080", "k", transport=httpx.MockTransport(handler))
     client.load("extra.m.gguf")
     assert seen.get("read") == 180.0
+
+
+# --- _build_deck wiring (hipfire stats/activity window) ---
+
+
+def test_build_deck_wires_hipfire_stats_url_and_activity_window(tmp_path, monkeypatch):
+    from app.main import _build_deck
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_DECK_HIPFIRE_ACTIVITY_WINDOW_S", "123.5")
+    settings = Settings()
+
+    deck = _build_deck(settings)
+
+    assert settings.hipfire_activity_window_s == 123.5
+    assert deck["hipfire"]._activity_window_s == 123.5
+    assert deck["hipfire"]._stats_url == "http://ods-hipfire:11435/stats"

@@ -67,13 +67,25 @@ class RaisingComfy:
 class StubHipfire:
     def __init__(self, state: str = "parked") -> None:
         self._state = state
+        self.stats_body = {"queue_depth": 0, "requests_served": 0}
+        self.stats_error = None
+        self.stats_calls = 0
 
     def status(self) -> str:
         return self._state
 
+    def stats(self) -> dict:
+        self.stats_calls += 1
+        if self.stats_error is not None:
+            raise self.stats_error
+        return dict(self.stats_body)
+
 
 class RaisingHipfire:
     def status(self) -> str:
+        raise EngineError("hipfire unreachable")
+
+    def stats(self) -> dict:
         raise EngineError("hipfire unreachable")
 
 
@@ -179,7 +191,9 @@ def test_hipfire_engineerror_sets_tenant_unknown_with_zero_footprint():
 
     result = world.snapshot(**_healthy_kwargs(hipfire=RaisingHipfire()))
 
-    assert result["tenants"]["hipfire"] == {"state": "unknown", "model": None, "footprint": 0}
+    assert result["tenants"]["hipfire"] == {
+        "state": "unknown", "model": None, "footprint": 0, "queue_depth": None
+    }
 
 
 def test_snapshot_itself_never_raises_when_all_engines_fail():
@@ -374,6 +388,38 @@ def test_hipfire_footprint_zero_when_not_running():
         result = World(clock=FakeClock()).snapshot(**_healthy_kwargs(hipfire=StubHipfire(state)))
         assert result["tenants"]["hipfire"]["footprint"] == 0
         assert result["tenants"]["hipfire"]["state"] == state
+
+
+def test_hipfire_snapshot_includes_queue_depth_when_running():
+    """The snapshot polls /stats while running — this is also what feeds the
+    HipfireClient conversation-activity tracker every watcher tick."""
+    hipfire = StubHipfire("running")
+    hipfire.stats_body = {"queue_depth": 2, "requests_served": 9}
+
+    result = World(clock=FakeClock()).snapshot(**_healthy_kwargs(hipfire=hipfire))
+
+    assert result["tenants"]["hipfire"]["queue_depth"] == 2
+    assert hipfire.stats_calls == 1
+
+
+def test_hipfire_snapshot_skips_stats_when_not_running():
+    for state in ("parked", "loading"):
+        hipfire = StubHipfire(state)
+        result = World(clock=FakeClock()).snapshot(**_healthy_kwargs(hipfire=hipfire))
+        assert result["tenants"]["hipfire"]["queue_depth"] is None
+        assert hipfire.stats_calls == 0
+
+
+def test_hipfire_snapshot_queue_depth_none_when_stats_raises():
+    """/stats failing must not take down the snapshot: state stays honest,
+    queue_depth is simply unknown."""
+    hipfire = StubHipfire("running")
+    hipfire.stats_error = EngineError("stats unreachable")
+
+    result = World(clock=FakeClock()).snapshot(**_healthy_kwargs(hipfire=hipfire))
+
+    assert result["tenants"]["hipfire"]["state"] == "running"
+    assert result["tenants"]["hipfire"]["queue_depth"] is None
 
 
 def test_hipfire_model_strips_openai_prefix():

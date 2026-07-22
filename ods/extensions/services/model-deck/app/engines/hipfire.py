@@ -29,15 +29,40 @@ unchanged and the container is never touched — fail safe: if we can't see
 the route table, we don't park. If the check returns True, GuardError is
 raised (not an EngineError subclass) and stop() is never called.
 
+park() then refuses while a hipfire conversation is live (the 2026-07-21
+incident: a set apply stopped/recreated the engine under an in-flight
+hermes chat; the single-slot conversation cache makes that minutes of
+re-prefill). "Live" means either of:
+  - the daemon's /stats reports queue_depth > 0 (a request holds the
+    single admission slot right now), or
+  - requests_served was seen to change within the last
+    `activity_window_s` seconds (the conversation is warm — the user is
+    between turns, not gone). The tracker is fed by every stats() call
+    (the watcher's World snapshot polls it each tick). On the FIRST
+    observation after a deck start, requests_served == 0 proves the
+    daemon has never served (not busy), while requests_served > 0 is
+    unknowable-recency traffic and counts as activity now — conservative
+    until the window elapses. activity_window_s = 0 disables the
+    recency rule.
+`force=True` skips the busy guard (an operator overriding for an
+abandoned conversation) but NEVER the litellm route guard — parking the
+default route breaks every caller, force or not. A stats transport
+failure while the container is running propagates as EngineError and
+nothing is stopped (same fail-safe stance as the route check).
+
 resume() only starts the container; it does not poll status() — callers
 that need to know when hipfire has finished loading call status() in a
-loop themselves.
+loop themselves. A parked container needs no busy check: nothing can be
+in flight.
 
 A `transport=` kwarg lets tests inject httpx.MockTransport for this
-client's own internal health-check httpx.Client. DockerCtl and
+client's own internal health/stats httpx.Client. DockerCtl and
 LiteLLMClient are passed in fully constructed, each carrying its own
-transport seam independently.
+transport seam independently. `clock=` (monotonic) is the activity
+tracker's time seam.
 """
+
+import time
 
 import httpx
 
@@ -57,11 +82,19 @@ class HipfireClient:
         container: str,
         litellm: LiteLLMClient,
         transport: httpx.BaseTransport | None = None,
+        stats_url: str | None = None,
+        activity_window_s: float = 600.0,
+        clock=time.monotonic,
     ) -> None:
         self._health_url = health_url
+        self._stats_url = stats_url or health_url.replace("/health", "/stats")
         self._dockerctl = dockerctl
         self._container = container
         self._litellm = litellm
+        self._activity_window_s = activity_window_s
+        self._clock = clock
+        self._served_last: int | None = None
+        self._last_activity_time: float | None = None
         self._client = httpx.Client(timeout=_TIMEOUT, transport=transport)
 
     def status(self) -> str:
@@ -73,12 +106,57 @@ class HipfireClient:
             raise EngineError(str(exc)) from exc
         return "running" if resp.status_code == _HEALTHY else "loading"
 
-    def park(self) -> None:
+    def stats(self) -> dict:
+        try:
+            resp = self._client.get(self._stats_url)
+        except httpx.TransportError as exc:
+            raise EngineError(str(exc)) from exc
+        if resp.status_code != _HEALTHY:
+            raise EngineError(f"GET {self._stats_url} -> {resp.status_code}")
+        body = resp.json()
+        self._note_activity(body.get("requests_served"))
+        return body
+
+    def _note_activity(self, served) -> None:
+        if not isinstance(served, int):
+            return
+        if self._served_last is None:
+            # First-ever observation: 0 proves the daemon has never served
+            # (no activity to record); >0 is traffic of unknowable recency,
+            # so conservatively count it as activity now.
+            if served > 0:
+                self._last_activity_time = self._clock()
+        elif served != self._served_last:
+            self._last_activity_time = self._clock()
+        self._served_last = served
+
+    def ensure_not_busy(self, action: str) -> None:
+        if not self._dockerctl.running(self._container):
+            return  # parked: nothing can be in flight
+        stats = self.stats()
+        queue_depth = stats.get("queue_depth")
+        if isinstance(queue_depth, int) and queue_depth > 0:
+            raise GuardError(
+                f"refusing to {action}: hipfire request in flight "
+                f"(queue_depth={queue_depth})"
+            )
+        if self._last_activity_time is not None and self._activity_window_s > 0:
+            age = self._clock() - self._last_activity_time
+            if age < self._activity_window_s:
+                raise GuardError(
+                    f"refusing to {action}: hipfire served a request {age:.0f}s "
+                    f"ago (activity window {self._activity_window_s:.0f}s; "
+                    "pass force=true to override)"
+                )
+
+    def park(self, force: bool = False) -> None:
         if self._litellm.default_targets_hipfire():
             raise GuardError(
                 f"refusing to park {self._container!r}: "
                 "litellm's default route currently targets hipfire"
             )
+        if not force:
+            self.ensure_not_busy(f"park {self._container!r}")
         self._dockerctl.stop(self._container)
 
     def resume(self) -> None:

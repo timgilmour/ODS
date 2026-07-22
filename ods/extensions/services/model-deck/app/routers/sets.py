@@ -86,7 +86,10 @@ def preview_set(slug: str, request: Request) -> dict:
 
 
 @router.post("/{slug}/apply", dependencies=[Depends(require_admin)])
-def apply_set(slug: str, request: Request) -> dict:
+def apply_set(slug: str, request: Request, force: bool = False) -> dict:
+    # ?force=true skips the hipfire conversation-guard (an operator
+    # overriding an abandoned conversation); mirrors create_set's
+    # ?overwrite= convention.
     deck = request.app.state.deck
     cfgset = deck["set_store"].get(slug)
     if cfgset is None:
@@ -96,6 +99,7 @@ def apply_set(slug: str, request: Request) -> dict:
     return sets_apply(
         cfgset,
         world=world,
+        force=force,
         lemonade=deck["lemonade"],
         comfy=deck["comfy"],
         hipfire=deck["hipfire"],
