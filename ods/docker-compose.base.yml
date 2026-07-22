@@ -117,6 +117,17 @@ services:
       SEARXNG_QUERY_URL: "http://searxng:8080/search?q=<query>&format=json"
       ENABLE_SEARCH_QUERY_GENERATION: "true"
       WEB_SEARCH_RESULT_COUNT: "5"
+      # Pin Open WebUI's background "task model" (title/tags/search-query/
+      # autocomplete/follow-up/image-prompt generation) to a fixed model id
+      # on the OpenAI connection (LiteLLM) instead of the conversation's own
+      # model. On hipfire-enabled boxes set this to a LiteLLM alias that
+      # always resolves to the GGUF engine (e.g. "lemonade") so utility
+      # traffic stays off hipfire's single-slot conversation cache — each
+      # eviction costs the next chat turn a full kernel-bound re-prefill,
+      # minutes at long context. NOT "default"/"*": those flip to hipfire
+      # while HIPFIRE_ACTIVE=true. Empty (default) keeps upstream behavior:
+      # task requests follow the chat model.
+      TASK_MODEL_EXTERNAL: "${OPEN_WEBUI_TASK_MODEL:-}"
       # Route Open WebUI retrieval embeddings through ODS's TEI service.
       # Otherwise Open WebUI downloads sentence-transformers/all-MiniLM-L6-v2
       # during app startup, which can block fresh installs before port 8080 binds.
