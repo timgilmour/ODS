@@ -80,6 +80,7 @@ class World:
         self._clock = clock
         self._lemonade_last_value: int | None = None
         self._lemonade_last_activity_time: float | None = None
+        self._lemonade_last_loaded: str | None = None
         self._comfy_last_activity_time: float | None = None
 
     def snapshot(self, gpus, lemonade, comfy, hipfire, litellm, registry) -> dict:
@@ -126,6 +127,14 @@ class World:
 
         loaded = status["loaded"]
         activity = lemonade.activity()  # never raises
+
+        # A load transition is activity: llama.cpp's counters restart at 0 on
+        # every load, so a fresh model can report the same counter value the
+        # previous one ended with and the value-change check alone would let
+        # it inherit a stale idle clock (and be evicted on the next tick).
+        if loaded != self._lemonade_last_loaded:
+            self._lemonade_last_activity_time = now
+        self._lemonade_last_loaded = loaded
 
         if activity is not None:
             if self._lemonade_last_value is None or activity != self._lemonade_last_value:

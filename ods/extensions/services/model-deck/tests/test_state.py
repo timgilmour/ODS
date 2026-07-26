@@ -319,6 +319,28 @@ def test_lemonade_idle_s_none_when_activity_returns_none():
     assert result["tenants"]["lemonade"]["idle_s"] is None
 
 
+def test_lemonade_idle_s_resets_on_load_even_when_counter_value_repeats():
+    # llama.cpp's token counters restart at 0 on every load, so a fresh load
+    # reports the same counter value (0) the previous resident model ended
+    # with. The load transition itself must reset the idle clock — otherwise
+    # the new model inherits the hours-old clock and the arbiter evicts it on
+    # the first tick after load.
+    clock = FakeClock(start=0.0)
+    world = World(clock=clock)
+
+    world.snapshot(
+        **_healthy_kwargs(lemonade=StubLemonade(loaded="extra.a.gguf", activity=0))
+    )
+    clock.advance(7 * 3600)  # idle-released hours ago; llama process gone
+    world.snapshot(**_healthy_kwargs(lemonade=StubLemonade(loaded=None, activity=None)))
+    clock.advance(60)
+    result = world.snapshot(
+        **_healthy_kwargs(lemonade=StubLemonade(loaded="extra.b.gguf", activity=0))
+    )
+
+    assert result["tenants"]["lemonade"]["idle_s"] == 0
+
+
 # --- comfyui state/idle clock ----------------------------------------------
 
 
