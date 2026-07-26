@@ -37,8 +37,13 @@ def lemonade_load(body: LemonadeLoadBody, request: Request) -> dict:
     model = body.model
     if not model.startswith(_EXTRA_PREFIX):
         model = f"{_EXTRA_PREFIX}{model}"
+    # Arm suppression for the in-flight window: while the blocking load runs,
+    # lemonade still reports "unloaded" and the GPU is already filling, so an
+    # un-suppressed watcher tick would infer a pending default-route load and
+    # stomp this one. On failure the window simply expires.
+    deck["heal_suppressor"].note_deck_unload()
     deck["lemonade"].load(model)
-    # Deliberate load: clear any suppression from a prior unload.
+    # Deliberate load succeeded: clear the window (and any prior unload's).
     deck["heal_suppressor"].clear()
     return {"status": "ok"}
 

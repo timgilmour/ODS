@@ -283,6 +283,30 @@ def test_lemonade_load_clears_heal_suppressor(tmp_path, monkeypatch):
     assert deck["heal_suppressor"].suppressed() is False
 
 
+def test_lemonade_load_suppresses_healing_while_load_is_in_flight(tmp_path, monkeypatch):
+    # While the blocking engine load runs, lemonade still reports "unloaded"
+    # and the target GPU's VRAM is already climbing, so an un-suppressed
+    # watcher tick infers a pending default-route load and stomps the manual
+    # one. The route must arm suppression BEFORE the engine call; the
+    # clear-after-success behavior stays.
+    app, deck = make_app(tmp_path, monkeypatch)
+    fake = deck["lemonade"]
+    seen = {}
+    original_load = fake.load
+
+    def observing_load(model):
+        seen["suppressed_during_load"] = deck["heal_suppressor"].suppressed()
+        return original_load(model)
+
+    fake.load = observing_load
+    resp = TestClient(app).post(
+        "/api/tenants/lemonade/load", json={"model": "extra.new.gguf"}
+    )
+    assert resp.status_code == 200
+    assert seen["suppressed_during_load"] is True
+    assert deck["heal_suppressor"].suppressed() is False
+
+
 def test_lemonade_unload_engages_heal_suppressor(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
