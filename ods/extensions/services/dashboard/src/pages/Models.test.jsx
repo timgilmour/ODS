@@ -939,7 +939,7 @@ test('keeps Delete visible but disabled while that model is working', () => {
   expect(deleteButton).toBeDisabled()
   expect(deleteButton).toHaveAttribute('title', 'Wait for the current model action to finish before deleting it.')
   const row = screen.getByText('Qwen 3.5 9B').closest('.grid')
-  expect(row).toHaveClass('lg:grid-cols-[minmax(250px,1.7fr)_184px_70px_110px_120px_90px_130px]')
+  expect(row).toHaveClass('lg:grid-cols-[minmax(250px,1.7fr)_184px_36px_70px_110px_120px_90px_130px]')
 })
 
 test('locks every model action while activation is in progress, including rollback and downloads', () => {
