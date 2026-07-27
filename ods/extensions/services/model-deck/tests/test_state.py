@@ -388,6 +388,23 @@ def test_comfy_idle_s_resets_when_queue_becomes_nonempty_again():
     assert result["tenants"]["comfyui"]["idle_s"] == 0
 
 
+def test_comfy_idle_clock_rearms_when_freed():
+    # A successful comfy free re-arms the idle TTL. Without this, idle_s only
+    # grows once comfy is idle, so the idle-release rule re-fires
+    # free_comfyui on every watcher tick (2s) for as long as comfy stays
+    # idle — flooding the event ring and spamming comfy's /free endpoint.
+    clock = FakeClock(start=0.0)
+    world = World(clock=clock)
+
+    world.snapshot(**_healthy_kwargs(comfy=StubComfy(queue=0)))
+    clock.advance(500)  # idle well past a 300s TTL
+    world.note_comfy_freed()
+    clock.advance(30)
+    result = world.snapshot(**_healthy_kwargs(comfy=StubComfy(queue=0)))
+
+    assert result["tenants"]["comfyui"]["idle_s"] == 30
+
+
 # --- hipfire state/model/footprint -----------------------------------------
 
 

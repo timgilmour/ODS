@@ -434,12 +434,16 @@ class FakeWorld:
         self._snapshot = snapshot
         self._raises = raises
         self.calls = 0
+        self.comfy_freed_notes = 0
 
     def snapshot(self, gpus, lemonade, comfy, hipfire, litellm, registry):
         self.calls += 1
         if self._raises is not None:
             raise self._raises
         return self._snapshot
+
+    def note_comfy_freed(self):
+        self.comfy_freed_notes += 1
 
 
 class FakeRegistry:
@@ -640,6 +644,36 @@ def test_watcher_guarderror_race_logged_and_no_reload(tmp_path):
     kinds = [e["kind"] for e in tail_events(events_path)]
     assert "free-raced" in kinds
     assert lemonade.loaded == []  # eviction raced -> no premature reload
+
+
+def test_watcher_successful_free_rearms_comfy_idle_clock(tmp_path):
+    """A successful free_comfyui must re-arm the world's comfy idle clock —
+    otherwise idle_s keeps growing and the idle-release rule re-emits the
+    free on every subsequent tick for as long as comfy stays idle."""
+    snapshot = _world(comfyui=_comfy(state="idle", queue=0, idle_s=5000))
+    world, comfy = FakeWorld(snapshot), FakeComfy()
+    watcher, _ = _make_watcher(
+        tmp_path, world, FakeRegistry(), _policy(comfy_idle=300), comfy=comfy
+    )
+
+    watcher.tick()
+
+    assert comfy.freed == 1
+    assert world.comfy_freed_notes == 1
+
+
+def test_watcher_raced_free_does_not_rearm_comfy_idle_clock(tmp_path):
+    """A GuardError'd free reclaimed nothing — the idle clock must NOT be
+    re-armed, so the free is retried once comfy actually drains."""
+    snapshot = _world(comfyui=_comfy(state="idle", queue=0, idle_s=5000))
+    world, comfy = FakeWorld(snapshot), FakeComfy(raise_guard=True)
+    watcher, _ = _make_watcher(
+        tmp_path, world, FakeRegistry(), _policy(comfy_idle=300), comfy=comfy
+    )
+
+    watcher.tick()
+
+    assert world.comfy_freed_notes == 0
 
 
 def test_watcher_tick_error_swallowed_and_loop_survives(tmp_path):

@@ -403,6 +403,9 @@ class Watcher:
                     eviction_raced = True
                     self._log("free-raced", {})
                 else:
+                    # Re-arm the idle TTL so the idle-release rule fires once
+                    # per TTL while comfy stays idle, not on every tick.
+                    self._world.note_comfy_freed()
                     self._log(kind, {})
             elif kind == "noop":
                 if action["reason"] == "wont-fit":

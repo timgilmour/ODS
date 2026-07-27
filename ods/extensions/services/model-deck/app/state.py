@@ -159,6 +159,13 @@ class World:
             "idle_s": idle_s,
         }
 
+    def note_comfy_freed(self) -> None:
+        """A successful comfy VRAM free re-arms the idle TTL. Without this,
+        idle_s only grows once comfy is idle (freeing changes none of the
+        idle-release rule's inputs), so the watcher re-emits free_comfyui on
+        every tick — flooding the event ring and comfy's /free endpoint."""
+        self._comfy_last_activity_time = self._clock()
+
     def _snapshot_comfy(self, comfy, now: float) -> dict:
         try:
             queue = comfy.queue_len()
