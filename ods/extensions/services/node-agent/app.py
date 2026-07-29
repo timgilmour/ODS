@@ -2,7 +2,8 @@
 import socket
 import time
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, Request
+from fastapi.responses import Response
 
 import nodeconfig
 from gpu_collect import collect_detailed_gpus
@@ -10,10 +11,19 @@ from gpu_collect import collect_detailed_gpus
 app = FastAPI(title="ods-node-agent")
 
 
+class AuthError(Exception):
+    pass
+
+
+@app.exception_handler(AuthError)
+async def _auth_error_handler(request: Request, exc: AuthError):
+    return Response(status_code=401)
+
+
 def verify_key(authorization: str = Header(default="")) -> None:
     expected = f"Bearer {nodeconfig.NODE_AGENT_KEY}"
     if not nodeconfig.NODE_AGENT_KEY or authorization != expected:
-        raise HTTPException(status_code=401)
+        raise AuthError()
 
 
 def _collect_gpus_uncached() -> list[dict]:

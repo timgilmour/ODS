@@ -17,9 +17,13 @@ def _fake_gpus():
 
 
 def test_info_requires_auth():
-    assert client.get("/v1/node/info").status_code == 401
+    r = client.get("/v1/node/info")
+    assert r.status_code == 401
+    assert r.content == b""
+
     bad = client.get("/v1/node/info", headers={"Authorization": "Bearer wrong"})
     assert bad.status_code == 401
+    assert bad.content == b""
 
 
 def test_info_returns_identity_and_inventory(monkeypatch):
