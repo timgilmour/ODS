@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -76,6 +77,28 @@ def _resolve_node_key(name: str, key_env: str, keys_map: dict) -> str:
     return os.environ.get(key_env, "") if key_env else ""
 
 
+_KEYISH_FIELD_RE = re.compile(r"(key|secret|token|password|pass|credential)",
+                              re.IGNORECASE)
+
+
+def _sanitize_entry_for_log(entry: object) -> object:
+    """Redact key-ish values before an entry reaches the log.
+
+    Keys are never *read* from ODS_REMOTE_NODES, but an admin may still have
+    inlined one there, and logging the raw entry with %r wrote it verbatim into
+    the log. Field names are kept so the message stays diagnosable; only the
+    values go. (`key_env` is a variable *name*, not key material, so it is left
+    readable -- that is the whole point of the field.)
+    """
+    if not isinstance(entry, dict):
+        return entry
+    return {
+        k: (v if k == "key_env" or not _KEYISH_FIELD_RE.search(str(k))
+            else "[redacted]")
+        for k, v in entry.items()
+    }
+
+
 def load_remote_nodes() -> list[RemoteNodeConfig]:
     raw = os.environ.get("ODS_REMOTE_NODES", "").strip()
     if not raw:
@@ -91,10 +114,19 @@ def load_remote_nodes() -> list[RemoteNodeConfig]:
     for entry in entries:
         if not isinstance(entry, dict) or not entry.get("name") \
                 or not entry.get("url"):
-            logger.warning("Skipping malformed remote node entry: %r", entry)
+            logger.warning("Skipping malformed remote node entry: %r",
+                           _sanitize_entry_for_log(entry))
             continue
         name = str(entry["name"])
         key = _resolve_node_key(name, entry.get("key_env", ""), keys_map)
+        if not key:
+            # The likeliest misconfiguration by far, and otherwise silent until
+            # it surfaces as an opaque 401 on the node's dashboard card.
+            logger.warning(
+                "Remote node %r has no bearer key: neither ODS_REMOTE_NODE_KEYS"
+                "[%r] nor key_env %r resolved to a value. The node will report"
+                " an HTTP 401 error until a key is supplied.",
+                name, name, entry.get("key_env", "") or None)
         nodes.append(RemoteNodeConfig(
             name=name, url=str(entry["url"]).rstrip("/"),
             key=key, display_name=entry.get("display_name")))

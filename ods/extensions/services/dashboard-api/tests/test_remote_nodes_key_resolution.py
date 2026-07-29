@@ -119,3 +119,45 @@ def test_keys_never_read_from_topology_json(monkeypatch):
     monkeypatch.delenv("ODS_REMOTE_NODE_KEYS", raising=False)
     nodes = remote_nodes.load_remote_nodes()
     assert nodes[0].key == ""
+
+
+def test_empty_resolved_key_is_warned_about(monkeypatch, caplog):
+    """A node whose key resolves to nothing is the likeliest misconfiguration,
+    and it was silent until it surfaced as an opaque 401 on the node's card."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.delenv("TEST_NODE_KEY", raising=False)
+    monkeypatch.delenv("ODS_REMOTE_NODE_KEYS", raising=False)
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == ""
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.WARNING]
+    assert any("sparky" in m and "ODS_REMOTE_NODE_KEYS" in m
+               for m in warnings), warnings
+
+
+def test_resolved_key_present_produces_no_warning(monkeypatch, caplog):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        remote_nodes.load_remote_nodes()
+    assert [r.getMessage() for r in caplog.records
+            if r.levelno >= logging.WARNING] == []
+
+
+def test_malformed_entry_log_never_echoes_an_inline_key(monkeypatch, caplog):
+    """The malformed-entry warning used %r on the raw entry, so an admin who
+    inlined a key in ODS_REMOTE_NODES (ignored as key material, but it can
+    still be present) got it written verbatim into the logs."""
+    malformed = json.dumps([{"name": "sparky",
+                             "key": "inline-secret-should-be-ignored",
+                             "api_key": "another-secret",
+                             "note": "no url field, so this entry is skipped"}])
+    monkeypatch.setenv("ODS_REMOTE_NODES", malformed)
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        assert remote_nodes.load_remote_nodes() == []
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "inline-secret-should-be-ignored" not in logged
+    assert "another-secret" not in logged
+    # Still useful for debugging: the offending entry stays identifiable.
+    assert "sparky" in logged
