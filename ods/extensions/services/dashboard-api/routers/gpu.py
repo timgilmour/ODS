@@ -13,6 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+import remote_nodes
 from security import verify_api_key
 
 from gpu import (
@@ -352,6 +353,7 @@ async def gpu_detailed():
         split_mode=_live_env_value("LLAMA_ARG_SPLIT_MODE") or None,
         tensor_split=_live_env_value("LLAMA_ARG_TENSOR_SPLIT") or None,
         aggregate=aggregate,
+        nodes=remote_nodes.get_remote_node_statuses(),
     )
     _detailed_cache["expires"] = now + _GPU_DETAILED_TTL
     _detailed_cache["value"] = result
