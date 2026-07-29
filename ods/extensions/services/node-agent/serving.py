@@ -40,9 +40,9 @@ def probe() -> dict:
     try:
         payload = _fetch_models_payload(nodeconfig.NODE_SERVING_PROBE_URL)
         models = payload.get("data") or []
-        result["endpoint_ok"] = True
         if models:
             result["model"] = models[0].get("id")
-    except ProbeError:
+        result["endpoint_ok"] = True
+    except (ProbeError, AttributeError, TypeError, KeyError, IndexError):
         pass
     return result

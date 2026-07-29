@@ -43,3 +43,29 @@ def test_probe_unconfigured(monkeypatch):
     r = client.get("/v1/node/serving", headers=AUTH)
     assert r.json() == {"model": None, "endpoint_ok": False,
                         "container_status": None}
+
+
+def test_probe_malformed_bare_list(monkeypatch):
+    """Endpoint returns bare list instead of {data: [...]}."""
+    monkeypatch.setattr(serving, "_fetch_models_payload",
+                        lambda url: [1, 2])
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["endpoint_ok"] is False
+    assert body["model"] is None
+
+
+def test_probe_malformed_data_not_dict(monkeypatch):
+    """Endpoint returns {data: [...]} but items aren't dicts."""
+    monkeypatch.setattr(serving, "_fetch_models_payload",
+                        lambda url: {"data": ["not-a-dict"]})
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["endpoint_ok"] is False
+    assert body["model"] is None
