@@ -132,3 +132,94 @@ async def test_one_bad_node_does_not_block_others(monkeypatch):
     by_name = {s.name: s for s in remote_nodes.get_remote_node_statuses()}
     assert by_name["sparky"].status == "online"
     assert by_name["deadbox"].status == "offline"
+
+
+@pytest.mark.asyncio
+async def test_stale_state_pruned_on_name_reuse(monkeypatch):
+    """A name removed from config, then reused with a different url, must not
+    inherit the previous occupant's platform/last_seen (_STATE must be
+    pruned, not just filtered at read time)."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODES_ENV)
+    monkeypatch.setenv("TEST_NODE_KEY", "sekrit")
+
+    def up(request):
+        if request.url.path == "/v1/node/gpu":
+            return httpx.Response(200, json={"backend": "nvidia", "gpus": [GPU]})
+        return httpx.Response(200, json={"model": None, "endpoint_ok": False,
+                                         "container_status": None})
+
+    async with _client(up) as client:
+        await remote_nodes.poll_all_nodes_once(client)
+    assert remote_nodes.get_remote_node_statuses()[0].status == "online"
+
+    # Node removed from config entirely; polling again must prune it from
+    # internal state, not merely hide it from the getter.
+    monkeypatch.setenv("ODS_REMOTE_NODES", "[]")
+
+    def unreachable(request):
+        raise AssertionError("no nodes configured; transport should be idle")
+
+    async with _client(unreachable) as client:
+        await remote_nodes.poll_all_nodes_once(client)
+    assert remote_nodes.get_remote_node_statuses() == []
+    assert "sparky" not in remote_nodes._STATE
+
+    # Same name reused, but pointed at a DIFFERENT url that refuses to
+    # connect. The first poll of the new target must be a clean "offline"
+    # with no state inherited from the old occupant of this name.
+    reused = json.dumps([{"name": "sparky", "url": "http://sparky2.test:7720",
+                          "key_env": "TEST_NODE_KEY"}])
+    monkeypatch.setenv("ODS_REMOTE_NODES", reused)
+
+    def refused(request):
+        raise httpx.ConnectError("refused")
+
+    async with _client(refused) as client:
+        await remote_nodes.poll_all_nodes_once(client)
+    (status,) = remote_nodes.get_remote_node_statuses()
+    assert status.status == "offline"
+    assert status.last_seen is None
+    assert status.platform == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_serving_probe_failure_does_not_demote_status(monkeypatch):
+    """The serving probe is auxiliary: any failure on it (transport error,
+    timeout, bad response) degrades to serving=None without touching the
+    node's online status or error field, which are governed by the GPU
+    endpoint alone."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODES_ENV)
+    monkeypatch.setenv("TEST_NODE_KEY", "sekrit")
+
+    def handler(request):
+        if request.url.path == "/v1/node/gpu":
+            return httpx.Response(200, json={"backend": "nvidia", "gpus": [GPU]})
+        if request.url.path == "/v1/node/serving":
+            raise httpx.ReadTimeout("serving probe timed out")
+        return httpx.Response(404)
+
+    async with _client(handler) as client:
+        await remote_nodes.poll_all_nodes_once(client)
+    (status,) = remote_nodes.get_remote_node_statuses()
+    assert status.status == "online"
+    assert status.serving is None
+    assert status.error is None
+
+
+@pytest.mark.asyncio
+async def test_poll_malformed_gpu_body_is_error(monkeypatch):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODES_ENV)
+    monkeypatch.setenv("TEST_NODE_KEY", "sekrit")
+
+    def handler(request):
+        if request.url.path == "/v1/node/gpu":
+            return httpx.Response(200, json={"backend": "nvidia",
+                                             "gpus": [{"bogus": True}]})
+        return httpx.Response(200, json={"model": None, "endpoint_ok": False,
+                                         "container_status": None})
+
+    async with _client(handler) as client:
+        await remote_nodes.poll_all_nodes_once(client)
+    (status,) = remote_nodes.get_remote_node_statuses()
+    assert status.status == "error"
+    assert status.error is not None

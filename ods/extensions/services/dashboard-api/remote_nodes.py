@@ -5,6 +5,10 @@ Nodes are configured via ODS_REMOTE_NODES (JSON list of
 never inline secrets. Absent/empty config → feature dormant.
 Terminology: distinct from routers/node.py (local snapshot) and from the
 remote-provider/peer inference-routing machinery.
+
+Status semantics: the GPU probe (/v1/node/gpu) alone governs a node's
+status ("online"/"offline"/"error"); the serving probe is auxiliary and any
+failure on it degrades only to serving=None, never the node's status.
 """
 from __future__ import annotations
 
@@ -79,31 +83,50 @@ def _carry(cfg: RemoteNodeConfig, status: str, error: str | None) -> RemoteNodeS
 async def _poll_node_once(cfg: RemoteNodeConfig,
                           client: httpx.AsyncClient) -> RemoteNodeStatus:
     headers = {"Authorization": f"Bearer {cfg.key}"}
+    # GPU and serving probes run concurrently so a node's wall-clock poll
+    # bound is ~one timeout, not two sequential ones. The GPU probe alone
+    # governs status/error; the serving probe is auxiliary (see module
+    # docstring) and any failure on it just yields serving=None.
+    gpu_result, serving_result = await asyncio.gather(
+        client.get(f"{cfg.url}/v1/node/gpu", headers=headers),
+        client.get(f"{cfg.url}/v1/node/serving", headers=headers),
+        return_exceptions=True)
+
+    if isinstance(gpu_result, BaseException):
+        if isinstance(gpu_result, (httpx.TransportError, asyncio.TimeoutError)):
+            return _carry(cfg, "offline", None)
+        return _carry(cfg, "error", f"gpu probe failed: {gpu_result!r}")
+
+    if gpu_result.status_code != 200:
+        return _carry(cfg, "error",
+                      f"node returned HTTP {gpu_result.status_code}")
+
     try:
-        gpu_resp = await client.get(f"{cfg.url}/v1/node/gpu", headers=headers)
-        serving_resp = await client.get(f"{cfg.url}/v1/node/serving",
-                                        headers=headers)
-        if gpu_resp.status_code != 200:
-            return _carry(cfg, "error",
-                          f"node returned HTTP {gpu_resp.status_code}")
-        gpu_body = gpu_resp.json()
-        serving = None
-        if serving_resp.status_code == 200:
-            serving = RemoteNodeServing(**serving_resp.json())
-        return RemoteNodeStatus(
-            name=cfg.name, display_name=cfg.display_name,
-            platform=str(gpu_body.get("backend", "unknown")),
-            status="online", last_seen=_now_iso(),
-            gpus=[IndividualGPU(**g) for g in gpu_body.get("gpus", [])],
-            serving=serving, error=None)
-    except (httpx.TransportError, asyncio.TimeoutError):
-        return _carry(cfg, "offline", None)
-    except (ValueError, TypeError) as exc:  # bad JSON / bad shape
+        gpu_body = gpu_result.json()
+        gpus = [IndividualGPU(**g) for g in gpu_body.get("gpus", [])]
+        platform = str(gpu_body.get("backend", "unknown"))
+    except (ValueError, TypeError) as exc:  # bad JSON / bad shape / pydantic
         return _carry(cfg, "error", f"malformed node response: {exc}")
+
+    serving = None
+    if not isinstance(serving_result, BaseException) \
+            and serving_result.status_code == 200:
+        try:
+            serving = RemoteNodeServing(**serving_result.json())
+        except (ValueError, TypeError):
+            serving = None  # auxiliary probe; never demotes node status
+
+    return RemoteNodeStatus(
+        name=cfg.name, display_name=cfg.display_name,
+        platform=platform, status="online", last_seen=_now_iso(),
+        gpus=gpus, serving=serving, error=None)
 
 
 async def poll_all_nodes_once(client: httpx.AsyncClient) -> None:
     cfgs = load_remote_nodes()
+    current_names = {cfg.name for cfg in cfgs}
+    for stale_name in set(_STATE) - current_names:
+        del _STATE[stale_name]
     results = await asyncio.gather(
         *(_poll_node_once(cfg, client) for cfg in cfgs),
         return_exceptions=True)
