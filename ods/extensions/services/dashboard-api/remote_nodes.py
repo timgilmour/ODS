@@ -1,8 +1,10 @@
 """Remote inference node registry + read-only metrics poller.
 
 Nodes are configured via ODS_REMOTE_NODES (JSON list of
-{"name", "display_name"?, "url", "key_env"}). Keys are env-var *names*,
-never inline secrets. Absent/empty config → feature dormant.
+{"name", "display_name"?, "url", "key_env"}). Authentication keys are delivered
+via ODS_REMOTE_NODE_KEYS (a JSON object mapping node name → bearer key), with
+key_env as the fallback mechanism. Keys are never inline secrets in the node
+definitions. Absent/empty config → feature dormant.
 Terminology: distinct from routers/node.py (local snapshot) and from the
 remote-provider/peer inference-routing machinery.
 
