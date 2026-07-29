@@ -5,6 +5,7 @@ import { GPUCard } from '../components/GPUCard'
 import { GPUChart } from '../components/GPUChart'
 import { TopologyView } from '../components/TopologyView'
 import { AssignmentTable } from '../components/AssignmentTable'
+import { RemoteNodeSection } from '../components/RemoteNodeSection'
 
 // Aggregate bar shared between aggregate section
 const AggBar = memo(function AggBar({ label, value, percent }) {
@@ -163,6 +164,10 @@ export default function GPUMonitor() {
           ))}
         </div>
       )}
+
+      {(detailed?.nodes ?? []).map((node) => (
+        <RemoteNodeSection key={node.name} node={node} />
+      ))}
     </div>
   )
 }
