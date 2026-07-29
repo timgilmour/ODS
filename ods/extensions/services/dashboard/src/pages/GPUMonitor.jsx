@@ -38,6 +38,11 @@ export default function GPUMonitor() {
     )
   }
 
+  // Remote nodes are independent of the local collector: a local failure must
+  // not blank a node the API already reported, so they render in the
+  // unavailable branch too whenever the last payload still carries them.
+  const nodes = detailed?.nodes ?? []
+
   if (error || !detailed) {
     return (
       <div className="p-8">
@@ -48,6 +53,9 @@ export default function GPUMonitor() {
             <p className="text-zinc-400 mt-0.5">{error || 'No GPU data returned from API.'}</p>
           </div>
         </div>
+        {nodes.map((node) => (
+          <RemoteNodeSection key={node.name} node={node} />
+        ))}
       </div>
     )
   }
@@ -154,6 +162,12 @@ export default function GPUMonitor() {
               {assignment && <AssignmentTable assignment={assignment} />}
             </div>
           )}
+
+          {/* Remote nodes are live cards, so they belong beside the live
+              per-GPU cards rather than under the local History charts. */}
+          {nodes.map((node) => (
+            <RemoteNodeSection key={node.name} node={node} />
+          ))}
         </>
       )}
 
@@ -164,10 +178,6 @@ export default function GPUMonitor() {
           ))}
         </div>
       )}
-
-      {(detailed?.nodes ?? []).map((node) => (
-        <RemoteNodeSection key={node.name} node={node} />
-      ))}
     </div>
   )
 }
