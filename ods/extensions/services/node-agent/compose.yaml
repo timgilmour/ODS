@@ -15,6 +15,8 @@ services:
       GPU_BACKEND: ${GPU_BACKEND:-nvidia}
       NODE_SERVING_PROBE_URL: ${NODE_SERVING_PROBE_URL:-}
       NODE_SERVING_CONTAINER: ${NODE_SERVING_CONTAINER:-}
+      NODE_AGENT_PORT: ${NODE_AGENT_PORT:-7720}
+      NODE_GPU_CACHE_TTL: ${NODE_GPU_CACHE_TTL:-2.0}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /usr/bin/docker:/usr/bin/docker:ro

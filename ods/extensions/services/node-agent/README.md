@@ -24,10 +24,7 @@ isn't present).
 | `NODE_SERVING_PROBE_URL` | *(unset)* | OpenAI-compatible `/v1/models`-style URL to probe for what model is currently being served. Left unset disables the probe. |
 | `NODE_SERVING_CONTAINER` | *(unset)* | Name of the local Docker container running inference; its status is reported via `docker inspect`. Left unset disables the check. |
 | `NODE_AGENT_PORT` | `7720` | Port uvicorn binds inside the container (also the host port under `network_mode: host`). |
-
-Advanced/optional (not templated in `compose.yaml`, set via the host
-environment if needed): `NODE_GPU_CACHE_TTL` (seconds, default `2.0`) —
-TTL for the short-lived GPU sample cache used by `/v1/node/gpu`.
+| `NODE_GPU_CACHE_TTL` | `2.0` | TTL in seconds for the short-lived GPU sample cache used by `/v1/node/gpu`. |
 
 ## Deploy
 
