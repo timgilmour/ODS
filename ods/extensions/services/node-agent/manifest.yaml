@@ -1,0 +1,86 @@
+schema_version: ods.services.v1
+
+compatibility:
+  ods_min: "2.0.0"
+
+service:
+  id: node-agent
+  name: ODS Node Agent (Remote GPU Metrics)
+  aliases: []
+  container_name: ods-node-agent
+  # REMOTE-DEPLOYED, NOT PART OF THE LOCAL STACK.
+  #
+  # This manifest exists so the service is visible to the repo's governance
+  # contracts -- tests/contracts/test-network-exposure-contracts.py enumerates
+  # */manifest.yaml, so without one a bind-all-interfaces host-networked
+  # service escaped config/network-exposure-policy.json entirely.
+  #
+  # It is disabled by default via the repo's existing compose convention: the
+  # fragment ships as `compose.yaml.disabled`, so SERVICE_COMPOSE resolves to
+  # "" and the service appears in neither sr_list_enabled nor sr_compose_flags.
+  # Nothing in the local stack builds, starts, or health-checks it. Deploy it
+  # by hand on the remote GPU host (see README.md); do not `ods enable` it.
+  #
+  # `host_network: true` reflects `network_mode: host` in the compose fragment
+  # and, per the audit's convention, opts out of the port-mapping and HTTP
+  # health-path requirements that cannot apply to a host-networked service.
+  host_network: true
+  port: 7720
+  startup_check: false
+  type: docker
+  # The agent's own GPU_BACKEND var picks the collector on the remote node, so
+  # every backend is supported there. (`none` would be tempting to signal "not
+  # a local GPU consumer", but tests/test-service-registry.sh's schema check
+  # accepts only amd/nvidia/apple/all.)
+  gpu_backends: [all]
+  compose_file: compose.yaml
+  category: optional
+  depends_on: []
+  description: >
+    Read-only metrics sidecar deployed on a REMOTE inference node (a DGX-class
+    box or any second GPU host) that does not run the full ODS stack. It
+    exposes a small bearer-authenticated HTTP API on port 7720 which this
+    host's dashboard-api polls to show that node's GPUs and what it is
+    serving. Nothing is routed to the node: this is monitoring only. It is not
+    installed or started by the local stack, and its port must be
+    firewall-scoped to the dashboard host.
+  env_vars:
+    - key: NODE_AGENT_KEY
+      required: true
+      secret: true
+      description: |
+        Bearer token clients must send as `Authorization: Bearer <key>`. No
+        default; the compose fragment fails fast if unset. Deliver the same
+        value to the dashboard host via ODS_REMOTE_NODE_KEYS.
+    - key: NODE_NAME
+      required: false
+      description: |
+        Human-readable node identifier returned by /v1/node/info. Defaults to
+        the remote host's hostname.
+    - key: GPU_BACKEND
+      required: false
+      description: |
+        GPU backend to collect from on the REMOTE node (nvidia, amd, apple).
+        Independent of this host's GPU_BACKEND. Defaults to nvidia.
+    - key: NODE_SERVING_PROBE_URL
+      required: false
+      description: |
+        OpenAI-compatible /v1/models URL to probe for the model the node is
+        serving. Unset disables the probe.
+    - key: NODE_SERVING_CONTAINER
+      required: false
+      description: |
+        Name of the local Docker container running inference on the remote
+        node, reported via `docker inspect`. Requires opting into the Docker
+        socket mount, which grants host-root-equivalent access -- see
+        README.md ("Security"). Leave unset unless you accept that.
+    - key: NODE_AGENT_PORT
+      required: false
+      description: |
+        Port uvicorn binds inside the container, which under network_mode:host
+        is also the host port. Defaults to 7720.
+    - key: NODE_GPU_CACHE_TTL
+      required: false
+      description: |
+        TTL in seconds for the short-lived GPU sample cache behind
+        /v1/node/gpu. Defaults to 2.0.

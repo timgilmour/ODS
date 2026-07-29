@@ -22,23 +22,57 @@ isn't present).
 | `NODE_NAME` | hostname | Human-readable node identifier returned by `/v1/node/info`. |
 | `GPU_BACKEND` | `nvidia` | Which GPU backend to collect from (`nvidia`, `amd`, `apple`). |
 | `NODE_SERVING_PROBE_URL` | *(unset)* | OpenAI-compatible `/v1/models`-style URL to probe for what model is currently being served. Left unset disables the probe. |
-| `NODE_SERVING_CONTAINER` | *(unset)* | Name of the local Docker container running inference; its status is reported via `docker inspect`. Left unset disables the check. |
-| `NODE_AGENT_PORT` | `7720` | Port uvicorn binds inside the container (also the host port under `network_mode: host`). |
+| `NODE_SERVING_CONTAINER` | *(unset)* | Name of the local Docker container running inference; its status is reported via `docker inspect`. **Requires opting into the Docker socket mount, which grants host-root-equivalent access — see [Security](#security).** Left unset (recommended) disables the check and `container_status` is reported as `null`. |
+| `NODE_AGENT_PORT` | `7720` | Port uvicorn binds inside the container (also the host port under `network_mode: host`). Read by the Dockerfile `CMD`, not by the Python config. |
 | `NODE_GPU_CACHE_TTL` | `2.0` | TTL in seconds for the short-lived GPU sample cache used by `/v1/node/gpu`. |
 
 ## Deploy
 
 Runs on the **remote** node, built from a full checkout of this repo (the
-build context is the repo root so it can vendor `dashboard-api/gpu.py`):
+build context is the repo root so it can vendor `dashboard-api/gpu.py`;
+`Dockerfile.dockerignore` keeps that context from shipping the whole repo):
 
 ```bash
-docker compose -f ods/extensions/services/node-agent/compose.yaml up -d --build
+docker compose -f ods/extensions/services/node-agent/compose.yaml.disabled up -d --build
 ```
+
+The compose fragment ships as `compose.yaml.disabled` on purpose. This service
+is **not** part of the local ODS stack, and `ods` builds its compose `-f` list
+from every extension whose `compose.yaml` exists — the `.disabled` suffix is
+the repo's existing convention for keeping a fragment out of that set. Do not
+run `ods enable node-agent`; deploy it by hand on the remote host as above.
 
 The compose file requests the `nvidia` device driver with the `utility`
 capability, which is what makes `nvidia-smi` available inside the
 otherwise-slim container. On non-NVIDIA nodes, drop that `deploy.resources`
 block and set `GPU_BACKEND` accordingly.
+
+### Registering the node with the dashboard host
+
+On the **dashboard** host, add the node to `ODS_REMOTE_NODES` and its key to
+`ODS_REMOTE_NODE_KEYS` (see `ods/.env.example`), then **recreate the
+dashboard-api container** — the remote-node config is read once at startup, so
+a running dashboard-api will not pick up a new node.
+
+## Security
+
+- **The Docker socket mount grants host-root-equivalent access.** Mounting
+  `/var/run/docker.sock` lets this container drive the full Docker API: create
+  privileged containers, bind-mount the host filesystem, read every secret.
+  Adding `:ro` write-protects only the socket *file* — the API behind it stays
+  fully writable — so `:ro` **does not mitigate this at all**. Because this
+  service is network-exposed, anyone who compromises it inherits host root.
+- Both the socket and the `docker` CLI mounts are therefore **commented out by
+  default**. Leave `NODE_SERVING_CONTAINER` unset and the mounts commented
+  unless you actively accept that trade; without them the agent works
+  unchanged and simply reports `container_status: null`.
+- **Always firewall-scope port 7720** to the dashboard host (see below). The
+  service uses `network_mode: host`, so it binds every interface on the node.
+- Every route is bearer-gated with a constant-time comparison, and the
+  unauthenticated OpenAPI surface (`/docs`, `/redoc`, `/openapi.json`) is
+  disabled so the API is not advertised to whoever can reach the port.
+- The agent is read-only: it collects metrics and probes. It exposes no way to
+  load, unload, start, or stop anything on the node.
 
 ## Firewall
 
@@ -57,6 +91,11 @@ All endpoints require `Authorization: Bearer <NODE_AGENT_KEY>` and return
 ### `GET /v1/node/info`
 
 Node identity plus a fresh (uncached) GPU inventory.
+
+> Currently **unconsumed** by the dashboard: the poller only calls
+> `/v1/node/gpu` and `/v1/node/serving`. `/v1/node/info` is the phase-2
+> capabilities seam (`capabilities: ["metrics"]`), kept so a later phase can
+> negotiate what a node supports without a protocol change.
 
 ```bash
 curl -H "Authorization: Bearer $NODE_AGENT_KEY" http://<node-ip>:7720/v1/node/info

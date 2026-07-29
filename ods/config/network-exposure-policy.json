@@ -80,6 +80,12 @@
       "auth_required": true,
       "notes": "Workflow automation can call local and external services."
     },
+    "node-agent": {
+      "risk": "remote-node-metrics-api",
+      "lan_exposure": "host-network",
+      "auth_required": true,
+      "notes": "Deployed on remote inference nodes, never in this stack (ships as compose.yaml.disabled). Read-only GPU/serving metrics on port 7720 under host networking, so it binds all interfaces on that node; every route is bearer-gated and the port must be firewall-scoped to the dashboard host."
+    },
     "open-webui": {
       "risk": "chat-ui",
       "lan_exposure": "operator-controlled",
