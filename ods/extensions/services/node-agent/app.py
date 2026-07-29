@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import Response
 
 import nodeconfig
+import serving
 from gpu_collect import collect_detailed_gpus
 
 app = FastAPI(title="ods-node-agent")
@@ -58,3 +59,8 @@ def node_info():
 @app.get("/v1/node/gpu", dependencies=[Depends(verify_key)])
 def node_gpu():
     return {"backend": nodeconfig.GPU_BACKEND, "gpus": _collect_gpus_cached()}
+
+
+@app.get("/v1/node/serving", dependencies=[Depends(verify_key)])
+def node_serving():
+    return serving.probe()
