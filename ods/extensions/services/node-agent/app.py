@@ -53,3 +53,8 @@ def node_info():
         "capabilities": ["metrics"],
         "gpus": _collect_gpus_uncached(),
     }
+
+
+@app.get("/v1/node/gpu", dependencies=[Depends(verify_key)])
+def node_gpu():
+    return {"backend": nodeconfig.GPU_BACKEND, "gpus": _collect_gpus_cached()}
