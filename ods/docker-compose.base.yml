@@ -269,6 +269,15 @@ services:
       # Model id of the vision-capable variant. Defaults to the user.*
       # name we register on AMD install (Qwen3.6-35B-A3B + mmproj-F16).
       - ODS_TALK_VISION_MODEL=${ODS_TALK_VISION_MODEL:-user.Qwen3.6-35B-A3B-Vision}
+      # Multi-node GPU visibility: static topology of remote inference
+      # nodes (JSON array; see remote_nodes.py) and the preferred
+      # key-delivery mechanism for their bearer keys (JSON map of
+      # node name -> key, forwarded here since compose enumerates this
+      # service's environment explicitly and cannot forward an
+      # admin-chosen key_env var name without a per-node compose edit).
+      # Both default empty: absent config leaves the feature dormant.
+      - ODS_REMOTE_NODES=${ODS_REMOTE_NODES:-}
+      - ODS_REMOTE_NODE_KEYS=${ODS_REMOTE_NODE_KEYS:-}
     volumes:
       - ./scripts:/ods/scripts:ro,z
       - ./config:/ods/config:ro,z
