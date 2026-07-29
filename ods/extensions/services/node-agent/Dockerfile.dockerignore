@@ -1,0 +1,20 @@
+# Build-context filter for THIS Dockerfile only.
+#
+# The node-agent build context is the repo root (it has to be, so the image can
+# vendor dashboard-api/gpu.py alongside the node-agent sources), and that root
+# is ~330 MB including a ~70 MB .git -- all of it uploaded to the daemon for an
+# image that needs six .py files and one requirements.txt.
+#
+# BuildKit reads `<path-to-Dockerfile>.dockerignore` in preference to the
+# context root's `.dockerignore`, so this file scopes the filter to the
+# node-agent build and leaves every other build in the repo untouched. Compose
+# v2 uses BuildKit by default; with the legacy builder (DOCKER_BUILDKIT=0) this
+# file is ignored and the build merely falls back to being slow.
+#
+# Allowlist: exclude everything, then re-include exactly what the Dockerfile
+# COPYs.
+**
+
+!ods/extensions/services/node-agent/requirements.txt
+!ods/extensions/services/node-agent/*.py
+!ods/extensions/services/dashboard-api/gpu.py

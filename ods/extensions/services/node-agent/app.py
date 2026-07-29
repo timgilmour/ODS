@@ -1,4 +1,5 @@
 """ODS node-agent: read-only metrics endpoint for remote inference nodes."""
+import secrets
 import socket
 import time
 from typing import Optional
@@ -10,7 +11,11 @@ import nodeconfig
 import serving
 from gpu_collect import collect_detailed_gpus
 
-app = FastAPI(title="ods-node-agent")
+# docs/redoc/openapi are unauthenticated by construction, and this service runs
+# with network_mode: host -- so leaving them on would advertise the whole API
+# surface to anyone who can reach the port. Every real route is bearer-gated.
+app = FastAPI(title="ods-node-agent", docs_url=None, redoc_url=None,
+              openapi_url=None)
 
 
 class AuthError(Exception):
@@ -23,8 +28,15 @@ async def _auth_error_handler(request: Request, exc: AuthError):
 
 
 def verify_key(authorization: str = Header(default="")) -> None:
+    if not nodeconfig.NODE_AGENT_KEY:
+        raise AuthError()  # fail closed: no key configured, nothing is allowed
     expected = f"Bearer {nodeconfig.NODE_AGENT_KEY}"
-    if not nodeconfig.NODE_AGENT_KEY or authorization != expected:
+    # Constant-time, and compared as UTF-8 bytes: compare_digest raises
+    # TypeError on non-ASCII str, and this header is attacker-controlled, so a
+    # str compare would turn an unauthenticated request into a 500 not a 401.
+    # Matches dashboard-api/security.py and ods/bin/ods-host-agent.py.
+    if not secrets.compare_digest(authorization.encode("utf-8"),
+                                  expected.encode("utf-8")):
         raise AuthError()
 
 
