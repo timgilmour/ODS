@@ -16,7 +16,16 @@ function lastSeenLabel(iso) {
 
 export const RemoteNodeSection = memo(function RemoteNodeSection({ node }) {
   const style = STATUS_STYLES[node.status] || STATUS_STYLES.offline
-  const dimmed = node.status !== 'online'
+  // Only an offline node is visually "dead". An errored node is actively
+  // reporting a problem worth reading, so it keeps full contrast and relies on
+  // the amber badge plus the message box to stand out.
+  const dimmed = node.status === 'offline' || !STATUS_STYLES[node.status]
+  const gpus = node.gpus ?? []
+  const serving = node.serving
+  // serving.model is null whenever the probe failed, so gating the whole line
+  // on it hid the "node up, inference endpoint down" case entirely.
+  const servingLine = serving && (serving.model || serving.endpoint_ok === false
+    || serving.container_status)
   return (
     <section className={`mt-8 ${dimmed ? 'opacity-60' : ''}`}>
       <div className="flex items-center gap-3 mb-3">
@@ -40,16 +49,28 @@ export const RemoteNodeSection = memo(function RemoteNodeSection({ node }) {
           {node.error}
         </div>
       )}
-      {node.serving?.model && (
+      {servingLine && (
         <p className="mb-3 text-sm text-zinc-400">
-          serving <span className="font-mono text-white">{node.serving.model}</span>
-          {node.serving.endpoint_ok ? ' · endpoint healthy' : ' · endpoint unreachable'}
+          {serving.model
+            ? <>serving <span className="font-mono text-white">{serving.model}</span></>
+            : <>no model reported</>}
+          {serving.endpoint_ok ? ' · endpoint healthy' : ' · endpoint unreachable'}
+          {serving.container_status && ` · container ${serving.container_status}`}
         </p>
       )}
-      {node.gpus.length > 0 && (
+      {gpus.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {node.gpus.map((gpu) => <GPUCard key={gpu.uuid} gpu={gpu} />)}
+          {gpus.map((gpu) => <GPUCard key={gpu.uuid} gpu={gpu} />)}
         </div>
+      ) : (
+        // A reachable node with an empty GPU list previously rendered an empty
+        // card body with no explanation. node.error above carries the agent's
+        // own collector message when there is one; this line always states the
+        // fact so the state never dead-ends.
+        <p className="text-sm text-zinc-500">
+          No GPUs reported by this node
+          {node.status === 'online' && !node.error && ' (the node reports zero GPUs)'}
+        </p>
       )}
     </section>
   )

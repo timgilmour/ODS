@@ -8,12 +8,14 @@ AUTH = {"Authorization": "Bearer test-key"}
 
 
 def _fake_gpus():
-    return [{
+    # _collect_gpus_uncached() returns a (gpus, error) sample; /v1/node/info
+    # reports the inventory only.
+    return ([{
         "index": 0, "uuid": "GPU-abc", "name": "NVIDIA GB10",
         "memory_used_mb": 1024, "memory_total_mb": 122880,
         "memory_percent": 0.8, "utilization_percent": 5,
         "temperature_c": 45, "power_w": 30.0, "memory_type": "unified",
-    }]
+    }], None)
 
 
 def test_info_requires_auth():

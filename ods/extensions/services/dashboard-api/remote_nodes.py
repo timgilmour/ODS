@@ -10,7 +10,10 @@ remote-provider/peer inference-routing machinery.
 
 Status semantics: the GPU probe (/v1/node/gpu) alone governs a node's
 status ("online"/"offline"/"error"); the serving probe is auxiliary and any
-failure on it degrades only to serving=None, never the node's status.
+failure on it degrades only to serving=None, never the node's status. A node
+that answers the GPU probe but reports its own collector failure in that
+response's nullable `error` field stays "online" (it is reachable) and carries
+that message through, so `error` is not exclusive to status="error".
 """
 from __future__ import annotations
 
@@ -141,6 +144,11 @@ async def _poll_node_once(cfg: RemoteNodeConfig,
         gpu_body = gpu_result.json()
         gpus = [IndividualGPU(**g) for g in gpu_body.get("gpus", [])]
         platform = str(gpu_body.get("backend", "unknown"))
+        # "Node up, collector failing": the agent answered, so the node stays
+        # online, but its own collector message is carried through so the card
+        # can explain an empty GPU list instead of dead-ending on a blank body.
+        # The field is additive -- older agents omit it entirely.
+        collector_error = gpu_body.get("error") or None
     except (ValueError, TypeError) as exc:  # bad JSON / bad shape / pydantic
         return _carry(cfg, "error", f"malformed node response: {exc}")
 
@@ -155,7 +163,8 @@ async def _poll_node_once(cfg: RemoteNodeConfig,
     return RemoteNodeStatus(
         name=cfg.name, display_name=cfg.display_name,
         platform=platform, status="online", last_seen=_now_iso(),
-        gpus=gpus, serving=serving, error=None)
+        gpus=gpus, serving=serving,
+        error=str(collector_error) if collector_error else None)
 
 
 async def poll_all_nodes_once(client: httpx.AsyncClient) -> None:

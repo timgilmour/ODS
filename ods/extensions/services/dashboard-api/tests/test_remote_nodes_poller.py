@@ -207,6 +207,50 @@ async def test_serving_probe_failure_does_not_demote_status(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collector_error_keeps_node_online_and_surfaces_message(monkeypatch):
+    """Design doc's "node up, collector failing" state: status stays online
+    (the agent answered, so the node is reachable) with an empty GPU list and
+    the agent's own collector message carried through to the UI."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODES_ENV)
+    monkeypatch.setenv("TEST_NODE_KEY", "sekrit")
+
+    def handler(request):
+        if request.url.path == "/v1/node/gpu":
+            return httpx.Response(200, json={
+                "backend": "nvidia", "gpus": [],
+                "error": "GPU collector unavailable: nvidia-smi not found"})
+        return httpx.Response(200, json={"model": None, "endpoint_ok": False,
+                                         "container_status": None})
+
+    async with _client(handler) as client:
+        await remote_nodes.poll_all_nodes_once(client)
+    (status,) = remote_nodes.get_remote_node_statuses()
+    assert status.status == "online"
+    assert status.gpus == []
+    assert status.last_seen is not None
+    assert status.error == "GPU collector unavailable: nvidia-smi not found"
+
+
+@pytest.mark.asyncio
+async def test_node_without_error_field_stays_error_free(monkeypatch):
+    """`error` is additive: an older node-agent omits it entirely."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODES_ENV)
+    monkeypatch.setenv("TEST_NODE_KEY", "sekrit")
+
+    def handler(request):
+        if request.url.path == "/v1/node/gpu":
+            return httpx.Response(200, json={"backend": "nvidia", "gpus": []})
+        return httpx.Response(200, json={"model": None, "endpoint_ok": False,
+                                         "container_status": None})
+
+    async with _client(handler) as client:
+        await remote_nodes.poll_all_nodes_once(client)
+    (status,) = remote_nodes.get_remote_node_statuses()
+    assert status.status == "online"
+    assert status.error is None
+
+
+@pytest.mark.asyncio
 async def test_poll_malformed_gpu_body_is_error(monkeypatch):
     monkeypatch.setenv("ODS_REMOTE_NODES", NODES_ENV)
     monkeypatch.setenv("TEST_NODE_KEY", "sekrit")

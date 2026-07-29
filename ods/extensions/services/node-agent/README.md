@@ -84,7 +84,23 @@ curl -H "Authorization: Bearer $NODE_AGENT_KEY" http://<node-ip>:7720/v1/node/gp
 ```json
 {
   "backend": "nvidia",
-  "gpus": [{"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GB10", "memory_used_mb": 1024, "memory_total_mb": 122880, "memory_percent": 0.8, "utilization_percent": 5, "temperature_c": 45, "power_w": 30.0, "memory_type": "unified"}]
+  "gpus": [{"index": 0, "uuid": "GPU-abc", "name": "NVIDIA GB10", "memory_used_mb": 1024, "memory_total_mb": 122880, "memory_percent": 0.8, "utilization_percent": 5, "temperature_c": 45, "power_w": 30.0, "memory_type": "unified"}],
+  "error": null
+}
+```
+
+`error` is nullable and reports a *collector* failure while the node itself is
+perfectly reachable: the collector is absent, or it ran and produced nothing
+usable. That is distinct from a node which genuinely has no GPUs, and which
+answers `"gpus": [], "error": null`. The dashboard keeps such a node `online`
+and displays the message on its card. The field is additive — a dashboard-api
+predating it simply ignores it.
+
+```json
+{
+  "backend": "nvidia",
+  "gpus": [],
+  "error": "GPU collector unavailable: no usable 'nvidia' collector on this node (check that the vendor SMI tool is installed and that the GPU devices are exposed to this container)"
 }
 ```
 
