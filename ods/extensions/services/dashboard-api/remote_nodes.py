@@ -39,6 +39,38 @@ class RemoteNodeConfig:
     display_name: str | None = None
 
 
+def _load_node_keys_map() -> dict:
+    """Parse ODS_REMOTE_NODE_KEYS, the preferred key-delivery mechanism: a
+    single JSON object {"<node name>": "<bearer key>"}. This exists because
+    compose services enumerate their environment explicitly, so an
+    admin-chosen key_env var name is never forwarded into the container
+    without a per-node compose edit -- one map var sidesteps that.
+    Malformed input (bad JSON / not an object) logs a warning and is
+    treated as empty, mirroring load_remote_nodes' own malformed-config
+    handling; it must never crash the registry.
+    """
+    raw = os.environ.get("ODS_REMOTE_NODE_KEYS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        assert isinstance(parsed, dict)
+    except (ValueError, AssertionError):
+        logger.warning("ODS_REMOTE_NODE_KEYS is not a JSON object; ignoring")
+        return {}
+    return parsed
+
+
+def _resolve_node_key(name: str, key_env: str, keys_map: dict) -> str:
+    """Resolution order: (1) keys_map[name] if present and non-empty,
+    (2) key_env lookup (fallback, kept working), (3) empty string. Keys
+    are never read from the ODS_REMOTE_NODES topology JSON itself."""
+    mapped = keys_map.get(name)
+    if mapped:
+        return str(mapped)
+    return os.environ.get(key_env, "") if key_env else ""
+
+
 def load_remote_nodes() -> list[RemoteNodeConfig]:
     raw = os.environ.get("ODS_REMOTE_NODES", "").strip()
     if not raw:
@@ -49,15 +81,17 @@ def load_remote_nodes() -> list[RemoteNodeConfig]:
     except (ValueError, AssertionError):
         logger.warning("ODS_REMOTE_NODES is not a JSON list; ignoring")
         return []
+    keys_map = _load_node_keys_map()
     nodes: list[RemoteNodeConfig] = []
     for entry in entries:
         if not isinstance(entry, dict) or not entry.get("name") \
                 or not entry.get("url"):
             logger.warning("Skipping malformed remote node entry: %r", entry)
             continue
-        key = os.environ.get(entry.get("key_env", ""), "")
+        name = str(entry["name"])
+        key = _resolve_node_key(name, entry.get("key_env", ""), keys_map)
         nodes.append(RemoteNodeConfig(
-            name=str(entry["name"]), url=str(entry["url"]).rstrip("/"),
+            name=name, url=str(entry["url"]).rstrip("/"),
             key=key, display_name=entry.get("display_name")))
     return nodes
 
