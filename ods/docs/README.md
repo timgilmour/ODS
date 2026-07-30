@@ -132,6 +132,7 @@ canonical source and treat older recipes as context.
 | [MODEL-SWITCHBOARD.md](MODEL-SWITCHBOARD.md) | Contributors | Model Switchboard architecture, PR series plan, state/route contracts, and rollout gates |
 | [CAPABILITY-PROFILE.md](CAPABILITY-PROFILE.md) | Developers | Machine capability profiling schema |
 | [MULTI-USER-SETUP.md](MULTI-USER-SETUP.md) | Operators | Expose and tune one install for multiple users |
+| [NETWORK-PORTS.md](NETWORK-PORTS.md) | Operators | Every host-facing port, what guards it, which env var moves it (generated) |
 | [PROFILES.md](PROFILES.md) | Reference | Docker Compose profiles (historical reference) |
 | [MODE-SWITCH.md](MODE-SWITCH.md) | Operators | Cloud/local/hybrid deployment modes (planned) |
 | [VLLM-SETUP.md](VLLM-SETUP.md) | Operators | Optional vLLM setup notes for high-concurrency NVIDIA inference |
