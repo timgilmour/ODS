@@ -39,6 +39,15 @@ services:
       - HIPFIRE_THINKING_BUDGET=${HIPFIRE_THINKING_BUDGET:-med}
     volumes:
       - ./data/hipfire/models:/opt/hipfire/.hipfire/models:ro,z
+      # JIT-validated kernel-blob cache (.hsaco + .hash sidecars). The image
+      # ships precompiled blobs WITHOUT .hash sidecars, so a fresh container
+      # distrusts them and recompiles every kernel the model touches (~20 s
+      # of cold start). Model activation RECREATES this container (stop +
+      # up -d, because HIPFIRE_MODEL is baked in at create time), which
+      # discards the overlay-fs copy of the JIT cache — persisting the hot
+      # cache dir makes recompilation once-per-toolchain instead of
+      # once-per-activation.
+      - ./data/hipfire/kernels:/opt/hipfire/.hipfire_kernels:z
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${HIPFIRE_PORT:-11435}:11435"
     healthcheck:
