@@ -23,11 +23,16 @@ services:
       NODE_SERVING_PROBE_URL: ${NODE_SERVING_PROBE_URL:-}
       NODE_SERVING_CONTAINER: ${NODE_SERVING_CONTAINER:-}
       NODE_AGENT_PORT: ${NODE_AGENT_PORT:-7720}
+      # Empty = every interface, which is what host networking gives you by
+      # default. Set it to one address on a multi-homed node (see README).
+      NODE_AGENT_BIND: ${NODE_AGENT_BIND:-}
       NODE_GPU_CACHE_TTL: ${NODE_GPU_CACHE_TTL:-2.0}
     healthcheck:
       # Liveness only: proves uvicorn is listening. Every route is bearer-gated,
       # so an HTTP probe would need the key; python is already in the image.
-      test: ["CMD", "python", "-c", "import os,socket; socket.create_connection(('127.0.0.1',int(os.environ.get('NODE_AGENT_PORT','7720'))),3).close()"]
+      # The probe follows NODE_AGENT_BIND: binding one address makes a fixed
+      # 127.0.0.1 probe fail against a perfectly healthy agent.
+      test: ["CMD", "python", "-c", "import os,socket; h=os.environ.get('NODE_AGENT_BIND','').strip(); h='127.0.0.1' if h in ('','0.0.0.0','::') else h; socket.create_connection((h,int(os.environ.get('NODE_AGENT_PORT','7720'))),3).close()"]
       interval: 30s
       timeout: 5s
       retries: 3

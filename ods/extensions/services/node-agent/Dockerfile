@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY ods/extensions/services/dashboard-api/gpu.py ./gpu.py
 COPY ods/extensions/services/node-agent/*.py ./
 EXPOSE 7720
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${NODE_AGENT_PORT:-7720}"]
+CMD ["sh", "-c", "uvicorn app:app --host ${NODE_AGENT_BIND:-0.0.0.0} --port ${NODE_AGENT_PORT:-7720}"]

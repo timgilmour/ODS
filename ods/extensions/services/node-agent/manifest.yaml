@@ -79,6 +79,14 @@ service:
       description: |
         Port uvicorn binds inside the container, which under network_mode:host
         is also the host port. Defaults to 7720.
+    - key: NODE_AGENT_BIND
+      required: false
+      description: |
+        Address uvicorn binds inside the container. Under network_mode:host
+        the default (0.0.0.0) means every interface on the remote node,
+        including any WAN or management NIC it has. Set it to one address on
+        a multi-homed node to keep the metrics API off the others. The
+        healthcheck follows this value. Defaults to 0.0.0.0.
     - key: NODE_GPU_CACHE_TTL
       required: false
       description: |
