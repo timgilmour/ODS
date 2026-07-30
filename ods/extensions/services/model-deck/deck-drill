@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# deck-drill — run the Model Deck live capability suite.
+# Safe tier by default; --disruptive adds the windowed tier.
+set -euo pipefail
+
+EXT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ODS_ENV="${ODS_ENV:-$HOME/ods/.env}"
+REPORT_DIR="${REPORT_DIR:-$HOME/notes/evidence/deck-drills}"
+IMAGE=model-deck-drill
+
+MARKER="safe"
+FORCE=0
+PYTEST_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --disruptive) MARKER="safe or disruptive"; shift ;;
+    --disruptive-only) MARKER="disruptive"; shift ;;
+    --force) FORCE=1; shift ;;
+    --report-dir) REPORT_DIR="$2"; shift 2 ;;
+    *) PYTEST_ARGS+=("$1"); shift ;;
+  esac
+done
+
+mkdir -p "$REPORT_DIR"
+
+if [[ "$MARKER" != "safe" && "$FORCE" != 1 ]]; then
+  QD=$(curl -sf --max-time 5 localhost:3015/api/state |
+       python3 -c 'import json,sys; print(json.load(sys.stdin)["world"]["tenants"]["hipfire"].get("queue_depth") or 0)' \
+       || echo unreachable)
+  if [[ "$QD" == unreachable ]]; then
+    echo "deck-drill: PRE-FLIGHT REFUSED — deck unreachable on :3015" >&2; exit 2
+  fi
+  if [[ "$QD" != 0 ]]; then
+    echo "deck-drill: PRE-FLIGHT REFUSED — hipfire request in flight (queue_depth=$QD)." >&2
+    echo "Re-run with --force only inside a declared window." >&2; exit 2
+  fi
+  echo "deck-drill: disruptive tier — this WILL evict hipfire's conversation cache," \
+       "park/resume hipfire, and flip the default route. Ctrl-C within 10 s to abort."
+  sleep 10
+fi
+
+# Raw docker build on purpose: `ods restart --rebuild-images` skips extension images.
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" "$EXT_DIR/livetests"
+
+LEMONADE_API_KEY="$(grep -E '^LEMONADE_API_KEY=' "$ODS_ENV" | cut -d= -f2- || true)"
+LITELLM_KEY="$(grep -E '^LITELLM_KEY=' "$ODS_ENV" | cut -d= -f2- || true)"
+export LEMONADE_API_KEY LITELLM_KEY
+
+set +e
+docker run --rm --network ods-network \
+  --user "$(id -u):$(id -g)" \
+  -v "$EXT_DIR":/suite:ro \
+  -v /sys:/sysfs:ro \
+  -v "$HOME/ods/data/models":/gguf-store:ro \
+  -v "$REPORT_DIR":/reports \
+  -e LEMONADE_API_KEY -e LITELLM_KEY -e DECK_DRILL_FORCE="$FORCE" \
+  "$IMAGE" python -m pytest /suite/livetests -m "$MARKER" "${PYTEST_ARGS[@]}"
+RC=$?
+set -e
+echo "deck-drill: report in $REPORT_DIR"
+case "$RC" in
+  0|5) exit 0 ;;   # 5 = no tests collected for the marker/-k combo — not a failure
+  *)   exit 1 ;;
+esac
