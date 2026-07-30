@@ -50,6 +50,10 @@ class LiteLLMClient:
                 return "hipfire" in entry["litellm_params"].get("api_base", "")
         return False
 
+    def model_info(self) -> list[dict]:
+        """Raw /model/info entries — for callers needing api_base etc."""
+        return self._model_info()
+
     def _model_info(self) -> list[dict]:
         try:
             resp = self._client.get("/model/info")

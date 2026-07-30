@@ -29,6 +29,7 @@ carries real in-memory idle-clock state that must stay single-sourced, not
 forked into two silently-diverging copies.
 """
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.engines import BusyError, EngineError, GuardError
 from app.gateway import detect_default_gateway
-from app.routers import control, policy, sets, status
+from app.routers import control, policy, sets, spark, status
 from app.settings import Settings
 
 # The GGUF store is bound read-only into the container at this path (see
@@ -120,6 +121,23 @@ def _build_deck(settings: Settings) -> dict:
     )
     hostagent = HostAgent(hostagent_url, settings.hostagent_key)
 
+    from app.engines.spark import SparkClient
+
+    spark_client = None
+    if settings.spark_node_url and settings.spark_serving_url:
+        try:
+            node_keys = json.loads(settings.spark_node_keys_json or "{}")
+        except ValueError:
+            node_keys = {}
+        spark_key = node_keys.get(settings.spark_node_name, "")
+        if isinstance(spark_key, str) and spark_key:
+            spark_client = SparkClient(
+                node_url=settings.spark_node_url,
+                node_key=spark_key,
+                serving_url=settings.spark_serving_url,
+                litellm=litellm,
+            )
+
     deck = {
         "settings": settings,
         "world": World(),
@@ -127,6 +145,7 @@ def _build_deck(settings: Settings) -> dict:
         "comfy": comfy,
         "hipfire": hipfire,
         "hostagent": hostagent,
+        "spark": spark_client,
         "litellm": litellm,
         "registry": Registry(data_dir / "registry.json", _GGUF_DIR),
         "policy_store": PolicyStore(data_dir / "policy.json"),
@@ -211,6 +230,7 @@ def create_app() -> FastAPI:
     app.include_router(control.router, prefix="/api")
     app.include_router(sets.router, prefix="/api")
     app.include_router(policy.router, prefix="/api")
+    app.include_router(spark.router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when
     # present so the API keeps working standalone until then. Mounted LAST:

@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     litellm_url: str = "http://litellm:4000"
     litellm_key: str = Field(default="", validation_alias="LITELLM_KEY")
 
+    # --- Spark (remote single-slot serving node; lifecycle only) ---
+    # Empty node/serving URL leaves the spark engine unbuilt (the /api/spark
+    # endpoints answer 503). The bearer key comes from the stack-wide
+    # ODS_REMOTE_NODE_KEYS JSON map (the same credential dashboard-api's
+    # remote-node poller consumes), selected by spark_node_name.
+    spark_node_url: str = ""
+    spark_node_name: str = "sparky"
+    spark_serving_url: str = ""
+    spark_node_keys_json: str = Field(default="",
+                                      validation_alias="ODS_REMOTE_NODE_KEYS")
+
     # --- Host agent ---
     # Empty = auto-derive from this container's default gateway. The host
     # agent binds the ods-network host-side gateway (e.g. 172.18.0.1), which
