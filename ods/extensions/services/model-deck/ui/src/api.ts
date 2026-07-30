@@ -241,6 +241,54 @@ export function deleteSet(slug: string): Promise<{ status: string }> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Spark (remote single-slot node — /api/spark/*, see app/routers/spark.py)
+// ---------------------------------------------------------------------------
+
+export interface SparkServing {
+  model: string | null;
+  endpoint_ok: boolean;
+  container_status: string | null;
+}
+
+export interface SparkSwapStatus {
+  state: "swapping" | "done" | "error";
+  profile: string;
+  id: string;
+  message: string;
+  ts: string;
+}
+
+export interface SparkStatus {
+  profiles: string[];
+  swap_status: SparkSwapStatus | null;
+  serving: SparkServing;
+}
+
+/** GET /api/spark/status — null when the spark engine isn't configured
+ * (503), which is how the card feature-detects whether to render at all.
+ * Every other failure propagates: a configured-but-unreachable spark is a
+ * real error the operator should see, not an absent card. */
+export async function getSparkStatus(): Promise<SparkStatus | null> {
+  try {
+    return await request<SparkStatus>("/api/spark/status");
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 503) return null;
+    throw err;
+  }
+}
+
+/** POST /api/spark/swap. Throws ApiError(409) for both guard refusals
+ * (busy serving — force-retryable) and an already-running swap (not
+ * force-retryable; the message says which). */
+export function sparkSwap(profile: string, force = false): Promise<unknown> {
+  return request<unknown>("/api/spark/swap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile, force }),
+  });
+}
+
 export function putPolicy(policies: PolicyMap): Promise<PolicyMap> {
   return request<PolicyMap>("/api/policy", {
     method: "PUT",

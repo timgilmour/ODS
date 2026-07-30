@@ -4,6 +4,7 @@ import EventLog from "./components/EventLog";
 import GpuColumn from "./components/GpuColumn";
 import PolicyModal from "./components/PolicyModal";
 import SetBuilder from "./components/SetBuilder";
+import SparkCard from "./components/SparkCard";
 import SetStrip from "./components/SetStrip";
 
 const POLL_MS = 3000;
@@ -92,6 +93,8 @@ export default function App() {
               ))}
             </div>
           )}
+
+          <SparkCard refreshTrigger={refreshTrigger} onChanged={refreshAll} />
         </>
       )}
 
