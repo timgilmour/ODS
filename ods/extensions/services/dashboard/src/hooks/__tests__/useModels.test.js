@@ -1,5 +1,5 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
-import { useModels } from '../useModels'
+import { getMockModels, MOCK_MODES, useModels } from '../useModels'
 
 // Shadow jsdom's Document.prototype.hidden getter on the instance; deleting
 // the own property in afterEach restores the prototype behavior.
@@ -23,8 +23,12 @@ const modelsResponse = (models, overrides = {}) => ({
     models,
     gpu: null,
     currentModel: null,
+    activationReadyModel: Object.prototype.hasOwnProperty.call(overrides, 'activationReadyModel')
+      ? overrides.activationReadyModel
+      : (overrides.currentModel ?? null),
     odsMode: 'local',
     configuredMode: 'local',
+    llmBackend: 'llama-server',
     ...overrides,
   })
 })
@@ -37,6 +41,16 @@ describe('useModels', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     delete document.hidden
+  })
+
+  test('development fixtures use unique model IDs and runnable local modes', () => {
+    const mockModels = getMockModels()
+    const modelIds = mockModels.map(model => model.id)
+
+    expect(new Set(modelIds).size).toBe(modelIds.length)
+    expect(modelIds).toContain('Qwen/Qwen2.5-32B-Instruct-AWQ')
+    expect(modelIds).toContain('Qwen/Qwen2.5-Coder-32B-Instruct-AWQ')
+    expect(MOCK_MODES).toEqual({ odsMode: 'local', configuredMode: 'local' })
   })
 
   test('fetches models on mount', async () => {
@@ -71,6 +85,43 @@ describe('useModels', () => {
     expect(result.current.error).toBeNull()
   })
 
+  test('surfaces backend-owned activation as a pending model action', async () => {
+    const target = 'slow-model'
+    fetch.mockResolvedValue(modelsResponse(
+      [{
+        id: target,
+        status: 'downloaded',
+        modelOperation: {
+          active: true,
+          operation: 'model_activation',
+          modelId: target,
+        },
+      }],
+      {
+        modelLifecycle: {
+          active: true,
+          operation: 'model_activation',
+          target,
+          modelId: target,
+        },
+      }
+    ))
+
+    const { result } = renderHook(() => useModels())
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    expect(result.current.modelLifecycle).toEqual({
+      active: true,
+      operation: 'model_activation',
+      target,
+      modelId: target,
+    })
+    expect(result.current.activationLoading).toBe(target)
+    expect(result.current.actionLoadingModels).toEqual([target])
+  })
+
   test('treats a missing runtime mode as unknown and blocks activation', async () => {
     fetch.mockResolvedValue({
       ok: true,
@@ -103,6 +154,28 @@ describe('useModels', () => {
     expect(activationPosts).toHaveLength(0)
     expect(result.current.actionLoading).toBeNull()
     expect(result.current.error).toBe('ODS is running in cloud mode. A local-mode installation is required to run downloaded models.')
+  })
+
+  test('keeps browsing available but blocks local activation for an external backend', async () => {
+    const target = 'downloaded-model'
+    fetch.mockResolvedValue(modelsResponse(
+      [{ id: target, status: 'downloaded' }],
+      { odsMode: 'local', configuredMode: 'local', llmBackend: 'external' }
+    ))
+
+    const { result } = renderHook(() => useModels())
+    await waitFor(() => expect(result.current.llmBackend).toBe('external'))
+
+    expect(result.current.models).toHaveLength(1)
+    expect(result.current.canActivateModels).toBe(false)
+
+    await act(async () => {
+      await result.current.loadModel(target)
+    })
+
+    const activationPosts = fetch.mock.calls.filter(([, options]) => options?.method === 'POST')
+    expect(activationPosts).toHaveLength(0)
+    expect(result.current.error).toContain('external Ollama or LM Studio backend')
   })
 
   test('does not activate when effective and configured modes differ', async () => {
@@ -155,9 +228,136 @@ describe('useModels', () => {
     })
 
     const postCall = fetch.mock.calls.find(c => c[1]?.method === 'POST')
-    expect(postCall).toBeTruthy()
-    expect(postCall[0]).toContain('new-model')
-    expect(postCall[0]).toContain('/download')
+    expect(postCall[0]).toBe('/api/models/new-model/download')
+    expect(Object.keys(postCall[1]).sort()).toEqual(['method', 'signal'])
+    expect(postCall[1]).toMatchObject({ method: 'POST' })
+    expect(postCall[1].signal).toBeInstanceOf(globalThis.AbortSignal)
+  })
+
+  test('loadModel sends the exact encoded activation request', async () => {
+    vi.useFakeTimers()
+    const target = 'org/model q4'
+    let currentModel = null
+    fetch.mockImplementation((_url, options) => {
+      if (options?.method === 'POST') {
+        currentModel = target
+        return Promise.resolve({ ok: true })
+      }
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: currentModel ? 'loaded' : 'downloaded' }],
+        { currentModel }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+
+      const postCall = fetch.mock.calls.find(c => c[1]?.method === 'POST')
+      expect(postCall[0]).toBe('/api/models/org%2Fmodel%20q4/load')
+      expect(Object.keys(postCall[1]).sort()).toEqual(['method', 'signal'])
+      expect(postCall[1]).toMatchObject({ method: 'POST' })
+      expect(postCall[1].signal).toBeInstanceOf(globalThis.AbortSignal)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('loadModel sends context and waits for the requested runtime context', async () => {
+    vi.useFakeTimers()
+    const target = 'qwen-long-context'
+    let contextLength = 65536
+    fetch.mockImplementation((_url, options) => {
+      if (options?.method === 'POST') {
+        const body = JSON.parse(options.body)
+        contextLength = body.context_length
+        return Promise.resolve({ ok: true })
+      }
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: 'loaded', contextLength }],
+        { currentModel: target }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target, { contextLength: 262144 })
+      })
+
+      const postCall = fetch.mock.calls.find(c => c[1]?.method === 'POST')
+      expect(postCall[0]).toBe('/api/models/qwen-long-context/load')
+      expect(postCall[1]).toMatchObject({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context_length: 262144 }),
+      })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
+      expect(result.current.models[0].contextLength).toBe(262144)
+      expect(result.current.error).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('keeps activation pending until downstream synchronization is receipted', async () => {
+    vi.useFakeTimers()
+    const target = 'qwen-model'
+    let currentModel = null
+    let activationReadyModel = null
+    fetch.mockImplementation((_url, options) => {
+      if (options?.method === 'POST') {
+        currentModel = target
+        return Promise.resolve({ ok: true })
+      }
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: currentModel ? 'loaded' : 'downloaded' }],
+        { currentModel, activationReadyModel }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(result.current.currentModel).toBe(target)
+      expect(result.current.activationReadyModel).toBeNull()
+      expect(result.current.actionLoading).toBe(target)
+
+      activationReadyModel = target
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
+      expect(result.current.activationReadyModel).toBe(target)
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('aborts a hung download start and releases its pending action for retry', async () => {
@@ -218,7 +418,6 @@ describe('useModels', () => {
   })
 
   test('keeps unrelated mutation errors separate from download start failures', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
     fetch.mockImplementation((_url, options) => {
       if (options?.method === 'DELETE') {
         return Promise.resolve({
@@ -286,7 +485,8 @@ describe('useModels', () => {
   })
 
   test('deleteModel calls DELETE and refreshes', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('confirm', vi.fn(() => { throw new Error('Native delete confirmation should stay in the page UI.') }))
+    const target = 'org/model q4'
 
     fetch.mockImplementation((url, opts) => {
       if (opts?.method === 'DELETE') {
@@ -302,17 +502,15 @@ describe('useModels', () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
 
     await act(async () => {
-      await result.current.deleteModel('to-delete')
+      await result.current.deleteModel(target)
     })
 
-    expect(confirm).toHaveBeenCalled()
+    expect(confirm).not.toHaveBeenCalled()
     const deleteCall = fetch.mock.calls.find(c => c[1]?.method === 'DELETE')
-    expect(deleteCall).toBeTruthy()
-    expect(deleteCall[0]).toContain('to-delete')
+    expect(deleteCall).toEqual(['/api/models/org%2Fmodel%20q4', { method: 'DELETE' }])
   })
 
   test('clears a pending delete when an independent refresh confirms removal', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
     const deleteRequest = deferred()
     let snapshot = [{ id: 'to-delete', status: 'downloaded' }]
     fetch.mockImplementation((_url, opts) => {
@@ -342,7 +540,6 @@ describe('useModels', () => {
   })
 
   test('shows the backend delete explanation instead of a generic failure', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
     fetch.mockImplementation((_url, opts) => {
       if (opts?.method === 'DELETE') {
         return Promise.resolve({
@@ -367,7 +564,6 @@ describe('useModels', () => {
 
   test('does not erase a mutation error when background list polling succeeds', async () => {
     vi.useFakeTimers()
-    vi.stubGlobal('confirm', vi.fn(() => true))
     fetch.mockImplementation((_url, opts) => {
       if (opts?.method === 'DELETE') {
         return Promise.resolve({
@@ -397,7 +593,6 @@ describe('useModels', () => {
 
   test('keeps activation working while an overlapping model mutation settles', async () => {
     vi.useFakeTimers()
-    vi.stubGlobal('confirm', vi.fn(() => true))
     const target = 'slow-model'
     const otherModel = 'other-model'
     const deleteRequest = deferred()
@@ -482,6 +677,57 @@ describe('useModels', () => {
         await loadPromise
       })
       expect(result.current.currentModel).toBe(target)
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('keeps activation pending while backend activation lifecycle is still active', async () => {
+    vi.useFakeTimers()
+    const target = 'warmup-model'
+    let currentModel = null
+    let activationActive = false
+    fetch.mockImplementation((_url, opts) => {
+      if (opts?.method === 'POST') return Promise.resolve({ ok: true })
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: currentModel ? 'loaded' : 'downloaded' }],
+        {
+          currentModel,
+          modelLifecycle: activationActive
+            ? {
+                active: true,
+                operation: 'model_activation',
+                target,
+                modelId: target,
+              }
+            : null,
+        }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+
+      currentModel = target
+      activationActive = true
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(result.current.currentModel).toBe(target)
+      expect(result.current.actionLoading).toBe(target)
+      expect(result.current.error).toBeNull()
+
+      activationActive = false
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
       expect(result.current.actionLoading).toBeNull()
       expect(result.current.error).toBeNull()
     } finally {
@@ -822,23 +1068,24 @@ describe('useModels', () => {
     }
   })
 
-  test('deleteModel aborts when user cancels confirm', async () => {
+  test('deleteModel does not depend on native confirm cancellation', async () => {
     vi.stubGlobal('confirm', vi.fn(() => false))
 
-    fetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ models: [{ id: 'keep-me' }], gpu: null, currentModel: null })
+    fetch.mockImplementation((_url, opts) => {
+      if (opts?.method === 'DELETE') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve(modelsResponse([{ id: 'keep-me', status: 'downloaded' }]))
     })
 
     const { result } = renderHook(() => useModels())
     await waitFor(() => expect(result.current.loading).toBe(false))
 
-    const callCountBefore = fetch.mock.calls.length
-
     await act(async () => {
       await result.current.deleteModel('keep-me')
     })
 
-    expect(fetch.mock.calls.length).toBe(callCountBefore)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(fetch.mock.calls.some(call => call[1]?.method === 'DELETE')).toBe(true)
   })
 })

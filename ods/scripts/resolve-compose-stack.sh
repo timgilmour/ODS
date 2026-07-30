@@ -9,6 +9,7 @@ ENV_MODE="false"
 SKIP_BROKEN="false"
 GPU_COUNT="1"
 ODS_MODE="${ODS_MODE:-local}"
+SKIP_GPU_OVERLAYS="${ODS_SKIP_GPU_OVERLAYS:-${ODS_SKIP_GPU_OVERLAYS_FOR:-}}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,6 +45,10 @@ while [[ $# -gt 0 ]]; do
             ODS_MODE="${2:-$ODS_MODE}"
             shift 2
             ;;
+        --skip-gpu-overlays|--skip-gpu-overlays-for)
+            SKIP_GPU_OVERLAYS="${2:-$SKIP_GPU_OVERLAYS}"
+            shift 2
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 1
@@ -68,7 +73,7 @@ if ! "$PYTHON_CMD" -c 'import yaml' >/dev/null 2>&1; then
     exit 2
 fi
 
-"$PYTHON_CMD" - "$SCRIPT_DIR" "$TIER" "$GPU_BACKEND" "$PROFILE_OVERLAYS" "$ENV_MODE" "$SKIP_BROKEN" "$GPU_COUNT" "$ODS_MODE" <<'PY'
+"$PYTHON_CMD" - "$SCRIPT_DIR" "$TIER" "$GPU_BACKEND" "$PROFILE_OVERLAYS" "$ENV_MODE" "$SKIP_BROKEN" "$GPU_COUNT" "$ODS_MODE" "$SKIP_GPU_OVERLAYS" <<'PY'
 import os
 import pathlib
 import platform
@@ -83,6 +88,11 @@ env_mode = (sys.argv[5] or "false").lower() == "true"
 skip_broken = (sys.argv[6] or "false").lower() == "true"
 gpu_count = int(sys.argv[7] or "1")
 ods_mode = (sys.argv[8] or os.environ.get("ODS_MODE", "local")).lower()
+skip_gpu_overlays = {
+    x.strip().lower()
+    for x in (sys.argv[9] or os.environ.get("ODS_SKIP_GPU_OVERLAYS", "")).split(",")
+    if x.strip()
+}
 lemonade_external = (
     os.environ.get("LEMONADE_EXTERNAL", "").lower() in {"1", "true", "yes", "on"}
     or (
@@ -90,6 +100,7 @@ lemonade_external = (
         and os.environ.get("AMD_INFERENCE_MANAGED", "").lower() == "false"
     )
 )
+external_llm = bool(os.environ.get("EXTERNAL_LLM_URL", "").strip())
 
 IS_DARWIN = platform.system() == "Darwin"
 APPLE_OVERLAY = "installers/macos/docker-compose.macos.yml" if IS_DARWIN else "docker-compose.apple.yml"
@@ -230,6 +241,7 @@ except (OSError, ValueError):
         "ape", "comfyui", "dashboard", "dashboard-api",
         "embeddings", "langfuse", "litellm", "llama-server", "n8n",
         "open-webui", "openclaw", "perplexica", "privacy-shield", "qdrant",
+        "remote-provider-egress", "remote-provider-ssh-tunnel",
         "searxng", "token-spy", "tts", "whisper",
     }
 
@@ -549,7 +561,7 @@ if ext_dir.exists():
                     continue
             # GPU-specific overlay (filesystem discovery — not in manifest)
             gpu_overlay = service_dir / f"compose.{gpu_backend}.yaml"
-            if gpu_overlay.exists():
+            if service_dir.name.lower() not in skip_gpu_overlays and gpu_overlay.exists():
                 resolved.append(str(gpu_overlay.relative_to(script_dir)))
 
             # Mode-specific overlay — depends_on for local/hybrid mode only.
@@ -562,7 +574,7 @@ if ext_dir.exists():
             # cloud overlay to profile out ODS's managed llama-server, so
             # local-mode overlays that wait on `llama-server: service_healthy`
             # would point at a disabled service and break lifecycle commands.
-            if ods_mode in ("local", "hybrid", "lemonade") and tier != "CLOUD" and gpu_backend != "apple" and not lemonade_external:
+            if ods_mode in ("local", "hybrid", "lemonade") and tier != "CLOUD" and gpu_backend != "apple" and not lemonade_external and not external_llm:
                 local_mode_overlay = service_dir / "compose.local.yaml"
                 if local_mode_overlay.exists():
                     resolved.append(str(local_mode_overlay.relative_to(script_dir)))
@@ -648,7 +660,7 @@ if user_ext_dir.exists():
                 resolved.append(str(compose_path.relative_to(script_dir)))
                 # GPU-specific overlay (filesystem discovery — not in manifest)
                 gpu_overlay = service_dir / f"compose.{gpu_backend}.yaml"
-                if gpu_overlay.exists():
+                if service_dir.name.lower() not in skip_gpu_overlays and gpu_overlay.exists():
                     # Fixed filename so traversal isn't possible, but the same
                     # security checks apply to the overlay's content.
                     ok, warnings = _scan_user_compose_content(gpu_overlay)
@@ -667,7 +679,7 @@ if user_ext_dir.exists():
                 # overlay to disable ODS's managed llama-server, so user-local
                 # overlays must not add local llama-server health dependencies.
                 # Mirrors the same guard in the built-in loop above (PR #1004).
-                if ods_mode in ("local", "hybrid", "lemonade") and tier != "CLOUD" and gpu_backend != "apple" and not lemonade_external:
+                if ods_mode in ("local", "hybrid", "lemonade") and tier != "CLOUD" and gpu_backend != "apple" and not lemonade_external and not external_llm:
                     local_mode_overlay = service_dir / "compose.local.yaml"
                     if local_mode_overlay.exists():
                         # Same content scan as compose.yaml/gpu overlay above —
@@ -711,6 +723,16 @@ if user_ext_dir.exists():
                     raise
     except OSError as e:
         print(f"WARNING: Could not scan user-extensions: {e}", file=sys.stderr)
+
+# External host runtimes disable ODS-managed inference and add the Linux
+# host-gateway alias to always-on clients. Append this before the operator
+# override so explicit local customization remains the final authority.
+external_llm_overlay = script_dir / "docker-compose.external-llm.yml"
+if external_llm:
+    if not external_llm_overlay.exists():
+        print("ERROR: EXTERNAL_LLM_URL is set but docker-compose.external-llm.yml is missing", file=sys.stderr)
+        sys.exit(1)
+    resolved.append("docker-compose.external-llm.yml")
 
 # Include docker-compose.override.yml if it exists (user customizations).
 # Even though the operator placed this file themselves, the resolver runs

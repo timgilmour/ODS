@@ -175,6 +175,7 @@ source "${LIB_DIR}/tier-map.sh"
 source "${LIB_DIR}/detection.sh"
 source "${LIB_DIR}/preflight-fs.sh"
 source "${LIB_DIR}/env-generator.sh"
+source "${LIB_DIR}/installed-footprint.sh"
 if [[ -f "${SOURCE_ROOT}/installers/lib/compose-failure-report.sh" ]]; then
     source "${SOURCE_ROOT}/installers/lib/compose-failure-report.sh"
 fi
@@ -420,18 +421,24 @@ HERMES_AUTH_VERIFY_PY
 
 _write_macos_opencode_config() {
     local config_path="$1" model_name="$2" base_url="$3" api_key="$4" context_length="$5"
+    # OpenCode reads config.json, not opencode.json, so the same document has
+    # to land in both files — matching installers/phases/07-devtools.sh on
+    # Linux and installers/windows/lib/opencode-config.ps1 on Windows.
+    local compat_path
+    compat_path="$(dirname "$config_path")/config.json"
     mkdir -p "$(dirname "$config_path")"
     ODS_OPENCODE_MODEL="$model_name" \
     ODS_OPENCODE_BASE_URL="$base_url" \
     ODS_OPENCODE_API_KEY="$api_key" \
     ODS_OPENCODE_CONTEXT="$context_length" \
-        /usr/bin/python3 - "$config_path" <<'OPENCODE_CONFIG_PY'
+        /usr/bin/python3 - "$config_path" "$compat_path" <<'OPENCODE_CONFIG_PY'
 import json
 import os
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
+compat_path = Path(sys.argv[2])
 try:
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 except (OSError, ValueError):
@@ -459,17 +466,25 @@ provider.update({
 data["model"] = f"{provider_id}/{model_name}"
 data.setdefault("$schema", "https://opencode.ai/config.json")
 
-tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
+payload = json.dumps(data, indent=2) + "\n"
 
-check = json.loads(path.read_text(encoding="utf-8"))
-check_provider = check["provider"][provider_id]
-if check.get("model") != f"{provider_id}/{model_name}":
-    raise SystemExit("OpenCode model verification failed")
-if check_provider["options"] != {"baseURL": base_url, "apiKey": api_key}:
-    raise SystemExit("OpenCode route verification failed")
+
+def write_atomic(target):
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, target)
+
+
+for target in (path, compat_path):
+    write_atomic(target)
+
+    check = json.loads(target.read_text(encoding="utf-8"))
+    check_provider = check["provider"][provider_id]
+    if check.get("model") != f"{provider_id}/{model_name}":
+        raise SystemExit(f"OpenCode model verification failed for {target.name}")
+    if check_provider["options"] != {"baseURL": base_url, "apiKey": api_key}:
+        raise SystemExit(f"OpenCode route verification failed for {target.name}")
 OPENCODE_CONFIG_PY
 }
 
@@ -499,6 +514,8 @@ _macos_collect_process_descendants() {
 }
 
 _macos_cancel_detached_bootstrap_upgrade() {
+    local cancel_reason="${1:-cloud_mode}"
+    local action_label="${2:-cloud transition}"
     local status_file="${INSTALL_DIR}/data/bootstrap-status.json"
     local args_file="${INSTALL_DIR}/data/bootstrap-upgrade.args"
     local pid_file="${INSTALL_DIR}/data/bootstrap-upgrade.pid"
@@ -538,7 +555,7 @@ _macos_cancel_detached_bootstrap_upgrade() {
     [[ "${#pids[@]}" -gt 0 ]] && should_mark_cancelled=true
 
     if [[ "${#pids[@]}" -gt 0 ]]; then
-        ai "Stopping ${#pids[@]} install-owned background model upgrade process(es) before cloud transition..."
+        ai "Stopping ${#pids[@]} install-owned background model upgrade process(es) before ${action_label}..."
         for pid in "${pids[@]}"; do
             pgid="$(ps -ww -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]' || true)"
             if [[ "$pgid" == "$pid" ]]; then
@@ -595,7 +612,7 @@ _macos_cancel_detached_bootstrap_upgrade() {
         fi
 
         if $alive; then
-            ai_err "Could not stop the complete install-owned background upgrade tree; refusing to rewrite cloud configuration."
+            ai_err "Could not stop the complete install-owned background upgrade tree; refusing to continue ${action_label}."
             return 1
         fi
     fi
@@ -605,17 +622,17 @@ _macos_cancel_detached_bootstrap_upgrade() {
         return 1
     }
     if [[ "$should_mark_cancelled" == "true" ]]; then
-        local status_tmp="${status_file}.cloud-transition.$$"
+        local status_tmp="${status_file}.${cancel_reason}.$$"
         local cancelled_at
         cancelled_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         mkdir -p "$(dirname "$status_file")"
-        if ! printf '{"status":"cancelled","reason":"cloud_mode","updatedAt":"%s"}\n' "$cancelled_at" > "$status_tmp" \
+        if ! printf '{"status":"cancelled","reason":"%s","updatedAt":"%s"}\n' "$cancel_reason" "$cancelled_at" > "$status_tmp" \
            || ! mv "$status_tmp" "$status_file"; then
             rm -f "$status_tmp" 2>/dev/null || true
-            ai_err "Could not mark the background model upgrade cancelled for cloud mode."
+            ai_err "Could not mark the background model upgrade cancelled for ${action_label}."
             return 1
         fi
-        ai_ok "Background model upgrade disabled for cloud mode"
+        ai_ok "Background model upgrade disabled for ${action_label}"
     fi
 }
 
@@ -625,9 +642,13 @@ _macos_launch_detached_bootstrap_upgrade() {
     local pid_file="${INSTALL_DIR}/data/bootstrap-upgrade.pid"
     local log_file="${INSTALL_DIR}/logs/model-upgrade.log"
     local python_cmd="${PYTHON_CMD:-/usr/bin/python3}"
+    local bash_cmd="${BASH:-bash}"
     [[ -x "$python_cmd" ]] || python_cmd="/usr/bin/python3"
+    if command -v cygpath >/dev/null 2>&1; then
+        bash_cmd="$(cygpath -w "$bash_cmd" 2>/dev/null || printf '%s' "$bash_cmd")"
+    fi
 
-    "$python_cmd" - "$pid_file" "$log_file" "$upgrade_script" "$@" <<'BOOTSTRAP_LAUNCH_PY'
+    BOOTSTRAP_BASH="$bash_cmd" "$python_cmd" - "$pid_file" "$log_file" "$upgrade_script" "$@" <<'BOOTSTRAP_LAUNCH_PY'
 import os
 import subprocess
 import sys
@@ -639,11 +660,12 @@ script = sys.argv[3]
 script_args = sys.argv[4:]
 if not script_args:
     raise SystemExit("bootstrap launcher requires the install directory")
+bash_exe = os.environ.get("BOOTSTRAP_BASH") or os.environ.get("BASH") or "bash"
 log_path.parent.mkdir(parents=True, exist_ok=True)
 pid_path.parent.mkdir(parents=True, exist_ok=True)
 with log_path.open("ab", buffering=0) as log_handle:
     proc = subprocess.Popen(
-        ["bash", script, *script_args],
+        [bash_exe, script, *script_args],
         cwd=script_args[0],
         stdin=subprocess.DEVNULL,
         stdout=log_handle,
@@ -658,13 +680,54 @@ os.replace(tmp, pid_path)
 BOOTSTRAP_LAUNCH_PY
 }
 
+_macos_persist_bootstrap_upgrade_args() {
+    local full_gguf_file="$1"
+    local full_gguf_url="$2"
+    local full_gguf_sha256="$3"
+    local full_llm_model="$4"
+    local full_max_context="$5"
+    local bootstrap_gguf_file="${6:-Qwen3.5-2B-Q4_K_M.gguf}"
+    local args_file="${INSTALL_DIR}/data/bootstrap-upgrade.args"
+
+    mkdir -p "${INSTALL_DIR}/data"
+    {
+        printf '%s\n' "$full_gguf_file"
+        printf '%s\n' "$full_gguf_url"
+        printf '%s\n' "$full_gguf_sha256"
+        printf '%s\n' "$full_llm_model"
+        printf '%s\n' "$full_max_context"
+        printf '%s\n' "$bootstrap_gguf_file"
+    } > "${args_file}.tmp" && mv "${args_file}.tmp" "$args_file" || {
+        rm -f "${args_file}.tmp" 2>/dev/null || true
+        ai_warn "Could not persist bootstrap-upgrade retry metadata"
+        return 1
+    }
+    chmod 600 "$args_file" 2>/dev/null || true
+}
+
+_macos_native_llama_cwd_is_owned() {
+    local process_cwd="$1" home_dir="${HOME:-}"
+    [[ -n "$process_cwd" ]] || return 1
+    [[ "$process_cwd" == "$INSTALL_DIR" ]] && return 0
+    return 1
+}
+
 _macos_native_llama_pid_is_owned() {
-    local pid="$1" command_line process_name
+    local pid="$1" command_line process_name process_cwd
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     process_name="$(ps -ww -p "$pid" -o comm= 2>/dev/null || true)"
     command_line="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
     [[ "${process_name##*/}" == "llama-server" ]] || return 1
-    [[ -n "${LLAMA_SERVER_BIN:-}" && "$command_line" == *"$LLAMA_SERVER_BIN"* ]]
+    if [[ -n "${LLAMA_SERVER_BIN:-}" && "$command_line" == *"$LLAMA_SERVER_BIN"* ]]; then
+        return 0
+    fi
+    case "$command_line" in
+        ./bin/llama-server*|bin/llama-server*)
+            process_cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+            _macos_native_llama_cwd_is_owned "$process_cwd"
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 _macos_stop_install_owned_native_llama() {
@@ -1530,6 +1593,34 @@ else
     # Copy source tree (skip .git, data, logs, .env, models)
     if [[ "$SOURCE_ROOT" != "$INSTALL_DIR" ]]; then
         ai "Copying source files to ${INSTALL_DIR}..."
+        _ods_prune_stale_dev_paths=false
+        if [[ -f "${INSTALL_DIR}/.env" ]] \
+            && [[ -f "${INSTALL_DIR}/manifest.json" ]] \
+            && [[ -f "${INSTALL_DIR}/docker-compose.base.yml" ]]; then
+            _ods_prune_stale_dev_paths=true
+        fi
+        _ods_dev_only_dirs=(tests docs examples .github)
+        _ods_dev_only_files=(
+            CHANGELOG.md
+            CODE_OF_CONDUCT.md
+            CONTRIBUTING.md
+            EDGE-QUICKSTART.md
+            FAQ.md
+            QUICKSTART.md
+            SECURITY.md
+            README.md
+            .shellcheckrc
+            PSScriptAnalyzerSettings.psd1
+            test-stack.sh
+            .gitignore
+        )
+        _ods_dev_rsync_excludes=()
+        for _ods_dev_path in "${_ods_dev_only_dirs[@]}"; do
+            _ods_dev_rsync_excludes+=(--exclude="/${_ods_dev_path}/")
+        done
+        for _ods_dev_path in "${_ods_dev_only_files[@]}"; do
+            _ods_dev_rsync_excludes+=(--exclude="/${_ods_dev_path}")
+        done
         rsync -a --quiet \
             --exclude='.git' \
             --exclude='data' \
@@ -1544,7 +1635,24 @@ else
             --exclude='.target-model' \
             --exclude='.target-quantization' \
             --exclude='.offline-mode' \
+            "${_ods_dev_rsync_excludes[@]}" \
             "$SOURCE_ROOT/" "$INSTALL_DIR/"
+
+        # Excludes leave files copied by an older installer in place. Move
+        # managed-upgrade leftovers to a recoverable backup instead of deleting
+        # possible user modifications. Unmanaged targets remain untouched.
+        if $_ods_prune_stale_dev_paths; then
+            _ods_dev_backup="$(
+                ods_quarantine_development_paths \
+                    "$INSTALL_DIR" \
+                    "${_ods_dev_only_dirs[@]}" \
+                    "${_ods_dev_only_files[@]}"
+            )"
+            if [[ -n "$_ods_dev_backup" ]]; then
+                ai_warn "Older development files were moved to ${_ods_dev_backup}"
+            fi
+        fi
+        unset _ods_prune_stale_dev_paths _ods_dev_only_dirs _ods_dev_only_files _ods_dev_rsync_excludes _ods_dev_path _ods_dev_backup
         ai_ok "Source files installed"
     else
         ai "Running in-place, skipping file copy"
@@ -1595,9 +1703,13 @@ else
     _macos_sync_builtin_compose_states
 
     # A detached bootstrap worker can rewrite GGUF_FILE/LLM_MODEL after its
-    # download finishes. Stop and disable it before cloud mode touches .env so
-    # the cloud values below are the final authoritative state.
-    if $CLOUD_MODE && ! _macos_cancel_detached_bootstrap_upgrade; then
+    # download finishes. Stop and disable it before cloud mode or a forced
+    # fresh install touches .env so the values below are authoritative.
+    if $CLOUD_MODE; then
+        if ! _macos_cancel_detached_bootstrap_upgrade "cloud_mode" "cloud transition"; then
+            exit 1
+        fi
+    elif $FORCE && ! _macos_cancel_detached_bootstrap_upgrade "fresh_install" "fresh install"; then
         exit 1
     fi
 
@@ -1608,12 +1720,30 @@ else
     _previous_llm_bind="$(read_env_value "${INSTALL_DIR}/.env" "BIND_ADDRESS")"
     _previous_macos_gateway="$(read_env_value "${INSTALL_DIR}/.env" "ODS_MACOS_HOST_GATEWAY")"
     generate_ods_env "$INSTALL_DIR" "$SELECTED_TIER" "$FORCE"
+    _macos_switchboard_mode="$(read_env_value "${INSTALL_DIR}/.env" "ODS_MODEL_SWITCHBOARD")"
+    case "${_macos_switchboard_mode:-observe}" in
+        legacy|observe|enabled) ;;
+        *) _macos_switchboard_mode="observe" ;;
+    esac
+    upsert_env_value "${INSTALL_DIR}/.env" "ODS_MODEL_SWITCHBOARD" "$_macos_switchboard_mode"
     _macos_agent_bind_raw="$(read_env_value "${INSTALL_DIR}/.env" "ODS_AGENT_BIND")"
     _macos_agent_bind="$(macos_normalize_agent_bind "${_macos_agent_bind_raw:-127.0.0.1}")"
     if [[ -n "$_macos_agent_bind_raw" && "$_macos_agent_bind" != "$_macos_agent_bind_raw" ]]; then
         ai_warn "ODS_AGENT_BIND=${_macos_agent_bind_raw} uses an unsupported IPv6 server socket; using ${_macos_agent_bind}"
         upsert_env_value "${INSTALL_DIR}/.env" "ODS_AGENT_BIND" "$_macos_agent_bind"
     fi
+    # Persist the interpreter that proved it can import yaml. _ensure_macos_pyyaml
+    # may have satisfied the compose resolver through an ODS-owned venv, but that
+    # choice only lives in this installer process. Without recording it, a later
+    # `ods enable` / `ods start` resolves python again, falls back to a host
+    # python3 that cannot import yaml, and scripts/resolve-compose-stack.sh fails
+    # after the install already reported success. lib/safe-env.sh exports .env
+    # keys, so the CLI and the resolver subprocess both pick this up.
+    if [[ -n "${ODS_PYTHON_CMD:-}" ]] && ! _macos_python_imports_yaml python3; then
+        upsert_env_value "${INSTALL_DIR}/.env" "ODS_PYTHON_CMD" "$ODS_PYTHON_CMD"
+        ai_ok "Recorded compose-resolver Python: ${ODS_PYTHON_CMD}"
+    fi
+
     _macos_llm_bridge_enabled="false"
     if [[ "${DOCKER_BACKEND:-unknown}" == "colima" ]]; then
         _macos_llm_bind="$(read_env_value "${INSTALL_DIR}/.env" "BIND_ADDRESS")"
@@ -1649,12 +1779,15 @@ else
         upsert_env_value "${INSTALL_DIR}/.env" "LLM_API_URL" "http://litellm:4000"
         upsert_env_value "${INSTALL_DIR}/.env" "HERMES_LLM_BASE_URL" "http://litellm:4000/v1"
         upsert_env_value "${INSTALL_DIR}/.env" "HERMES_LLM_API_KEY" "$_macos_litellm_key"
+        upsert_env_value "${INSTALL_DIR}/.env" "OPEN_WEBUI_LLM_BASE_URL" "http://litellm:4000"
+        upsert_env_value "${INSTALL_DIR}/.env" "OPEN_WEBUI_LLM_API_KEY" "$_macos_litellm_key"
         upsert_env_value "${INSTALL_DIR}/.env" "LLM_MODEL" "$LLM_MODEL"
         upsert_env_value "${INSTALL_DIR}/.env" "GGUF_FILE" ""
         upsert_env_value "${INSTALL_DIR}/.env" "MAX_CONTEXT" "$MAX_CONTEXT"
         upsert_env_value "${INSTALL_DIR}/.env" "CTX_SIZE" "$MAX_CONTEXT"
     else
         upsert_env_value "${INSTALL_DIR}/.env" "ODS_MODE" "local"
+        upsert_env_value "${INSTALL_DIR}/.env" "LLM_BACKEND" "llama-server"
         upsert_env_value "${INSTALL_DIR}/.env" "HERMES_LLM_API_KEY" "sk-ods-hermes-local"
         if [[ "$_previous_ods_mode" == "cloud" ]]; then
             upsert_env_value "${INSTALL_DIR}/.env" "LLM_MODEL" "$LLM_MODEL"
@@ -1668,6 +1801,17 @@ else
         else
             upsert_env_value "${INSTALL_DIR}/.env" "LLM_API_URL" "http://host.docker.internal:8080"
             upsert_env_value "${INSTALL_DIR}/.env" "HERMES_LLM_BASE_URL" "http://host.docker.internal:8080/v1"
+        fi
+        if [[ "$_macos_switchboard_mode" == "enabled" ]]; then
+            _macos_litellm_key="$(read_env_value "${INSTALL_DIR}/.env" "LITELLM_KEY")"
+            if [[ -z "$_macos_litellm_key" ]]; then
+                ai_err "Switchboard mode requires the generated LiteLLM master key, but LITELLM_KEY is empty."
+                exit 1
+            fi
+            upsert_env_value "${INSTALL_DIR}/.env" "HERMES_LLM_BASE_URL" "http://litellm:4000/v1"
+            upsert_env_value "${INSTALL_DIR}/.env" "HERMES_LLM_API_KEY" "$_macos_litellm_key"
+            upsert_env_value "${INSTALL_DIR}/.env" "OPEN_WEBUI_LLM_BASE_URL" "http://litellm:4000"
+            upsert_env_value "${INSTALL_DIR}/.env" "OPEN_WEBUI_LLM_API_KEY" "$_macos_litellm_key"
         fi
     fi
     if [[ "${DOCKER_BACKEND:-unknown}" == "colima" ]] \
@@ -1684,6 +1828,39 @@ else
         _macos_litellm_key
     CONTAINER_LLM_URL="$(read_env_value "${INSTALL_DIR}/.env" "LLM_API_URL")"
     [[ -n "$CONTAINER_LLM_URL" ]] || CONTAINER_LLM_URL="http://host.docker.internal:8080"
+    _macos_runtime_renderer="${ODS_PYTHON_CMD:-python3}"
+    if [[ ! -f "${INSTALL_DIR}/scripts/render-runtime-configs.py" ]] \
+        || ! command -v "$_macos_runtime_renderer" >/dev/null 2>&1; then
+        ai_err "Model router config renderer is unavailable"
+        exit 1
+    fi
+    _macos_router_args=(
+        --switchboard-mode "$_macos_switchboard_mode"
+        --ods-mode "$(read_env_value "${INSTALL_DIR}/.env" "ODS_MODE")"
+        --gpu-backend "apple"
+        --model "${LLM_MODEL:-}"
+        --gguf-file "${GGUF_FILE:-}"
+        --llm-base-url "${CONTAINER_LLM_URL}"
+        --litellm-key "$(read_env_value "${INSTALL_DIR}/.env" "LITELLM_KEY")"
+        --context-length "${MAX_CONTEXT:-65536}"
+        --output-root "$INSTALL_DIR"
+        --write
+    )
+    for _macos_router_surface in model-router-endpoints; do
+        if ! "$_macos_runtime_renderer" "${INSTALL_DIR}/scripts/render-runtime-configs.py" \
+            --surface "$_macos_router_surface" "${_macos_router_args[@]}" >> "$ODS_LOG_FILE" 2>&1; then
+            ai_err "Failed to render required ${_macos_router_surface} config"
+            exit 1
+        fi
+    done
+    if [[ "$_macos_switchboard_mode" == "enabled" ]] \
+       && [[ "$(read_env_value "${INSTALL_DIR}/.env" "ODS_MODE")" != "cloud" ]] \
+       && ! "$_macos_runtime_renderer" "${INSTALL_DIR}/scripts/render-runtime-configs.py" \
+            --surface litellm-switchboard "${_macos_router_args[@]}" >> "$ODS_LOG_FILE" 2>&1; then
+        ai_err "Failed to render required litellm-switchboard config"
+        exit 1
+    fi
+    unset _macos_runtime_renderer _macos_router_args _macos_router_surface
     if $env_existed && ! $FORCE; then
         ai_ok "Preserved existing .env (use --force to regenerate secrets)"
     else
@@ -1762,7 +1939,7 @@ else
 
         GGUF_FILE="$BOOTSTRAP_GGUF_FILE"
         GGUF_URL="$BOOTSTRAP_GGUF_URL"
-        GGUF_SHA256=""
+        GGUF_SHA256="${BOOTSTRAP_GGUF_SHA256:-}"
         LLM_MODEL="$BOOTSTRAP_LLM_MODEL"
         MAX_CONTEXT="$BOOTSTRAP_MAX_CONTEXT"
         ai "Fast-start mode: downloading bootstrap model (~1.5GB) for instant chat."
@@ -2246,11 +2423,13 @@ for service in (data.get("services") or {}).values():
     if service.get("build") is not None:
         continue
     image = str(service.get("image") or "").strip()
-    if image:
-        print(image)
-' | while IFS= read -r _image; do
+    if not image:
+        continue
+    platform = str(service.get("platform") or "").strip()
+    print(image + "\t" + platform)
+' | while IFS=$'\t' read -r _image _platform; do
                 _macos_is_local_image "$_image" && continue
-                printf '%s\n' "$_image"
+                printf '%s\t%s\n' "$_image" "$_platform"
             done | awk '!seen[$0]++'; then
                 return 0
             fi
@@ -2262,19 +2441,91 @@ for service in (data.get("services") or {}).values():
         done | awk '!seen[$0]++'
     }
 
-    _macos_pull_image_with_retry() {
-        local image="$1" attempt max_attempts delay
-        local -a delays=(5 15 30)
+    _macos_normalize_image_platform() {
+        local raw="${1:-}" os arch variant extra
+        raw="${raw//$'\r'/}"
+        raw="${raw//$'\n'/}"
+        raw="${raw//[[:space:]]/}"
+        raw="${raw,,}"
+        raw="${raw#\"}"
+        raw="${raw%\"}"
+        raw="${raw#\'}"
+        raw="${raw%\'}"
+        [[ -n "$raw" ]] || return 1
 
-        if docker image inspect "$image" >/dev/null 2>&1; then
-            log "Compose image already cached: $image"
-            return 0
+        if [[ "$raw" != */* ]]; then
+            raw="linux/$raw"
+        fi
+        IFS='/' read -r os arch variant extra <<< "$raw"
+        [[ -n "$os" && -n "$arch" && -z "$extra" ]] || return 1
+
+        case "$arch" in
+            amd64|x86_64|x86-64)
+                arch="amd64"
+                ;;
+            arm64|aarch64)
+                arch="arm64"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+
+        case "${variant:-}" in
+            ""|"<no value>")
+                variant=""
+                ;;
+            v8)
+                [[ "$arch" == "arm64" ]] || return 1
+                variant=""
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+
+        printf '%s/%s\n' "$os" "$arch"
+    }
+
+    _macos_cached_image_platform() {
+        local image="$1" inspected
+        inspected="$(docker image inspect \
+            --format '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' \
+            "$image" 2>/dev/null)" || return 1
+        _macos_normalize_image_platform "$inspected"
+    }
+
+    _macos_pull_image_with_retry() {
+        # $2 is the compose service's platform pin (may be empty). Without it,
+        # docker pull resolves the host platform (linux/arm64 on Apple
+        # Silicon), which hard-fails for amd64-only images like TEI even
+        # though compose would run them pinned under emulation.
+        local image="$1" platform="${2:-}" attempt max_attempts delay cached_platform requested_platform
+        local -a delays=(5 15 30)
+        local -a pull_cmd=(docker pull "$image")
+        [[ -n "$platform" ]] && pull_cmd=(docker pull --platform "$platform" "$image")
+
+        if [[ -z "$platform" ]]; then
+            if docker image inspect "$image" >/dev/null 2>&1; then
+                log "Compose image already cached: $image"
+                return 0
+            fi
+        else
+            requested_platform="$(_macos_normalize_image_platform "$platform" 2>/dev/null || true)"
+            cached_platform="$(_macos_cached_image_platform "$image" 2>/dev/null || true)"
+            if [[ -n "$requested_platform" && "$cached_platform" == "$requested_platform" ]]; then
+                log "Compose image already cached for $requested_platform: $image"
+                return 0
+            fi
+            if [[ -n "$cached_platform" ]]; then
+                log "Compose image cache platform mismatch for $image: cached=$cached_platform requested=${requested_platform:-$platform}"
+            fi
         fi
 
         max_attempts="${ODS_DOCKER_PULL_MAX_ATTEMPTS:-4}"
         for ((attempt=1; attempt<=max_attempts; attempt++)); do
-            ai "Pulling Compose image ($attempt/$max_attempts): $image"
-            if docker pull "$image" >>"$ODS_LOG_FILE" 2>&1; then
+            ai "Pulling Compose image ($attempt/$max_attempts): $image${platform:+ [$platform]}"
+            if "${pull_cmd[@]}" >>"$ODS_LOG_FILE" 2>&1; then
                 ai_ok "Pulled $image"
                 return 0
             fi
@@ -2290,7 +2541,7 @@ for service in (data.get("services") or {}).values():
     }
 
     _macos_pre_pull_compose_images() {
-        local image_output image failed
+        local image_output image platform failed
         image_output="$(_macos_compose_external_images)" || {
             ai_err "Could not resolve macOS Docker Compose images before service launch"
             ai "Inspect compose config with: cd '$INSTALL_DIR' && docker compose ${COMPOSE_FLAGS[*]} config --images"
@@ -2300,9 +2551,9 @@ for service in (data.get("services") or {}).values():
 
         ai "Verifying Compose image cache before launch..."
         failed=0
-        while IFS= read -r image; do
+        while IFS=$'\t' read -r image platform; do
             [[ -n "$image" ]] || continue
-            _macos_pull_image_with_retry "$image" || failed=$((failed + 1))
+            _macos_pull_image_with_retry "$image" "$platform" || failed=$((failed + 1))
         done <<< "$image_output"
 
         if [[ "$failed" -eq 0 ]]; then
@@ -2324,7 +2575,7 @@ for service in (data.get("services") or {}).values():
     # surface unrelated Dockerfile failures and make a healthy selected stack
     # look broken.
     ai "Rebuilding local-built images..."
-    _macos_candidate_build_services=(dashboard dashboard-api ape token-spy privacy-shield)
+    _macos_candidate_build_services=(dashboard dashboard-api model-router remote-provider-egress remote-provider-ssh-tunnel ape token-spy privacy-shield brave-search)
     if ! _macos_enabled_services="$(docker compose "${COMPOSE_FLAGS[@]}" config --services 2>>"$ODS_LOG_FILE")"; then
         ai_err "Could not resolve macOS compose services for local image rebuilds."
         ai "Inspect compose config with: cd '$INSTALL_DIR' && docker compose ${COMPOSE_FLAGS[*]} config --services"
@@ -2535,9 +2786,18 @@ for service in (data.get("services") or {}).values():
         _upgrade_script="$INSTALL_DIR/scripts/bootstrap-upgrade.sh"
 
         if [[ -x "$_upgrade_script" ]] || [[ -f "$_upgrade_script" ]]; then
-            if ! _macos_launch_detached_bootstrap_upgrade "$_upgrade_script" \
-                "$INSTALL_DIR" "$FULL_GGUF_FILE" "$FULL_GGUF_URL" \
-                "$FULL_GGUF_SHA256" "$FULL_LLM_MODEL" "$FULL_MAX_CONTEXT"; then
+            _macos_persist_bootstrap_upgrade_args \
+                "$FULL_GGUF_FILE" "$FULL_GGUF_URL" "$FULL_GGUF_SHA256" \
+                "$FULL_LLM_MODEL" "$FULL_MAX_CONTEXT" "$BOOTSTRAP_GGUF_FILE" || true
+            # Start the long-lived downloader from a child shell after closing
+            # inherited non-stdio FDs, matching the Linux installer contract.
+            if ! (
+                _close_inherited_fds_for_daemon
+                _macos_launch_detached_bootstrap_upgrade "$_upgrade_script" \
+                    "$INSTALL_DIR" "$FULL_GGUF_FILE" "$FULL_GGUF_URL" \
+                    "$FULL_GGUF_SHA256" "$FULL_LLM_MODEL" "$FULL_MAX_CONTEXT" \
+                    "$BOOTSTRAP_GGUF_FILE"
+            ); then
                 ai_err "Could not launch the isolated background model upgrade."
                 exit 1
             fi
@@ -2557,7 +2817,16 @@ for service in (data.get("services") or {}).values():
     # local mode follows the actual native llama bind and port.
     if [[ -n "$OPENCODE_BIN" && -x "$OPENCODE_BIN" ]]; then
         mkdir -p "$OPENCODE_CONFIG_DIR"
-        if $CLOUD_MODE; then
+        _opencode_switchboard_mode="$(read_env_value "$INSTALL_DIR/.env" "ODS_MODEL_SWITCHBOARD")"
+        if [[ "${_opencode_switchboard_mode:-observe}" == "enabled" ]]; then
+            _opencode_model="ods/current"
+            _opencode_port="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_PORT")"
+            [[ "$_opencode_port" =~ ^[0-9]+$ ]] || _opencode_port="4000"
+            _opencode_bind="$(read_env_value "$INSTALL_DIR/.env" "BIND_ADDRESS")"
+            _opencode_host="$(macos_bind_probe_host "${_opencode_bind:-127.0.0.1}")"
+            _opencode_base_url="http://${_opencode_host}:${_opencode_port}/v1"
+            _opencode_api_key="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_KEY")"
+        elif $CLOUD_MODE; then
             _opencode_model="default"
             _opencode_port="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_PORT")"
             [[ "$_opencode_port" =~ ^[0-9]+$ ]] || _opencode_port="4000"
@@ -2584,6 +2853,7 @@ for service in (data.get("services") or {}).values():
         fi
         ai_ok "OpenCode configured for ${_opencode_model} at ${_opencode_base_url}"
         unset _opencode_model _opencode_port _opencode_bind _opencode_host \
+            _opencode_switchboard_mode \
             _opencode_base_url _opencode_api_key
 
         # Install as macOS LaunchAgent (auto-start on login).
@@ -2662,6 +2932,14 @@ if [[ -f "${INSTALL_DIR}/bin/ods-host-agent.py" ]] && [[ -n "$AGENT_PYTHON" ]]; 
     _agent_probe_host="$(macos_bind_probe_host "$_agent_native_bind")"
     if ! command -v docker >/dev/null 2>&1; then
         ai_warn "docker not found on PATH at install time — host agent will fail to start until Docker Desktop is launched and 'docker' resolves on your shell PATH"
+    fi
+    if ! "$AGENT_PYTHON" -c "import huggingface_hub, hf_xet" >/dev/null 2>&1; then
+        ai "Installing ODS host-agent model downloader dependencies..."
+        if "$AGENT_PYTHON" -m pip install --user -q "huggingface_hub[hf_xet]>=0.27" 2>&1 | tee -a "$ODS_LOG_FILE" >/dev/null; then
+            ai_ok "ODS host-agent Hugging Face downloader ready"
+        else
+            ai_warn "Could not install huggingface_hub[hf_xet]; model manager downloads may fail on Xet-backed Hugging Face models."
+        fi
     fi
     cat > "$ODS_AGENT_PLIST" <<AGENT_PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2893,7 +3171,45 @@ if [[ "$ENABLE_VOICE" == "true" ]]; then
     # macOS reassigns Whisper to 9100 if port 9000 is in use (AirPlay Receiver).
     WHISPER_PORT_RESOLVED="${WHISPER_PORT:-9000}"
     WHISPER_URL="http://127.0.0.1:${WHISPER_PORT_RESOLVED}"
-    STT_RECOVERY_CMD="curl --max-time 1800 -X POST ${WHISPER_URL}/v1/models/${STT_MODEL_ENCODED}"
+    STT_MODEL_URL="${WHISPER_URL}/v1/models/${STT_MODEL_ENCODED}"
+    STT_TRIGGER_TIMEOUT_SECONDS="${ODS_STT_TRIGGER_TIMEOUT_SECONDS:-30}"
+    STT_CACHE_WAIT_SECONDS="${ODS_STT_CACHE_WAIT_SECONDS:-900}"
+    [[ "$STT_TRIGGER_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || STT_TRIGGER_TIMEOUT_SECONDS=30
+    [[ "$STT_CACHE_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || STT_CACHE_WAIT_SECONDS=900
+    STT_RECOVERY_CMD="curl --max-time ${STT_TRIGGER_TIMEOUT_SECONDS} -X POST ${STT_MODEL_URL}"
+
+    _macos_stt_model_cached() {
+        local _url="$1"
+        curl -sf --max-time 10 "$_url" &>/dev/null
+    }
+
+    _trigger_macos_stt_model_download() {
+        local _url="$1"
+        local _rc=0
+
+        # Speaches can keep downloading after the request is accepted. Keep the
+        # client bounded, then use the cache endpoint as the strict source of truth.
+        curl -sS --fail --max-time "${STT_TRIGGER_TIMEOUT_SECONDS}" -X POST "$_url" \
+            >> "$ODS_LOG_FILE" 2>&1 || _rc=$?
+        if [[ "$_rc" -eq 0 || "$_rc" -eq 28 ]]; then
+            return 0
+        fi
+        ai_warn "STT model download trigger returned curl exit ${_rc}; verifying cache before failing."
+        return 1
+    }
+
+    _wait_macos_stt_model_cached() {
+        local _url="$1"
+        local _deadline=$((SECONDS + STT_CACHE_WAIT_SECONDS))
+
+        while (( SECONDS < _deadline )); do
+            if _macos_stt_model_cached "$_url"; then
+                return 0
+            fi
+            sleep 5
+        done
+        _macos_stt_model_cached "$_url"
+    }
 
     # Step 1: wait briefly for the models API to be ready (max 15s).
     _stt_api_ready=false
@@ -2909,21 +3225,15 @@ if [[ "$ENABLE_VOICE" == "true" ]]; then
         ai_warn "STT models API not ready -- download manually:"
         echo "    $STT_RECOVERY_CMD"
     # Step 2: skip if already cached.
-    elif curl -sf --max-time 10 "${WHISPER_URL}/v1/models/${STT_MODEL_ENCODED}" &>/dev/null; then
+    elif _macos_stt_model_cached "$STT_MODEL_URL"; then
         ai_ok "STT model already cached (${STT_MODEL})"
     else
         # Step 3: POST to trigger download.
-        # max-time 600s (10 min): bounded retry budget so a stuck
-        # huggingface_hub.snapshot_download (well-known on slow links and
-        # under bufferbloat) can't consume the entire install timeout. The
-        # next step verifies cache state via GET and prints the recovery
-        # command if the timeout was hit before completion.
         ai "Downloading STT model (${STT_MODEL})..."
-        curl -s --max-time 600 -X POST "${WHISPER_URL}/v1/models/${STT_MODEL_ENCODED}" \
-            >> "$ODS_LOG_FILE" 2>&1 || true
+        _trigger_macos_stt_model_download "$STT_MODEL_URL" || true
 
         # Step 4: verify the model is actually cached.
-        if curl -sf --max-time 10 "${WHISPER_URL}/v1/models/${STT_MODEL_ENCODED}" &>/dev/null; then
+        if _wait_macos_stt_model_cached "$STT_MODEL_URL"; then
             ai_ok "STT model cached (${STT_MODEL})"
         else
             ai_warn "STT model download failed -- run manually:"
@@ -2938,20 +3248,28 @@ if $ENABLE_PERPLEXICA; then
     ai "Configuring Perplexica..."
     PERPLEXICA_MODEL="${GGUF_FILE:-$LLM_MODEL}"
     PERPLEXICA_API_KEY="no-key"
+    PERPLEXICA_BASE_URL="${CONTAINER_LLM_URL:-http://host.docker.internal:8080}"
+    _perplexica_switchboard_mode="$(read_env_value "$INSTALL_DIR/.env" "ODS_MODEL_SWITCHBOARD")"
+    if [[ "${_perplexica_switchboard_mode:-observe}" == "enabled" ]]; then
+        PERPLEXICA_MODEL="ods/current"
+        PERPLEXICA_API_KEY="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_KEY")"
+        PERPLEXICA_BASE_URL="http://litellm:4000"
+    fi
     $CLOUD_MODE && PERPLEXICA_MODEL="default"
     if $CLOUD_MODE; then
         PERPLEXICA_API_KEY="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_KEY")"
+        PERPLEXICA_BASE_URL="http://litellm:4000"
     fi
     _perplexica_port="$(read_env_value "$INSTALL_DIR/.env" "PERPLEXICA_PORT")"
     [[ "$_perplexica_port" =~ ^[0-9]+$ ]] || _perplexica_port="3004"
     if [[ -z "$PERPLEXICA_API_KEY" ]] \
        || ! configure_perplexica "$_perplexica_port" "$PERPLEXICA_MODEL" \
-            "${CONTAINER_LLM_URL:-http://host.docker.internal:8080}" "$PERPLEXICA_API_KEY"; then
+            "$PERPLEXICA_BASE_URL" "$PERPLEXICA_API_KEY"; then
         ai_err "Perplexica was selected but its authenticated inference route could not be configured and verified."
         exit 1
     fi
     ai_ok "Perplexica configured (model: ${PERPLEXICA_MODEL})"
-    unset PERPLEXICA_API_KEY _perplexica_port
+    unset PERPLEXICA_API_KEY PERPLEXICA_BASE_URL _perplexica_port _perplexica_switchboard_mode
 fi
 
 # ── Pre-mark setup wizard complete ──
