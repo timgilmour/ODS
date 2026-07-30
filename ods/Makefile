@@ -46,6 +46,8 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== ods-doctor rootless subordinate IDs ==="
 	@bash tests/test-ods-doctor-rootless-subid.sh
+	@echo "=== Docker rootless bind-mount ownership ==="
+	@bash tests/test-rootless-docker-ownership.sh
 	@echo ""
 	@echo "=== AMD/Lemonade contracts ==="
 	@bash tests/contracts/test-amd-lemonade-contracts.sh
@@ -54,10 +56,13 @@ test: ## Run unit and contract tests
 	@bash tests/contracts/test-windows-llm-model-readiness.sh
 	@bash tests/contracts/test-windows-lemonade-swap-wait.sh
 	@bash tests/contracts/test-windows-hermes-config-patching.sh
+	@bash tests/contracts/test-llama-metrics-flag.sh
+	@bash tests/contracts/test-llama-reasoning-format.sh
 	@echo ""
 	@echo "=== Overlay/plist contracts ==="
 	@bash tests/contracts/test-overlay-map-coherence.sh
 	@bash tests/contracts/test-plist-log-paths.sh
+	@python3 tests/contracts/test-llama-runtime-tunables.py
 	@echo ""
 	@echo "=== safe .env loading (quote/CRLF handling) ==="
 	@bash tests/test-safe-env.sh
