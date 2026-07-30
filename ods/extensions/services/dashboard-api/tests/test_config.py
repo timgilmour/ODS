@@ -518,6 +518,21 @@ class TestLoadExtensionManifests:
         services, _, _ = load_extension_manifests(tmp_path, "apple")
         assert "systemd-svc" not in services
 
+    def test_apple_backend_includes_explicitly_supported_host_service(self, tmp_path):
+        """A cross-platform host service may declare a macOS LaunchAgent."""
+        svc_dir = tmp_path / "host-svc"
+        svc_dir.mkdir()
+        (svc_dir / "manifest.yaml").write_text(
+            "schema_version: ods.services.v1\n"
+            "service:\n  id: host-svc\n  name: Host Svc\n  port: 3003\n"
+            "  type: host-systemd\n"
+            "  macos_host_supported: true\n"
+            "  gpu_backends: [all]\n"
+        )
+
+        services, _, _ = load_extension_manifests(tmp_path, "apple")
+        assert services["host-svc"]["macos_host_supported"] is True
+
     def test_apple_backend_loads_all_features(self, tmp_path):
         """Features with gpu_backends: [amd, nvidia] are loaded for apple backend."""
         svc_dir = tmp_path / "svc-with-gpu-feature"

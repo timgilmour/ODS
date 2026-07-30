@@ -353,7 +353,10 @@ def load_extension_manifests(
                         continue
                 supported = service.get("gpu_backends", ["amd", "nvidia", "apple"])
                 if gpu_backend == "apple":
-                    if service.get("type") == "host-systemd":
+                    if (
+                        service.get("type") == "host-systemd"
+                        and not service.get("macos_host_supported", False)
+                    ):
                         continue  # Linux-only service, not available on macOS
                     # All docker services run on macOS regardless of gpu_backends declaration
                 elif gpu_backend not in supported and "all" not in supported:
@@ -381,6 +384,7 @@ def load_extension_manifests(
                     "ui_path": service.get("ui_path", "/"),
                     "public_url": public_url,
                     "external_link": bool(service.get("external_link", True)),
+                    "macos_host_supported": bool(service.get("macos_host_supported", False)),
                     "container_name": service.get("container_name", f"ods-{service_id}"),
                     "depends_on": service.get("depends_on", []),
                     "category": service.get("category", "optional"),
