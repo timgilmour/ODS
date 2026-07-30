@@ -174,6 +174,8 @@ Yes. Common use cases:
 
 **With install wizard:** Under 1 hour for someone comfortable with terminal.
 
+Linux/macOS:
+
 ```bash
 curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
@@ -182,6 +184,22 @@ The hosted endpoint proxies the current bootstrap from repository `main`.
 Reviewed merges reach it automatically after edge-cache refresh. `ODS_REF` selects a compatible repository checkout. See
 [Installer Trust](INSTALLER_TRUST.md) to inspect the script or install a stable
 release or audited commit manually.
+
+Windows:
+
+```powershell
+$ProgressPreference = "SilentlyContinue"
+$odsSrc = Join-Path $env:TEMP ("ods-install-" + [guid]::NewGuid().ToString("N"))
+$odsZip = Join-Path $odsSrc "ods-main.zip"
+New-Item -ItemType Directory -Path $odsSrc | Out-Null
+Invoke-WebRequest "https://github.com/Osmantic/ODS/archive/refs/heads/main.zip" -OutFile $odsZip
+Expand-Archive -LiteralPath $odsZip -DestinationPath $odsSrc -Force
+cd (Get-ChildItem -LiteralPath $odsSrc -Directory | Select-Object -First 1).FullName
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install.ps1
+```
+
+Do not run the `curl ... | bash` installer from Windows PowerShell.
 
 The wizard:
 1. Detects your hardware

@@ -44,6 +44,22 @@ if $DRY_RUN; then
     [[ "$ENABLE_OPENCLAW" == "true" ]] && log "[DRY RUN] Would configure OpenClaw (model: $LLM_MODEL, config: ${OPENCLAW_CONFIG:-default})"
     log "[DRY RUN] Would validate .env against schema"
 else
+    _phase06_rootless=false
+    if [[ -f "$SCRIPT_DIR/lib/rootless-ownership.sh" ]]; then
+        # shellcheck source=../../lib/rootless-ownership.sh
+        source "$SCRIPT_DIR/lib/rootless-ownership.sh"
+        _phase06_rootless_state=0
+        ods_docker_rootless_state || _phase06_rootless_state=$?
+        case "$_phase06_rootless_state" in
+            0) _phase06_rootless=true ;;
+            1) ;;
+            *)
+                error "Could not determine Docker rootless mode. Verify Docker access, then re-run the installer."
+                return 1
+                ;;
+        esac
+    fi
+
     # Create directories
     _phase06_step "create-directories"
     ods_progress 38 "directories" "Creating directory structure"
@@ -58,7 +74,8 @@ else
     # Upstream intentionally makes that directory 0700. A reinstall running
     # as the host user must not "repair" it back to uid 1000, or Hermes's web
     # status and ODS Talk JSON-RPC paths fail with PermissionError.
-    if [[ "${ENABLE_HERMES:-false}" == "true" && -d "$INSTALL_DIR/data/hermes" ]]; then
+    if ! $_phase06_rootless \
+        && [[ "${ENABLE_HERMES:-false}" == "true" && -d "$INSTALL_DIR/data/hermes" ]]; then
         sudo chown -R 10000:10000 "$INSTALL_DIR/data/hermes" 2>/dev/null || \
             warn "Failed to restore data/hermes ownership to Hermes uid 10000 (Hermes dashboard may be unhealthy)"
         sudo chmod 700 "$INSTALL_DIR/data/hermes" 2>/dev/null || true
@@ -66,12 +83,14 @@ else
 
     # Fix ownership of data/config dirs that may have been created by containers
     # (e.g. SearXNG runs as uid 977, ComfyUI data owned by root)
-    for _data_dir in "$INSTALL_DIR"/data/*/; do
-        [[ "${ENABLE_HERMES:-false}" == "true" && "$_data_dir" == "$INSTALL_DIR/data/hermes/" ]] && continue
-        if [[ -d "$_data_dir" ]] && ! [[ -w "$_data_dir" ]]; then
-            sudo chown -R "$(id -u):$(id -g)" "$_data_dir" 2>/dev/null || true
-        fi
-    done
+    if ! $_phase06_rootless; then
+        for _data_dir in "$INSTALL_DIR"/data/*/; do
+            [[ "${ENABLE_HERMES:-false}" == "true" && "$_data_dir" == "$INSTALL_DIR/data/hermes/" ]] && continue
+            if [[ -d "$_data_dir" ]] && ! [[ -w "$_data_dir" ]]; then
+                sudo chown -R "$(id -u):$(id -g)" "$_data_dir" 2>/dev/null || true
+            fi
+        done
+    fi
     for _cfg_dir in "$INSTALL_DIR"/config/*/; do
         if [[ -d "$_cfg_dir" ]] && ! [[ -w "$_cfg_dir" ]]; then
             sudo chown -R "$(id -u):$(id -g)" "$_cfg_dir" 2>/dev/null || true
@@ -81,7 +100,9 @@ else
     # Ensure we can write to config/data subtrees (rsync will fail otherwise)
     if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
         _cant_write=""
-        for _root in config data; do
+        _phase06_write_roots="config data"
+        $_phase06_rootless && _phase06_write_roots="config"
+        for _root in $_phase06_write_roots; do
             [[ -d "$INSTALL_DIR/$_root" ]] || continue
             for _d in "$INSTALL_DIR/$_root"/*/; do
                 [[ "${ENABLE_HERMES:-false}" == "true" && "$_d" == "$INSTALL_DIR/data/hermes/" ]] && continue
@@ -233,12 +254,16 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         # Pre-create data/openclaw so chown doesn't fail on a fresh install where
         # the directory hasn't been touched yet.
         mkdir -p "$INSTALL_DIR/data/openclaw"
-        chown -R 1000:1000 "$INSTALL_DIR/data/openclaw" "$INSTALL_DIR/config/openclaw/workspace" || warn "Failed to chown openclaw paths to 1000:1000 (non-fatal); container may need uid fixup"
+        if ! $_phase06_rootless; then
+            chown -R 1000:1000 "$INSTALL_DIR/data/openclaw" "$INSTALL_DIR/config/openclaw/workspace" || warn "Failed to chown openclaw paths to 1000:1000 (non-fatal); container may need uid fixup"
+        fi
     fi
 
-    # token-spy container runs as uid 1000 (baked in Dockerfile) — fix ownership
+    # Prepare service-specific ownership after compose selection is final.
     _phase06_step "prepare-service-permissions"
-    chown -R 1000:1000 "$INSTALL_DIR/data/token-spy" || warn "Failed to chown data/token-spy to 1000:1000 (non-fatal); container may crash if installer ran as a different uid"
+    if ! $_phase06_rootless; then
+        chown -R 1000:1000 "$INSTALL_DIR/data/token-spy" || warn "Failed to chown data/token-spy to 1000:1000 (non-fatal); container may crash if installer ran as a different uid"
+    fi
 
     # ── .env merge logic: preserve user-configured values on re-install ──
     _phase06_step "generate-env"
@@ -613,6 +638,14 @@ raise SystemExit(1)' 2>/dev/null && return 0
     else
         BIND_ADDRESS=$(_env_get BIND_ADDRESS "${BIND_ADDRESS:-127.0.0.1}")
     fi
+    if [[ "${ENABLE_ODS_PROXY:-false}" == "true" ]] \
+        || [[ "$BIND_ADDRESS" != "127.0.0.1" && "$BIND_ADDRESS" != "::1" && "$BIND_ADDRESS" != "localhost" ]]; then
+        # Never carry an authless localhost value into a network-exposed rerun.
+        WEBUI_AUTH="true"
+    else
+        # On loopback, preserve an operator's explicit opt-in to authentication.
+        WEBUI_AUTH=$(_env_get WEBUI_AUTH "false")
+    fi
 
     # Host LAN IP — only meaningful when BIND_ADDRESS=0.0.0.0. Some services
     # (e.g. openclaw) need to know the host's LAN address so the Control UI
@@ -728,7 +761,7 @@ raise SystemExit(1)' 2>/dev/null && return 0
 # Tier: ${TIER} (${TIER_NAME})
 
 #=== ODS Version (used by ods-cli update for version-compat checks) ===
-ODS_VERSION=${VERSION:-2.5.3}
+ODS_VERSION=${VERSION:-2.6.0}
 
 #=== Network Binding ===
 # 127.0.0.1 = localhost only (secure default)
@@ -984,7 +1017,8 @@ EMBEDDINGS_MEMORY_LIMIT=${EMBEDDINGS_MEMORY_LIMIT_VALUE}
 ODS_DEVICE_NAME=${ODS_DEVICE_NAME}
 
 #=== Web UI Settings ===
-WEBUI_AUTH=true
+# Loopback installs open directly. Network-bound installs require a login.
+WEBUI_AUTH=${WEBUI_AUTH}
 ENABLE_WEB_SEARCH=true
 WEB_SEARCH_ENGINE=searxng
 
@@ -1045,6 +1079,18 @@ ENV_EOF
     chmod 600 "$INSTALL_DIR/.env"  # Secure secrets file
     ai_ok "Created $INSTALL_DIR"
     ai_ok "Generated secure secrets in .env (permissions: 600)"
+
+    # Apply rootless namespace ownership only after the final .env exists.
+    # This preserves legacy Token Spy key migration and makes UID/GID overrides
+    # from both fresh installs and reruns available to the ownership contract.
+    if $_phase06_rootless; then
+        export ODS_ROOTLESS_COMPOSE_FLAGS="${COMPOSE_FLAGS:-}"
+        if ! ods_fix_rootless_ownership "$INSTALL_DIR"; then
+            error "Docker rootless data ownership could not be prepared. Stop any affected ODS services, then re-run the installer."
+            return 1
+        fi
+        unset ODS_ROOTLESS_COMPOSE_FLAGS
+    fi
 
     # Generate LiteLLM config for Lemonade.
     # Lemonade exposes models as "extra.<GGUF_FILENAME>" — the wildcard

@@ -338,7 +338,8 @@ $envResult = New-ODSEnv `
     -WhisperCudaEnabled $whisperCudaSupported `
     -EnableLangfuse $enableLangfuse `
     -SwitchboardMode $env:ODS_MODEL_SWITCHBOARD `
-    -EnableLan      $lanFlag
+    -EnableLan      $lanFlag `
+    -EnableODSProxy $enableODSProxy
 Write-AISuccess "Generated .env with secure secrets"
 
 # ── Post-generation validation: verify all required keys are present with values ──
