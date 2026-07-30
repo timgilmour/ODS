@@ -1,6 +1,6 @@
-"""Deck assignments (assigned_services) are dashboard-host-local by design
-(see docs/superpowers/specs/2026-07-29-multi-node-gpu-visibility-design.md,
-'out of scope: deck/placement integration for remote GPUs'). The vendored
+"""Deck assignments (assigned_services) are dashboard-host-local by design:
+deck/placement integration for remote GPUs is deliberately out of scope, so a
+remote node must never claim one. The vendored
 collector (dashboard-api/gpu.py) fills assigned_services from either the
 deck's assignment file or, absent one, an inference from local compute
 processes -- on a remote node that inference is meaningless (it labels an
