@@ -72,7 +72,8 @@ dashboard-api container, and point `ODS_REMOTE_NODE_KEYS_FILE` at the path
 *inside* that container. It wins per node over `ODS_REMOTE_NODE_KEYS`, and
 because it is re-read each poll cycle, rotating this node's key afterwards is
 a file write on the dashboard host plus a restart of the agent here — no
-dashboard-api recreate.
+dashboard-api recreate. Write the file atomically (write a temp file, then
+`mv` over it): a half-written read falls back to the env map for that cycle.
 
 ## Security
 
@@ -101,7 +102,7 @@ dashboard-api recreate.
 |---|---|---|---|---|
 | `NODE_AGENT_PORT` (7720) | TCP | Remote node | every interface by default under `network_mode: host` — narrow with `NODE_AGENT_BIND` | Bearer-gated read-only GPU/serving metrics, polled by the dashboard host |
 
-The agent opens nothing else: no outbound listener, no discovery broadcast, no
+The agent opens nothing else: no second listener, no discovery broadcast, no
 port on the dashboard host. Scope inbound access to the dashboard host only:
 
 ```bash
