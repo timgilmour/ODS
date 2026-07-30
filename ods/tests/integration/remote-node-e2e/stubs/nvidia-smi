@@ -1,0 +1,26 @@
+#!/bin/sh
+# Stands in for nvidia-smi inside the node-agent container so the harness can
+# run on a machine with no NVIDIA GPU -- CI included.
+#
+# Stubbing the CLI rather than patching Python is the point: the vendored
+# collector's own argv construction, CSV parsing, unit handling and rounding
+# all execute for real, which a Python-level mock skips entirely.
+#
+# Values are deliberately odd so an assertion cannot pass by coincidence.
+for arg in "$@"; do
+    case "$arg" in
+        --query-compute-apps=*)
+            # A compute process using >100MB, which the collector turns into
+            # assigned_services ["llama-server"]. On a real remote node that
+            # name belongs to a service on the DASHBOARD host, so node-agent
+            # must scrub it before it reaches the wire; the harness asserts
+            # exactly that.
+            echo "GPU-e2e-0000-0000-0000-000000000000, 4242, 8192"
+            exit 0
+            ;;
+    esac
+done
+
+# index, uuid, name, memory.used, memory.total, utilization.gpu,
+# temperature.gpu, power.draw
+echo "0, GPU-e2e-0000-0000-0000-000000000000, NVIDIA GB10 (e2e stub), 12345, 122880, 7, 45, 30.5"

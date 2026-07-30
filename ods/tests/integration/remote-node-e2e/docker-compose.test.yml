@@ -1,0 +1,91 @@
+# Remote-node end-to-end harness: dashboard-api's poller against a real
+# node-agent container, over a real network hop. See README.md.
+#
+# Each service is a separate "host" from the code's point of view -- own
+# hostname, own loopback, own process tree, reached only by IP over a bridge
+# network -- which is what makes this different from the mocked-transport unit
+# tests in dashboard-api/tests/.
+name: ods-remote-node-e2e
+
+services:
+  # Stands in for whatever the remote node is serving (vLLM, llama-server).
+  serving-stub:
+    image: python:3.12-slim
+    container_name: ods-e2e-serving-stub
+    command: ["python", "/srv/serving_stub.py"]
+    volumes:
+      - ./stubs/serving_stub.py:/srv/serving_stub.py:ro
+    networks:
+      e2e:
+        ipv4_address: 172.30.20.22
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1',8000),3).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # The real service image, built from the real Dockerfile at the repo root.
+  node-agent:
+    build:
+      context: ../../../..
+      dockerfile: ods/extensions/services/node-agent/Dockerfile
+    container_name: ods-e2e-node-agent
+    environment:
+      NODE_AGENT_KEY: e2e-test-key
+      NODE_NAME: e2e-node
+      GPU_BACKEND: nvidia
+      NODE_SERVING_PROBE_URL: http://172.30.20.22:8000/v1/models
+      NODE_AGENT_PORT: "7720"
+      # No cache: every request re-runs the collector, so a test never reads a
+      # sample taken during a previous test.
+      NODE_GPU_CACHE_TTL: "0"
+    volumes:
+      # python:3.12-slim puts /usr/local/bin ahead of /usr/bin on PATH, so this
+      # shadows a real nvidia-smi if the build host happens to have one.
+      - ./stubs/nvidia-smi:/usr/local/bin/nvidia-smi:ro
+    networks:
+      e2e:
+        ipv4_address: 172.30.20.21
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1',7720),3).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      serving-stub:
+        condition: service_healthy
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-runner
+    container_name: ods-e2e-test-runner
+    environment:
+      # dashboard-api's own modules, imported unmodified.
+      PYTHONPATH: /app
+      NODE_AGENT_URL: http://172.30.20.21:7720
+      NODE_AGENT_KEY: e2e-test-key
+      # No container answers here. Deliberately on the same subnet, so the
+      # failure is a refused/unroutable peer rather than a DNS miss.
+      DEAD_NODE_URL: http://172.30.20.99:7720
+      SERVING_STUB_MODEL: e2e-stub-model
+    volumes:
+      - ../../../extensions/services/dashboard-api:/app:ro
+      - ./tests:/e2e-tests:ro
+    # no:cacheprovider because /e2e-tests is mounted read-only.
+    command: ["pytest", "-q", "-p", "no:cacheprovider", "/e2e-tests"]
+    networks:
+      e2e:
+        ipv4_address: 172.30.20.100
+    depends_on:
+      node-agent:
+        condition: service_healthy
+
+networks:
+  e2e:
+    driver: bridge
+    ipam:
+      config:
+        # Static addressing keeps the "dead peer" case honest and the
+        # assertions readable. Chosen clear of ODS's own networks (172.17-22).
+        - subnet: 172.30.20.0/24
