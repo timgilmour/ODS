@@ -578,6 +578,34 @@ def test_api_settings_env_save_returns_llama_apply_plan(test_client, settings_en
     assert "llama-server" in payload["applyPlan"]["summary"]
 
 
+def test_api_settings_env_save_uses_host_agent_canonical_value(
+    test_client, settings_env_fixture, monkeypatch,
+):
+    def fake_env_update(raw_text):
+        return {
+            "backup_path": "data/config-backups/.env.backup.test",
+            "enforced_values": {"WEBUI_AUTH": "true"},
+        }
+
+    monkeypatch.setattr("main._call_agent_env_update", fake_env_update)
+
+    response = test_client.put(
+        "/api/settings/env",
+        headers=test_client.auth_headers,
+        json={
+            "mode": "form",
+            "values": {
+                "WEBUI_AUTH": "false",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["values"]["WEBUI_AUTH"] == "true"
+    assert payload["fields"]["WEBUI_AUTH"]["value"] == "true"
+
+
 def test_api_settings_env_preserves_commented_empty_llama_args(test_client, settings_env_fixture):
     env_path = settings_env_fixture["env_path"]
 

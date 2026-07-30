@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${ROOT_DIR}/installers/macos/lib/installed-footprint.sh"
 
+if ! command -v rsync >/dev/null 2>&1; then
+    echo "[SKIP] macOS installed-footprint contract requires rsync"
+    exit 0
+fi
+
 test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
 
@@ -33,7 +38,7 @@ printf '%s\n' "runtime" > "${source_root}/config/runtime.yaml"
 
 printf '%s\n' "modified documentation" > "${install_dir}/docs/stale.txt"
 printf '%s\n' "modified readme" > "${install_dir}/README.md"
-printf '%s\n' "ODS_VERSION=2.5.3" > "${install_dir}/.env"
+printf '%s\n' "ODS_VERSION=2.6.0" > "${install_dir}/.env"
 printf '%s\n' "{}" > "${install_dir}/manifest.json"
 printf '%s\n' "services: {}" > "${install_dir}/docker-compose.base.yml"
 printf '%s\n' "user data" > "${install_dir}/data/preserve.db"
