@@ -97,6 +97,11 @@ class RenderInputs:
     remote_llm_model: str = ""
     # Switchboard rollout mode: legacy | observe | enabled (plan section 8)
     switchboard_mode: str = "observe"
+    # Operator-maintained extra litellm routes (config/litellm/extra-routes.json
+    # sidecar): rendered verbatim into every litellm surface this box serves,
+    # before the wildcard. The sidecar is an INPUT — the renderer never writes
+    # it — which is what makes these routes survive activate regens.
+    extra_litellm_routes: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -298,6 +303,69 @@ litellm_settings:
     return RenderedFile("litellm-cloud", "config/litellm/cloud.yaml", content)
 
 
+_EXTRA_ROUTES_RESERVED = {
+    "default", "*", "hipfire", "lemonade", "local", "cloud", "ods/current",
+}
+
+
+def load_extra_litellm_routes(path_arg: str | None) -> tuple:
+    """Load the extra-routes sidecar; see RenderInputs.extra_litellm_routes.
+
+    ``path_arg`` None (flag omitted) -> the install-relative default path;
+    empty string -> feature off. A missing file is simply "no extras" (the
+    file's existence is the feature switch), but a file that exists and is
+    malformed FAILS the render: silently dropping operator routes recreates
+    the silent-wildcard-fallback failure this sidecar exists to fix.
+    """
+    if path_arg is None:
+        path = Path(__file__).resolve().parent.parent / "config" / "litellm" / "extra-routes.json"
+    elif not path_arg:
+        return ()
+    else:
+        path = Path(path_arg)
+    if not path.is_file():
+        return ()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise SystemExit(f"extra-routes: {path} is not valid JSON: {exc}")
+    if not isinstance(data, list):
+        raise SystemExit(f"extra-routes: {path} must be a JSON list of route objects")
+    routes = []
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise SystemExit(f"extra-routes: entry {i} must be an object")
+        cleaned = {
+            "model_name": entry.get("model_name"),
+            "model": entry.get("model"),
+            "api_base": entry.get("api_base"),
+            "api_key": entry.get("api_key", "not-needed"),
+        }
+        for field in ("model_name", "model", "api_base", "api_key"):
+            value = cleaned[field]
+            if not isinstance(value, str) or not value.strip() or "\n" in value:
+                raise SystemExit(
+                    f"extra-routes: entry {i} field {field!r} must be a "
+                    f"non-empty single-line string (got {value!r})")
+        if cleaned["model_name"] in _EXTRA_ROUTES_RESERVED:
+            raise SystemExit(
+                f"extra-routes: entry {i} may not shadow core route "
+                f"{cleaned['model_name']!r}")
+        routes.append(cleaned)
+    return tuple(routes)
+
+
+def extra_route_entry(route: dict) -> str:
+    """One model_list entry, matching the hand-written route style."""
+    return (
+        f"  - model_name: {route['model_name']}\n"
+        f"    litellm_params:\n"
+        f"      model: {route['model']}\n"
+        f"      api_base: {route['api_base']}\n"
+        f"      api_key: {route['api_key']}\n"
+    )
+
+
 def render_litellm_hybrid(inputs: RenderInputs) -> RenderedFile:
     content = """model_list:
   - model_name: local
@@ -377,7 +445,8 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
             "\n"
             f"  - model_name: lemonade\n{lemonade_params}"
             "\n"
-            f"  - model_name: \"*\"\n{default_params}"
+            + "".join(f"{extra_route_entry(r)}\n" for r in inputs.extra_litellm_routes)
+            + f"  - model_name: \"*\"\n{default_params}"
             "\n"
             "litellm_settings:\n"
             "  drop_params: true\n"
@@ -391,7 +460,8 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
         "model_list:\n"
         f"  - model_name: default\n{lemonade_params}"
         "\n"
-        f"  - model_name: \"*\"\n{lemonade_params}"
+        + "".join(f"{extra_route_entry(r)}\n" for r in inputs.extra_litellm_routes)
+        + f"  - model_name: \"*\"\n{lemonade_params}"
         "\n"
         "litellm_settings:\n"
         "  drop_params: true\n"
@@ -557,6 +627,7 @@ def render_litellm_switchboard(inputs: RenderInputs) -> RenderedFile:
       api_key: os.environ/MINIMAX_API_KEY
 """,
         ])
+    routes.extend(extra_route_entry(r) for r in inputs.extra_litellm_routes)
     routes.append(f'  - model_name: "*"\n{local_route}')
     content = (
         "model_list:\n"
@@ -675,6 +746,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--ods-mode", choices=["local", "cloud", "hybrid", "lemonade"], default="local")
     parser.add_argument("--llm-base-url", default="http://llama-server:8080/v1")
     parser.add_argument("--litellm-key", default=DEFAULT_LITELLM_KEY)
+    parser.add_argument(
+        "--extra-routes-file",
+        default=None,
+        help="extra litellm routes sidecar (default: config/litellm/"
+             "extra-routes.json next to this install; '' disables)",
+    )
     parser.add_argument("--opencode-port", type=int, default=3003)
     parser.add_argument("--context-length", type=int, default=DEFAULT_CONTEXT)
     parser.add_argument("--hipfire-enabled", action="store_true")
@@ -828,6 +905,7 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         remote_llm_transport=args.remote_llm_transport,
         remote_llm_base_url=args.remote_llm_base_url,
         remote_llm_model=args.remote_llm_model,
+        extra_litellm_routes=load_extra_litellm_routes(args.extra_routes_file),
     )
     validate_remote_inputs(inputs)
     if args.surface == "litellm-switchboard" and inputs.ods_mode == "cloud":

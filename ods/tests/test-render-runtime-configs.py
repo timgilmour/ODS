@@ -712,3 +712,104 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# --- extra litellm routes sidecar (config/litellm/extra-routes.json) ---
+
+
+def _extra_routes_file(tmpdir: str, payload: object) -> str:
+    path = Path(tmpdir) / "extra-routes.json"
+    path.write_text(json.dumps(payload) if not isinstance(payload, str) else payload)
+    return str(path)
+
+
+def _spark_routes() -> list[dict[str, str]]:
+    return [
+        {"model_name": "spark-aeon", "model": "openai/aeon",
+         "api_base": "http://192.168.1.15:8000/v1"},
+        {"model_name": "spark-laguna", "model": "openai/laguna",
+         "api_base": "http://192.168.1.15:8000/v1", "api_key": "not-needed"},
+    ]
+
+
+def test_extra_routes_injected_before_lemonade_wildcard() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, _spark_routes())
+        payload = run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                               "--extra-routes-file", path)
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+    assert "model_name: spark-aeon" in content
+    assert "model_name: spark-laguna" in content
+    assert "api_base: http://192.168.1.15:8000/v1" in content
+    assert content.index("spark-aeon") < content.index('model_name: "*"')
+    # Defaulted api_key still renders (litellm requires the field).
+    assert content.count("api_key: not-needed") >= 2
+
+
+def test_extra_routes_injected_in_lemonade_hipfire_branch() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, _spark_routes())
+        payload = run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                               "--hipfire-enabled", "--hipfire-model", "m",
+                               "--extra-routes-file", path)
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+    assert "model_name: spark-aeon" in content
+    assert "model_name: hipfire" in content
+    assert content.index("spark-aeon") < content.index('model_name: "*"')
+
+
+def test_extra_routes_injected_in_switchboard_surface() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, _spark_routes())
+        payload = run_renderer("--surface", "all", "--switchboard-mode", "enabled",
+                               "--extra-routes-file", path)
+        content = file_by_surface(payload, "litellm-switchboard")["content"]
+    assert "model_name: spark-aeon" in content
+    assert content.index("spark-aeon") < content.index('model_name: "*"')
+    # The model-router aliases stay untouched by the sidecar.
+    assert content.count("http://model-router:9099/v1") == 4
+
+
+def test_extra_routes_missing_file_renders_without_extras() -> None:
+    payload = run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                           "--extra-routes-file", "/nonexistent/extra.json")
+    content = file_by_surface(payload, "litellm-lemonade")["content"]
+    assert "spark" not in content
+
+
+def test_extra_routes_reserved_name_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, [
+            {"model_name": "default", "model": "openai/x",
+             "api_base": "http://evil:1/v1"}])
+        try:
+            run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                         "--extra-routes-file", path)
+        except subprocess.CalledProcessError as exc:
+            assert "shadow" in exc.stderr
+        else:
+            raise AssertionError("reserved model_name must fail the render")
+
+
+def test_extra_routes_malformed_json_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, "{not json")
+        try:
+            run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                         "--extra-routes-file", path)
+        except subprocess.CalledProcessError as exc:
+            assert "extra-routes" in exc.stderr
+        else:
+            raise AssertionError("malformed sidecar must fail the render")
+
+
+def test_extra_routes_missing_field_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, [{"model_name": "spark-aeon"}])
+        try:
+            run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                         "--extra-routes-file", path)
+        except subprocess.CalledProcessError as exc:
+            assert "model" in exc.stderr
+        else:
+            raise AssertionError("incomplete entry must fail the render")
