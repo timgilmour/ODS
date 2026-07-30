@@ -18,7 +18,7 @@ describe('getSidebarExternalLinks', () => {
       ],
     })
 
-    expect(links[0].url).toBe('https://chat.example.test')
+    expect(links.find(link => link.key === 'open-webui').url).toBe('https://chat.example.test')
   })
 
   it('keeps the existing host-port plus ui_path fallback', () => {
@@ -36,6 +36,31 @@ describe('getSidebarExternalLinks', () => {
       ],
     })
 
-    expect(links[0].url).toBe('http://localhost:3005/dashboard')
+    expect(links.find(link => link.key === 'token-spy').url).toBe('http://localhost:3005/dashboard')
+  })
+
+  it('keeps the core OpenCode launcher visible when API metadata overrides it', () => {
+    const links = getSidebarExternalLinks({
+      status: { services: [{ id: 'opencode', name: 'OpenCode (IDE)', status: 'not_deployed' }] },
+      getExternalUrl: port => `http://localhost:${port}`,
+      apiLinks: [
+        {
+          id: 'opencode',
+          label: 'OpenCode (IDE)',
+          port: 3003,
+          ui_path: '/',
+          icon: 'Code',
+          healthNeedles: ['opencode', 'opencode (ide)'],
+        },
+      ],
+    })
+
+    const openCode = links.find(link => link.key === 'opencode')
+    expect(openCode).toMatchObject({
+      label: 'OpenCode (IDE)',
+      url: 'http://localhost:3003',
+      healthy: false,
+      alwaysVisible: true,
+    })
   })
 })

@@ -387,9 +387,16 @@ if $DOCKER_CMD inspect ods-perplexica &>/dev/null; then
     PERPLEXICA_MODEL="${LLM_MODEL:-default}"
     if [[ -n "${GGUF_FILE:-}" ]]; then
         PERPLEXICA_MODEL="$GGUF_FILE"
-        _perplexica_backend="$(printf '%s' "${LLM_BACKEND:-${AMD_INFERENCE_RUNTIME:-}}" | tr '[:upper:]' '[:lower:]')"
-        if [[ "$_perplexica_backend" == "lemonade" ]]; then
-            PERPLEXICA_MODEL="extra.$GGUF_FILE"
+        # Lemonade serves the model under a separate id. An AMD local install
+        # runs Lemonade while LLM_BACKEND stays "llama-server", so the runtime
+        # and the backend have to be checked independently — same rule as
+        # scripts/bootstrap-upgrade.sh and the container-side
+        # extensions/services/perplexica/sync-model-config.js.
+        _perplexica_runtime="$(printf '%s' "${AMD_INFERENCE_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
+        _perplexica_backend="$(printf '%s' "${LLM_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$_perplexica_runtime" == "lemonade" || "$_perplexica_backend" == "lemonade" ]]; then
+            PERPLEXICA_MODEL="${LEMONADE_MODEL:-}"
+            [[ -n "$PERPLEXICA_MODEL" ]] || PERPLEXICA_MODEL="extra.$GGUF_FILE"
         fi
     fi
     PERPLEXICA_LLM_BASE_URL="${LLM_API_URL:-http://llama-server:8080}"
