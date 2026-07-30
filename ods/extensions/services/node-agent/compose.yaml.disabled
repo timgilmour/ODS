@@ -27,6 +27,10 @@ services:
       # default. Set it to one address on a multi-homed node (see README).
       NODE_AGENT_BIND: ${NODE_AGENT_BIND:-}
       NODE_GPU_CACHE_TTL: ${NODE_GPU_CACHE_TTL:-2.0}
+      # Swap control (opt-in): set BOTH to enable /v1/node/{profiles,swap}.
+      # In-container paths that must match the volumes block below.
+      NODE_VLLM_DIR: ${NODE_VLLM_DIR:-}
+      NODE_SWAP_CTL_DIR: ${NODE_SWAP_CTL_DIR:-}
     healthcheck:
       # Liveness only: proves uvicorn is listening. Every route is bearer-gated,
       # so an HTTP probe would need the key; python is already in the image.
@@ -53,6 +57,17 @@ services:
     # volumes:
     #   - /var/run/docker.sock:/var/run/docker.sock:ro
     #   - /usr/bin/docker:/usr/bin/docker:ro
+    # ─────────────────────────────────────────────────────────────────────────
+    #
+    # Swap control mounts (opt-in, SAFE — this is the docker.sock alternative):
+    # the agent only reads the compose-*.yaml set (ro) and writes request.json
+    # into the ctl dir; the host-side swap-helper (swap-helper/swap-helper.sh,
+    # run by the operator outside docker) is the only thing that touches
+    # docker. Uncomment together with NODE_VLLM_DIR=/vllm and
+    # NODE_SWAP_CTL_DIR=/swap-ctl above.
+    # volumes:
+    #   - ${HOST_VLLM_DIR:-~/vllm}:/vllm:ro
+    #   - ${HOST_SWAP_CTL_DIR:-~/vllm/swap-ctl}:/swap-ctl:rw
     # ─────────────────────────────────────────────────────────────────────────
     deploy:
       resources:

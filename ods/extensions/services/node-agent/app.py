@@ -1,14 +1,18 @@
-"""ODS node-agent: read-only metrics endpoint for remote inference nodes."""
+"""ODS node-agent: metrics + file-protocol swap control for remote nodes."""
 import secrets
 import socket
 import time
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
 from fastapi.responses import Response
 
 import nodeconfig
 import serving
+import swapctl
 from gpu_collect import collect_detailed_gpus
 
 # docs/redoc/openapi are unauthenticated by construction, and this service runs
@@ -76,11 +80,14 @@ def _collect_gpus_cached() -> tuple[list[dict], Optional[str]]:
 @app.get("/v1/node/info", dependencies=[Depends(verify_key)])
 def node_info():
     gpus, _error = _collect_gpus_uncached()
+    capabilities = ["metrics"]
+    if swapctl.enabled():
+        capabilities.append("swap")
     return {
         "name": nodeconfig.NODE_NAME,
         "hostname": socket.gethostname(),
         "platform": nodeconfig.GPU_BACKEND,
-        "capabilities": ["metrics"],
+        "capabilities": capabilities,
         "gpus": gpus,
     }
 
@@ -97,3 +104,32 @@ def node_gpu():
 @app.get("/v1/node/serving", dependencies=[Depends(verify_key)])
 def node_serving():
     return serving.probe()
+
+
+@app.exception_handler(swapctl.SwapCtlDisabled)
+async def _swapctl_disabled(request: Request, exc: swapctl.SwapCtlDisabled):
+    return JSONResponse(status_code=503,
+                        content={"detail": "swap control is not configured"})
+
+
+class SwapBody(BaseModel):
+    profile: str
+
+
+@app.get("/v1/node/profiles", dependencies=[Depends(verify_key)])
+def node_profiles():
+    return {"profiles": swapctl.list_profiles(),
+            "swap_status": swapctl.read_status()}
+
+
+@app.post("/v1/node/swap", status_code=202, dependencies=[Depends(verify_key)])
+def node_swap(body: SwapBody):
+    try:
+        req_id = swapctl.request_swap(body.profile)
+    except swapctl.InvalidProfile:
+        raise HTTPException(status_code=400, detail="invalid profile name")
+    except swapctl.UnknownProfile:
+        raise HTTPException(status_code=404, detail="unknown profile")
+    except swapctl.SwapInProgress as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"id": req_id, "profile": body.profile}
