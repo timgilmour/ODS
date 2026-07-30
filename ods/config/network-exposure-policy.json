@@ -74,6 +74,12 @@
       "auth_required": false,
       "notes": "Local OpenAI-compatible inference API."
     },
+    "model-router": {
+      "risk": "internal-routing-control-plane",
+      "lan_exposure": "none",
+      "auth_required": true,
+      "notes": "Internal-only (expose:, not ports:); routes model endpoints for dashboard-api/litellm and holds internal keys."
+    },
     "n8n": {
       "risk": "workflow-automation-ui",
       "lan_exposure": "operator-controlled",
