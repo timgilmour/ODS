@@ -66,13 +66,20 @@ class LitellmDirect:
         data = self._c.get("/model/info").json()["data"]
         return {e["model_name"]: e["litellm_params"]["model"] for e in data}
 
-    def completion(self, route: str, max_tokens: int = 8) -> str:
+    def completion(self, route: str, max_tokens: int = 64) -> dict:
+        """One real served request; returns the response message dict.
+
+        Ground truth is that the engine SERVED (2xx with a choice) — content may
+        legitimately be empty when a thinking model (hipfire's xhigh) spends the
+        whole token budget on reasoning, so callers assert on the returned dict,
+        never on content text.
+        """
         r = self._c.post("/v1/chat/completions", json={
             "model": route, "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": "Reply with the word: ok"}],
         })
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        return r.json()["choices"][0]["message"]
 
 
 def hipfire_health_status(url: str) -> str:

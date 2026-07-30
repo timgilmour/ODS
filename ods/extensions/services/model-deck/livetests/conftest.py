@@ -24,7 +24,10 @@ LEMONADE_URL = os.environ.get("LEMONADE_URL", "http://llama-server:8080")
 COMFY_URL = os.environ.get("COMFY_URL", "http://comfyui:8188")
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
 HIPFIRE_URL = os.environ.get("HIPFIRE_URL", "http://ods-hipfire:11435")
-CATALOG_URL = os.environ.get("CATALOG_URL", "http://dashboard-api:3001")
+# The catalog is read via the dashboard FRONT-END's authenticated proxy
+# (dashboard:3001/api/*): dashboard-api's own port (3002) 401s without a key,
+# and dashboard-api:3001 is nothing at all (conn-refused).
+CATALOG_URL = os.environ.get("CATALOG_URL", "http://dashboard:3001")
 GGUF_STORE = Path("/gguf-store")
 
 # Watcher tick is 2 s; TTL drills wait TTL + 3 ticks + margin.

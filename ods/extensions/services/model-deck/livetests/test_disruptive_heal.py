@@ -21,7 +21,10 @@ HEAL_TIMEOUT = 300  # free + 27B reload can take a few minutes
 
 
 def test_d3_contention_heal_replay(deck, lemonade_direct, comfy_direct,
-                                   litellm_direct, events):
+                                   litellm_direct, events, lemonade_guard):
+    # lemonade_guard: the drill deliberately ends with the healed route model
+    # resident; the guard returns lemonade to its pre-drill state so the
+    # session bookend's left-as-found holds.
     state = deck.get("/api/state").json()
     route = state["world"]["default_route"]
     if not route:
