@@ -151,9 +151,12 @@ def _load_node_keys_map() -> dict:
             parsed = json.loads(raw)
             assert isinstance(parsed, dict)
             merged.update(parsed)
+            _warn_cleared(("keys-env-parse",))
         except (ValueError, AssertionError):
             _warn_once(("keys-env-parse",),
                        "ODS_REMOTE_NODE_KEYS is not a JSON object; ignoring")
+    else:
+        _warn_cleared(("keys-env-parse",))
     for name, key in _load_keys_file().items():
         if key:  # present-but-empty is not a hit, as in _resolve_node_key
             merged[name] = key
@@ -199,16 +202,26 @@ def load_remote_nodes() -> list[RemoteNodeConfig]:
     try:
         entries = json.loads(raw)
         assert isinstance(entries, list)
+        _warn_cleared(("nodes-env-parse",))
     except (ValueError, AssertionError):
-        logger.warning("ODS_REMOTE_NODES is not a JSON list; ignoring")
+        # Warn-once like every other diagnostic here: this path also runs on
+        # every /api/gpu/detailed request via get_remote_node_statuses(), not
+        # just the 5s poll cycle.
+        _warn_once(("nodes-env-parse",),
+                   "ODS_REMOTE_NODES is not a JSON list; ignoring")
         return []
     keys_map = _load_node_keys_map()
     nodes: list[RemoteNodeConfig] = []
     for entry in entries:
         if not isinstance(entry, dict) or not entry.get("name") \
                 or not entry.get("url"):
-            logger.warning("Skipping malformed remote node entry: %r",
-                           _sanitize_entry_for_log(entry))
+            sanitized = _sanitize_entry_for_log(entry)
+            # Signature carries the sanitized repr, never the raw entry: it
+            # sits in module state for the life of the process, so key material
+            # must not ride along. Editing the entry changes the signature, so
+            # a new problem with the same entry still warns.
+            _warn_once(("nodes-entry", repr(sanitized)),
+                       "Skipping malformed remote node entry: %r", sanitized)
             continue
         name = str(entry["name"])
         key = _resolve_node_key(name, entry.get("key_env", ""), keys_map)

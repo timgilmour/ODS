@@ -149,6 +149,45 @@ def test_resolved_key_present_produces_no_warning(monkeypatch, caplog):
             if r.levelno >= logging.WARNING] == []
 
 
+def test_malformed_nodes_list_warns_once_across_polls(monkeypatch, caplog):
+    """Same per-cycle exposure as the no-key warning: load_remote_nodes() runs
+    on every poll cycle AND every /api/gpu/detailed request."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", "{not a list")
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        for _ in range(5):
+            assert remote_nodes.load_remote_nodes() == []
+    assert len([r for r in caplog.records
+                if "JSON list" in r.getMessage()]) == 1
+
+
+def test_malformed_entry_warns_once_across_polls(monkeypatch, caplog):
+    monkeypatch.setenv("ODS_REMOTE_NODES",
+                       json.dumps([{"name": "sparky"}]))  # no url: skipped
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        for _ in range(5):
+            remote_nodes.load_remote_nodes()
+    assert len([r for r in caplog.records
+                if "malformed" in r.getMessage()]) == 1
+
+
+def test_malformed_map_warning_rearms_after_recovery(monkeypatch, caplog):
+    """Warn-once must key on the condition, not fire once per process: a map
+    that is fixed and later breaks again needs to be heard again."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", "{bad json")
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        remote_nodes.load_remote_nodes()
+        monkeypatch.setenv("ODS_REMOTE_NODE_KEYS",
+                           json.dumps({"sparky": "from-map"}))
+        remote_nodes.load_remote_nodes()
+        caplog.clear()
+        monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", "{bad json")
+        remote_nodes.load_remote_nodes()
+    assert any("ODS_REMOTE_NODE_KEYS" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_malformed_entry_log_never_echoes_an_inline_key(monkeypatch, caplog):
     """The malformed-entry warning used %r on the raw entry, so an admin who
     inlined a key in ODS_REMOTE_NODES (ignored as key material, but it can
