@@ -11,6 +11,13 @@ services:
       - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
       - LITELLM_KEY=${LITELLM_KEY:-}
       - HOST_AGENT_KEY=${ODS_AGENT_KEY:-} # live installs name the agent key ODS_AGENT_KEY
+      # Spark (remote single-slot node) — engine stays unbuilt unless the
+      # URLs are set AND ODS_REMOTE_NODE_KEYS carries an entry for the node
+      # (same credential dashboard-api's remote-node poller uses).
+      - MODEL_DECK_SPARK_NODE_URL=${MODEL_DECK_SPARK_NODE_URL:-}
+      - MODEL_DECK_SPARK_SERVING_URL=${MODEL_DECK_SPARK_SERVING_URL:-}
+      - MODEL_DECK_SPARK_NODE_NAME=${MODEL_DECK_SPARK_NODE_NAME:-sparky}
+      - ODS_REMOTE_NODE_KEYS=${ODS_REMOTE_NODE_KEYS:-}
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ./data/model-deck:/data:z

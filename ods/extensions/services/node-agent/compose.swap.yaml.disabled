@@ -1,0 +1,20 @@
+# Swap-control overlay for the node-agent — OPT-IN, remote-node only.
+# Same `.disabled` convention as compose.yaml.disabled (keep it out of the
+# local stack's -f set). Activate by adding it to the compose call:
+#
+#   docker compose -f ods/extensions/services/node-agent/compose.yaml.disabled \
+#                  -f ods/extensions/services/node-agent/compose.swap.yaml.disabled \
+#                  up -d --build
+#
+# This is the docker.sock-free alternative for model swapping: the agent
+# reads the compose-*.yaml profile set (ro) and writes request.json into the
+# ctl dir; the host-side swap-helper (swap-helper/swap-helper.sh, run as the
+# operator via cron @reboot) is the only thing that touches docker.
+services:
+  ods-node-agent:
+    environment:
+      NODE_VLLM_DIR: /vllm
+      NODE_SWAP_CTL_DIR: /swap-ctl
+    volumes:
+      - ${HOST_VLLM_DIR:-/home/tim/vllm}:/vllm:ro
+      - ${HOST_SWAP_CTL_DIR:-/home/tim/vllm/swap-ctl}:/swap-ctl:rw
