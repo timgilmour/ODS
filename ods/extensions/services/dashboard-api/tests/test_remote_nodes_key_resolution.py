@@ -1,0 +1,206 @@
+"""ODS_REMOTE_NODE_KEYS: the preferred key-delivery mechanism.
+
+Deploy-time problem this closes: docker-compose.base.yml's dashboard-api
+service enumerates its environment explicitly, so an admin-chosen key_env
+var name (e.g. ODS_NODE_KEY_SPARKY) never reaches the container without a
+compose edit per node. ODS_REMOTE_NODE_KEYS is a single JSON object
+{"<node name>": "<bearer key>"} that IS forwarded (see docker-compose.base.yml
+passthrough) and resolves without any per-node compose change.
+
+Resolution order per node, by name: (1) ODS_REMOTE_NODE_KEYS[name] if
+present and non-empty, (2) key_env lookup (existing, must keep working),
+(3) empty string. ODS_REMOTE_NODE_KEYS_FILE sits above all three and is
+covered in test_remote_nodes_keys_file.py; these cases leave it unset. Malformed ODS_REMOTE_NODE_KEYS (bad JSON / not an object)
+must log a warning and behave as if empty -- never crash, mirroring
+load_remote_nodes' own malformed-config handling.
+
+Keys must never be read from ODS_REMOTE_NODES itself -- only key_env
+(a var *name*) or the ODS_REMOTE_NODE_KEYS map may supply key material.
+"""
+import json
+import logging
+
+import remote_nodes
+
+NODE = json.dumps([{"name": "sparky", "url": "http://sparky.test:7720",
+                    "key_env": "TEST_NODE_KEY"}])
+
+
+def setup_function(_fn):
+    remote_nodes._STATE.clear()
+    # Config diagnostics on this path are warn-once (they run per poll cycle),
+    # so a signature left behind by an earlier test silences the next one.
+    remote_nodes._WARNED_ONCE.clear()
+
+
+def test_map_hit_used_when_key_env_absent(monkeypatch):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.delenv("TEST_NODE_KEY", raising=False)
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS",
+                       json.dumps({"sparky": "from-map"}))
+    nodes = remote_nodes.load_remote_nodes()
+    assert len(nodes) == 1
+    assert nodes[0].key == "from-map"
+
+
+def test_map_miss_falls_back_to_key_env(monkeypatch):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS",
+                       json.dumps({"someone-else": "not-sparky"}))
+    nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == "from-key-env"
+
+
+def test_no_map_configured_falls_back_to_key_env(monkeypatch):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.delenv("ODS_REMOTE_NODE_KEYS", raising=False)
+    nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == "from-key-env"
+
+
+def test_precedence_map_wins_when_both_set(monkeypatch):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS",
+                       json.dumps({"sparky": "from-map"}))
+    nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == "from-map"
+
+
+def test_map_empty_string_value_falls_back_to_key_env(monkeypatch):
+    """Present-but-empty in the map does not count as a hit."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", json.dumps({"sparky": ""}))
+    nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == "from-key-env"
+
+
+def test_neither_configured_yields_empty_string(monkeypatch):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.delenv("TEST_NODE_KEY", raising=False)
+    monkeypatch.delenv("ODS_REMOTE_NODE_KEYS", raising=False)
+    nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == ""
+
+
+def test_malformed_map_bad_json_falls_back_to_key_env(monkeypatch, caplog):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", "{not json")
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == "from-key-env"
+    assert any("ODS_REMOTE_NODE_KEYS" in r.message for r in caplog.records)
+
+
+def test_malformed_map_not_an_object_falls_back_to_key_env(monkeypatch, caplog):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", json.dumps(["sparky", "from-map"]))
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == "from-key-env"
+    assert any("ODS_REMOTE_NODE_KEYS" in r.message for r in caplog.records)
+
+
+def test_malformed_map_never_crashes_with_no_fallback_either(monkeypatch):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.delenv("TEST_NODE_KEY", raising=False)
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", "not even json {{{")
+    nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == ""
+
+
+def test_keys_never_read_from_topology_json(monkeypatch):
+    """A stray 'key' field inline in ODS_REMOTE_NODES must be ignored;
+    only key_env (a var name) or the map may supply key material."""
+    sneaky = json.dumps([{"name": "sparky", "url": "http://sparky.test:7720",
+                          "key": "inline-secret-should-be-ignored"}])
+    monkeypatch.setenv("ODS_REMOTE_NODES", sneaky)
+    monkeypatch.delenv("ODS_REMOTE_NODE_KEYS", raising=False)
+    nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == ""
+
+
+def test_empty_resolved_key_is_warned_about(monkeypatch, caplog):
+    """A node whose key resolves to nothing is the likeliest misconfiguration,
+    and it was silent until it surfaced as an opaque 401 on the node's card."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.delenv("TEST_NODE_KEY", raising=False)
+    monkeypatch.delenv("ODS_REMOTE_NODE_KEYS", raising=False)
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        nodes = remote_nodes.load_remote_nodes()
+    assert nodes[0].key == ""
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.WARNING]
+    assert any("sparky" in m and "ODS_REMOTE_NODE_KEYS" in m
+               for m in warnings), warnings
+
+
+def test_resolved_key_present_produces_no_warning(monkeypatch, caplog):
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        remote_nodes.load_remote_nodes()
+    assert [r.getMessage() for r in caplog.records
+            if r.levelno >= logging.WARNING] == []
+
+
+def test_malformed_nodes_list_warns_once_across_polls(monkeypatch, caplog):
+    """Same per-cycle exposure as the no-key warning: load_remote_nodes() runs
+    on every poll cycle AND every /api/gpu/detailed request."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", "{not a list")
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        for _ in range(5):
+            assert remote_nodes.load_remote_nodes() == []
+    assert len([r for r in caplog.records
+                if "JSON list" in r.getMessage()]) == 1
+
+
+def test_malformed_entry_warns_once_across_polls(monkeypatch, caplog):
+    monkeypatch.setenv("ODS_REMOTE_NODES",
+                       json.dumps([{"name": "sparky"}]))  # no url: skipped
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        for _ in range(5):
+            remote_nodes.load_remote_nodes()
+    assert len([r for r in caplog.records
+                if "malformed" in r.getMessage()]) == 1
+
+
+def test_malformed_map_warning_rearms_after_recovery(monkeypatch, caplog):
+    """Warn-once must key on the condition, not fire once per process: a map
+    that is fixed and later breaks again needs to be heard again."""
+    monkeypatch.setenv("ODS_REMOTE_NODES", NODE)
+    monkeypatch.setenv("TEST_NODE_KEY", "from-key-env")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", "{bad json")
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        remote_nodes.load_remote_nodes()
+        monkeypatch.setenv("ODS_REMOTE_NODE_KEYS",
+                           json.dumps({"sparky": "from-map"}))
+        remote_nodes.load_remote_nodes()
+        caplog.clear()
+        monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", "{bad json")
+        remote_nodes.load_remote_nodes()
+    assert any("ODS_REMOTE_NODE_KEYS" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_malformed_entry_log_never_echoes_an_inline_key(monkeypatch, caplog):
+    """The malformed-entry warning used %r on the raw entry, so an admin who
+    inlined a key in ODS_REMOTE_NODES (ignored as key material, but it can
+    still be present) got it written verbatim into the logs."""
+    malformed = json.dumps([{"name": "sparky",
+                             "key": "inline-secret-should-be-ignored",
+                             "api_key": "another-secret",
+                             "note": "no url field, so this entry is skipped"}])
+    monkeypatch.setenv("ODS_REMOTE_NODES", malformed)
+    with caplog.at_level(logging.WARNING, logger="remote_nodes"):
+        assert remote_nodes.load_remote_nodes() == []
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "inline-secret-should-be-ignored" not in logged
+    assert "another-secret" not in logged
+    # Still useful for debugging: the offending entry stays identifiable.
+    assert "sparky" in logged

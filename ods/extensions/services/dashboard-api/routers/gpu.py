@@ -13,6 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+import remote_nodes
 from security import verify_api_key
 
 from gpu import (
@@ -326,6 +327,31 @@ async def _probe_external_lemonade(api_base: str, api_path: str) -> tuple[str, s
 # Endpoints
 # ============================================================================
 
+def _no_local_gpu_aggregate(gpu_backend: str) -> GPUInfo:
+    """Zero-valued aggregate for a host that reports no local GPUs.
+
+    ``aggregate_gpu_details()`` deliberately rejects an empty list — there is
+    no truthful aggregate of nothing — but the detailed endpoint still has to
+    answer when the only GPUs worth showing belong to a remote node. The
+    ``*_available`` flags are all false so the UI reads this as "nothing
+    measured here" rather than "0 °C, 0 % busy".
+    """
+    return GPUInfo(
+        name="No local GPU",
+        memory_used_mb=0,
+        memory_total_mb=0,
+        memory_percent=0.0,
+        utilization_percent=0,
+        temperature_c=0,
+        power_w=None,
+        gpu_backend=gpu_backend,
+        gpu_count=0,
+        memory_usage_available=False,
+        utilization_available=False,
+        temperature_available=False,
+    )
+
+
 @router.get("/api/gpu/detailed", response_model=MultiGPUStatus, dependencies=[Depends(verify_api_key)])
 async def gpu_detailed():
     """Per-GPU metrics with service assignment info (cached 3 s)."""
@@ -334,11 +360,18 @@ async def gpu_detailed():
         return _detailed_cache["value"]
 
     gpu_backend = os.environ.get("GPU_BACKEND", "").lower() or "nvidia"
-    gpus = await asyncio.to_thread(_get_raw_gpus, gpu_backend)
-    if not gpus:
+    gpus = await asyncio.to_thread(_get_raw_gpus, gpu_backend) or []
+    # Remote-node statuses are resolved before the no-data check: a dashboard
+    # host with no usable local GPU (or a transient nvidia-smi failure) must
+    # not hide configured remote nodes — that GPU-less-host case is the
+    # multi-node design doc's motivating scenario. 503 is reserved for
+    # "nothing at all to report", which is the pre-existing behaviour.
+    nodes = remote_nodes.get_remote_node_statuses()
+    if not gpus and not nodes:
         raise HTTPException(status_code=503, detail="No GPU data available")
 
-    aggregate = aggregate_gpu_details(gpus, gpu_backend)
+    aggregate = (aggregate_gpu_details(gpus, gpu_backend) if gpus
+                 else _no_local_gpu_aggregate(gpu_backend))
 
     assignment_full = decode_gpu_assignment()
     assignment_data = assignment_full.get("gpu_assignment") if assignment_full else None
@@ -352,6 +385,7 @@ async def gpu_detailed():
         split_mode=_live_env_value("LLAMA_ARG_SPLIT_MODE") or None,
         tensor_split=_live_env_value("LLAMA_ARG_TENSOR_SPLIT") or None,
         aggregate=aggregate,
+        nodes=nodes,
     )
     _detailed_cache["expires"] = now + _GPU_DETAILED_TTL
     _detailed_cache["value"] = result

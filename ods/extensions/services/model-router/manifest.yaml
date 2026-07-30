@@ -11,6 +11,14 @@ service:
   host_env: MODEL_ROUTER_HOST
   default_host: model-router
   port: 9099
+  # Internal-only — the compose file declares this port under `expose:`, not
+  # `ports:`, so it's unreachable from the host (only other containers on
+  # the bridge network can reach model-router:9099). This explicit zero
+  # keeps `ods status`'s host-side probe from trying 127.0.0.1:9099, which
+  # nothing ever listens on, and reporting a false "not responding". The
+  # container's own Docker healthcheck (see docker-compose.base.yml) is the
+  # real health signal. Same pattern as hermes/manifest.yaml.
+  external_port_default: 0
   external_link: false
   health: /health
   ui_path: /health

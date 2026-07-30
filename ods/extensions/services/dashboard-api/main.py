@@ -60,6 +60,7 @@ from host_agent_client import (
     shutdown_clients as shutdown_agent_clients,
 )
 from agent_monitor import collect_metrics
+import remote_nodes
 from routers import (
     workflows, features, setup, updates, agents, privacy, extensions,
     gpu as gpu_router, resources, voice, models as models_router, model_state as model_state_router,
@@ -1035,6 +1036,7 @@ async def _lifespan(app: FastAPI):
         asyncio.create_task(collect_metrics()),
         asyncio.create_task(_poll_service_health()),
         asyncio.create_task(gpu_router.poll_gpu_history()),
+        asyncio.create_task(remote_nodes.poll_remote_nodes_forever()),
     ]
     try:
         yield

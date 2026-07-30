@@ -1293,6 +1293,34 @@ def test_production_schema_marks_provider_api_keys_secret(key):
     assert entry.get("secret") is True, f"{key} must have 'secret': true in .env.schema.json"
 
 
+def test_production_schema_marks_remote_node_keys_secret():
+    """``ODS_REMOTE_NODE_KEYS`` holds every remote node's bearer key.
+
+    Its name matches none of ``_SENSITIVE_ENV_KEY_RE``'s patterns, so without
+    the explicit schema flag the Settings env editor rendered the whole JSON
+    key map in cleartext. ``ODS_REMOTE_NODES`` is deliberately *not* secret --
+    it is topology (names/URLs) and stays readable.
+    """
+    import pathlib
+
+    schema_path = pathlib.Path(__file__).resolve().parents[4] / ".env.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    properties = schema["properties"]
+
+    keys_entry = properties.get("ODS_REMOTE_NODE_KEYS")
+    assert keys_entry is not None, "schema missing entry for ODS_REMOTE_NODE_KEYS"
+    assert keys_entry.get("secret") is True, \
+        "ODS_REMOTE_NODE_KEYS must have 'secret': true in .env.schema.json"
+    import settings as settings_mod
+
+    assert settings_mod._is_secret_field("ODS_REMOTE_NODE_KEYS", keys_entry) is True
+
+    topology_entry = properties.get("ODS_REMOTE_NODES")
+    assert topology_entry is not None, "schema missing entry for ODS_REMOTE_NODES"
+    assert topology_entry.get("secret") is not True, \
+        "ODS_REMOTE_NODES is topology, not a credential"
+
+
 def test_production_schema_only_allows_explicit_rag_secret_removal():
     import pathlib
 

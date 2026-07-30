@@ -1,0 +1,7 @@
+#!/bin/sh
+# A node whose vendor tooling is broken: nvidia-smi exists but fails, the way
+# it does when the driver is wedged or the devices are not exposed to the
+# container. The agent must stay up and report a collector error -- the
+# "online, collector failing" state -- not go dark.
+echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver." >&2
+exit 9

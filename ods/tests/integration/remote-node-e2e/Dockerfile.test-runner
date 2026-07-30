@@ -1,0 +1,16 @@
+# Drives dashboard-api's remote_nodes.py against the live node-agent container.
+# dashboard-api's source is bind-mounted at /app rather than copied, so the
+# harness always exercises the working tree.
+FROM python:3.12-slim
+# remote_nodes -> models -> config pulls in PyYAML, so the runner needs
+# dashboard-api's import-time dependencies as well as the test tooling. Kept to
+# that transitive set rather than the whole requirements.txt: no server runs
+# here, and a short list makes a new import in that chain fail loudly instead
+# of silently passing on a dependency nobody meant to rely on.
+RUN pip install --no-cache-dir \
+    "pytest>=8.0,<9.0" \
+    "pytest-asyncio>=0.23,<0.25" \
+    "httpx>=0.27.0,<0.29.0" \
+    "pydantic>=2.5.0,<3.0.0" \
+    "PyYAML>=6.0,<7.0.0"
+WORKDIR /e2e-tests

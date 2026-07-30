@@ -58,3 +58,18 @@ jobs:
 
       - name: Run Unit Tests
         run: pytest tests/ -v --cov=. --cov-report=term --cov-report=lcov:coverage.lcov
+
+  # The poller's unit tests drive it through a mocked transport, so the wire
+  # contract between dashboard-api and node-agent is only ever checked against
+  # assumptions written in the same file as the assertions. This runs it
+  # against the real service image over a real network hop. No GPU required:
+  # the collector's nvidia-smi is stubbed inside the container, so the
+  # collector's own argv and parsing still execute. See the harness README.
+  remote-node-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Remote node end-to-end harness
+        run: bash ods/tests/integration/remote-node-e2e/run.sh

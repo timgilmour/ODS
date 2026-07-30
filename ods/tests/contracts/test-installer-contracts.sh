@@ -361,6 +361,35 @@ else
   echo "[SKIP] docker compose unavailable"
 fi
 
+echo "[contract] dashboard-api forwards remote-node config without per-node compose edits"
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  tmp_env="$(mktemp)"
+  trap 'rm -f "$tmp_env"' EXIT
+  cat > "$tmp_env" <<'ENV_EOF'
+WEBUI_SECRET=ci-placeholder
+ODS_REMOTE_NODES=[{"name":"sparky","url":"http://sparky.test:7720","key_env":"ODS_NODE_KEY_SPARKY"}]
+ODS_REMOTE_NODE_KEYS={"sparky":"ci-placeholder-key"}
+ENV_EOF
+  rendered="$(docker compose --env-file "$tmp_env" -f docker-compose.base.yml config dashboard-api)"
+  grep -q 'ODS_REMOTE_NODES:.*sparky' <<<"$rendered" \
+    || { echo "[FAIL] dashboard-api must forward ODS_REMOTE_NODES (topology) into the container"; exit 1; }
+  grep -q 'ODS_REMOTE_NODE_KEYS:.*ci-placeholder-key' <<<"$rendered" \
+    || { echo "[FAIL] dashboard-api must forward ODS_REMOTE_NODE_KEYS (preferred key delivery) into the container without a per-node compose edit"; exit 1; }
+
+  tmp_env_empty="$(mktemp)"
+  trap 'rm -f "$tmp_env" "$tmp_env_empty"' EXIT
+  cat > "$tmp_env_empty" <<'ENV_EOF'
+WEBUI_SECRET=ci-placeholder
+ENV_EOF
+  rendered_empty="$(docker compose --env-file "$tmp_env_empty" -f docker-compose.base.yml config dashboard-api)"
+  grep -q "ODS_REMOTE_NODES: \"\"" <<<"$rendered_empty" \
+    || { echo "[FAIL] ODS_REMOTE_NODES must default empty (feature dormant when unconfigured)"; exit 1; }
+  grep -q "ODS_REMOTE_NODE_KEYS: \"\"" <<<"$rendered_empty" \
+    || { echo "[FAIL] ODS_REMOTE_NODE_KEYS must default empty (feature dormant when unconfigured)"; exit 1; }
+else
+  echo "[SKIP] docker compose unavailable"
+fi
+
 echo "[contract] dashboard nginx re-resolves dashboard-api after lifecycle churn"
 dashboard_nginx="extensions/services/dashboard/nginx.conf"
 grep -qF 'resolver 127.0.0.11' "$dashboard_nginx" \

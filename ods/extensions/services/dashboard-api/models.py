@@ -143,6 +143,23 @@ class IndividualGPU(BaseModel):
     temperature_available: bool = True
 
 
+class RemoteNodeServing(BaseModel):
+    model: Optional[str] = None
+    endpoint_ok: bool = False
+    container_status: Optional[str] = None
+
+
+class RemoteNodeStatus(BaseModel):
+    name: str
+    display_name: Optional[str] = None
+    platform: str = "unknown"
+    status: str  # "online" | "offline" | "error"
+    last_seen: Optional[str] = None
+    gpus: list[IndividualGPU] = []
+    serving: Optional[RemoteNodeServing] = None
+    error: Optional[str] = None
+
+
 class MultiGPUStatus(BaseModel):
     gpu_count: int
     backend: str  # "nvidia", "amd", "apple"
@@ -152,6 +169,7 @@ class MultiGPUStatus(BaseModel):
     split_mode: Optional[str] = None
     tensor_split: Optional[str] = None
     aggregate: GPUInfo
+    nodes: list[RemoteNodeStatus] = []
 
 
 class AmdRuntimeStatus(BaseModel):

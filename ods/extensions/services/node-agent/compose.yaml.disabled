@@ -1,0 +1,63 @@
+# Runs on the REMOTE node, NOT in the local ODS stack.
+#
+# Build and start from a repo checkout root ON THE REMOTE HOST:
+#   docker compose -f ods/extensions/services/node-agent/compose.yaml.disabled up -d --build
+#
+# The `.disabled` suffix is the repo's own convention (see langfuse) for a
+# compose fragment that must stay out of the local stack's compose file set:
+# `ods` builds its -f list from every extension whose compose.yaml exists, so a
+# plain compose.yaml here would enrol a remote-only service into every local
+# stack operation. Do NOT run `ods enable node-agent` -- see manifest.yaml.
+services:
+  ods-node-agent:
+    build:
+      context: ../../../..
+      dockerfile: ods/extensions/services/node-agent/Dockerfile
+    container_name: ods-node-agent
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NODE_AGENT_KEY: ${NODE_AGENT_KEY:?set NODE_AGENT_KEY}
+      NODE_NAME: ${NODE_NAME:-}
+      GPU_BACKEND: ${GPU_BACKEND:-nvidia}
+      NODE_SERVING_PROBE_URL: ${NODE_SERVING_PROBE_URL:-}
+      NODE_SERVING_CONTAINER: ${NODE_SERVING_CONTAINER:-}
+      NODE_AGENT_PORT: ${NODE_AGENT_PORT:-7720}
+      # Empty = every interface, which is what host networking gives you by
+      # default. Set it to one address on a multi-homed node (see README).
+      NODE_AGENT_BIND: ${NODE_AGENT_BIND:-}
+      NODE_GPU_CACHE_TTL: ${NODE_GPU_CACHE_TTL:-2.0}
+    healthcheck:
+      # Liveness only: proves uvicorn is listening. Every route is bearer-gated,
+      # so an HTTP probe would need the key; python is already in the image.
+      # The probe follows NODE_AGENT_BIND: binding one address makes a fixed
+      # 127.0.0.1 probe fail against a perfectly healthy agent.
+      test: ["CMD", "python", "-c", "import os,socket; h=os.environ.get('NODE_AGENT_BIND','').strip(); h='127.0.0.1' if h in ('','0.0.0.0','::') else h; socket.create_connection((h,int(os.environ.get('NODE_AGENT_PORT','7720'))),3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # ─────────────────────────────────────────────────────────────────────────
+    # OPT-IN ONLY -- commented out on purpose. Uncomment BOTH lines below if,
+    # and only if, you set NODE_SERVING_CONTAINER and accept the trade. They
+    # exist solely so /v1/node/serving can run `docker inspect <container>`;
+    # with them absent, container_status is simply reported as null and every
+    # other field still works.
+    #
+    # What they grant: mounting the Docker socket into this container gives it
+    # full control of the Docker API -- create privileged containers, mount the
+    # host filesystem, read every secret -- which is equivalent to host root.
+    # The `:ro` flag protects only the socket *file*; the API behind it stays
+    # fully writable, so it mitigates nothing here. This container listens on
+    # the network (network_mode: host), so whoever compromises it gets host
+    # root with it. See README.md ("Security").
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock:ro
+    #   - /usr/bin/docker:/usr/bin/docker:ro
+    # ─────────────────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
