@@ -64,7 +64,7 @@ The installer's first-boot flow handles both. If you're not using the installer,
 **The proxy is the trusted gate.** Behind it, each service's own auth applies:
 
 - `dashboard-api`: API key (`DASHBOARD_API_KEY`)
-- Open WebUI: its own auth (`WEBUI_AUTH=true` by default — users sign up / sign in)
+- Open WebUI: its own auth (`WEBUI_AUTH=true` is selected when the installer enables this LAN proxy)
 - Dashboard SPA: the React app shows admin features only when the API call succeeds
 - ODS Talk: signed `ods-session` cookie from owner-card redemption; no dashboard admin API control
 - `hermes-proxy`: Caddy `forward_auth` against `dashboard-api/api/auth/verify-session` (signed-cookie check)

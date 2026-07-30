@@ -421,18 +421,24 @@ HERMES_AUTH_VERIFY_PY
 
 _write_macos_opencode_config() {
     local config_path="$1" model_name="$2" base_url="$3" api_key="$4" context_length="$5"
+    # OpenCode reads config.json, not opencode.json, so the same document has
+    # to land in both files — matching installers/phases/07-devtools.sh on
+    # Linux and installers/windows/lib/opencode-config.ps1 on Windows.
+    local compat_path
+    compat_path="$(dirname "$config_path")/config.json"
     mkdir -p "$(dirname "$config_path")"
     ODS_OPENCODE_MODEL="$model_name" \
     ODS_OPENCODE_BASE_URL="$base_url" \
     ODS_OPENCODE_API_KEY="$api_key" \
     ODS_OPENCODE_CONTEXT="$context_length" \
-        /usr/bin/python3 - "$config_path" <<'OPENCODE_CONFIG_PY'
+        /usr/bin/python3 - "$config_path" "$compat_path" <<'OPENCODE_CONFIG_PY'
 import json
 import os
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
+compat_path = Path(sys.argv[2])
 try:
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 except (OSError, ValueError):
@@ -460,17 +466,25 @@ provider.update({
 data["model"] = f"{provider_id}/{model_name}"
 data.setdefault("$schema", "https://opencode.ai/config.json")
 
-tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
+payload = json.dumps(data, indent=2) + "\n"
 
-check = json.loads(path.read_text(encoding="utf-8"))
-check_provider = check["provider"][provider_id]
-if check.get("model") != f"{provider_id}/{model_name}":
-    raise SystemExit("OpenCode model verification failed")
-if check_provider["options"] != {"baseURL": base_url, "apiKey": api_key}:
-    raise SystemExit("OpenCode route verification failed")
+
+def write_atomic(target):
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, target)
+
+
+for target in (path, compat_path):
+    write_atomic(target)
+
+    check = json.loads(target.read_text(encoding="utf-8"))
+    check_provider = check["provider"][provider_id]
+    if check.get("model") != f"{provider_id}/{model_name}":
+        raise SystemExit(f"OpenCode model verification failed for {target.name}")
+    if check_provider["options"] != {"baseURL": base_url, "apiKey": api_key}:
+        raise SystemExit(f"OpenCode route verification failed for {target.name}")
 OPENCODE_CONFIG_PY
 }
 

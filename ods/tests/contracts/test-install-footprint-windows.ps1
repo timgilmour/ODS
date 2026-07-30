@@ -35,7 +35,7 @@ try {
     }
     Set-Content -LiteralPath (Join-Path $installDir "docs\stale.txt") -Value "modified documentation"
     Set-Content -LiteralPath (Join-Path $installDir "README.md") -Value "modified readme"
-    Set-Content -LiteralPath (Join-Path $installDir ".env") -Value "ODS_VERSION=2.5.3"
+    Set-Content -LiteralPath (Join-Path $installDir ".env") -Value "ODS_VERSION=2.6.0"
     Set-Content -LiteralPath (Join-Path $installDir "manifest.json") -Value "{}"
     Set-Content -LiteralPath (Join-Path $installDir "docker-compose.base.yml") -Value "services: {}"
     Set-Content -LiteralPath (Join-Path $installDir "data\preserve.db") -Value "user data"
