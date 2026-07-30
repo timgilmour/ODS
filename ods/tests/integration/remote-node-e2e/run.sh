@@ -23,4 +23,15 @@ teardown() {
 "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 trap teardown EXIT
 
+if [ "$KEEP" = true ]; then
+    # --abort-on-container-exit stops EVERY container when the runner exits,
+    # so it and --keep contradict each other: detach instead, stream the
+    # runner's output, and leave the agent containers up for poking at.
+    "${COMPOSE[@]}" up --build -d
+    "${COMPOSE[@]}" logs -f test-runner &
+    code="$(docker wait ods-e2e-test-runner)"
+    wait %% 2>/dev/null || true
+    exit "$code"
+fi
+
 "${COMPOSE[@]}" up --build --abort-on-container-exit --exit-code-from test-runner

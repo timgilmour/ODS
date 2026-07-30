@@ -24,6 +24,7 @@ from models import IndividualGPU
 AGENT_URL = os.environ["NODE_AGENT_URL"]
 AGENT_KEY = os.environ["NODE_AGENT_KEY"]
 DEAD_URL = os.environ["DEAD_NODE_URL"]
+DEGRADED_URL = os.environ["DEGRADED_NODE_URL"]
 STUB_MODEL = os.environ["SERVING_STUB_MODEL"]
 
 STUB_UUID = "GPU-e2e-0000-0000-0000-000000000000"
@@ -105,6 +106,26 @@ async def test_assigned_services_never_cross_the_wire(monkeypatch):
 
     (status,) = remote_nodes.get_remote_node_statuses()
     assert status.gpus[0].assigned_services == []
+
+
+@pytest.mark.asyncio
+async def test_broken_collector_is_online_with_an_error(monkeypatch):
+    """The third state the dashboard renders: the node answers, its vendor
+    tooling does not (wedged driver, devices not exposed). Must stay online --
+    it is reachable -- with the collector's message carried through, distinct
+    from both offline and auth-error. Exercised against a second real agent
+    container whose nvidia-smi fails."""
+    monkeypatch.setenv("ODS_REMOTE_NODES",
+                       _nodes_env(url=DEGRADED_URL, name="e2e-degraded"))
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", _keys_env(name="e2e-degraded"))
+    await _poll_once()
+
+    (status,) = remote_nodes.get_remote_node_statuses()
+    assert status.status == "online"
+    assert status.last_seen is not None
+    assert status.gpus == []
+    assert status.error is not None
+    assert "collector" in status.error
 
 
 @pytest.mark.asyncio

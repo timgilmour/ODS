@@ -39,9 +39,10 @@ unit tests can see:
 
 | Path | What it is |
 |---|---|
-| `docker-compose.test.yml` | Three containers on a private bridge with static IPs |
+| `docker-compose.test.yml` | Four containers on a private bridge with static IPs |
 | `Dockerfile.test-runner` | pytest + dashboard-api's import-time deps |
 | `stubs/nvidia-smi` | Fake vendor CLI, so no GPU is needed |
+| `stubs/nvidia-smi-broken` | The same CLI failing, for the collector-error state |
 | `stubs/serving_stub.py` | Minimal OpenAI-shaped `/v1/models` endpoint |
 | `tests/` | The suite, run inside `test-runner` |
 
@@ -49,6 +50,7 @@ unit tests can see:
 |---|---|---|
 | `ods-e2e-node-agent` | 172.30.20.21 | The real service image |
 | `ods-e2e-serving-stub` | 172.30.20.22 | What the node is "serving" |
+| `ods-e2e-node-agent-degraded` | 172.30.20.23 | Same image, vendor CLI broken |
 | `ods-e2e-test-runner` | 172.30.20.100 | Imports `remote_nodes.py`, polls the agent |
 | *(nothing)* | 172.30.20.99 | The dead peer, for offline/isolation cases |
 
@@ -65,9 +67,10 @@ the collector's own argv construction and CSV parsing — the parts most likely
 to break. The values it reports are deliberately odd (12345 MB used, 122880 MB
 total, 30.5 W) so an assertion cannot pass by coincidence.
 
-To exercise a different scenario, edit the stub: an empty response makes the
-collector return nothing, which should surface as an `online` node carrying a
-collector `error` rather than an offline one.
+The degraded agent runs the same image with `stubs/nvidia-smi-broken` mounted
+instead -- a vendor CLI that fails the way a wedged driver does -- which is how
+the suite covers the third dashboard state: `online` with a collector `error`,
+distinct from both offline and auth-error.
 
 ## Known limits
 

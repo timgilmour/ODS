@@ -55,6 +55,31 @@ services:
       serving-stub:
         condition: service_healthy
 
+  # Same image as node-agent, but its vendor CLI fails -- the "node up,
+  # collector failing" state (a wedged driver, devices not exposed). The agent
+  # must stay up and answer 200 with a collector error, not go dark.
+  node-agent-degraded:
+    build:
+      context: ../../../..
+      dockerfile: ods/extensions/services/node-agent/Dockerfile
+    container_name: ods-e2e-node-agent-degraded
+    environment:
+      NODE_AGENT_KEY: e2e-test-key
+      NODE_NAME: e2e-degraded
+      GPU_BACKEND: nvidia
+      NODE_AGENT_PORT: "7720"
+      NODE_GPU_CACHE_TTL: "0"
+    volumes:
+      - ./stubs/nvidia-smi-broken:/usr/local/bin/nvidia-smi:ro
+    networks:
+      e2e:
+        ipv4_address: 172.30.20.23
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1',7720),3).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
   test-runner:
     build:
       context: .
@@ -68,6 +93,7 @@ services:
       # No container answers here. Deliberately on the same subnet, so the
       # failure is a refused/unroutable peer rather than a DNS miss.
       DEAD_NODE_URL: http://172.30.20.99:7720
+      DEGRADED_NODE_URL: http://172.30.20.23:7720
       SERVING_STUB_MODEL: e2e-stub-model
     volumes:
       - ../../../extensions/services/dashboard-api:/app:ro
@@ -79,6 +105,8 @@ services:
         ipv4_address: 172.30.20.100
     depends_on:
       node-agent:
+        condition: service_healthy
+      node-agent-degraded:
         condition: service_healthy
 
 networks:
