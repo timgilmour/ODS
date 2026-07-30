@@ -703,15 +703,21 @@ def main() -> int:
         test_hipfire_env_absent_renders_stock,
         test_hipfire_explicit_flags_ignore_env,
         test_atomic_write_failure_preserves_known_good_config,
+        test_extra_routes_injected_before_lemonade_wildcard,
+        test_extra_routes_injected_in_lemonade_hipfire_branch,
+        test_extra_routes_injected_in_switchboard_surface,
+        test_extra_routes_missing_file_renders_without_extras,
+        test_extra_routes_reserved_name_fails_closed,
+        test_extra_routes_malformed_json_fails_closed,
+        test_extra_routes_missing_field_fails_closed,
+        test_lemonade_routes_carry_context_windows,
+        test_hipfire_context_window_env_fallback,
+        test_extra_routes_carry_context_windows,
     ]
     for test in tests:
         test()
         print(f"[PASS] {test.__name__}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 # --- extra litellm routes sidecar (config/litellm/extra-routes.json) ---
@@ -813,3 +819,67 @@ def test_extra_routes_missing_field_fails_closed() -> None:
             assert "model" in exc.stderr
         else:
             raise AssertionError("incomplete entry must fail the render")
+
+
+# --- model_info context windows (catalog-generator branch) ---
+
+
+def test_lemonade_routes_carry_context_windows() -> None:
+    payload = run_renderer(
+        "--surface", "litellm-lemonade",
+        "--ods-mode", "lemonade",
+        "--gpu-backend", "amd",
+        "--gguf-file", "Model.gguf",
+        "--context-length", "32768",
+        "--hipfire-enabled", "--hipfire-active",
+        "--hipfire-model", "qwen36-35b-a3b.mq4",
+        "--hipfire-context-length", "262144",
+    )
+    content = file_by_surface(payload, "litellm-lemonade")["content"]
+    hipfire_block = content.split("- model_name: hipfire\n", 1)[1]
+    assert "max_input_tokens: 262144" in hipfire_block.split("- model_name:", 1)[0]
+    lemonade_block = content.split("- model_name: lemonade\n", 1)[1]
+    assert "max_input_tokens: 32768" in lemonade_block.split("- model_name:", 1)[0]
+    default_block = content.split("- model_name: default\n", 1)[1]
+    assert "max_input_tokens: 262144" in default_block.split("- model_name:", 1)[0]
+
+
+def test_hipfire_context_window_env_fallback() -> None:
+    # Flag-less callers (the host-agent invocation) get hipfire's context from
+    # the install tree's .env — HIPFIRE_MAX_SEQ, NOT CTX_SIZE (llama-server's).
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / ".env").write_text(
+            "ENABLE_HIPFIRE=true\n"
+            "HIPFIRE_MODEL=qwen36-35b-a3b.mq4\n"
+            "HIPFIRE_ACTIVE=true\n"
+            "HIPFIRE_MAX_SEQ=200000\n"
+            "CTX_SIZE=32768\n",
+            encoding="utf-8",
+        )
+        payload = run_renderer(*_hipfire_args("--output-root", str(root)))
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+        hipfire_block = content.split("- model_name: hipfire\n", 1)[1]
+        assert "max_input_tokens: 200000" in hipfire_block.split("- model_name:", 1)[0]
+
+
+def test_extra_routes_carry_context_windows() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, [
+            {"model_name": "spark-aeon", "model": "openai/aeon",
+             "api_base": "http://192.168.1.15:8000/v1",
+             "max_input_tokens": 229376},
+            {"model_name": "spark-heretic", "model": "openai/heretic",
+             "api_base": "http://192.168.1.15:8000/v1"},
+        ])
+        payload = run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                               "--extra-routes-file", path)
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+    aeon_block = content.split("- model_name: spark-aeon\n", 1)[1].split("- model_name:", 1)[0]
+    assert "max_input_tokens: 229376" in aeon_block
+    heretic_block = content.split("- model_name: spark-heretic\n", 1)[1].split("- model_name:", 1)[0]
+    assert "model_info" not in heretic_block
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -102,6 +102,9 @@ class RenderInputs:
     # before the wildcard. The sidecar is an INPUT — the renderer never writes
     # it — which is what makes these routes survive activate regens.
     extra_litellm_routes: tuple = ()
+    # Hipfire's context window (HIPFIRE_MAX_SEQ — distinct from context_length,
+    # which is llama-server's GGUF CTX_SIZE).
+    hipfire_context_length: int = 262144
 
 
 @dataclass(frozen=True)
@@ -303,6 +306,14 @@ litellm_settings:
     return RenderedFile("litellm-cloud", "config/litellm/cloud.yaml", content)
 
 
+def _model_info_block(max_input_tokens) -> str:
+    """Per-route litellm model_info; consumers (omp's litellm discovery, the
+    dashboard) read max_input_tokens as the context window."""
+    if not max_input_tokens or int(max_input_tokens) <= 0:
+        return ""
+    return f"    model_info:\n      max_input_tokens: {int(max_input_tokens)}\n"
+
+
 _EXTRA_ROUTES_RESERVED = {
     "default", "*", "hipfire", "lemonade", "local", "cloud", "ods/current",
 }
@@ -351,6 +362,13 @@ def load_extra_litellm_routes(path_arg: str | None) -> tuple:
             raise SystemExit(
                 f"extra-routes: entry {i} may not shadow core route "
                 f"{cleaned['model_name']!r}")
+        max_input = entry.get("max_input_tokens")
+        if max_input is not None:
+            if not isinstance(max_input, int) or isinstance(max_input, bool) or max_input <= 0:
+                raise SystemExit(
+                    f"extra-routes: entry {i} field 'max_input_tokens' must be "
+                    f"a positive integer (got {max_input!r})")
+            cleaned["max_input_tokens"] = max_input
         routes.append(cleaned)
     return tuple(routes)
 
@@ -363,6 +381,7 @@ def extra_route_entry(route: dict) -> str:
         f"      model: {route['model']}\n"
         f"      api_base: {route['api_base']}\n"
         f"      api_key: {route['api_key']}\n"
+        + _model_info_block(route.get("max_input_tokens"))
     )
 
 
@@ -437,13 +456,16 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
       api_key: not-needed
 """
         default_params = hipfire_params if inputs.hipfire_active else lemonade_params
+        hipfire_info = _model_info_block(inputs.hipfire_context_length)
+        lemonade_info = _model_info_block(inputs.context_length)
+        default_info = hipfire_info if inputs.hipfire_active else lemonade_info
         content = (
             "model_list:\n"
-            f"  - model_name: default\n{default_params}"
+            f"  - model_name: default\n{default_params}{default_info}"
             "\n"
-            f"  - model_name: hipfire\n{hipfire_params}"
+            f"  - model_name: hipfire\n{hipfire_params}{hipfire_info}"
             "\n"
-            f"  - model_name: lemonade\n{lemonade_params}"
+            f"  - model_name: lemonade\n{lemonade_params}{lemonade_info}"
             "\n"
             + "".join(f"{extra_route_entry(r)}\n" for r in inputs.extra_litellm_routes)
             + f"  - model_name: \"*\"\n{default_params}"
@@ -456,9 +478,10 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
         )
         return RenderedFile("litellm-lemonade", "config/litellm/lemonade.yaml", content)
 
+    lemonade_info = _model_info_block(inputs.context_length)
     content = (
         "model_list:\n"
-        f"  - model_name: default\n{lemonade_params}"
+        f"  - model_name: default\n{lemonade_params}{lemonade_info}"
         "\n"
         + "".join(f"{extra_route_entry(r)}\n" for r in inputs.extra_litellm_routes)
         + f"  - model_name: \"*\"\n{lemonade_params}"
@@ -758,6 +781,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--hipfire-active", action="store_true")
     parser.add_argument("--hipfire-model", default="")
     parser.add_argument("--hipfire-api-base", default="http://hipfire:11435/v1")
+    parser.add_argument("--hipfire-context-length", type=int, default=0)
     parser.add_argument(
         "--remote-llm-enabled",
         choices=["", "true", "false"],
@@ -859,6 +883,19 @@ def resolve_hipfire_state(args: argparse.Namespace) -> tuple[bool, bool, str]:
     )
 
 
+def resolve_hipfire_context_length(args: argparse.Namespace) -> int:
+    """Hipfire context window: explicit flag wins; otherwise the install
+    tree's .env HIPFIRE_MAX_SEQ (NOT CTX_SIZE — that is llama-server's GGUF
+    context). Falls back to hipfire's shipped default."""
+    if args.hipfire_context_length > 0:
+        return args.hipfire_context_length
+    env = read_env_values(Path(args.output_root) / ".env", ("HIPFIRE_MAX_SEQ",))
+    raw = (env.get("HIPFIRE_MAX_SEQ") or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return 262144
+
+
 def validate_remote_inputs(inputs: RenderInputs) -> None:
     if not remote_route_enabled(inputs):
         return
@@ -906,6 +943,7 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         remote_llm_base_url=args.remote_llm_base_url,
         remote_llm_model=args.remote_llm_model,
         extra_litellm_routes=load_extra_litellm_routes(args.extra_routes_file),
+        hipfire_context_length=resolve_hipfire_context_length(args),
     )
     validate_remote_inputs(inputs)
     if args.surface == "litellm-switchboard" and inputs.ods_mode == "cloud":
