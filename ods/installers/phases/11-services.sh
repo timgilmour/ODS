@@ -17,6 +17,191 @@
 #   Change model download logic or compose launch flags here.
 # ============================================================================
 
+_phase11_build_local_images() {
+    local -a build_services=("$@")
+    local -a failed_build_services=()
+    local build_count=0 build_total=${#build_services[@]}
+    local svc build_pid build_failed resolved_image
+    local attempt max_attempts retry_delay build_log label
+
+    max_attempts="${ODS_DOCKER_BUILD_MAX_ATTEMPTS:-3}"
+    [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=3
+    (( max_attempts < 1 )) && max_attempts=1
+    retry_delay="${ODS_DOCKER_BUILD_RETRY_DELAY_SECONDS:-5}"
+    [[ "$retry_delay" =~ ^[0-9]+$ ]] || retry_delay=5
+
+    for svc in "${build_services[@]}"; do
+        build_count=$((build_count + 1))
+        build_log="${LOG_FILE}.${svc}.build.log"
+        : > "$build_log"
+        build_failed=true
+
+        for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            {
+                echo ""
+                echo "===== $svc build attempt $attempt/$max_attempts at $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+            } >> "$build_log"
+
+            $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" build --no-cache "$svc" >> "$build_log" 2>&1 &
+            build_pid=$!
+            build_failed=false
+            label="[$build_count/$build_total] Building $svc"
+            (( max_attempts > 1 )) && label="$label (attempt $attempt/$max_attempts)"
+            spin_task "$build_pid" "$label" || build_failed=true
+
+            # Cross-check that a successful build produced a tagged image. An
+            # image left by an earlier install never overrides a non-zero build.
+            if ! $build_failed; then
+                resolved_image=$($DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" config --format json 2>/dev/null \
+                    | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    svc_name = '$svc'
+    svc_config = d.get('services', {}).get(svc_name, {})
+    image = svc_config.get('image', '') or ''
+    if not image and svc_config.get('build') is not None:
+        project = d.get('name') or 'ods'
+        image = f'{project}-{svc_name}'
+    print(image)
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+                if [[ -n "$resolved_image" ]] && ! $DOCKER_CMD image inspect "$resolved_image" &>/dev/null; then
+                    build_failed=true
+                    echo "Built image '$resolved_image' was not found after build attempt $attempt." >> "$build_log"
+                fi
+            fi
+
+            if ! $build_failed; then
+                break
+            fi
+
+            printf "\r  ${AMB}⚠${NC} %-60s\n" "$svc build failed (attempt $attempt/$max_attempts)"
+            if (( attempt < max_attempts )); then
+                ai_warn "$svc build failed; retrying in ${retry_delay}s (attempt $((attempt + 1))/$max_attempts)..."
+                sleep "$retry_delay"
+            fi
+        done
+
+        if $build_failed; then
+            printf "\r  ${AMB}⚠${NC} %-60s\n" "$svc build failed or image missing"
+            {
+                echo ""
+                echo "===== $svc build log tail ($build_log) ====="
+                tail -n 120 "$build_log" 2>/dev/null || true
+            } >> "$LOG_FILE"
+            ai "Build log: $build_log"
+            failed_build_services+=("$svc")
+        else
+            printf "\r  ${BGRN}✓${NC} %-60s\n" "$svc built"
+        fi
+    done
+
+    if (( ${#failed_build_services[@]} > 0 )); then
+        ai_bad "Required local image build(s) failed: ${failed_build_services[*]}"
+        ai "Refusing to start an image left by an earlier install. Fix the build error and rerun the installer."
+        return 1
+    fi
+}
+
+_phase11_download_hf_artifact() {
+    local url="$1" destination="$2" log_file="$3"
+    local helper="$INSTALL_DIR/scripts/download-hf-artifact.py"
+    local python_cmd="${ODS_PYTHON_CMD:-}"
+
+    case "$url" in
+        https://huggingface.co/*|https://www.huggingface.co/*|https://hf.co/*) ;;
+        *) return 2 ;;
+    esac
+
+    [[ -f "$helper" ]] || return 2
+    if [[ -z "$python_cmd" ]]; then
+        python_cmd="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+    fi
+    [[ -n "$python_cmd" ]] || return 2
+
+    if ! "$python_cmd" -c "import huggingface_hub, hf_xet" >/dev/null 2>&1; then
+        if ods_ensure_python_pip "$python_cmd" "Hugging Face downloader"; then
+            ods_python_pip_install_user "$python_cmd" "$log_file" "huggingface_hub[hf_xet]>=0.27" || true
+        fi
+    fi
+
+    "$python_cmd" "$helper" "$url" "$destination" >> "$log_file" 2>&1
+}
+
+_phase11_prefetch_embeddings_model() {
+    [[ "${ENABLE_EMBEDDINGS:-${ENABLE_RAG:-false}}" == "true" ]] || return 0
+    [[ "${ODS_EMBEDDINGS_PREFETCH:-true}" == "false" ]] && {
+        ai_warn "Skipping embeddings model prefetch because ODS_EMBEDDINGS_PREFETCH=false."
+        return 0
+    }
+
+    local helper="$INSTALL_DIR/scripts/download-hf-snapshot.py"
+    local model="${EMBEDDING_MODEL:-}"
+    local revision="${EMBEDDING_MODEL_REVISION:-}"
+    local cache_dir="$INSTALL_DIR/data/embeddings"
+    local python_cmd="${ODS_PYTHON_CMD:-${_python_cmd:-}}"
+    local prefetch_pid
+
+    if [[ -z "$model" ]] && declare -f _phase11_env_get >/dev/null 2>&1; then
+        model="$(_phase11_env_get EMBEDDING_MODEL "BAAI/bge-base-en-v1.5")"
+    fi
+    model="${model:-BAAI/bge-base-en-v1.5}"
+
+    [[ -f "$helper" ]] || {
+        ai_bad "Embeddings snapshot helper missing: $helper"
+        return 1
+    }
+    if [[ -z "$python_cmd" ]]; then
+        python_cmd="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+    fi
+    [[ -n "$python_cmd" ]] || {
+        ai_bad "Python is required to prefetch the embeddings model for RAG."
+        return 1
+    }
+
+    if ! "$python_cmd" -c "import huggingface_hub, hf_xet" >/dev/null 2>&1; then
+        if ods_ensure_python_pip "$python_cmd" "Embeddings Hugging Face downloader"; then
+            ods_python_pip_install_user "$python_cmd" "$LOG_FILE" "huggingface_hub[hf_xet]>=0.27" || true
+        fi
+    fi
+    if ! "$python_cmd" -c "import huggingface_hub, hf_xet" >/dev/null 2>&1; then
+        ai_bad "Could not install huggingface_hub[hf_xet] for embeddings prefetch."
+        ai "Install it manually and re-run:"
+        ai "  $python_cmd -m pip install --user 'huggingface_hub[hf_xet]>=0.27'"
+        return 1
+    fi
+
+    mkdir -p "$cache_dir"
+    ai "Caching embeddings model for RAG: $model"
+    if [[ -n "$revision" ]]; then
+        "$python_cmd" "$helper" "$model" "$cache_dir" --revision "$revision" >> "$LOG_FILE" 2>&1 &
+    else
+        "$python_cmd" "$helper" "$model" "$cache_dir" >> "$LOG_FILE" 2>&1 &
+    fi
+    prefetch_pid=$!
+    if spin_task "$prefetch_pid" "Caching embeddings model"; then
+        ai_ok "Embeddings model cached for TEI"
+        return 0
+    fi
+
+    ai_bad "Embeddings model prefetch failed."
+    ai "Log file: $LOG_FILE"
+    return 1
+}
+
+_phase11_model_file_valid() {
+    local path="$1" expected_sha="${2:-}" actual_hash
+    [[ -s "$path" ]] || return 1
+    if [[ -n "$expected_sha" ]]; then
+        command -v sha256sum >/dev/null 2>&1 || return 1
+        actual_hash="$(sha256sum "$path" 2>/dev/null | awk '{print $1}')"
+        [[ -n "$actual_hash" && "$actual_hash" == "$expected_sha" ]] || return 1
+    fi
+    return 0
+}
+
 ods_progress 75 "services" "Starting services"
 show_phase 5 6 "Starting Services" "~2-3 minutes"
 
@@ -53,6 +238,14 @@ else
         managed="${AMD_INFERENCE_MANAGED:-$(_phase11_env_get AMD_INFERENCE_MANAGED "")}"
         mode="${ODS_MODE:-$(_phase11_env_get ODS_MODE local)}"
         [[ "${external,,}" == "true" ]] || [[ "${mode,,}" == "lemonade" && "${managed,,}" == "false" ]]
+    }
+
+    _phase11_external_llm() {
+        local url model skip
+        url="${EXTERNAL_LLM_URL:-$(_phase11_env_get EXTERNAL_LLM_URL "")}"
+        model="${EXTERNAL_LLM_MODEL:-$(_phase11_env_get EXTERNAL_LLM_MODEL "")}"
+        skip="${SKIP_MODEL_DOWNLOAD:-$(_phase11_env_get SKIP_MODEL_DOWNLOAD false)}"
+        [[ -n "$url" && -n "$model" && "${skip,,}" == "true" ]]
     }
 
     _phase11_close_inherited_fds_for_daemon() {
@@ -205,6 +398,30 @@ else
             "ods-external-lemonade" \
             "" \
             "external Lemonade"
+    }
+
+    _phase11_allow_external_llm_firewall() {
+        _phase11_external_llm || return 0
+
+        local network_name="${1:-ods-network}"
+        local base without_scheme host_port port
+        base="${EXTERNAL_LLM_URL:-$(_phase11_env_get EXTERNAL_LLM_URL "")}"
+        base="${base%/}"
+        case "$base" in
+            http://localhost:*|http://127.0.0.1:*|http://\[::1\]:*) ;;
+            *) return 0 ;;
+        esac
+        without_scheme="${base#*://}"
+        host_port="${without_scheme%%/*}"
+        port="${host_port##*:}"
+        [[ "$port" =~ ^[0-9]+$ ]] || return 0
+
+        _phase11_allow_container_host_firewall \
+            "$network_name" \
+            "$port" \
+            "ods-external-llm" \
+            "" \
+            "external ${EXTERNAL_LLM_PROVIDER:-LLM}"
     }
 
     if [[ "${GPU_BACKEND:-}" == "amd" ]] && ! amd_gpu_runtime_devices_available; then
@@ -402,6 +619,8 @@ else
             mv "$litellm_disabled" "$litellm_cf"
             ai_ok "Auto-enabled litellm for external Lemonade mode"
         fi
+    elif _phase11_external_llm; then
+        ai "External ${EXTERNAL_LLM_PROVIDER:-LLM} mode - skipping ODS-managed GGUF download"
     fi
 
     # Ensure model directory exists
@@ -412,7 +631,7 @@ else
     # immediately. The full model downloads in the background and hot-swaps.
     [[ -f "$SCRIPT_DIR/installers/lib/bootstrap-model.sh" ]] && . "$SCRIPT_DIR/installers/lib/bootstrap-model.sh"
     _BOOTSTRAP_ACTIVE=false
-    if type bootstrap_needed &>/dev/null && bootstrap_needed; then
+    if ! _phase11_external_llm && type bootstrap_needed &>/dev/null && bootstrap_needed; then
         _BOOTSTRAP_ACTIVE=true
         # Save full model config for the background upgrade
         FULL_GGUF_FILE="$GGUF_FILE"
@@ -424,7 +643,7 @@ else
         # Swap to bootstrap model for the foreground download
         GGUF_FILE="$BOOTSTRAP_GGUF_FILE"
         GGUF_URL="$BOOTSTRAP_GGUF_URL"
-        GGUF_SHA256=""  # No SHA256 for Tier 0 model
+        GGUF_SHA256="${BOOTSTRAP_GGUF_SHA256:-}"
         LLM_MODEL="$BOOTSTRAP_LLM_MODEL"
         MAX_CONTEXT="$BOOTSTRAP_MAX_CONTEXT"
         ai "Fast-start mode: downloading bootstrap model (~1.5GB) for instant chat."
@@ -435,7 +654,9 @@ else
     # Download GGUF model if not already present (with retry and integrity verification)
     ods_progress 76 "services" "Checking AI model"
     GGUF_DIR="$INSTALL_DIR/data/models"
-    if [[ "${ODS_MODE:-local}" != "cloud" && -n "$GGUF_URL" ]] && ! _phase11_external_lemonade; then
+    if [[ "${ODS_MODE:-local}" != "cloud" && -n "$GGUF_URL" ]] \
+        && ! _phase11_external_lemonade \
+        && ! _phase11_external_llm; then
         # Check if model exists and verify integrity
         if [[ -f "$GGUF_DIR/$GGUF_FILE" ]]; then
             if [[ -n "$GGUF_SHA256" ]]; then
@@ -467,6 +688,21 @@ else
         if [[ ! -f "$GGUF_DIR/$GGUF_FILE" ]]; then
             ods_progress 77 "services" "Downloading AI model"
             ai "Downloading GGUF model: $GGUF_FILE"
+
+            # Expected size drives the progress percentage. LLM_MODEL_SIZE_MB
+            # tracks the full model, which is not what fast-start downloads
+            # here, so the bootstrap branch carries its own number.
+            _model_total_mb="${LLM_MODEL_SIZE_MB:-0}"
+            [[ "$_BOOTSTRAP_ACTIVE" == "true" ]] && _model_total_mb="${BOOTSTRAP_GGUF_SIZE_MB:-0}"
+            [[ "$_model_total_mb" =~ ^[0-9]+$ ]] || _model_total_mb=0
+            ODS_ACTIVE_DOWNLOAD_PART="$GGUF_DIR/$GGUF_FILE.part"
+            ODS_ACTIVE_DOWNLOAD_TOTAL_MB="$_model_total_mb"
+
+            # curl resumes into the same .part file (-C -), so an interrupted
+            # install keeps its bytes. Say so instead of looking like a restart.
+            if [[ -s "$ODS_ACTIVE_DOWNLOAD_PART" ]]; then
+                ai "Found partial download: $(format_download_progress "$(download_part_bytes "$ODS_ACTIVE_DOWNLOAD_PART")" "$_model_total_mb"). Resuming..."
+            fi
             signal "This is the big one. I've got it — sit back."
             echo ""
 
@@ -476,11 +712,14 @@ else
                 [[ $_attempt -gt 1 ]] && ai "Retry attempt $_attempt of 3..."
                 curl -fSL -C - --connect-timeout 30 --max-time 3600 \
                     --retry 3 --retry-delay 5 --retry-all-errors \
-                    -o "$GGUF_DIR/$GGUF_FILE.part" "$GGUF_URL" \
+                    -o "$ODS_ACTIVE_DOWNLOAD_PART" "$GGUF_URL" \
                     >> "$INSTALL_DIR/logs/model-download.log" 2>&1 &
                 dl_pid=$!
+                ODS_ACTIVE_DOWNLOAD_PID="$dl_pid"
 
-                if spin_task $dl_pid "Downloading $GGUF_FILE"; then
+                if spin_task $dl_pid "Downloading $GGUF_FILE" \
+                    "$ODS_ACTIVE_DOWNLOAD_PART" "$_model_total_mb"; then
+                    ODS_ACTIVE_DOWNLOAD_PID=""
                     # Verify the file actually landed before claiming success.
                     # Today's chain (spin_task → mv → printf) trusts each step's
                     # exit code separately and can race: mv can silently fail if
@@ -488,7 +727,7 @@ else
                     # another process can remove the file before the printf
                     # fires. A spurious "Model downloaded" line then misleads
                     # later phases that depend on the file existing.
-                    if mv "$GGUF_DIR/$GGUF_FILE.part" "$GGUF_DIR/$GGUF_FILE" && [[ -s "$GGUF_DIR/$GGUF_FILE" ]]; then
+                    if mv "$ODS_ACTIVE_DOWNLOAD_PART" "$GGUF_DIR/$GGUF_FILE" && [[ -s "$GGUF_DIR/$GGUF_FILE" ]]; then
                         printf "\r  ${BGRN}✓${NC} %-60s\n" "Model downloaded: $GGUF_FILE"
                         _dl_success=true
                         break
@@ -496,13 +735,34 @@ else
                         rm -f "$GGUF_DIR/$GGUF_FILE" 2>/dev/null || true
                         printf "\r  ${AMB}⚠${NC} %-60s\n" "Download claimed to succeed but $GGUF_FILE is missing/empty"
                     fi
+                else
+                    ODS_ACTIVE_DOWNLOAD_PID=""
+                    if _phase11_download_hf_artifact "$GGUF_URL" "$ODS_ACTIVE_DOWNLOAD_PART" "$INSTALL_DIR/logs/model-download.log"; then
+                        if mv "$ODS_ACTIVE_DOWNLOAD_PART" "$GGUF_DIR/$GGUF_FILE" && [[ -s "$GGUF_DIR/$GGUF_FILE" ]]; then
+                            printf "\r  ${BGRN}✓${NC} %-60s\n" "Model downloaded via Hugging Face client: $GGUF_FILE"
+                            _dl_success=true
+                            break
+                        else
+                            rm -f "$GGUF_DIR/$GGUF_FILE" 2>/dev/null || true
+                            printf "\r  ${AMB}⚠${NC} %-60s\n" "Hugging Face fallback completed but $GGUF_FILE is missing/empty"
+                        fi
+                    fi
                 fi
                 printf "\r  ${AMB}⚠${NC} %-60s\n" "Download attempt $_attempt failed"
                 sleep 3
             done
 
+            if [[ "$_dl_success" != "true" ]] && _phase11_model_file_valid "$GGUF_DIR/$GGUF_FILE" "$GGUF_SHA256"; then
+                printf "\r  ${BGRN}✓${NC} %-60s\n" "Model present after download retries: $GGUF_FILE"
+                _dl_success=true
+            fi
+
             if [[ "$_dl_success" != "true" ]]; then
                 printf "\r  ${RED}✗${NC} %-60s\n" "Download failed after 3 attempts: $GGUF_FILE"
+                # Nothing above deletes the .part, so the bytes already on disk
+                # are still usable. Users who do not know that re-download from
+                # zero or clear the directory by hand.
+                report_active_download_preserved
                 ai "Manual retry: curl -fSL -C - --connect-timeout 30 --max-time 3600 --retry 3 --retry-delay 5 --retry-all-errors -o '$GGUF_DIR/$GGUF_FILE.part' '$GGUF_URL' && mv '$GGUF_DIR/$GGUF_FILE.part' '$GGUF_DIR/$GGUF_FILE'"
             else
                 # Verify freshly downloaded file
@@ -529,10 +789,13 @@ else
                     fi
                 fi
             fi
+            unset ODS_ACTIVE_DOWNLOAD_PID ODS_ACTIVE_DOWNLOAD_PART ODS_ACTIVE_DOWNLOAD_TOTAL_MB
         fi
 
         # Abort if model download/verification failed
-        if [[ "${ODS_MODE:-local}" != "cloud" && -n "$GGUF_URL" && ! -f "$GGUF_DIR/$GGUF_FILE" ]] && ! _phase11_external_lemonade; then
+        if [[ "${ODS_MODE:-local}" != "cloud" && -n "$GGUF_URL" && ! -f "$GGUF_DIR/$GGUF_FILE" ]] \
+            && ! _phase11_external_lemonade \
+            && ! _phase11_external_llm; then
             ai_bad "Model file missing or verification failed. Cannot proceed without a valid model."
             ai "Re-run the installer to retry the download."
             exit 1
@@ -547,12 +810,26 @@ else
         ai "Cloud mode — skipping image model download"
     elif [[ "$GPU_BACKEND" == "amd" ]]; then
         COMFYUI_BASE="$INSTALL_DIR/data/comfyui/ComfyUI/models"
+        COMFYUI_MIOPEN_CACHE="$INSTALL_DIR/data/comfyui/miopen"
     elif [[ "$GPU_BACKEND" == "nvidia" ]]; then
         COMFYUI_BASE="$INSTALL_DIR/data/comfyui/models"
     fi
     if [[ "$ENABLE_COMFYUI" == "true" && "${ODS_MODE:-local}" != "cloud" && ( "$GPU_BACKEND" == "amd" || "$GPU_BACKEND" == "nvidia" ) ]]; then
         SDXL_CHECKPOINT_DIR="$COMFYUI_BASE/checkpoints"
         mkdir -p "$SDXL_CHECKPOINT_DIR"
+        if [[ "$GPU_BACKEND" == "amd" ]]; then
+            # Pre-create the cache as the install owner. This avoids Docker
+            # creating a root-owned bind source and keeps it traversable for
+            # both rootful and rootless container runtimes.
+            mkdir -p "$COMFYUI_MIOPEN_CACHE"
+            if ! chmod u+rwx,go+rx "$COMFYUI_MIOPEN_CACHE" 2>>"$LOG_FILE"; then
+                ai_warn "Could not normalize MIOpen cache permissions; continuing because the install owner may still have access"
+            fi
+            if [[ ! -w "$COMFYUI_MIOPEN_CACHE" || ! -x "$COMFYUI_MIOPEN_CACHE" ]]; then
+                ai_bad "MIOpen cache is not writable: $COMFYUI_MIOPEN_CACHE"
+                exit 1
+            fi
+        fi
         # NVIDIA ComfyUI also needs output/input/workflows bind-mount dirs
         if [[ "$GPU_BACKEND" == "nvidia" ]]; then
             mkdir -p "$INSTALL_DIR/data/comfyui"/{output,input,workflows}
@@ -569,24 +846,30 @@ else
                 . "$SCRIPT_DIR/installers/lib/background-tasks.sh"
             fi
 
-            nohup env \
-                SDXL_CHECKPOINT_DIR="$SDXL_CHECKPOINT_DIR" \
-                SDXL_MODEL="$SDXL_MODEL" \
-                SDXL_URL="$SDXL_URL" \
-                bash -c '
-                    echo "[SDXL] Starting SDXL Lightning model download..."
-                    if [[ ! -f "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL" ]]; then
-                        echo "[SDXL] Downloading $SDXL_MODEL (~6.5GB)..."
-                        curl -fSL -C - --connect-timeout 30 --max-time 3600 \
-                            --retry 5 --retry-delay 10 --retry-all-errors \
-                            -o "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL.part" \
-                            "$SDXL_URL" 2>&1 && \
-                            mv "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL.part" "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL" && \
-                            echo "[SDXL] $SDXL_MODEL complete" || \
-                            echo "[SDXL] ERROR: Failed to download $SDXL_MODEL"
-                    fi
-                    echo "[SDXL] SDXL Lightning model download finished."
-                ' > "$INSTALL_DIR/logs/sdxl-download.log" 2>&1 &
+            # This daemon must not inherit the installer model lifecycle lock;
+            # otherwise full-model activation waits for an unrelated 6.5 GB
+            # image download after the installer itself releases the lock.
+            (
+                _phase11_close_inherited_fds_for_daemon
+                exec nohup env \
+                    SDXL_CHECKPOINT_DIR="$SDXL_CHECKPOINT_DIR" \
+                    SDXL_MODEL="$SDXL_MODEL" \
+                    SDXL_URL="$SDXL_URL" \
+                    bash -c '
+                        echo "[SDXL] Starting SDXL Lightning model download..."
+                        if [[ ! -f "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL" ]]; then
+                            echo "[SDXL] Downloading $SDXL_MODEL (~6.5GB)..."
+                            curl -fSL -C - --connect-timeout 30 --max-time 3600 \
+                                --retry 5 --retry-delay 10 --retry-all-errors \
+                                -o "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL.part" \
+                                "$SDXL_URL" 2>&1 && \
+                                mv "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL.part" "$SDXL_CHECKPOINT_DIR/$SDXL_MODEL" && \
+                                echo "[SDXL] $SDXL_MODEL complete" || \
+                                echo "[SDXL] ERROR: Failed to download $SDXL_MODEL"
+                        fi
+                        echo "[SDXL] SDXL Lightning model download finished."
+                    ' > "$INSTALL_DIR/logs/sdxl-download.log" 2>&1
+            ) &
 
             sdxl_pid=$!
 
@@ -603,7 +886,9 @@ else
     fi
 
     # Generate models.ini for llama-server (skip in cloud mode)
-    if [[ "${ODS_MODE:-local}" != "cloud" ]] && ! _phase11_external_lemonade; then
+    if [[ "${ODS_MODE:-local}" != "cloud" ]] \
+        && ! _phase11_external_lemonade \
+        && ! _phase11_external_llm; then
         mkdir -p "$INSTALL_DIR/config/llama-server"
         cat > "$INSTALL_DIR/config/llama-server/models.ini" << MODELS_INI_EOF
 [${LLM_MODEL}]
@@ -691,8 +976,13 @@ MODELS_INI_EOF
         if [[ -f "$_hermes_tpl" ]]; then
             # Model name: cloud mode uses the routed model id; Lemonade
             # prefixes GGUF files with "extra."; llama.cpp uses the file name.
-            if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
+            _hermes_switchboard_mode="$(printf '%s' "${ODS_MODEL_SWITCHBOARD:-observe}" | tr '[:upper:]' '[:lower:]')"
+            if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
+                _hermes_model="ods/current"
+            elif [[ "${ODS_MODE:-local}" == "cloud" ]]; then
                 _hermes_model="${LLM_MODEL:-default}"
+            elif _phase11_external_llm; then
+                _hermes_model="${EXTERNAL_LLM_MODEL:-$(_phase11_env_get EXTERNAL_LLM_MODEL "${LLM_MODEL:-default}")}"
             elif _phase11_external_lemonade; then
                 _hermes_model="${LEMONADE_MODEL:-$(_phase11_env_get LEMONADE_MODEL "${LLM_MODEL:-default}")}"
             else
@@ -712,16 +1002,26 @@ MODELS_INI_EOF
             # macOS install-macos.sh handles the host.docker.internal swap.
             _hermes_base_url=""
             _hermes_api_key=""
-            if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
+            if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
                 _hermes_base_url="${HERMES_LLM_BASE_URL:-http://litellm:4000/v1}"
                 _hermes_api_key="${HERMES_LLM_API_KEY:-${LITELLM_KEY:-}}"
+            elif [[ "${ODS_MODE:-local}" == "cloud" ]]; then
+                _hermes_base_url="${HERMES_LLM_BASE_URL:-http://litellm:4000/v1}"
+                _hermes_api_key="${HERMES_LLM_API_KEY:-${LITELLM_KEY:-}}"
+            elif _phase11_external_llm; then
+                _hermes_base_url="${HERMES_LLM_BASE_URL:-$(_phase11_env_get HERMES_LLM_BASE_URL "")}"
+                _hermes_api_key="${HERMES_LLM_API_KEY:-$(_phase11_env_get HERMES_LLM_API_KEY not-needed)}"
             elif [[ "${GPU_BACKEND:-}" == "amd" ]] || _phase11_external_lemonade; then
                 _hermes_base_url="http://litellm:4000/v1"
                 _hermes_api_key="${LITELLM_KEY:-}"
             fi
             _hermes_context="${MAX_CONTEXT:-65536}"
             _hermes_request_timeout=180
-            if [[ "${ODS_MODE:-local}" != "cloud" ]] && { [[ "${GPU_BACKEND:-}" == "amd" ]] || _phase11_external_lemonade; }; then
+            if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
+                _hermes_request_timeout=900
+            elif [[ "${ODS_MODE:-local}" != "cloud" ]] && { [[ "${GPU_BACKEND:-}" == "amd" ]] || _phase11_external_lemonade; }; then
+                _hermes_request_timeout=900
+            elif _phase11_external_llm; then
                 _hermes_request_timeout=900
             fi
             _hermes_patcher="$INSTALL_DIR/scripts/patch-hermes-config.py"
@@ -806,6 +1106,10 @@ MODELS_INI_EOF
     fi
     ai_ok "Compose configuration valid"
 
+    if ! _phase11_prefetch_embeddings_model; then
+        exit 1
+    fi
+
     # Launch containers
     ods_progress 81 "services" "Launching containers"
     echo ""
@@ -814,9 +1118,9 @@ MODELS_INI_EOF
     echo ""
     COMPOSE_STARTED_WITH_DELAYED_HEALTH=false
     compose_ok=false
-    # Build locally-built images individually so one failure doesn't block the rest
-    _build_count=0
-    _candidate_build_services=(dashboard dashboard-api ape token-spy privacy-shield)
+    # Build local images individually so every failure is reported before the
+    # installer refuses to launch any potentially stale image.
+    _candidate_build_services=(dashboard dashboard-api model-router remote-provider-egress remote-provider-ssh-tunnel ape token-spy privacy-shield brave-search)
     [[ "$ENABLE_COMFYUI" == "true" ]] && _candidate_build_services+=(comfyui)
     [[ "$GPU_BACKEND" == "amd" ]] && _candidate_build_services+=(llama-server)
     if ! _enabled_compose_services="$($DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" config --services 2>>"$LOG_FILE")"; then
@@ -835,97 +1139,12 @@ MODELS_INI_EOF
     if [[ "$GPU_BACKEND" == "nvidia" && " ${_build_services[*]} " == *" comfyui "* ]]; then
         ai "ComfyUI is compiling from source for NVIDIA — this takes 25-40 minutes on first run."
     fi
-    _build_total=${#_build_services[@]}
-    # Track builds that didn't produce a usable image so we don't abort the
-    # whole compose-up on a single missing service. Each entry is a service
-    # name (matches ods-cli's service id) that will be excluded below.
-    _failed_build_services=()
-    for _svc in "${_build_services[@]}"; do
-        _build_count=$((_build_count + 1))
-        $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" build --no-cache "$_svc" >> "$LOG_FILE" 2>&1 &
-        _build_pid=$!
-        _build_failed=false
-        spin_task $_build_pid "[$_build_count/$_build_total] Building $_svc" || _build_failed=true
-        # Cross-check: did the build actually produce a usable image? A
-        # build can "succeed" (exit 0) yet leave no tagged image (rare —
-        # buildx bugs, disk-full mid-export) and a "failed" build can
-        # still leave a usable cached image (idempotent re-run). Inspect
-        # the resolved image tag rather than trusting the exit code alone.
-        _resolved_image=$($DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" config --format json 2>/dev/null \
-            | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    svc_name = '$_svc'
-    svc = d.get('services', {}).get(svc_name, {})
-    image = svc.get('image', '') or ''
-    if not image and svc.get('build') is not None:
-        project = d.get('name') or 'ods'
-        image = f'{project}-{svc_name}'
-    print(image)
-except Exception:
-    pass
-" 2>/dev/null || echo "")
-        if [[ -n "$_resolved_image" ]] && ! $DOCKER_CMD image inspect "$_resolved_image" &>/dev/null; then
-            _build_failed=true
-        fi
-        if $_build_failed; then
-            printf "\r  ${AMB}⚠${NC} %-60s\n" "$_svc build failed or image missing"
-            _failed_build_services+=("$_svc")
-        else
-            printf "\r  ${BGRN}✓${NC} %-60s\n" "$_svc built"
-        fi
-    done
-
-    # Exclude failed-build services from compose-up. Without this, --no-build
-    # at compose-up time would see a referenced image that doesn't exist and
-    # abort the ENTIRE stack — a single failed build of, say, comfyui takes
-    # down the other 24+ healthy services. Repro'd on Tower2 during today's
-    # cross-platform install test. Removing the compose file from
-    # COMPOSE_FLAGS_ARR lets compose-up proceed with everything that did
-    # build, and the operator can re-attempt the failed extension later via
-    # `ods enable <svc>` once they've fixed the build cause.
-    if [[ ${#_failed_build_services[@]} -gt 0 ]]; then
-        _new_compose_flags_arr=()
-        _excluded_build_services=()
-        _skip_next=false
-        for _arg in "${COMPOSE_FLAGS_ARR[@]}"; do
-            if $_skip_next; then
-                _skip_next=false
-                _drop=false
-                for _failed in "${_failed_build_services[@]}"; do
-                    if [[ "$_arg" == *"/extensions/services/$_failed/"* ]]; then
-                        _drop=true
-                        if [[ " ${_excluded_build_services[*]} " != *" $_failed "* ]]; then
-                            _excluded_build_services+=("$_failed")
-                        fi
-                        break
-                    fi
-                done
-                $_drop || _new_compose_flags_arr+=("-f" "$_arg")
-            elif [[ "$_arg" == "-f" ]]; then
-                _skip_next=true
-            else
-                _new_compose_flags_arr+=("$_arg")
-            fi
-        done
-        COMPOSE_FLAGS_ARR=("${_new_compose_flags_arr[@]}")
-        _retained_failed_build_services=()
-        for _failed in "${_failed_build_services[@]}"; do
-            if [[ " ${_excluded_build_services[*]} " != *" $_failed "* ]]; then
-                _retained_failed_build_services+=("$_failed")
-            fi
-        done
-        if [[ ${#_excluded_build_services[@]} -gt 0 ]]; then
-            ai_warn "Excluding from compose-up due to build failure: ${_excluded_build_services[*]}"
-        fi
-        if [[ ${#_retained_failed_build_services[@]} -gt 0 ]]; then
-            ai_warn "Build failed for core/overlay service(s) still present in compose-up: ${_retained_failed_build_services[*]}"
-        fi
+    if ! _phase11_build_local_images "${_build_services[@]}"; then
+        exit 1
     fi
 
     # Start everything. --no-build is intentional: the explicit build loop
-    # above already produced (or failed-and-excluded) every buildable image,
+    # above successfully produced every enabled buildable image,
     # and we don't want compose-up silently re-invoking the slow ComfyUI build
     # on each retry. --pull never is intentional too: Phase 08 and the preflight
     # below own registry access through pull_with_progress, so compose-up cannot
@@ -981,6 +1200,7 @@ except Exception:
     # so we allow the actual Docker subnet instead of a broad RFC1918 range.
     _phase11_allow_host_agent_firewall ods-network
     _phase11_allow_external_lemonade_firewall ods-network
+    _phase11_allow_external_llm_firewall ods-network
 
     _compose_started_with_delayed_health=false
     if ! $compose_ok && _phase11_compose_failure_is_delayed_health && _phase11_has_managed_containers; then
