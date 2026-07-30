@@ -24,6 +24,7 @@ isn't present).
 | `NODE_SERVING_PROBE_URL` | *(unset)* | OpenAI-compatible `/v1/models`-style URL to probe for what model is currently being served. Left unset disables the probe. |
 | `NODE_SERVING_CONTAINER` | *(unset)* | Name of the local Docker container running inference; its status is reported via `docker inspect`. **Requires opting into the Docker socket mount, which grants host-root-equivalent access — see [Security](#security).** Left unset (recommended) disables the check and `container_status` is reported as `null`. |
 | `NODE_AGENT_PORT` | `7720` | Port uvicorn binds inside the container (also the host port under `network_mode: host`). Read by the Dockerfile `CMD`, not by the Python config. |
+| `NODE_AGENT_BIND` | `0.0.0.0` | Address uvicorn binds. The default is every interface on the node — including any WAN or management NIC. On a multi-homed node, set this to the one address the dashboard host reaches it on. The healthcheck follows it. Read by the Dockerfile `CMD`, not by the Python config. |
 | `NODE_GPU_CACHE_TTL` | `2.0` | TTL in seconds for the short-lived GPU sample cache used by `/v1/node/gpu`. |
 
 ## Deploy
@@ -47,6 +48,17 @@ capability, which is what makes `nvidia-smi` available inside the
 otherwise-slim container. On non-NVIDIA nodes, drop that `deploy.resources`
 block and set `GPU_BACKEND` accordingly.
 
+**Surviving a reboot of the remote node** is Docker's job here: the fragment
+sets `restart: unless-stopped`, so the agent comes back on its own — but only
+if the Docker daemon itself starts at boot. That is not automatic on every
+distribution, so confirm it on the remote host:
+
+```bash
+systemctl is-enabled docker   # expect "enabled"; otherwise: sudo systemctl enable docker
+```
+
+There is no systemd unit to install for the agent itself.
+
 ### Registering the node with the dashboard host
 
 On the **dashboard** host, add the node to `ODS_REMOTE_NODES` and its key to
@@ -66,22 +78,31 @@ a running dashboard-api will not pick up a new node.
   default**. Leave `NODE_SERVING_CONTAINER` unset and the mounts commented
   unless you actively accept that trade; without them the agent works
   unchanged and simply reports `container_status: null`.
-- **Always firewall-scope port 7720** to the dashboard host (see below). The
-  service uses `network_mode: host`, so it binds every interface on the node.
+- **Always firewall-scope port 7720** to the dashboard host (see [Ports](#ports)).
+  The service uses `network_mode: host`, so by default it binds every interface
+  on the node; `NODE_AGENT_BIND` narrows that to one address.
 - Every route is bearer-gated with a constant-time comparison, and the
   unauthenticated OpenAPI surface (`/docs`, `/redoc`, `/openapi.json`) is
   disabled so the API is not advertised to whoever can reach the port.
 - The agent is read-only: it collects metrics and probes. It exposes no way to
   load, unload, start, or stop anything on the node.
 
-## Firewall
+## Ports
 
-This service listens on `network_mode: host`, so scope inbound access to
-the dashboard host only, e.g.:
+| Port | Protocol | Where | Binds | Purpose |
+|---|---|---|---|---|
+| `NODE_AGENT_PORT` (7720) | TCP | Remote node | every interface by default under `network_mode: host` — narrow with `NODE_AGENT_BIND` | Bearer-gated read-only GPU/serving metrics, polled by the dashboard host |
+
+The agent opens nothing else: no outbound listener, no discovery broadcast, no
+port on the dashboard host. Scope inbound access to the dashboard host only:
 
 ```bash
 ufw allow from <dashboard-ip> to any port 7720 proto tcp
 ```
+
+On a multi-homed node, `NODE_AGENT_BIND=<lan-ip>` narrows the listener to one
+interface as well. Treat that as defence in depth, not a replacement for the
+firewall rule — it still accepts every host that can reach that address.
 
 ## API
 
