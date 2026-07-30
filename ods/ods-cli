@@ -25,7 +25,7 @@ while [[ -L "$_source" ]]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$_source")" && pwd)"
 INSTALL_DIR="${ODS_HOME:-$HOME/ods}"
-VERSION="2.0.0"
+VERSION="2.6.0"
 if [[ -f "$INSTALL_DIR/.env" ]]; then
     _v=$(awk -F= '/^ODS_VERSION=/{gsub(/^["'"'"']|["'"'"']$/,"",$2); print $2; exit}' "$INSTALL_DIR/.env" 2>/dev/null) || true
     [[ -n "${_v:-}" ]] && VERSION="$_v"
@@ -123,6 +123,30 @@ _env_get_raw() {
         index($0, k "=") == 1 { value = substr($0, length(k) + 2); found = 1 }
         END { if (found) print value }
     ' "$file" 2>/dev/null | tr -d '\r' || true
+}
+
+_ods_cli_proxy_enabled() {
+    [[ -f "$INSTALL_DIR/extensions/services/ods-proxy/compose.yaml" ]] \
+        || [[ -f "$INSTALL_DIR/data/user-extensions/ods-proxy/compose.yaml" ]]
+}
+
+_ods_cli_require_proxy_auth() {
+    [[ -f "$INSTALL_DIR/.env" ]] \
+        || error "Cannot enable network access without $INSTALL_DIR/.env."
+    if [[ "$(_env_get_raw WEBUI_AUTH)" != "true" ]]; then
+        _env_set "WEBUI_AUTH" "true" \
+            || error "Could not enforce WEBUI_AUTH=true before enabling network access."
+        log "  Network access requires sign-in; set WEBUI_AUTH=true."
+    fi
+    export WEBUI_AUTH=true
+}
+
+_ods_cli_prepare_proxy_start() {
+    local -a compose_flags=("$@")
+    _ods_cli_require_proxy_auth
+    _compose_run_with_summary \
+        "Applying authenticated Open WebUI configuration" \
+        "${compose_flags[@]}" up -d --no-deps --force-recreate open-webui
 }
 
 _ods_cli_bootstrap_status() {
@@ -1165,9 +1189,37 @@ _ods_cli_pull_external_images() {
     for image in "${images[@]}"; do
         count=$((count + 1))
         log "  [$count/$total] $image"
-        if ! docker pull "$image"; then
+        local _pull_max_attempts="${ODS_COMPOSE_PULL_RETRY_ATTEMPTS:-3}"
+        if ! [[ "$_pull_max_attempts" =~ ^[0-9]+$ ]] || (( _pull_max_attempts < 1 )); then
+            _pull_max_attempts=3
+        fi
+        local _pull_attempt=1 _pull_ok=false _pull_log
+        _pull_log=$(mktemp)
+        while (( _pull_attempt <= _pull_max_attempts )); do
+            : >"$_pull_log"
+            if docker pull "$image" >"$_pull_log" 2>&1; then
+                _pull_ok=true
+                break
+            fi
+            if (( _pull_attempt >= _pull_max_attempts )) \
+                || ! grep -Eiq 'context deadline exceeded|i/o timeout|TLS handshake timeout|connection reset by peer|connection timed out|temporary failure|network is unreachable|net/http: request canceled|unexpected EOF' "$_pull_log"; then
+                break
+            fi
+            local _pull_delay
+            case "$_pull_attempt" in
+                1) _pull_delay="${ODS_COMPOSE_PULL_RETRY_DELAY_1:-5}" ;;
+                2) _pull_delay="${ODS_COMPOSE_PULL_RETRY_DELAY_2:-15}" ;;
+                *) _pull_delay="${ODS_COMPOSE_PULL_RETRY_DELAY_N:-30}" ;;
+            esac
+            warn "Docker registry pull hit a transient network error; retrying (${_pull_attempt}/$((_pull_max_attempts - 1)))."
+            sleep "$_pull_delay"
+            _pull_attempt=$((_pull_attempt + 1))
+        done
+        if [[ "$_pull_ok" != "true" ]]; then
+            cat "$_pull_log" >&2
             failed=$((failed + 1))
         fi
+        rm -f "$_pull_log"
     done
 
     if (( failed > 0 )); then
@@ -1480,6 +1532,17 @@ cmd_restart() {
         resolved_service=$(resolve_service "$resolved_service")
     fi
 
+    if [[ "$resolved_service" == "ods-proxy" ]]; then
+        _ods_cli_prepare_proxy_start "${flags[@]}"
+    elif [[ -z "$resolved_service" || "$resolved_service" == "open-webui" ]] \
+        && _ods_cli_proxy_enabled; then
+        _ods_cli_require_proxy_auth
+    fi
+
+    if ! _ods_cli_repair_rootless_ownership "$resolved_service"; then
+        error "Rootless bind-mount ownership is not ready; service restart was cancelled."
+    fi
+
     local refresh_soul="false"
     if [[ -z "$resolved_service" || "$resolved_service" == "hermes" ]]; then
         refresh_soul="true"
@@ -1634,6 +1697,16 @@ cmd_stop() {
     fi
 }
 
+_ods_cli_repair_rootless_ownership() {
+    local service="${1:-}"
+    local helper="$INSTALL_DIR/lib/rootless-ownership.sh"
+
+    [[ -f "$helper" ]] || return 0
+    # shellcheck source=lib/rootless-ownership.sh
+    source "$helper"
+    ods_fix_rootless_ownership "$INSTALL_DIR" "$service"
+}
+
 cmd_start() {
     check_install
     cd "$INSTALL_DIR"
@@ -1665,6 +1738,13 @@ cmd_start() {
         resolved_service=$(resolve_service "$resolved_service")
     fi
 
+    if [[ "$resolved_service" == "ods-proxy" ]]; then
+        _ods_cli_prepare_proxy_start "${flags[@]}"
+    elif [[ -z "$resolved_service" || "$resolved_service" == "open-webui" ]] \
+        && _ods_cli_proxy_enabled; then
+        _ods_cli_require_proxy_auth
+    fi
+
     local refresh_soul="false"
     if [[ -z "$resolved_service" || "$resolved_service" == "hermes" ]]; then
         refresh_soul="true"
@@ -1677,6 +1757,10 @@ cmd_start() {
         ensure_llama_cpu_budget
         flags_str=$(get_compose_flags)
         read -ra flags <<< "$flags_str"
+    fi
+
+    if ! _ods_cli_repair_rootless_ownership "$resolved_service"; then
+        error "Rootless bind-mount ownership is not ready; service start was cancelled."
     fi
 
     if [[ -z "$resolved_service" ]]; then
@@ -2638,6 +2722,10 @@ cmd_enable() {
     # Check it's not a core service
     local cat="${SERVICE_CATEGORIES[$service_id]:-optional}"
     [[ "$cat" == "core" ]] && { success "$service_id is a core service (always enabled)."; return 0; }
+
+    if [[ "$service_id" == "ods-proxy" ]]; then
+        _ods_cli_require_proxy_auth
+    fi
 
     # Check GPU backend compatibility
     local gpu_backends="${SERVICE_GPU_BACKENDS[$service_id]:-}"
@@ -5971,6 +6059,13 @@ cmd_repair() {
             [[ -x "$script" ]] || error "Hermes slash worker repair script not found or not executable: $script"
             "$script" --force
             ;;
+        rootless-ownership|rootless)
+            local script="$INSTALL_DIR/lib/rootless-ownership.sh"
+            [[ -f "$script" ]] || error "Rootless ownership helper not found: $script"
+            # shellcheck source=lib/rootless-ownership.sh
+            source "$script"
+            ods_fix_rootless_ownership "$INSTALL_DIR"
+            ;;
         voice|stt|tts)
             local flags_str
             flags_str=$(get_compose_flags)
@@ -6031,7 +6126,7 @@ cmd_repair() {
             success "Voice repair complete"
             ;;
         *)
-            log "Usage: ods repair [voice|hermes-workers]"
+            log "Usage: ods repair [voice|hermes-workers|rootless-ownership]"
             log_error "Unknown repair target: $target"
             return 1
             ;;
@@ -6380,6 +6475,7 @@ ${CYAN}Examples:${NC}
   ods agent status              # Check host agent health
   ods agent restart             # Restart host agent
   ods repair voice              # Start voice services and cache STT model
+  ods repair rootless-ownership # Repair active bind mounts for rootless Docker
   ods repair hermes-workers     # Prune leaked Hermes slash_worker children
 
 ${CYAN}Environment:${NC}
