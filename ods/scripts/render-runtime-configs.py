@@ -438,6 +438,17 @@ litellm_settings:
 def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
     # ODS-CONTRACT-WRITER: litellm-lemonade
     model = lemonade_model_id(inputs)
+    # The LLM_MODEL alias replaces the old "*" wildcard on this surface:
+    # consumers configured with the catalog model name (dashboard-api et al.)
+    # keep working, while unknown names now fail loudly instead of silently
+    # answering from the default engine.
+    alias = inputs.model.strip()
+    extra_names = {r["model_name"] for r in inputs.extra_litellm_routes}
+    emit_alias = (
+        bool(alias)
+        and alias not in {"default", "hipfire", "lemonade"}
+        and alias not in extra_names
+    )
     api_base = inputs.lemonade_api_base.rstrip("/") or "http://llama-server:8080/api/v1"
     lemonade_params = f"""    litellm_params:
       model: openai/{model}
@@ -468,9 +479,8 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
             f"  - model_name: lemonade\n{lemonade_params}{lemonade_info}"
             "\n"
             + "".join(f"{extra_route_entry(r)}\n" for r in inputs.extra_litellm_routes)
-            + f"  - model_name: \"*\"\n{default_params}"
-            "\n"
-            "litellm_settings:\n"
+            + (f"  - model_name: {yaml_scalar(alias)}\n{default_params}{default_info}\n" if emit_alias else "")
+            + "litellm_settings:\n"
             "  drop_params: true\n"
             "  set_verbose: false\n"
             "  request_timeout: 900\n"
@@ -484,9 +494,8 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
         f"  - model_name: default\n{lemonade_params}{lemonade_info}"
         "\n"
         + "".join(f"{extra_route_entry(r)}\n" for r in inputs.extra_litellm_routes)
-        + f"  - model_name: \"*\"\n{lemonade_params}"
-        "\n"
-        "litellm_settings:\n"
+        + (f"  - model_name: {yaml_scalar(alias)}\n{lemonade_params}{lemonade_info}\n" if emit_alias else "")
+        + "litellm_settings:\n"
         "  drop_params: true\n"
         "  set_verbose: false\n"
         "  request_timeout: 900\n"

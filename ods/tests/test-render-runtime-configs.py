@@ -578,7 +578,7 @@ def test_hipfire_active_routes_default_to_hipfire() -> None:
         "      api_key: not-needed\n"
     )
     assert f"- model_name: default\n{hipfire_route}" in content
-    assert f'- model_name: "*"\n{hipfire_route}' in content
+    assert 'model_name: "*"' not in content
     assert f"- model_name: hipfire\n{hipfire_route}" in content
     # Explicit escape hatch back to Lemonade/llama-server survives.
     assert "- model_name: lemonade\n    litellm_params:\n      model: openai/extra.Model.gguf" in content
@@ -713,6 +713,9 @@ def main() -> int:
         test_lemonade_routes_carry_context_windows,
         test_hipfire_context_window_env_fallback,
         test_extra_routes_carry_context_windows,
+        test_lemonade_has_no_wildcard_and_aliases_llm_model,
+        test_lemonade_alias_skips_reserved_names,
+        test_lemonade_alias_skips_extra_route_names,
     ]
     for test in tests:
         test()
@@ -747,7 +750,8 @@ def test_extra_routes_injected_before_lemonade_wildcard() -> None:
     assert "model_name: spark-aeon" in content
     assert "model_name: spark-laguna" in content
     assert "api_base: http://192.168.1.15:8000/v1" in content
-    assert content.index("spark-aeon") < content.index('model_name: "*"')
+    # The lemonade surface has no wildcard anymore — unknown names fail loudly.
+    assert 'model_name: "*"' not in content
     # Defaulted api_key still renders (litellm requires the field).
     assert content.count("api_key: not-needed") >= 2
 
@@ -761,7 +765,7 @@ def test_extra_routes_injected_in_lemonade_hipfire_branch() -> None:
         content = file_by_surface(payload, "litellm-lemonade")["content"]
     assert "model_name: spark-aeon" in content
     assert "model_name: hipfire" in content
-    assert content.index("spark-aeon") < content.index('model_name: "*"')
+    assert 'model_name: "*"' not in content
 
 
 def test_extra_routes_injected_in_switchboard_surface() -> None:
@@ -861,6 +865,50 @@ def test_hipfire_context_window_env_fallback() -> None:
         content = file_by_surface(payload, "litellm-lemonade")["content"]
         hipfire_block = content.split("- model_name: hipfire\n", 1)[1]
         assert "max_input_tokens: 200000" in hipfire_block.split("- model_name:", 1)[0]
+
+
+def test_lemonade_has_no_wildcard_and_aliases_llm_model() -> None:
+    payload = run_renderer(
+        "--surface", "litellm-lemonade",
+        "--ods-mode", "lemonade",
+        "--gpu-backend", "amd",
+        "--gguf-file", "Model.gguf",
+        "--model", "qwen3.5-27b",
+        "--hipfire-enabled",
+        "--hipfire-model", "qwen36-35b-a3b.mq4",
+    )
+    content = file_by_surface(payload, "litellm-lemonade")["content"]
+    assert 'model_name: "*"' not in content
+    # hipfire enabled but NOT active -> default (and therefore the alias) is lemonade
+    assert '- model_name: "qwen3.5-27b"\n    litellm_params:\n      model: openai/extra.Model.gguf' in content
+
+
+def test_lemonade_alias_skips_reserved_names() -> None:
+    payload = run_renderer(
+        "--surface", "litellm-lemonade",
+        "--ods-mode", "lemonade",
+        "--gpu-backend", "amd",
+        "--gguf-file", "Model.gguf",
+        "--model", "default",
+    )
+    content = file_by_surface(payload, "litellm-lemonade")["content"]
+    assert content.count("- model_name: default\n") == 1
+    assert 'model_name: "default"' not in content
+
+
+def test_lemonade_alias_skips_extra_route_names() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, _spark_routes())
+        payload = run_renderer(
+            "--surface", "litellm-lemonade",
+            "--ods-mode", "lemonade",
+            "--gguf-file", "Model.gguf",
+            "--model", "spark-aeon",
+            "--extra-routes-file", path,
+        )
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+    assert content.count("model_name: spark-aeon") == 1
+    assert 'model_name: "spark-aeon"' not in content
 
 
 def test_extra_routes_carry_context_windows() -> None:
