@@ -14,10 +14,14 @@ Guard order in swap(), mirroring hipfire.py's park():
      read propagates unchanged (can't see the table -> don't swap).
      force NEVER skips this guard.
   2. busy guard — refuse while the live model has running or waiting
-     requests (vLLM /metrics). endpoint_ok False skips this check (a dead
-     endpoint has nothing to interrupt — that's the recovery path). A
-     metrics failure while the endpoint is up is EngineError, not "not
-     busy". force=True skips this guard only.
+     requests (vLLM /metrics). A metrics failure while the endpoint is up
+     is EngineError, not "not busy". force=True skips this guard.
+  3. boot-window guard — endpoint down + last swap "done"/"swapping" means
+     a boot (possibly a ~15 min autotune) is in flight; refuse rather than
+     silently restart it. force=True interrupts — which is also the
+     recovery path for a profile whose boot has wedged. A last swap in
+     state "error" never started a boot, so swapping away needs no force
+     (found live 2026-07-30: helper "done" just means swap.sh launched).
 The node-agent's own 409 (pending request / helper mid-swap) surfaces as
 BusyError; its 4xx validation answers surface as EngineError.
 """
@@ -118,6 +122,13 @@ class SparkClient:
                 raise GuardError(
                     f"spark serving has {n} in-flight request(s); "
                     "retry later or use force")
+        if not serving.get("endpoint_ok") and not force:
+            last = self._node_get("/v1/node/profiles").get("swap_status") or {}
+            if last.get("state") in ("swapping", "done"):
+                raise GuardError(
+                    f"previous swap ({last.get('profile')}) is still booting "
+                    "(a first boot can autotune ~15 min); wait for the "
+                    "endpoint or use force to interrupt it")
 
         try:
             resp = self._node.post("/v1/node/swap", json={"profile": profile})

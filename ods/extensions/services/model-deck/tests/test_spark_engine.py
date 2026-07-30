@@ -196,3 +196,39 @@ def test_swap_maps_node_404_to_engineerror():
         swap_response=(404, {"detail": "unknown profile"})))
     with pytest.raises(EngineError):
         client.swap("ghost")
+
+
+# --- boot-window guard (found live 2026-07-30: helper "done" != endpoint up;
+# the whole autotune window was swappable with no warning) ---
+
+def test_swap_refuses_while_previous_swap_still_booting():
+    handler = _node_handler(
+        swap_status={"state": "done", "profile": "laguna", "id": "u0",
+                     "message": "swap launched", "ts": "2026-07-30T22:35:02Z"},
+        serving={"model": None, "endpoint_ok": False, "container_status": None})
+    client = _client(handler)
+    with pytest.raises(GuardError) as exc:
+        client.swap("mm27b")
+    assert "boot" in str(exc.value)
+    assert not [r for r in handler.calls if r.url.path == "/v1/node/swap"]
+
+
+def test_swap_force_overrides_boot_window_guard():
+    handler = _node_handler(
+        swap_status={"state": "done", "profile": "laguna", "id": "u0",
+                     "message": "swap launched", "ts": "2026-07-30T22:35:02Z"},
+        serving={"model": None, "endpoint_ok": False, "container_status": None})
+    client = _client(handler)
+    assert client.swap("mm27b", force=True)["id"] == "u1"
+
+
+def test_swap_allowed_when_endpoint_down_with_failed_last_swap():
+    # A swap whose swap.sh failed never started a boot — swapping away is
+    # the fix, not an interruption; no guard, no force needed.
+    handler = _node_handler(
+        swap_status={"state": "error", "profile": "qwen35", "id": "u0",
+                     "message": "swap.sh failed (see swap.log)",
+                     "ts": "2026-07-30T22:35:02Z"},
+        serving={"model": None, "endpoint_ok": False, "container_status": None})
+    client = _client(handler)
+    assert client.swap("mm27b")["id"] == "u1"
