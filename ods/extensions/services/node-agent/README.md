@@ -66,6 +66,14 @@ On the **dashboard** host, add the node to `ODS_REMOTE_NODES` and its key to
 dashboard-api container** — the remote-node config is read once at startup, so
 a running dashboard-api will not pick up a new node.
 
+For a key that should not sit in the container's environment, put the same
+`{"<node name>": "<bearer key>"}` object in a 0600 file, mount it into the
+dashboard-api container, and point `ODS_REMOTE_NODE_KEYS_FILE` at the path
+*inside* that container. It wins per node over `ODS_REMOTE_NODE_KEYS`, and
+because it is re-read each poll cycle, rotating this node's key afterwards is
+a file write on the dashboard host plus a restart of the agent here — no
+dashboard-api recreate.
+
 ## Security
 
 - **The Docker socket mount grants host-root-equivalent access.** Mounting

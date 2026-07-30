@@ -275,9 +275,14 @@ services:
       # node name -> key, forwarded here since compose enumerates this
       # service's environment explicitly and cannot forward an
       # admin-chosen key_env var name without a per-node compose edit).
-      # Both default empty: absent config leaves the feature dormant.
+      # ODS_REMOTE_NODE_KEYS_FILE names a file holding that same map, read
+      # from inside this container -- keys stay out of the environment, so
+      # mount the file in yourself; a path this container cannot see warns
+      # and falls back to the env map. All default empty: absent config
+      # leaves the feature dormant.
       - ODS_REMOTE_NODES=${ODS_REMOTE_NODES:-}
       - ODS_REMOTE_NODE_KEYS=${ODS_REMOTE_NODE_KEYS:-}
+      - ODS_REMOTE_NODE_KEYS_FILE=${ODS_REMOTE_NODE_KEYS_FILE:-}
     volumes:
       - ./scripts:/ods/scripts:ro,z
       - ./config:/ods/config:ro,z

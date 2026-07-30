@@ -2,9 +2,11 @@
 
 Nodes are configured via ODS_REMOTE_NODES (JSON list of
 {"name", "display_name"?, "url", "key_env"}). Authentication keys are delivered
-via ODS_REMOTE_NODE_KEYS (a JSON object mapping node name → bearer key), with
-key_env as the fallback mechanism. Keys are never inline secrets in the node
-definitions. Absent/empty config → feature dormant.
+by, in order of precedence per node: ODS_REMOTE_NODE_KEYS_FILE (a file holding
+a JSON object mapping node name → bearer key, kept off the environment),
+ODS_REMOTE_NODE_KEYS (the same object as an env var), then that node's key_env.
+Keys are never inline secrets in the node definitions. Absent/empty config →
+feature dormant.
 Terminology: distinct from routers/node.py (local snapshot) and from the
 remote-provider/peer inference-routing machinery.
 
@@ -22,6 +24,7 @@ import json
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -45,26 +48,116 @@ class RemoteNodeConfig:
     display_name: str | None = None
 
 
-def _load_node_keys_map() -> dict:
-    """Parse ODS_REMOTE_NODE_KEYS, the preferred key-delivery mechanism: a
-    single JSON object {"<node name>": "<bearer key>"}. This exists because
-    compose services enumerate their environment explicitly, so an
-    admin-chosen key_env var name is never forwarded into the container
-    without a per-node compose edit -- one map var sidesteps that.
-    Malformed input (bad JSON / not an object) logs a warning and is
-    treated as empty, mirroring load_remote_nodes' own malformed-config
-    handling; it must never crash the registry.
+_WARNED_ONCE: set[tuple] = set()
+
+
+def _warn_once(signature: tuple, message: str, *args) -> None:
+    """Log a config diagnostic at most once per distinct condition.
+
+    load_remote_nodes() is re-read on every poll cycle, so a plain
+    logger.warning on this path writes the same line every
+    POLL_INTERVAL_SECONDS -- ~17k lines a day over one unfixed typo, which
+    buries everything else in the log. Signatures are dropped by
+    _warn_cleared() once the condition goes away, so a problem that recurs
+    after a fix is heard again instead of being swallowed for the life of the
+    process.
     """
-    raw = os.environ.get("ODS_REMOTE_NODE_KEYS", "").strip()
-    if not raw:
+    if signature in _WARNED_ONCE:
+        return
+    _WARNED_ONCE.add(signature)
+    logger.warning(message, *args)
+
+
+def _warn_cleared(*signatures: tuple) -> None:
+    for signature in signatures:
+        _WARNED_ONCE.discard(signature)
+
+
+def _load_keys_file() -> dict:
+    """Read ODS_REMOTE_NODE_KEYS_FILE: the same JSON object as the env map,
+    delivered as a file (e.g. a 0600 mount from /run/secrets) instead of an
+    environment variable.
+
+    Why bother, given the env map works: an env var is readable by anything
+    that can `docker inspect` this host or read /proc/<pid>/environ, and this
+    particular var is the aggregate -- one read hands over the bearer key for
+    every remote node at once, not one. A file narrows that.
+
+    Every failure here degrades to {} and lets the env map answer. This runs
+    inside a long-lived service, so hard-failing on a bad path would take the
+    whole GPU page down -- local cards included -- to report a remote-node
+    misconfiguration. A file readable beyond its owner warns but is still
+    used, following the soft-warning precedent in upstream PR #1365's
+    --token-file. Contents are never logged, only the path.
+    """
+    raw_path = os.environ.get("ODS_REMOTE_NODE_KEYS_FILE", "").strip()
+    if not raw_path:
         return {}
+    path = os.path.expanduser(raw_path)
+    mode_sig = ("keys-file-mode", path)
+    read_sig = ("keys-file-read", path)
+    parse_sig = ("keys-file-parse", path)
+    unreadable = ("ODS_REMOTE_NODE_KEYS_FILE %s cannot be read (%s); falling"
+                  " back to ODS_REMOTE_NODE_KEYS")
     try:
-        parsed = json.loads(raw)
-        assert isinstance(parsed, dict)
-    except (ValueError, AssertionError):
-        logger.warning("ODS_REMOTE_NODE_KEYS is not a JSON object; ignoring")
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError as exc:
+        _warn_once(read_sig, unreadable, path, exc.strerror)
         return {}
+    if mode & 0o077:
+        _warn_once(mode_sig,
+                   "ODS_REMOTE_NODE_KEYS_FILE %s is mode %o, readable beyond"
+                   " its owner. It holds the bearer key for every remote node;"
+                   " 0600 is expected. Using it anyway.", path, mode)
+    else:
+        _warn_cleared(mode_sig)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            parsed = json.loads(handle.read())
+        assert isinstance(parsed, dict)
+    except OSError as exc:
+        _warn_once(read_sig, unreadable, path, exc.strerror)
+        return {}
+    except (ValueError, AssertionError):
+        _warn_once(parse_sig,
+                   "ODS_REMOTE_NODE_KEYS_FILE %s is not a JSON object of"
+                   " {node name: bearer key}; ignoring it and falling back to"
+                   " ODS_REMOTE_NODE_KEYS. (Contents not logged.)", path)
+        return {}
+    _warn_cleared(read_sig, parse_sig)
     return parsed
+
+
+def _load_node_keys_map() -> dict:
+    """Merge the two map-shaped key sources, the file winning per node.
+
+    ODS_REMOTE_NODE_KEYS is a single JSON object {"<node name>": "<bearer
+    key>"}. It exists because compose services enumerate their environment
+    explicitly, so an admin-chosen key_env var name is never forwarded into
+    the container without a per-node compose edit -- one map var sidesteps
+    that. ODS_REMOTE_NODE_KEYS_FILE carries the same object off the
+    environment entirely.
+
+    Precedence is per node rather than whole-map replacement, so keys can move
+    onto the file one node at a time without the rest going dark. Malformed
+    input on either side logs a warning and is treated as empty, mirroring
+    load_remote_nodes' own malformed-config handling; it must never crash the
+    registry.
+    """
+    merged: dict = {}
+    raw = os.environ.get("ODS_REMOTE_NODE_KEYS", "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            assert isinstance(parsed, dict)
+            merged.update(parsed)
+        except (ValueError, AssertionError):
+            _warn_once(("keys-env-parse",),
+                       "ODS_REMOTE_NODE_KEYS is not a JSON object; ignoring")
+    for name, key in _load_keys_file().items():
+        if key:  # present-but-empty is not a hit, as in _resolve_node_key
+            merged[name] = key
+    return merged
 
 
 def _resolve_node_key(name: str, key_env: str, keys_map: dict) -> str:
@@ -119,14 +212,20 @@ def load_remote_nodes() -> list[RemoteNodeConfig]:
             continue
         name = str(entry["name"])
         key = _resolve_node_key(name, entry.get("key_env", ""), keys_map)
+        nokey_sig = ("node-key", name)
         if not key:
             # The likeliest misconfiguration by far, and otherwise silent until
-            # it surfaces as an opaque 401 on the node's dashboard card.
-            logger.warning(
-                "Remote node %r has no bearer key: neither ODS_REMOTE_NODE_KEYS"
-                "[%r] nor key_env %r resolved to a value. The node will report"
-                " an HTTP 401 error until a key is supplied.",
+            # it surfaces as an opaque 401 on the node's dashboard card. Warned
+            # once, not once per poll cycle.
+            _warn_once(
+                nokey_sig,
+                "Remote node %r has no bearer key: none of"
+                " ODS_REMOTE_NODE_KEYS_FILE, ODS_REMOTE_NODE_KEYS[%r] or"
+                " key_env %r resolved to a value. The node will report an"
+                " HTTP 401 error until a key is supplied.",
                 name, name, entry.get("key_env", "") or None)
+        else:
+            _warn_cleared(nokey_sig)
         nodes.append(RemoteNodeConfig(
             name=name, url=str(entry["url"]).rstrip("/"),
             key=key, display_name=entry.get("display_name")))

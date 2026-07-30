@@ -9,7 +9,8 @@ passthrough) and resolves without any per-node compose change.
 
 Resolution order per node, by name: (1) ODS_REMOTE_NODE_KEYS[name] if
 present and non-empty, (2) key_env lookup (existing, must keep working),
-(3) empty string. Malformed ODS_REMOTE_NODE_KEYS (bad JSON / not an object)
+(3) empty string. ODS_REMOTE_NODE_KEYS_FILE sits above all three and is
+covered in test_remote_nodes_keys_file.py; these cases leave it unset. Malformed ODS_REMOTE_NODE_KEYS (bad JSON / not an object)
 must log a warning and behave as if empty -- never crash, mirroring
 load_remote_nodes' own malformed-config handling.
 
@@ -27,6 +28,9 @@ NODE = json.dumps([{"name": "sparky", "url": "http://sparky.test:7720",
 
 def setup_function(_fn):
     remote_nodes._STATE.clear()
+    # Config diagnostics on this path are warn-once (they run per poll cycle),
+    # so a signature left behind by an earlier test silences the next one.
+    remote_nodes._WARNED_ONCE.clear()
 
 
 def test_map_hit_used_when_key_env_absent(monkeypatch):
