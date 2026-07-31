@@ -77,6 +77,13 @@ def _profiles_meta_map() -> dict:
 def profile_meta(name: str) -> dict:
     """Return metadata dict for profile, with defaults for missing fields."""
     entry = _profiles_meta_map().get(name) or {}
+    if not isinstance(entry, dict):
+        # profiles.json is valid JSON but this entry isn't an object (e.g.
+        # {"comfyui": 5}) -- treat it the same as a missing entry rather than
+        # crashing .get() below. This is polled continuously by
+        # GET /v1/node/serving, so a malformed sidecar must degrade to
+        # defaults, not a 500.
+        entry = {}
     meta = {"name": name}
     for key, default in _META_DEFAULTS.items():
         meta[key] = entry.get(key, default)

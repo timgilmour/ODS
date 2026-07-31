@@ -150,6 +150,28 @@ def test_malformed_profiles_json_falls_back_to_defaults(monkeypatch, tmp_path):
     assert heretic["engine"] == "vllm"
 
 
+def test_profile_meta_tolerates_non_dict_entry_value(monkeypatch, tmp_path):
+    """profiles.json is valid JSON but an entry's value isn't an object (e.g.
+    {"comfyui": 5}). Regression for a 500 on GET /v1/node/serving: the old
+    code did entry.get(key, default) unconditionally, and int has no .get."""
+    vllm, ctl = _enable(monkeypatch, tmp_path, profiles=("comfyui",))
+    (vllm / "profiles.json").write_text(json.dumps({"comfyui": 5}))
+
+    meta = swapctl.profile_meta("comfyui")
+    assert meta == {"name": "comfyui", "engine": "vllm",
+                    "health_url": None, "container": None}
+
+    # list_profiles() and current_profile_meta() route through profile_meta()
+    # too -- neither may raise.
+    profiles = swapctl.list_profiles()
+    assert profiles == [meta]
+
+    (ctl / "status.json").write_text(json.dumps(
+        {"state": "done", "profile": "comfyui", "id": "x",
+         "message": "swap launched", "ts": "2026-07-31T00:00:00Z"}))
+    assert swapctl.current_profile_meta() == meta
+
+
 def test_current_profile_meta_reads_status(monkeypatch, tmp_path):
     vllm, ctl = _enable(monkeypatch, tmp_path, profiles=("comfyui",))
     (vllm / "profiles.json").write_text(json.dumps(

@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 import serving
@@ -157,6 +159,39 @@ def test_probe_no_swap_status_falls_back_to_env(monkeypatch):
                         "http://localhost:8000/v1/models")
     monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_CONTAINER", "aeon-vllm")
     r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.json() == {"model": "heretic", "endpoint_ok": True,
+                        "container_status": "running"}
+
+
+def test_probe_survives_non_dict_profiles_json_entry(monkeypatch, tmp_path):
+    """End-to-end regression for the reviewer-flagged 500: a real (unmocked)
+    swapctl reading a valid-JSON-but-non-dict profiles.json entry (e.g.
+    {"comfyui": 5}) must not blow up GET /v1/node/serving, a route polled
+    continuously. The fix (swapctl.profile_meta() treating a non-dict entry
+    as {}) means ALL fields fall back to defaults, including engine ->
+    "vllm" -- so this profile is indistinguishable from an unconfigured one
+    and probe() correctly takes the ordinary env-configured path, not the
+    comfyui-shaped branch. The point of this test is the 200, not the shape."""
+    vllm = tmp_path / "vllm"
+    ctl = tmp_path / "ctl"
+    vllm.mkdir()
+    ctl.mkdir()
+    (vllm / "compose-comfyui.yaml").write_text("services: {}\n")
+    (vllm / "profiles.json").write_text(json.dumps({"comfyui": 5}))
+    (ctl / "status.json").write_text(json.dumps(
+        {"state": "done", "profile": "comfyui", "id": "x",
+         "message": "swap launched", "ts": "2026-07-31T00:00:00Z"}))
+    monkeypatch.setattr(serving.swapctl.nodeconfig, "NODE_VLLM_DIR", str(vllm))
+    monkeypatch.setattr(serving.swapctl.nodeconfig, "NODE_SWAP_CTL_DIR", str(ctl))
+    monkeypatch.setattr(serving, "_fetch_models_payload",
+                        lambda url: {"data": [{"id": "heretic"}]})
+    monkeypatch.setattr(serving, "_container_status", lambda name: "running")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_CONTAINER", "aeon-vllm")
+
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.status_code == 200
     assert r.json() == {"model": "heretic", "endpoint_ok": True,
                         "container_status": "running"}
 
