@@ -37,7 +37,16 @@ def _wait_serving(deck, model, timeout_s=SWAP_TIMEOUT):
     pytest.fail(f"{model} not serving within {timeout_s}s: {_status(deck)}")
 
 
-def test_d5_spark_comfyui_round_trip(deck):
+def test_d5_spark_comfyui_round_trip(deck, lemonade_guard):
+    # lemonade_guard: this round trip's own boot-back leg alone can take
+    # ~13-15 min (FlashInfer JIT rebuild, see SWAP_TIMEOUT above), which
+    # exceeds lemonade's 900 s idle TTL -- the deck's own idle-release
+    # watcher can legitimately unload lemonade mid-drill (found live
+    # 2026-07-31: box_bookend caught the drift as an unrelated teardown
+    # ERROR). lemonade_guard restores lemonade's pre-test loaded model in
+    # its own finalizer, which runs before box_bookend's closing snapshot
+    # (function-scoped teardown precedes session-scoped teardown), so the
+    # session is left as found regardless of how long this test runs.
     start = _status(deck)
     assert any(p["name"] == "comfyui" for p in start["profiles"]), \
         "comfyui profile missing from node-agent listing"
