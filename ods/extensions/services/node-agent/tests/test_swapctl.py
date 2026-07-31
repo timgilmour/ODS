@@ -47,7 +47,11 @@ def test_profiles_lists_compose_set_with_null_status(monkeypatch, tmp_path):
     _enable(monkeypatch, tmp_path)
     r = client.get("/v1/node/profiles", headers=AUTH)
     assert r.status_code == 200
-    assert r.json() == {"profiles": ["laguna", "mm27b"], "swap_status": None}
+    profiles = r.json()["profiles"]
+    assert len(profiles) == 2
+    assert profiles[0] == {"name": "laguna", "engine": "vllm", "health_url": None, "container": None}
+    assert profiles[1] == {"name": "mm27b", "engine": "vllm", "health_url": None, "container": None}
+    assert r.json()["swap_status"] is None
 
 
 def test_profiles_surfaces_helper_status(monkeypatch, tmp_path):
@@ -109,3 +113,50 @@ def test_info_advertises_swap_capability_when_enabled(monkeypatch, tmp_path):
     _enable(monkeypatch, tmp_path)
     r = client.get("/v1/node/info", headers=AUTH)
     assert "swap" in r.json()["capabilities"]
+
+
+def test_list_profiles_returns_dicts_with_default_engine(monkeypatch, tmp_path):
+    _enable(monkeypatch, tmp_path, profiles=("heretic",))
+    r = client.get("/v1/node/profiles", headers=AUTH)
+    assert r.status_code == 200
+    profiles = r.json()["profiles"]
+    assert len(profiles) == 1
+    assert profiles[0] == {
+        "name": "heretic", "engine": "vllm", "health_url": None, "container": None
+    }
+
+
+def test_profiles_json_overrides_metadata(monkeypatch, tmp_path):
+    vllm, ctl = _enable(monkeypatch, tmp_path, profiles=("comfyui",))
+    (vllm / "profiles.json").write_text(json.dumps({
+        "comfyui": {"engine": "comfyui",
+                    "health_url": "http://127.0.0.1:8188/system_stats",
+                    "container": "spark-comfyui"}}))
+    r = client.get("/v1/node/profiles", headers=AUTH)
+    assert r.status_code == 200
+    profiles = r.json()["profiles"]
+    comfyui_profile = next(p for p in profiles if p["name"] == "comfyui")
+    assert comfyui_profile["engine"] == "comfyui"
+    assert comfyui_profile["container"] == "spark-comfyui"
+
+
+def test_malformed_profiles_json_falls_back_to_defaults(monkeypatch, tmp_path):
+    vllm, ctl = _enable(monkeypatch, tmp_path, profiles=("heretic",))
+    (vllm / "profiles.json").write_text("{not json")
+    r = client.get("/v1/node/profiles", headers=AUTH)
+    assert r.status_code == 200
+    profiles = r.json()["profiles"]
+    heretic = next(p for p in profiles if p["name"] == "heretic")
+    assert heretic["engine"] == "vllm"
+
+
+def test_current_profile_meta_reads_status(monkeypatch, tmp_path):
+    vllm, ctl = _enable(monkeypatch, tmp_path, profiles=("comfyui",))
+    (vllm / "profiles.json").write_text(json.dumps(
+        {"comfyui": {"engine": "comfyui"}}))
+    (ctl / "status.json").write_text(json.dumps(
+        {"state": "done", "profile": "comfyui", "id": "x",
+         "message": "swap launched", "ts": "2026-07-31T00:00:00Z"}))
+    meta = swapctl.current_profile_meta()
+    assert meta is not None
+    assert meta["engine"] == "comfyui"

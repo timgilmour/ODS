@@ -8,6 +8,7 @@ swap progress. Disabled entirely unless both dirs are configured.
 """
 
 import json
+import logging
 import re
 import uuid
 from pathlib import Path
@@ -15,6 +16,10 @@ from pathlib import Path
 import nodeconfig
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_logger = logging.getLogger(__name__)
+_warned_profiles_json = False
+
+_META_DEFAULTS = {"engine": "vllm", "health_url": None, "container": None}
 
 
 class SwapCtlDisabled(Exception):
@@ -49,10 +54,49 @@ def enabled() -> bool:
         return False
 
 
-def list_profiles() -> list[str]:
+def _profiles_meta_map() -> dict:
+    """Read <vllm>/profiles.json; absent/malformed -> {} (warn once)."""
+    global _warned_profiles_json
     vllm, _ = _dirs()
-    return sorted(p.name[len("compose-"):-len(".yaml")]
-                  for p in vllm.glob("compose-*.yaml"))
+    path = vllm / "profiles.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+        _warned_profiles_json = False
+        return data
+    except (ValueError, OSError) as exc:
+        if not _warned_profiles_json:
+            _logger.warning("profiles.json unreadable, using defaults: %s", exc)
+            _warned_profiles_json = True
+        return {}
+
+
+def profile_meta(name: str) -> dict:
+    """Return metadata dict for profile, with defaults for missing fields."""
+    entry = _profiles_meta_map().get(name) or {}
+    meta = {"name": name}
+    for key, default in _META_DEFAULTS.items():
+        meta[key] = entry.get(key, default)
+    return meta
+
+
+def current_profile_meta() -> dict | None:
+    """Return metadata for the current profile, or None if no valid status."""
+    status = read_status()
+    if not status or status.get("state") == "error":
+        return None
+    name = status.get("profile")
+    return profile_meta(name) if name else None
+
+
+def list_profiles() -> list[dict]:
+    vllm, _ = _dirs()
+    names = sorted(p.name[len("compose-"):-len(".yaml")]
+                   for p in vllm.glob("compose-*.yaml"))
+    return [profile_meta(n) for n in names]
 
 
 def read_status() -> dict | None:
