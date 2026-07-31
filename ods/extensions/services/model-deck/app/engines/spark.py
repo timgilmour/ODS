@@ -15,7 +15,12 @@ Guard order in swap(), mirroring hipfire.py's park():
      force NEVER skips this guard.
   2. busy guard — refuse while the live model has running or waiting
      requests (vLLM /metrics). A metrics failure while the endpoint is up
-     is EngineError, not "not busy". force=True skips this guard.
+     is EngineError, not "not busy". force=True skips this guard. Engine-
+     aware: only runs when the current profile's engine is "vllm" or
+     unknown (conservative default); a non-vllm engine (e.g. comfyui) has
+     no /metrics to consult, so the guard is skipped — v1 documented
+     limitation, no ComfyUI queue visibility, the operator owns not
+     swapping mid-render.
   3. boot-window guard — endpoint down + last swap "done"/"swapping" means
      a boot (possibly a ~15 min autotune) is in flight; refuse rather than
      silently restart it. force=True interrupts — which is also the
@@ -108,6 +113,26 @@ class SparkClient:
                 return self._serving_host in api_base
         return False
 
+    def _current_engine(self) -> str | None:
+        """Engine of the profile the node last swapped to, or None if unknown.
+
+        Conservative by design: any ambiguity (no swap_status, a failed
+        swap, or a profiles-fetch failure) returns None, which the busy
+        guard in swap() treats the same as "vllm" — i.e. it still probes.
+        """
+        try:
+            payload = self._node_get("/v1/node/profiles")
+        except EngineError:
+            return None
+        status = payload.get("swap_status") or {}
+        if status.get("state") == "error":
+            return None
+        current = status.get("profile")
+        for prof in payload.get("profiles") or []:
+            if isinstance(prof, dict) and prof.get("name") == current:
+                return prof.get("engine")
+        return None
+
     def swap(self, profile: str, force: bool = False) -> dict:
         if self._default_route_targets_spark():
             raise GuardError(
@@ -117,11 +142,17 @@ class SparkClient:
 
         serving = self._node_get("/v1/node/serving")
         if serving.get("endpoint_ok") and not force:
-            n = self.busy_requests()
-            if n > 0:
-                raise GuardError(
-                    f"spark serving has {n} in-flight request(s); "
-                    "retry later or use force")
+            engine = self._current_engine()
+            if engine in (None, "vllm"):
+                n = self.busy_requests()
+                if n > 0:
+                    raise GuardError(
+                        f"spark serving has {n} in-flight request(s); "
+                        "retry later or use force")
+            # else: non-vllm engine (e.g. comfyui) — no /metrics to consult;
+            # busy guard deliberately skipped (v1 documented limitation: no
+            # ComfyUI queue visibility — the operator owns not swapping
+            # mid-render).
         if not serving.get("endpoint_ok") and not force:
             last = self._node_get("/v1/node/profiles").get("swap_status") or {}
             if last.get("state") in ("swapping", "done"):

@@ -31,7 +31,21 @@ def _litellm(default_api_base="http://hipfire:11435/v1"):
                          transport=httpx.MockTransport(handler))
 
 
-def _node_handler(profiles=("laguna", "mm27b"), swap_status=None,
+DEFAULT_PROFILES = (
+    {"name": "laguna", "engine": "vllm", "health_url": None, "container": None},
+    {"name": "mm27b", "engine": "vllm", "health_url": None, "container": None},
+)
+
+# A node whose last swap landed on a non-vllm (ComfyUI) profile — used to
+# exercise the engine-aware busy guard.
+COMFY_MIX_PROFILES = (
+    {"name": "laguna", "engine": "vllm", "health_url": None, "container": None},
+    {"name": "comfyui", "engine": "comfyui",
+     "health_url": "http://sparky:8188/system_stats", "container": "comfyui"},
+)
+
+
+def _node_handler(profiles=DEFAULT_PROFILES, swap_status=None,
                   serving=None, swap_response=(202, {"id": "u1"})):
     calls = []
     serving = serving or {"model": "aeon", "endpoint_ok": True,
@@ -82,7 +96,7 @@ def _client(node_handler, metrics_handler=None, litellm=None):
 def test_status_combines_profiles_and_serving():
     client = _client(_node_handler())
     s = client.status()
-    assert s["profiles"] == ["laguna", "mm27b"]
+    assert s["profiles"] == list(DEFAULT_PROFILES)
     assert s["swap_status"] is None
     assert s["serving"]["model"] == "aeon"
     assert s["serving"]["endpoint_ok"] is True
@@ -232,3 +246,42 @@ def test_swap_allowed_when_endpoint_down_with_failed_last_swap():
         serving={"model": None, "endpoint_ok": False, "container_status": None})
     client = _client(handler)
     assert client.swap("mm27b")["id"] == "u1"
+
+
+# --- engine-aware busy guard (comfyui profiles have no /metrics to probe;
+# v1 has no ComfyUI queue visibility, so the operator owns not swapping
+# mid-render) ---
+
+def test_swap_away_from_comfyui_skips_vllm_busy_probe():
+    handler = _node_handler(
+        profiles=COMFY_MIX_PROFILES,
+        swap_status={"state": "done", "profile": "comfyui", "id": "u0",
+                     "message": "swap launched", "ts": "2026-07-31T00:00:00Z"},
+        swap_response=(202, {"id": "i1", "profile": "heretic"}))
+
+    def metrics_404(request):
+        # no /metrics route registered for a comfyui-served node
+        return httpx.Response(404, text="not found", request=request)
+
+    client = _client(handler, metrics_handler=metrics_404)
+    out = client.swap("heretic")
+    assert out["id"] == "i1"  # swap succeeded, no EngineError from /metrics
+
+
+def test_swap_between_vllm_profiles_still_probes_metrics():
+    handler = _node_handler(
+        profiles=COMFY_MIX_PROFILES,
+        swap_status={"state": "done", "profile": "laguna", "id": "u0",
+                     "message": "swap launched", "ts": "2026-07-31T00:00:00Z"})
+    client = _client(handler, metrics_handler=_metrics_handler(running=1))
+    with pytest.raises(GuardError):
+        client.swap("mm27b")
+
+
+def test_swap_with_no_swap_status_probes_metrics():
+    # swap_status None -> conservative: engine unknown, vLLM busy guard runs
+    # (existing behavior).
+    handler = _node_handler(profiles=COMFY_MIX_PROFILES, swap_status=None)
+    client = _client(handler, metrics_handler=_metrics_handler(running=1))
+    with pytest.raises(GuardError):
+        client.swap("mm27b")
