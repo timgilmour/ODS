@@ -4,19 +4,42 @@ import subprocess
 import httpx
 
 import nodeconfig
+import swapctl
 
 
 class ProbeError(RuntimeError):
     pass
 
 
-def _fetch_models_payload(url: str) -> dict:
+def _fetch_raw(url: str) -> httpx.Response:
+    """GET url, raising ProbeError unless the response is 2xx.
+
+    Shared by `_fetch_models_payload` (which parses the body as OpenAI-shaped
+    JSON) and `_probe_health_2xx` (which only cares about the status code).
+    """
     try:
         resp = httpx.get(url, timeout=2.0)
         resp.raise_for_status()
-        return resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
+        return resp
+    except httpx.HTTPError as exc:
         raise ProbeError(str(exc)) from exc
+
+
+def _fetch_models_payload(url: str) -> dict:
+    try:
+        return _fetch_raw(url).json()
+    except ValueError as exc:
+        raise ProbeError(str(exc)) from exc
+
+
+def _probe_health_2xx(url: str) -> bool:
+    """GET url; any 2xx response -> True. No OpenAI-shaped payload is parsed
+    or expected -- this is a bare liveness check for non-vLLM engines."""
+    try:
+        _fetch_raw(url)
+        return True
+    except ProbeError:
+        return False
 
 
 def _container_status(name: str) -> str | None:
@@ -30,7 +53,11 @@ def _container_status(name: str) -> str | None:
         return None
 
 
-def probe() -> dict:
+def _probe_env_configured() -> dict:
+    """The original probe path: env-configured OpenAI /v1/models endpoint
+    plus an optional docker container. Taken for vLLM profiles, for nodes
+    with no current swap status, and for generic nodes where swap control
+    itself is unconfigured (NODE_VLLM_DIR/NODE_SWAP_CTL_DIR unset)."""
     result = {"model": None, "endpoint_ok": False, "container_status": None}
     if nodeconfig.NODE_SERVING_CONTAINER:
         result["container_status"] = _container_status(
@@ -46,3 +73,26 @@ def probe() -> dict:
     except (ProbeError, AttributeError, TypeError, KeyError, IndexError):
         pass
     return result
+
+
+def probe() -> dict:
+    try:
+        meta = swapctl.current_profile_meta()
+    except swapctl.SwapCtlDisabled:
+        # Generic node: no NODE_VLLM_DIR/NODE_SWAP_CTL_DIR configured, so
+        # there is no per-profile metadata to consult at all -- fall back to
+        # the env-configured path exactly as before swap control existed.
+        meta = None
+
+    if meta and meta.get("engine") != "vllm":
+        container = meta.get("container") or nodeconfig.NODE_SERVING_CONTAINER
+        result = {"model": meta["name"], "endpoint_ok": False,
+                  "container_status": None}
+        if container:
+            result["container_status"] = _container_status(container)
+        url = meta.get("health_url")
+        if url:
+            result["endpoint_ok"] = _probe_health_2xx(url)
+        return result
+
+    return _probe_env_configured()

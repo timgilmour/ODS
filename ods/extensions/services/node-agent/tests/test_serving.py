@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 import serving
+import swapctl
 from app import app
 
 client = TestClient(app)
@@ -86,3 +87,94 @@ def test_probe_malformed_data_not_dict(monkeypatch):
     body = r.json()
     assert body["endpoint_ok"] is False
     assert body["model"] is None
+
+
+def test_probe_comfyui_engine_uses_health_url(monkeypatch):
+    monkeypatch.setattr(
+        serving.swapctl, "current_profile_meta",
+        lambda: {"name": "comfyui", "engine": "comfyui",
+                 "health_url": "http://127.0.0.1:8188/system_stats",
+                 "container": "spark-comfyui"})
+    monkeypatch.setattr(serving, "_fetch_raw", lambda url: None)
+    monkeypatch.setattr(serving, "_container_status", lambda name: "running")
+    result = serving.probe()
+    assert result == {"model": "comfyui", "endpoint_ok": True,
+                      "container_status": "running"}
+
+
+def test_probe_comfyui_engine_down(monkeypatch):
+    monkeypatch.setattr(
+        serving.swapctl, "current_profile_meta",
+        lambda: {"name": "comfyui", "engine": "comfyui",
+                 "health_url": "http://127.0.0.1:8188/system_stats",
+                 "container": "spark-comfyui"})
+
+    def _boom(url):
+        raise serving.ProbeError("connection refused")
+
+    monkeypatch.setattr(serving, "_fetch_raw", _boom)
+    monkeypatch.setattr(serving, "_container_status", lambda name: "running")
+    result = serving.probe()
+    assert result["model"] == "comfyui"
+    assert result["endpoint_ok"] is False
+
+
+def test_probe_comfyui_engine_no_health_url_no_container(monkeypatch):
+    """A profile with no health_url/container override just reports the
+    profile name; endpoint_ok stays False rather than probing anything."""
+    monkeypatch.setattr(
+        serving.swapctl, "current_profile_meta",
+        lambda: {"name": "comfyui", "engine": "comfyui",
+                 "health_url": None, "container": None})
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_CONTAINER", "")
+    result = serving.probe()
+    assert result == {"model": "comfyui", "endpoint_ok": False,
+                      "container_status": None}
+
+
+def test_probe_vllm_profile_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        serving.swapctl, "current_profile_meta",
+        lambda: {"name": "heretic", "engine": "vllm",
+                 "health_url": None, "container": None})
+    monkeypatch.setattr(serving, "_fetch_models_payload",
+                        lambda url: {"data": [{"id": "heretic"}]})
+    monkeypatch.setattr(serving, "_container_status", lambda name: "running")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_CONTAINER", "aeon-vllm")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.json() == {"model": "heretic", "endpoint_ok": True,
+                        "container_status": "running"}
+
+
+def test_probe_no_swap_status_falls_back_to_env(monkeypatch):
+    monkeypatch.setattr(serving.swapctl, "current_profile_meta", lambda: None)
+    monkeypatch.setattr(serving, "_fetch_models_payload",
+                        lambda url: {"data": [{"id": "heretic"}]})
+    monkeypatch.setattr(serving, "_container_status", lambda name: "running")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_CONTAINER", "aeon-vllm")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.json() == {"model": "heretic", "endpoint_ok": True,
+                        "container_status": "running"}
+
+
+def test_probe_swapctl_disabled_falls_back_to_env(monkeypatch):
+    """Generic nodes without NODE_VLLM_DIR/NODE_SWAP_CTL_DIR configured raise
+    SwapCtlDisabled from current_profile_meta(); probe() must swallow that and
+    take the env-configured path (the remote-node e2e harness's contract)."""
+    def _disabled():
+        raise swapctl.SwapCtlDisabled()
+
+    monkeypatch.setattr(serving.swapctl, "current_profile_meta", _disabled)
+    monkeypatch.setattr(serving, "_fetch_models_payload",
+                        lambda url: {"data": [{"id": "heretic"}]})
+    monkeypatch.setattr(serving, "_container_status", lambda name: "running")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_CONTAINER", "aeon-vllm")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.json() == {"model": "heretic", "endpoint_ok": True,
+                        "container_status": "running"}
