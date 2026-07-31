@@ -259,8 +259,15 @@ export interface SparkSwapStatus {
   ts: string;
 }
 
+export interface SparkProfile {
+  name: string;
+  engine: string; // "vllm" | "comfyui" | future engines
+  health_url: string | null;
+  container: string | null;
+}
+
 export interface SparkStatus {
-  profiles: string[];
+  profiles: SparkProfile[];
   swap_status: SparkSwapStatus | null;
   serving: SparkServing;
 }

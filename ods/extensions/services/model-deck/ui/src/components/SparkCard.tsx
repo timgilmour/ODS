@@ -86,6 +86,7 @@ export default function SparkCard({
     swapStatus.state !== "error" &&
     serving &&
     !serving.endpoint_ok;
+  const servingProfile = status?.profiles.find((p) => p.name === serving?.model);
 
   return (
     <div className="tenant-card">
@@ -94,6 +95,9 @@ export default function SparkCard({
         <span className={`chip chip-${chip}`}>
           {serving?.endpoint_ok ? "serving" : "endpoint down"}
         </span>
+        {servingProfile && servingProfile.engine !== "vllm" && (
+          <span className="chip">{servingProfile.engine}</span>
+        )}
       </div>
 
       <div className="tenant-meta">
@@ -132,8 +136,8 @@ export default function SparkCard({
         >
           <option value="">swap to…</option>
           {(status?.profiles ?? []).map((p) => (
-            <option key={p} value={p}>
-              {p}
+            <option key={p.name} value={p.name}>
+              {p.engine !== "vllm" ? `${p.name} (${p.engine})` : p.name}
             </option>
           ))}
         </select>
