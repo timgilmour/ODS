@@ -126,6 +126,19 @@ class FakeHostAgent:
             raise self.fail
         return {"activated": model_id}
 
+    def lifecycle(self):
+        # Idle by default — matches a box with no in-flight host-agent op.
+        return {"active": False, "operation": None, "target": None}
+
+
+class _BusyHostAgent:
+    """Mirrors test_arbiter.py's I2 busy-lifecycle fixture (``_BusyHostAgent``
+    there). Kept as a local copy here — importing a 3-line fake across test
+    modules would be more awkward than just mirroring it."""
+
+    def lifecycle(self):
+        return {"active": True, "operation": "model_activation", "target": "qwen3-30b"}
+
 
 class FakeRegistry:
     def __init__(self, footprints=None, models=None):
@@ -380,6 +393,95 @@ def test_hipfire_resume_engine_error_502(tmp_path, monkeypatch):
     deck["hipfire"].fail = EngineError("dockerctl unreachable")
     resp = TestClient(app).post("/api/tenants/hipfire/resume")
     assert resp.status_code == 502
+
+
+# ===========================================================================
+# Control routes refuse while the host agent is mid-lifecycle-operation
+# ===========================================================================
+
+
+def test_lemonade_load_409_while_host_agent_busy(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post(
+        "/api/tenants/lemonade/load", json={"model": "extra.new.gguf"}
+    )
+    assert resp.status_code == 409
+    assert "host agent is busy" in resp.json()["detail"]
+    assert deck["lemonade"].calls == []
+
+
+def test_lemonade_load_force_bypasses_host_agent_guard(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post(
+        "/api/tenants/lemonade/load?force=true", json={"model": "extra.new.gguf"}
+    )
+    assert resp.status_code == 200
+    assert deck["lemonade"].calls == [("load", "extra.new.gguf")]
+
+
+def test_lemonade_unload_409_while_host_agent_busy(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post("/api/tenants/lemonade/unload", json={})
+    assert resp.status_code == 409
+    assert "host agent is busy" in resp.json()["detail"]
+    assert deck["lemonade"].calls == []
+
+
+def test_lemonade_unload_force_bypasses_host_agent_guard(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post("/api/tenants/lemonade/unload?force=true", json={})
+    assert resp.status_code == 200
+    assert deck["lemonade"].calls == [("unload", "extra.m.gguf")]
+
+
+def test_hipfire_park_409_while_host_agent_busy(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post("/api/tenants/hipfire/park")
+    assert resp.status_code == 409
+    assert "host agent is busy" in resp.json()["detail"]
+    assert deck["hipfire"].calls == []
+
+
+def test_hipfire_park_force_bypasses_host_agent_guard(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post("/api/tenants/hipfire/park?force=true")
+    assert resp.status_code == 200
+    assert deck["hipfire"].calls == ["park"]
+
+
+def test_hipfire_resume_409_while_host_agent_busy(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post("/api/tenants/hipfire/resume")
+    assert resp.status_code == 409
+    assert "host agent is busy" in resp.json()["detail"]
+    assert deck["hipfire"].calls == []
+
+
+def test_hipfire_resume_force_bypasses_host_agent_guard(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post("/api/tenants/hipfire/resume?force=true")
+    assert resp.status_code == 200
+    assert deck["hipfire"].calls == ["resume"]
+
+
+def test_comfyui_free_unguarded_while_host_agent_busy(tmp_path, monkeypatch):
+    """comfyui/free is deliberately NOT guarded — freeing VRAM helps an
+    in-flight host-agent activation, it never fights it."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+    resp = TestClient(app).post("/api/tenants/comfyui/free")
+    assert resp.status_code == 200
+    assert deck["comfy"].calls == ["free"]
 
 
 # ===========================================================================

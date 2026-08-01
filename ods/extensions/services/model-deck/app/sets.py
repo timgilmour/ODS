@@ -322,6 +322,14 @@ def apply_in_progress() -> bool:
 # a known, meaningful "this step could not proceed" signal from a client.
 _HALT_EXCEPTIONS = (GuardError, EngineError, BusyError, ValueError)
 
+# Plan steps that touch the surface the ODS host agent's own lifecycle ops
+# (activation snapshots + readiness proofs) assume nobody else is mutating.
+# free_comfyui/policy_patch/warn are deliberately absent — freeing VRAM helps
+# an in-flight activation, and a policy patch never mutates engine state.
+_HOST_AGENT_GUARDED_STEPS = frozenset(
+    {"unload_lemonade", "load_lemonade", "park_hipfire", "activate", "resume_hipfire"}
+)
+
 
 def apply(
     cfgset: ConfigSet,
@@ -330,7 +338,7 @@ def apply(
     lemonade,
     comfy,
     hipfire,
-    hostagent,
+    hostagent=None,
     policy_store,
     store: SetStore,
     events_path: Path,
@@ -376,7 +384,7 @@ def _run_apply(
     lemonade,
     comfy,
     hipfire,
-    hostagent,
+    hostagent=None,
     policy_store,
     store,
     events_path,
@@ -398,6 +406,29 @@ def _run_apply(
         except _HALT_EXCEPTIONS:
             log_event(events_path, "apply-vetoed", {"name": cfgset.name})
             raise
+
+    # Pre-veto, not per-step: plan order runs evictions FIRST, so hitting the
+    # agent's own 409 at the activate step would leave a half-applied set.
+    if (
+        not force
+        and hostagent is not None
+        and any(s["step"] in _HOST_AGENT_GUARDED_STEPS for s in steps)
+    ):
+        lifecycle = hostagent.lifecycle()
+        if lifecycle["active"]:
+            log_event(
+                events_path,
+                "apply-vetoed",
+                {
+                    "name": cfgset.name,
+                    "reason": "host-agent-busy",
+                    "operation": lifecycle["operation"],
+                },
+            )
+            raise BusyError(
+                f"host agent is busy ({lifecycle['operation'] or 'model lifecycle'}); "
+                "retry after it finishes or use force=true"
+            )
 
     log_event(events_path, "apply-start", {"name": cfgset.name})
 

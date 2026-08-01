@@ -127,6 +127,23 @@ class RecHostAgent:
             raise self.fail
         return {"activated": model_id}
 
+    def lifecycle(self):
+        # Idle by default — every existing apply() test that doesn't
+        # explicitly care about the host-agent guard must see "not busy".
+        return {"active": False, "operation": None, "target": None}
+
+
+class _BusyHostAgent:
+    """Mirrors test_arbiter.py's I2 busy-lifecycle fixture (``_BusyHostAgent``
+    there). Kept as a local copy — importing a 3-line fake across test
+    modules would be more awkward than just mirroring it."""
+
+    def lifecycle(self):
+        return {"active": True, "operation": "model_activation", "target": "qwen3-30b"}
+
+    def activate(self, model_id):  # pragma: no cover - must never run
+        raise AssertionError("hostagent.activate must not run past a busy veto")
+
 
 class RecPolicyStore:
     def __init__(self, current=None):
@@ -698,6 +715,79 @@ def test_apply_halts_on_each_expected_exception(tmp_path, exc):
 
     assert report["failed"] == {"step": "activate", "model_id": "cat-7"}
     assert report["error"] == str(exc)
+
+
+# ===========================================================================
+# apply — pre-veto while the ODS host agent is mid-lifecycle-operation
+# ===========================================================================
+
+
+def test_apply_vetoed_while_host_agent_busy(tmp_path):
+    """A plan whose steps touch the host-agent-guarded surface (here:
+    load_lemonade) is refused up front, before any step executes, while the
+    host agent owns the box — mirrors the hipfire pre-veto above."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
+    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+
+    with pytest.raises(BusyError, match="host agent is busy"):
+        run_apply(cfg, world, tmp_path, hostagent=_BusyHostAgent())
+
+    events = tail_events(tmp_path / "events.jsonl")
+    assert any(
+        e["kind"] == "apply-vetoed" and e["detail"].get("reason") == "host-agent-busy"
+        for e in events
+    )
+
+
+def test_apply_force_bypasses_host_agent_veto(tmp_path):
+    """force=True skips the host-agent probe entirely — the agent stays
+    busy the whole time (proving it was never consulted), and the plan
+    still completes."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
+    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+
+    report, clients = run_apply(
+        cfg, world, tmp_path, hostagent=_BusyHostAgent(), force=True
+    )
+
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("load", "extra.m.gguf")]
+
+
+def test_apply_not_vetoed_when_host_agent_idle(tmp_path):
+    world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
+    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+
+    report, clients = run_apply(cfg, world, tmp_path)  # default RecHostAgent is idle
+
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("load", "extra.m.gguf")]
+
+
+def test_apply_not_vetoed_when_plan_has_no_guarded_steps(tmp_path):
+    """comfyui-only plans never touch the host-agent-guarded step set; a busy
+    agent must not block them, mirroring comfyui/free being unguarded at the
+    control route."""
+    world = make_world(comfy=("idle", 0))
+    cfg = ConfigSet(name="free-it", ephemeral={"comfyui": {"state": "free"}})
+
+    report, clients = run_apply(cfg, world, tmp_path, hostagent=_BusyHostAgent())
+
+    assert report["failed"] is None
+    assert clients["comfy"].calls == ["free"]
+
+
+def test_apply_tolerates_hostagent_none(tmp_path):
+    """hostagent defaults to None; a plan with guarded steps must not crash
+    when no host-agent client is wired up (same tolerance heal_suppressor
+    already gets)."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
+    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+
+    report, clients = run_apply(cfg, world, tmp_path, hostagent=None)
+
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("load", "extra.m.gguf")]
 
 
 def test_apply_logs_start_and_end_ok(tmp_path):
