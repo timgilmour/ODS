@@ -86,4 +86,39 @@ describe('GPUMonitor remote node sections', () => {
     await userEvent.click(screen.getByRole('button', { name: 'History' }))
     expect(screen.queryByText('DGX Spark GB10')).not.toBeInTheDocument()
   })
+
+  it('shows local + remote GPU counts in the header when remote nodes are present', () => {
+    const localGpu = {
+      index: 0, uuid: 'GPU-local', name: 'Local GPU',
+      memory_used_mb: 1024, memory_total_mb: 24576, memory_percent: 4.2,
+      utilization_percent: 10, temperature_c: 45, power_w: 60,
+    }
+    const remoteGpu2 = { ...remoteGpu, index: 1, uuid: 'GPU-remote-2' }
+    useGPUDetailed.mockReturnValue({
+      detailed: {
+        gpu_count: 1, backend: 'amd', gpus: [localGpu],
+        aggregate: null, assignment: null, split_mode: null, tensor_split: null,
+        nodes: [{ ...node, gpus: [remoteGpu, remoteGpu2] }],
+      },
+      history: null, topology: null, loading: false, error: null, stale: false,
+    })
+
+    render(<GPUMonitor />)
+
+    expect(screen.getByText(/1 local GPU \+ 2 remote/)).toBeInTheDocument()
+  })
+
+  it('shows a stale indicator when polls stop succeeding', () => {
+    useGPUDetailed.mockReturnValue({
+      detailed: {
+        gpu_count: 0, backend: 'nvidia', gpus: [], aggregate: zeroAggregate,
+        assignment: null, split_mode: null, tensor_split: null, nodes: [],
+      },
+      history: null, topology: null, loading: false, error: null, stale: true,
+    })
+
+    render(<GPUMonitor />)
+
+    expect(screen.getByText('stale — retrying')).toBeInTheDocument()
+  })
 })

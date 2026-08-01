@@ -24,7 +24,7 @@ const AggBar = memo(function AggBar({ label, value, percent }) {
 })
 
 export default function GPUMonitor() {
-  const { detailed, history, topology, loading, error } = useGPUDetailed()
+  const { detailed, history, topology, loading, error, stale } = useGPUDetailed()
   const [activeTab, setActiveTab] = useState('overview') // 'overview' | 'history'
 
   if (loading) {
@@ -60,7 +60,8 @@ export default function GPUMonitor() {
     )
   }
 
-  const { gpus = [], backend, gpu_count, aggregate, assignment, split_mode, tensor_split } = detailed
+  const { gpus = [], backend, gpu_count, aggregate, assignment, split_mode, tensor_split, nodes: detailedNodes = [] } = detailed
+  const remoteGpuCount = detailedNodes.reduce((n, node) => n + (node.gpus?.length || 0), 0)
 
   return (
     <div className="p-8">
@@ -72,12 +73,13 @@ export default function GPUMonitor() {
             GPU Monitor
           </h1>
           <p className="mt-1 text-sm text-zinc-400">
-            {gpu_count} GPU{gpu_count !== 1 ? 's' : ''} · <span className="font-mono uppercase text-zinc-300">{backend}</span>
+            {gpu_count} local GPU{gpu_count !== 1 ? 's' : ''}
+            {remoteGpuCount > 0 ? ` + ${remoteGpuCount} remote` : ''} · <span className="font-mono uppercase text-zinc-300">{backend}</span>
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs font-mono bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-500">
-          <RefreshCw size={12} className="text-indigo-400" />
-          live · 5s
+        <div className={`flex items-center gap-2 text-xs font-mono bg-zinc-900/50 border rounded-lg px-3 py-2 ${stale ? 'border-amber-700 text-amber-400' : 'border-zinc-800 text-zinc-500'}`}>
+          <RefreshCw size={12} className={stale ? 'text-amber-400' : 'text-indigo-400'} />
+          {stale ? 'stale — retrying' : 'live · 5s'}
         </div>
       </div>
 
