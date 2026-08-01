@@ -40,16 +40,16 @@ tenant "unknown".
 Externals (minimal heuristic, display-only — see task brief for the full
 version this deliberately simplifies): a KFD pid using more than 1 GiB
 counts as "external" only when NO tenant anywhere reports a loaded/running
-state (lemonade "loaded", comfyui "busy", or hipfire "running"). World has
-no way to know which GPU hosts which tenant (``app.gpu.read_gpus`` doesn't
-attribute pids to tenants, only to GPUs), so this can't be scoped to "the
-GPU that tenant is actually on" without building GPU-index attribution,
-which is explicitly out of scope here. Practical effect: as soon as any
-tenant is loaded/running anywhere in the box, all fat pids on all GPUs are
-treated as accounted-for, even ones on a GPU with no tenant activity at
-all — this under-reports externals whenever a tenant is loaded on one GPU
-while unrelated heavy VRAM use happens on another. Acceptable for a
-display-only UI list; do not use this for eviction decisions.
+state (lemonade "loaded", comfyui "busy", or hipfire "running"). This
+heuristic doesn't scope to "the GPU that tenant is actually on" (that would
+need attributing ``app.gpu.read_gpus`` pids to specific tenants, which is
+explicitly out of scope here) even though ``placement`` now carries the
+tenant->GPU index mapping. Practical effect: as soon as any tenant is
+loaded/running anywhere in the box, all fat pids on all GPUs are treated as
+accounted-for, even ones on a GPU with no tenant activity at all — this
+under-reports externals whenever a tenant is loaded on one GPU while
+unrelated heavy VRAM use happens on another. Acceptable for a display-only
+UI list; do not use this for eviction decisions.
 
 No Settings import here — pure inputs only.
 """
@@ -66,6 +66,10 @@ _EXTERNAL_FLOOR_BYTES = 1 * 1024**3  # 1 GiB
 _OPENAI_PREFIX = "openai/"
 _EXTRA_PREFIX = "extra."
 
+# Mirrors Settings' fixed engine->GPU placement defaults; _build_deck passes
+# the live Settings values so the UI never has to hardcode the layout.
+_DEFAULT_PLACEMENT = {"hipfire": 0, "lemonade": 1, "comfyui": 1}
+
 
 def _strip_prefix(name: str | None, prefix: str) -> str | None:
     if name is None:
@@ -76,12 +80,17 @@ def _strip_prefix(name: str | None, prefix: str) -> str | None:
 class World:
     """In-memory idle-clock state across repeated ``snapshot()`` calls."""
 
-    def __init__(self, clock=time.monotonic) -> None:
+    def __init__(self, clock=time.monotonic, placement: dict[str, int] | None = None) -> None:
         self._clock = clock
         self._lemonade_last_value: int | None = None
         self._lemonade_last_activity_time: float | None = None
         self._lemonade_last_loaded: str | None = None
         self._comfy_last_activity_time: float | None = None
+        # Static tenant->GPU index mapping, carried explicitly from Settings
+        # (see _DEFAULT_PLACEMENT / app.main._build_deck) — not inferred from
+        # any engine call, so it never fails and never varies across a
+        # process's lifetime.
+        self._placement = dict(placement) if placement is not None else dict(_DEFAULT_PLACEMENT)
 
     def snapshot(self, gpus, lemonade, comfy, hipfire, litellm, registry) -> dict:
         now = self._clock()
@@ -117,6 +126,7 @@ class World:
             },
             "externals": externals,
             "default_route": default_route,
+            "placement": dict(self._placement),
         }
 
     def _snapshot_lemonade(self, lemonade, registry, now: float) -> dict:

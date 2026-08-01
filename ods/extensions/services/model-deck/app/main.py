@@ -140,7 +140,11 @@ def _build_deck(settings: Settings) -> dict:
 
     deck = {
         "settings": settings,
-        "world": World(),
+        "world": World(placement={
+            "hipfire": settings.hipfire_gpu_index,
+            "lemonade": settings.lemonade_gpu_index,
+            "comfyui": settings.lemonade_gpu_index,  # comfy shares the lemonade GPU (settings.py comment)
+        }),
         "lemonade": lemonade,
         "comfy": comfy,
         "hipfire": hipfire,

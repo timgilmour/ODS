@@ -138,8 +138,27 @@ def test_snapshot_has_expected_top_level_keys():
 
     result = world.snapshot(**_healthy_kwargs())
 
-    assert set(result) == {"gpus", "tenants", "externals", "default_route"}
+    assert set(result) == {"gpus", "tenants", "externals", "default_route", "placement"}
     assert set(result["tenants"]) == {"lemonade", "comfyui", "hipfire"}
+
+
+# --- placement ---------------------------------------------------------
+
+
+def test_snapshot_includes_default_placement():
+    world = World(clock=FakeClock())
+
+    result = world.snapshot(**_healthy_kwargs())
+
+    assert result["placement"] == {"hipfire": 0, "lemonade": 1, "comfyui": 1}
+
+
+def test_snapshot_respects_custom_placement():
+    world = World(clock=FakeClock(), placement={"hipfire": 2, "lemonade": 0, "comfyui": 0})
+
+    result = world.snapshot(**_healthy_kwargs())
+
+    assert result["placement"] == {"hipfire": 2, "lemonade": 0, "comfyui": 0}
 
 
 def test_snapshot_gpus_computes_free_from_total_minus_used():

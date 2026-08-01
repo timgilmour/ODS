@@ -221,6 +221,7 @@ def test_api_state_shape(tmp_path, monkeypatch):
     assert body["models"] == [{"file": "m.gguf", "size": 1, "footprint": 2}]
     assert body["world"]["default_route"] == "extra.model.gguf"
     assert body["world"]["tenants"]["hipfire"]["state"] == "running"
+    assert body["world"]["placement"]["hipfire"] == 0
 
 
 def test_api_state_calls_read_gpus_fresh_each_request(tmp_path, monkeypatch):
