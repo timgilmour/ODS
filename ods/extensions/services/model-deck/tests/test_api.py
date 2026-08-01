@@ -756,6 +756,45 @@ def test_apply_force_skips_hipfire_busy_veto(tmp_path, monkeypatch):
     assert deck["hipfire"].park_forces == [True]
 
 
+def test_apply_host_agent_busy_veto_409_and_no_mutation(tmp_path, monkeypatch):
+    """HTTP-level proof of the routers/sets.py wiring: hostagent=deck["hostagent"]
+    passthrough + BusyError -> 409 app handler. Mirrors the hipfire-busy-veto
+    precedent above but for the new host-agent guard (plan contains
+    load_lemonade, a guarded step)."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded=None)
+    deck["hostagent"] = _BusyHostAgent()
+    client = TestClient(app)
+    client.post(
+        "/api/sets",
+        json={"name": "Load It", "ephemeral": {"lemonade": {"state": "loaded"}}},
+    )
+
+    resp = client.post("/api/sets/load-it/apply")
+
+    assert resp.status_code == 409
+    assert "host agent is busy" in resp.json()["detail"]
+    assert deck["lemonade"].calls == []
+    assert deck["set_store"].get(RESERVED_SLUG) is None
+
+
+def test_apply_force_skips_host_agent_busy_veto(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded=None)
+    deck["hostagent"] = _BusyHostAgent()
+    client = TestClient(app)
+    client.post(
+        "/api/sets",
+        json={"name": "Load It", "ephemeral": {"lemonade": {"state": "loaded"}}},
+    )
+
+    resp = client.post("/api/sets/load-it/apply?force=true")
+
+    assert resp.status_code == 200
+    assert resp.json()["failed"] is None
+    assert deck["lemonade"].calls == [("load", "extra.model.gguf")]
+
+
 def test_hipfire_park_busy_409(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     deck["hipfire"] = FakeHipfire(
