@@ -1,18 +1,9 @@
 import { bytesToGB, meterFillClass, type Gpu, type ModelFile, type PolicyMap, type TenantName, type World } from "../api";
 import TenantCard from "./TenantCard";
 
-// Mirrors the backend's fixed engine->GPU placement (compose GPU device
-// assignment / app/settings.py): hipfire is pinned to GPU 0; lemonade and
-// comfyui share GPU 1. Not derived from any API field — the world snapshot
-// carries no per-tenant GPU attribution (see app/state.py's externals-only
-// GPU->pid mapping). SetBuilder.tsx hardcodes the same fixed placement for
-// its (differently-shaped, drag/drop) GPU 0/1 columns rather than importing
-// this — kept un-exported to avoid a needless coupling between the two
-// components' very different rendering.
-const GPU_TENANTS: Record<number, TenantName[]> = {
-  0: ["hipfire"],
-  1: ["lemonade", "comfyui"],
-};
+// Fixed display order; membership comes from the backend's placement map
+// (World.snapshot "placement"), so the layout is data-driven per host.
+const TENANT_ORDER: TenantName[] = ["hipfire", "lemonade", "comfyui"];
 
 interface GpuColumnProps {
   gpu: Gpu;
@@ -24,7 +15,7 @@ interface GpuColumnProps {
 
 export default function GpuColumn({ gpu, world, policy, models, onRefresh }: GpuColumnProps) {
   const pct = gpu.total > 0 ? (gpu.used / gpu.total) * 100 : 0;
-  const tenants = GPU_TENANTS[gpu.index] ?? [];
+  const tenants = TENANT_ORDER.filter((t) => world.placement[t] === gpu.index);
   const externals = world.externals.filter((e) => e.gpu === gpu.index);
 
   return (

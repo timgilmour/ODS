@@ -254,7 +254,7 @@ input[type="password"] {
   background: var(--meter-red);
 }
 
-/* Hipfire's GPU 0 meter when the draft's hipfire choice is "don't touch"
+/* Hipfire's meter when the draft's hipfire choice is "don't touch"
  * (null): shows the live footprint rather than a drafted one, so it's
  * styled subdued to read as "current state," not "this draft's plan." */
 .meter-fill-subdued {

@@ -58,6 +58,7 @@ export interface World {
   };
   externals: ExternalProc[];
   default_route: string | null;
+  placement: Record<TenantName, number>;
 }
 
 export interface TenantPolicy {

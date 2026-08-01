@@ -60,11 +60,13 @@ interface OverwriteSnapshot {
   slug: string;
 }
 
-/** Drag-and-drop set editor: GPU 0 (hipfire toggle, not a drop target) and
- * GPU 1 (lemonade/comfyui, a drop target) mirror GpuColumn's fixed
- * engine->GPU placement (see GpuColumn.tsx:GPU_TENANTS) but render bespoke
- * controls per tenant rather than TenantCard's live-status view — this is
- * a *draft* of desired state, not a live status card. */
+/** Drag-and-drop set editor: the hipfire column (a toggle, not a drop
+ * target) and the lemonade/comfyui column (a drop target) mirror
+ * GpuColumn's tenant grouping, but render bespoke controls per tenant
+ * rather than TenantCard's live-status view — this is a *draft* of desired
+ * state, not a live status card. Column indices (which physical GPU each
+ * one is) come from the world snapshot's placement map, not a hardcoded
+ * layout — GpuColumn no longer hardcodes it either. */
 export default function SetBuilder({ models, gpus, world, onModalOpenChange }: SetBuilderProps) {
   // Existing sets, for the load/duplicate/delete select.
   const [sets, setSets] = useState<ConfigSet[]>([]);
@@ -260,7 +262,7 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
 
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
-    // The GPU 1 drop target isn't a form control, so the disabled
+    // The lemonade/comfyui drop target isn't a form control, so the disabled
     // <fieldset> around the rest of the form doesn't block it natively —
     // guard explicitly so a drag can't mutate the draft while an overwrite
     // confirmation is pending (CRITICAL 1).
@@ -303,8 +305,14 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
 
   // --- Footprint budgets ----------------------------------------------------
 
-  const gpu0Total = gpus.find((g) => g.index === 0)?.total ?? DEFAULT_GPU_BYTES;
-  const gpu1Total = gpus.find((g) => g.index === 1)?.total ?? DEFAULT_GPU_BYTES;
+  // Which physical GPU each column represents — derived from the world
+  // snapshot's placement map (World.snapshot "placement"), not hardcoded;
+  // GpuColumn derives the same values independently for its own layout.
+  const hipfireGpu = world.placement.hipfire;
+  const sharedGpu = world.placement.lemonade;
+
+  const gpu0Total = gpus.find((g) => g.index === hipfireGpu)?.total ?? DEFAULT_GPU_BYTES;
+  const gpu1Total = gpus.find((g) => g.index === sharedGpu)?.total ?? DEFAULT_GPU_BYTES;
 
   const placedFootprint = placedModel
     ? (models.find((m) => m.file === placedModel)?.footprint ?? 0)
@@ -352,11 +360,11 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
         {/* Disabled as a whole (native fieldset cascade covers every
             input/textarea/select/button inside, including ModelLibrary's
             Place buttons) whenever an overwrite confirmation is pending —
-            see CRITICAL 1. The GPU 1 drop target isn't a form control, so
+            see CRITICAL 1. The lemonade/comfyui drop target isn't a form control, so
             handleDrop also short-circuits explicitly while a snapshot is
             pending. */}
         <fieldset className="builder-fieldset" disabled={overwriteSnapshot !== null}>
-          <ModelLibrary models={models} onPlace={placeModel} />
+          <ModelLibrary models={models} onPlace={placeModel} targetGpu={sharedGpu} />
 
           <div className="builder-main">
             <div className="panel">
@@ -466,7 +474,7 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
 
             <div className="gpu-row">
               <div className="gpu-column">
-                <h2>GPU 0</h2>
+                <h2>GPU {hipfireGpu}</h2>
                 {gpu0Pct > 90 && (
                   <div className="banner-error">
                     <span>Over budget — loads may fail</span>
@@ -521,7 +529,7 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={handleDrop}
               >
-                <h2>GPU 1</h2>
+                <h2>GPU {sharedGpu}</h2>
                 {gpu1Pct > 90 && (
                   <div className="banner-error">
                     <span>Over budget — loads may fail</span>
