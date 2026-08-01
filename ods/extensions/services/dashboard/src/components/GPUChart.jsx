@@ -1,7 +1,7 @@
 import { memo } from 'react'
 
 // SVG polyline sparkline — no external deps
-function Sparkline({ values, color, height = 48, width = '100%' }) {
+function Sparkline({ values, color, height = 48, width = '100%', max = null }) {
   const data = (values || []).filter(v => v != null)
   if (data.length < 2) {
     return <div className="h-12 bg-zinc-800/50 rounded" />
@@ -9,11 +9,11 @@ function Sparkline({ values, color, height = 48, width = '100%' }) {
 
   const W = 300 // internal viewBox width
   const H = height
-  const max = Math.max(...data, 1)
+  const scale = max ?? Math.max(...data, 1)
   const pts = data
     .map((v, i) => {
       const x = (i / (data.length - 1)) * W
-      const y = H - (v / max) * (H - 4) - 2
+      const y = H - (Math.min(v, scale) / scale) * (H - 4) - 2
       return `${x.toFixed(1)},${y.toFixed(1)}`
     })
     .join(' ')
@@ -64,7 +64,7 @@ export const GPUChart = memo(function GPUChart({ history, gpuIndex }) {
         <span className="text-[10px] text-zinc-500 font-mono">{timeRange}</span>
       </div>
       <div className="grid grid-cols-2 gap-3">
-        {METRICS.map(({ key: mk, label, color }) => {
+        {METRICS.map(({ key: mk, label, color, max }) => {
           const values = gpuData[mk] || []
           const latest = values[values.length - 1]
           return (
@@ -75,7 +75,7 @@ export const GPUChart = memo(function GPUChart({ history, gpuIndex }) {
                   {latest != null ? (Number.isInteger(latest) ? latest : latest.toFixed(1)) : '—'}
                 </span>
               </div>
-              <Sparkline values={values} color={color} height={36} />
+              <Sparkline values={values} color={color} height={36} max={max} />
             </div>
           )
         })}
