@@ -18,7 +18,12 @@ class FakeSpark:
         self.calls = []  # mutating only: ("swap", profile, force)
         self.fail = None
         self._status = {
-            "profiles": ["laguna", "mm27b"],
+            "profiles": [
+                {"name": "laguna", "engine": "vllm", "health_url": None,
+                 "container": None},
+                {"name": "mm27b", "engine": "vllm", "health_url": None,
+                 "container": None},
+            ],
             "swap_status": None,
             "serving": {"model": "aeon", "endpoint_ok": True,
                         "container_status": None},
@@ -56,7 +61,12 @@ def test_status_passthrough(tmp_path, monkeypatch):
     app, deck = _spark_app(tmp_path, monkeypatch)
     r = TestClient(app).get("/api/spark/status")
     assert r.status_code == 200
-    assert r.json()["profiles"] == ["laguna", "mm27b"]
+    assert r.json()["profiles"] == [
+        {"name": "laguna", "engine": "vllm", "health_url": None,
+         "container": None},
+        {"name": "mm27b", "engine": "vllm", "health_url": None,
+         "container": None},
+    ]
     assert r.json()["serving"]["model"] == "aeon"
 
 

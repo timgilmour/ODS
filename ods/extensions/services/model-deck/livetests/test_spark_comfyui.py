@@ -51,6 +51,12 @@ def test_d5_spark_comfyui_round_trip(deck, lemonade_guard):
     assert any(p["name"] == "comfyui" for p in start["profiles"]), \
         "comfyui profile missing from node-agent listing"
     original = start["serving"]["model"] or "heretic"
+    # A prior aborted run can leave comfyui itself serving; swapping
+    # comfyui -> comfyui -> comfyui would be a false-green no-op that
+    # never exercises the vllm boot-back leg and leaves litellm routes
+    # dead, so fall back to heretic as the round-trip target instead.
+    if original == "comfyui":
+        original = "heretic"
 
     _swap(deck, "comfyui")
     s = _wait_serving(deck, "comfyui")
