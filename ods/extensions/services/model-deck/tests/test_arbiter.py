@@ -511,7 +511,7 @@ def _settings(**overrides):
 
 def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
-    heal_suppressor=None, **sett,
+    heal_suppressor=None, hostagent=None, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -526,6 +526,7 @@ def _make_watcher(
         events_path=events_path,
         read_gpus=read_gpus if read_gpus is not None else RecordingReadGpus(),
         heal_suppressor=heal_suppressor,
+        hostagent=hostagent,
     )
     return watcher, events_path
 
@@ -965,3 +966,120 @@ def test_watcher_tick_noop_while_apply_holds_lock(tmp_path):
 
     assert world.calls == 0  # no snapshot attempted
     assert tail_events(events_path) == []  # nothing logged
+
+
+# ===========================================================================
+# I2 — watcher yields to an in-flight host-agent lifecycle operation
+# ===========================================================================
+
+
+class _BusyHostAgent:
+    def lifecycle(self):
+        return {"active": True, "operation": "model_activation", "target": "qwen3-30b"}
+
+
+class _IdleHostAgent:
+    def lifecycle(self):
+        return {"active": False, "operation": None, "target": None}
+
+
+class _ExplodingHostAgent:
+    """Raises if probed — proves the watcher only checks lifecycle() when
+    there is real work to skip, never on a tick with nothing to do."""
+
+    def lifecycle(self):
+        raise AssertionError("hostagent must not be probed when there is no real work")
+
+
+def test_tick_skips_actions_while_host_agent_busy(tmp_path):
+    """Same scenario as test_watcher_tick_idle_release_unloads_and_logs, plus
+    a busy hostagent: the idle-release unload must be suppressed and a
+    'host-agent-busy' event logged instead of the unload."""
+    model = "extra.idle.gguf"
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model=model, footprint=10 * GIB, idle_s=1000),
+        default_route=None,
+    )
+    lemonade = FakeLemonade()
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(),
+        _policy(lem_idle=900),
+        lemonade=lemonade,
+        hostagent=_BusyHostAgent(),
+    )
+
+    watcher.tick()
+
+    assert lemonade.unloaded == []  # action suppressed
+    events = tail_events(events_path)
+    assert events[-1]["kind"] == "host-agent-busy"
+    assert events[-1]["detail"]["operation"] == "model_activation"
+    assert events[-1]["detail"]["target"] == "qwen3-30b"
+
+
+def test_tick_executes_when_host_agent_idle(tmp_path):
+    """Same scenario, but an idle hostagent must not block the unload —
+    behavior unchanged from the no-hostagent case."""
+    model = "extra.idle.gguf"
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model=model, footprint=10 * GIB, idle_s=1000),
+        default_route=None,
+    )
+    lemonade = FakeLemonade()
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(),
+        _policy(lem_idle=900),
+        lemonade=lemonade,
+        hostagent=_IdleHostAgent(),
+    )
+
+    watcher.tick()
+
+    assert lemonade.unloaded == [model]  # unchanged behavior
+    events = tail_events(events_path)
+    assert events[-1]["kind"] == "unload_lemonade"
+
+
+def test_host_agent_busy_events_are_deduped(tmp_path):
+    model = "extra.idle.gguf"
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model=model, footprint=10 * GIB, idle_s=1000),
+        default_route=None,
+    )
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(),
+        _policy(lem_idle=900),
+        hostagent=_BusyHostAgent(),
+    )
+
+    watcher.tick()
+    watcher.tick()
+
+    events = [e for e in tail_events(events_path) if e["kind"] == "host-agent-busy"]
+    assert len(events) == 1
+
+
+def test_idle_tick_does_not_probe_host_agent_when_nothing_to_do(tmp_path):
+    """No idle-past-TTL, no pending load -> decide() returns []. There is no
+    real work to skip, so the watcher must not even call lifecycle()."""
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model="extra.m.gguf", footprint=10 * GIB, idle_s=10),
+        default_route=None,
+    )
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(),
+        _policy(lem_idle=900),
+        hostagent=_ExplodingHostAgent(),
+    )
+
+    watcher.tick()  # must not raise (an exploding lifecycle() would blow up)
+
+    assert tail_events(events_path) == []

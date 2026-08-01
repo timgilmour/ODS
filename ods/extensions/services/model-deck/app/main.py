@@ -186,6 +186,7 @@ def _build_watcher(settings: Settings):
         events_path=deck["events_path"],
         read_gpus=deck["read_gpus"],
         heal_suppressor=deck["heal_suppressor"],
+        hostagent=deck["hostagent"],
     )
 
 

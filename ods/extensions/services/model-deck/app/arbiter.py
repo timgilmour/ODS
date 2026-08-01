@@ -63,6 +63,17 @@ Design notes that are load-bearing (and tested):
 * The watcher YIELDS to an in-flight set apply: if ``app.sets`` holds its
   apply lock, ``tick()`` returns immediately (no snapshot, no actions) so the
   two never interleave real evictions/loads on the live box.
+
+* The watcher also YIELDS to an in-flight host-agent lifecycle operation
+  (activation/download/delete): that machinery owns the box's model state
+  end-to-end (snapshots, container restarts, readiness proofs), and a deck
+  action fired mid-operation races it — e.g. an unload can make the agent's
+  readiness gate fail and roll back for no reason. When there is real work
+  to do (a pending load or a non-noop action), the watcher probes
+  ``hostagent.lifecycle()``; if it reports active, the whole tick is skipped
+  and a deduped ``host-agent-busy`` event is logged instead. An idle tick
+  (nothing to do) never probes the agent at all. ``hostagent=None`` (the
+  default) disables the check entirely, so this is opt-in.
 """
 
 import threading
@@ -280,6 +291,7 @@ class Watcher:
         events_path,
         read_gpus,
         heal_suppressor=None,
+        hostagent=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -298,6 +310,7 @@ class Watcher:
             if heal_suppressor is not None
             else HealSuppressor(settings.heal_suppress_s)
         )
+        self._hostagent = hostagent
         self._interval = settings.watch_interval
 
         self._stop = threading.Event()
@@ -352,6 +365,23 @@ class Watcher:
             # rules (decide with pending=None) still run.
             pending = None if self._heal_suppressor.suppressed() else self._infer_pending(world)
             actions = decide(world, policy, pending)
+
+            # A host-agent lifecycle operation (activation/download/delete)
+            # owns the box's model state end-to-end — snapshots, container
+            # restarts, readiness proofs. Deck actions fired mid-operation
+            # race that machinery (e.g. an unload makes the agent's readiness
+            # gate fail and roll back for no reason), so the watcher yields
+            # whole ticks while one is active. Probed only when there is real
+            # work to skip — an idle deck never polls the agent.
+            real_work = pending is not None or any(a["type"] != "noop" for a in actions)
+            if real_work and self._hostagent is not None:
+                lifecycle = self._hostagent.lifecycle()
+                if lifecycle["active"]:
+                    self._log("host-agent-busy", {
+                        "operation": lifecycle["operation"],
+                        "target": lifecycle["target"],
+                    })
+                    return
             self._execute(actions, pending)
         except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above
             self._log("tick-error", {"error": str(exc)})
@@ -434,7 +464,7 @@ class Watcher:
     # tick. A different kind — or the same kind with a different detail — in
     # between resets the suppression. Real one-shot actions (unloads, frees,
     # loads) are NEVER deduped and always logged.
-    _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced"})
+    _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced", "host-agent-busy"})
 
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))
