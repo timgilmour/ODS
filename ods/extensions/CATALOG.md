@@ -23,6 +23,7 @@ For adding or authoring extensions, see [EXTENSIONS.md](../docs/EXTENSIONS.md) a
 | ods-proxy     | ODS (Web)       | optional   | 80          | all            | LAN/mDNS web entry with host-based routing for chat, dashboard, API, and Hermes proxy. |
 | embeddings      | TEI (Embeddings)         | optional   | 8090        | all            | Text embeddings service for RAG. |
 | langfuse        | Langfuse (LLM Observability) | optional | 3006      | all            | LLM tracing, evaluations, and prompt management. |
+| model-deck      | Model Deck (VRAM Control) | optional  | 3015        | amd            | GPU/VRAM supervisor: tenant load/unload/free/park controls, config sets with preview/apply, idle-release + contention-healing arbiter. |
 | n8n             | n8n (Workflows)          | optional   | 5678        | all            | Workflow automation. |
 | openclaw        | OpenClaw (Agents) **(deprecated)** | optional | 7860 | all | Legacy agent framework. **DEPRECATED** — removal planned in the next release. Use `hermes` instead. See [MIGRATION-OPENCLAW-TO-HERMES.md](../docs/MIGRATION-OPENCLAW-TO-HERMES.md). |
 | opencode        | OpenCode (IDE)           | optional   | 3003        | all            | Host-managed browser IDE / coding assistant wired to local inference. |
@@ -37,7 +38,7 @@ For adding or authoring extensions, see [EXTENSIONS.md](../docs/EXTENSIONS.md) a
 
 - **core** — Always part of the base stack (llama-server, open-webui, dashboard, dashboard-api).
 - **recommended** — Enabled by default in the installer; can be disabled (litellm, searxng, token-spy, hermes, hermes-proxy).
-- **optional** — User opts in during install or later (APE, Brave Search, ComfyUI, ods-proxy, embeddings, Langfuse, n8n, OpenCode, Perplexica, Privacy Shield, Qdrant, Tailscale, TTS, Whisper). `openclaw` is also in this category but is **deprecated** as of 2026-05-12.
+- **optional** — User opts in during install or later (APE, Brave Search, ComfyUI, ods-proxy, embeddings, Langfuse, Model Deck, n8n, OpenCode, Perplexica, Privacy Shield, Qdrant, Tailscale, TTS, Whisper). `openclaw` is also in this category but is **deprecated** as of 2026-05-12.
 
 ## Ports and .env
 

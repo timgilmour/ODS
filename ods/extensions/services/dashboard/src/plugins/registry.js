@@ -1,11 +1,11 @@
 import { coreRoutes, coreExternalLinks } from './core'
 import { appendPath } from '../lib/serviceUrls'
 import {
-  MessageSquare, Network, Bot, Terminal, Search, Image, Code, ExternalLink
+  MessageSquare, Network, Bot, Terminal, Search, Image, Code, Layers, ExternalLink
 } from 'lucide-react'
 
 const ICON_MAP = {
-  MessageSquare, Network, Bot, Terminal, Search, Image, Code, ExternalLink,
+  MessageSquare, Network, Bot, Terminal, Search, Image, Code, Layers, ExternalLink,
 }
 
 const routeExtensions = []

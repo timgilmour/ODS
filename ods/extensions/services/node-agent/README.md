@@ -95,8 +95,11 @@ dashboard-api recreate. Write the file atomically (write a temp file, then
 - Every route is bearer-gated with a constant-time comparison, and the
   unauthenticated OpenAPI surface (`/docs`, `/redoc`, `/openapi.json`) is
   disabled so the API is not advertised to whoever can reach the port.
-- The agent is read-only: it collects metrics and probes. It exposes no way to
-  load, unload, start, or stop anything on the node.
+- The agent is read-only for metrics and probes, with one deliberate exception:
+  `POST /v1/node/swap` asks the host swap-helper to switch between
+  operator-approved compose profiles. It still exposes no way to load, unload,
+  start, or stop arbitrary workloads — the helper revalidates every request and
+  only accepts profiles whose compose files the operator placed on the node.
 
 ## Ports
 

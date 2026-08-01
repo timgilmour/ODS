@@ -507,6 +507,7 @@ SIDEBAR_ICONS = {
     "comfyui": "Image",
     "token-spy": "Terminal",
     "langfuse": "BarChart2",
+    "model-deck": "Layers",
 }
 
 # --- Extensions Portal ---

@@ -138,6 +138,13 @@
       "internal_port": 11435,
       "manifest_service": "hipfire",
       "include_in_example": false
+    },
+    {
+      "env_var": "MODEL_DECK_PORT",
+      "external_default": 3015,
+      "service_id": "model-deck",
+      "internal_port": 3015,
+      "manifest_service": "model-deck"
     }
   ]
 }
