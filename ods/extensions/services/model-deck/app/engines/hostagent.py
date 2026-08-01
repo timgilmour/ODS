@@ -76,6 +76,8 @@ class HostAgent:
             data = resp.json()
         except ValueError:
             return dict(_IDLE)
+        if not isinstance(data, dict):
+            return dict(_IDLE)
         return {
             "active": bool(data.get("lifecycleActive")),
             "operation": data.get("activeOperation"),

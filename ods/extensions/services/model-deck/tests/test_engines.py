@@ -1022,6 +1022,41 @@ def test_hostagent_lifecycle_never_raises():
         assert agent.lifecycle() == {"active": False, "operation": None, "target": None}
 
 
+def test_hostagent_lifecycle_hits_correct_path_with_auth_header():
+    handler = _recording_handler(200, {"status": "idle"})
+    agent = HostAgent("http://agent:7710", "key", transport=_transport(handler))
+
+    agent.lifecycle()
+
+    assert len(handler.calls) == 1
+    req = handler.calls[0]
+    assert req.method == "GET"
+    assert req.url.path == "/v1/model/status"
+    assert req.headers["authorization"] == "Bearer key"
+
+
+def test_hostagent_lifecycle_uses_short_probe_timeout():
+    seen = {}
+
+    def handler(request):
+        seen.update(request.extensions.get("timeout", {}))
+        return httpx.Response(200, json={"status": "idle"})
+
+    agent = HostAgent("http://agent:7710", "key", transport=httpx.MockTransport(handler))
+    agent.lifecycle()
+
+    assert seen == {"connect": 2.0, "read": 2.0, "write": 2.0, "pool": 2.0}
+
+
+def test_hostagent_lifecycle_idle_when_response_body_is_not_an_object():
+    """A 2xx response whose body is valid-but-non-object JSON (null, a list,
+    a bare string) must not blow up data.get(...) — treat it as idle."""
+    for body in (None, [], "ok"):
+        transport = httpx.MockTransport(lambda req, body=body: httpx.Response(200, json=body))
+        agent = HostAgent("http://agent:7710", "key", transport=transport)
+        assert agent.lifecycle() == {"active": False, "operation": None, "target": None}
+
+
 def test_lemonade_activity_uses_separate_metrics_url():
     seen = []
 
