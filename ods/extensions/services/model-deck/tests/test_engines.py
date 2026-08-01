@@ -988,6 +988,40 @@ def test_hostagent_read_timeout_is_600_seconds():
     assert timeout.pool == 5.0
 
 
+# --- HostAgent.lifecycle() ---
+
+
+def test_hostagent_lifecycle_reports_busy():
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={
+        "status": "idle",
+        "lifecycleActive": True,
+        "activeOperation": "model_activation",
+        "activeTarget": "qwen3-30b",
+    }))
+    agent = HostAgent("http://agent:7710", "key", transport=transport)
+    assert agent.lifecycle() == {
+        "active": True, "operation": "model_activation", "target": "qwen3-30b",
+    }
+
+
+def test_hostagent_lifecycle_idle_when_no_lifecycle_keys():
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"status": "idle"}))
+    agent = HostAgent("http://agent:7710", "key", transport=transport)
+    assert agent.lifecycle() == {"active": False, "operation": None, "target": None}
+
+
+def test_hostagent_lifecycle_never_raises():
+    def _boom(req):
+        raise httpx.ConnectError("agent down")
+    for transport in (
+        httpx.MockTransport(_boom),
+        httpx.MockTransport(lambda req: httpx.Response(500, text="err")),
+        httpx.MockTransport(lambda req: httpx.Response(200, text="not json")),
+    ):
+        agent = HostAgent("http://agent:7710", "key", transport=transport)
+        assert agent.lifecycle() == {"active": False, "operation": None, "target": None}
+
+
 def test_lemonade_activity_uses_separate_metrics_url():
     seen = []
 

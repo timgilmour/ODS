@@ -18,6 +18,15 @@ request. It raises EngineError on any other non-2xx response (with the
 response text) or on an httpx.TransportError. There is no retry logic here
 by design — the host agent owns its own lock/rollback semantics, and a
 retry from this layer could race with that.
+
+lifecycle() is a different kind of call: it's the never-raising busy probe
+used by the arbiter/control guards to check whether the host agent has an
+activation in flight before issuing a competing command. It polls
+GET /v1/model/status with a short 2 s timeout (unlike activate's wide 600 s
+read timeout, since this is a cheap status check, not a long-running
+operation) and always returns a dict — any transport/HTTP/JSON failure is
+treated as idle, since an unreachable agent cannot have an activation in
+flight and the deck must keep working when the agent is down.
 """
 
 import httpx
@@ -25,6 +34,9 @@ import httpx
 from app.engines import BusyError, EngineError
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
+_LIFECYCLE_TIMEOUT = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
+
+_IDLE = {"active": False, "operation": None, "target": None}
 
 
 class HostAgent:
@@ -52,3 +64,20 @@ class HostAgent:
         if not resp.is_success:
             raise EngineError(resp.text)
         return resp.json()
+
+    def lifecycle(self) -> dict:
+        try:
+            resp = self._client.get("/v1/model/status", timeout=_LIFECYCLE_TIMEOUT)
+        except httpx.TransportError:
+            return dict(_IDLE)
+        if not resp.is_success:
+            return dict(_IDLE)
+        try:
+            data = resp.json()
+        except ValueError:
+            return dict(_IDLE)
+        return {
+            "active": bool(data.get("lifecycleActive")),
+            "operation": data.get("activeOperation"),
+            "target": data.get("activeTarget"),
+        }
