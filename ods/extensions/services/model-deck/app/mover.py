@@ -298,7 +298,15 @@ class JobQueue:
             if self.world_fn is not None:
                 from app.storage import unit_in_use
 
-                reason = unit_in_use(unit, self.world_fn())
+                world = self.world_fn()
+                # Same fail-closed rule as plan_move (I4): with litellm
+                # unreachable, world["routes_known"] is False because we
+                # couldn't ask — not because there is no default route. A gguf
+                # job reaching execution start on that basis must still
+                # refuse, same wording as the plan-time guard.
+                if unit["type"] == "gguf" and world.get("routes_known", True) is False:
+                    raise RuntimeError("litellm unreachable — cannot verify default route")
+                reason = unit_in_use(unit, world)
                 if reason:
                     raise RuntimeError(f"refused at execution start: {reason}")
 

@@ -207,6 +207,27 @@ def test_worker_refuses_when_destination_file_already_exists(tmp_path):
     assert cat.get("hot:a.gguf")["state"] == "resident"
 
 
+# -- execution-start re-check carries the routes_known fail-closed rule (NEW-2) --
+
+
+def test_execution_start_recheck_fails_closed_when_routes_unknown(tmp_path):
+    """Same fail-closed rule as plan_move (I4): if litellm has gone
+    unreachable by the time a queued gguf job reaches execution start,
+    routes_known=False means 'couldn't ask', not 'no default route' — the
+    job must fail rather than risk archiving the auto-reload target."""
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+    q.world_fn = lambda: {"routes_known": False}
+
+    job = q.submit(plan, label="manual move")
+    q._process(q._pending.pop(0))
+
+    got = q.get(job["id"])
+    assert got["state"] == "failed"
+    assert "litellm unreachable — cannot verify default route" in got["error"]
+    assert (hot / "a.gguf").exists() and not (cold / "a.gguf").exists()
+    assert cat.get("hot:a.gguf")["state"] == "resident"
+
+
 # -- EXDEV fallback on the same-fs fast path (I1) ---------------------------
 
 
