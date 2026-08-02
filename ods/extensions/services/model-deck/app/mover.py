@@ -265,6 +265,16 @@ class JobQueue:
             src = Path(src_loc["path"]) / unit["relpath"]
             dst = Path(dst_loc["path"]) / unit["relpath"]
 
+            # THE CHOKE POINT (invariant 12 corollary): the same-fs fast path
+            # is an os.replace, which silently clobbers a same-named file at
+            # the destination — an auto-eviction could destroy an archived
+            # older version of the model with no trace. Every producer
+            # (manual move, watcher, pull-through) funnels through here, so
+            # one refusal covers them all.
+            if dst.exists():
+                raise RuntimeError(
+                    f"destination already exists: {dst} — refusing to overwrite")
+
             def progress(done: int) -> None:
                 with self._lock:
                     job["bytes_done"] = done

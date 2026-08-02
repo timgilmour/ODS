@@ -546,3 +546,27 @@ def test_hot_load_notes_last_used(tmp_path, monkeypatch):
     units = deck["catalog"].units()
     hit = next(u for u in units if u["type"] == "gguf" and u["name"] == "a.gguf")
     assert hit["last_used"] is not None
+
+
+# ===========================================================================
+# Destination-collision guard (C1b: plan/UX layer)
+# ===========================================================================
+
+
+def test_move_onto_existing_destination_file_409(tmp_path, monkeypatch):
+    """A move whose destination already holds a same-named file is refused at
+    plan time (409) — the operator sees it immediately instead of the worker
+    discovering it, and the archived copy is never at risk."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    src = _register(client, tmp_path, "src")
+    dst = _register(client, tmp_path, "dst")
+    _write_gguf(src, "a.gguf")
+    _write_gguf(dst, "a.gguf", content=b"older archived version")
+    deck["catalog"].scan()
+
+    resp = client.post("/api/storage/moves", json={"unit_id": "src:a.gguf", "dest": "dst"})
+    assert resp.status_code == 409
+    assert "already exists" in resp.json()["detail"]
+    assert (dst / "a.gguf").read_bytes() == b"older archived version"
+    assert (src / "a.gguf").exists()

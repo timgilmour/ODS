@@ -183,3 +183,25 @@ def test_worker_thread_start_stop(tmp_path):
         assert (cold / "a.gguf").exists()
     finally:
         q.stop()
+
+
+# -- destination-collision guard (C1a: worker choke point) ------------------
+
+
+def test_worker_refuses_when_destination_file_already_exists(tmp_path):
+    """os.replace happily clobbers a same-named file at the destination, so an
+    auto-eviction could silently destroy an archived older version. The worker
+    refuses before the mover is ever entered: job failed, BOTH files intact,
+    catalog state restored to resident."""
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+    (cold / "a.gguf").write_bytes(b"older archived version")
+
+    job = q.submit(plan, label="watermark archive")
+    q._process(q._pending.pop(0))
+
+    got = q.get(job["id"])
+    assert got["state"] == "failed"
+    assert "destination already exists" in got["error"]
+    assert (hot / "a.gguf").read_bytes() == b"g" * 1000          # source untouched
+    assert (cold / "a.gguf").read_bytes() == b"older archived version"
+    assert cat.get("hot:a.gguf")["state"] == "resident"

@@ -5,6 +5,8 @@ Same conventions as the sibling routers: deps from request.app.state.deck,
 GuardError/ValueError left to the app-wide handlers (409/422), no auth.
 """
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -74,6 +76,14 @@ def submit_move(deck, unit_id: str, dest_name: str, label: str, on_success=None)
     dest = described.get(dest_name)
     if dest is None:
         raise ValueError(f"unknown location {dest_name!r}")
+    # Plan/UX half of the destination-collision guard (the worker enforces the
+    # other half at its choke point): refuse up front so the operator gets a
+    # 409 instead of a job that fails minutes later, and so a same-named
+    # archived copy is never a move away from being overwritten.
+    if (Path(dest["path"]) / unit["relpath"]).exists():
+        raise GuardError(
+            f"destination {dest_name!r} already exists: {unit['relpath']!r} "
+            "is already there — move or remove it first")
     world = build_world_snapshot(deck)
     active = frozenset(j["unit_id"] for j in deck["job_queue"].jobs()
                        if j["state"] not in _TERMINAL)
