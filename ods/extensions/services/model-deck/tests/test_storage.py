@@ -153,3 +153,93 @@ def test_no_archive_to_reports_shortfall_only():
     locs = [_loc("hot", free=1 * 10**9, wm=50.0, archive_to=None)]
     actions = storage_decide([_u("hot:a.gguf")], locs, _world(), 0)
     assert [a["type"] for a in actions] == ["shortfall"]
+
+
+# StorageWatcher tests
+from app.storage import StorageWatcher
+
+
+class _FakeQueue:
+    def __init__(self):
+        self.submitted = []
+        self._active = False
+    def active(self):
+        return self._active
+    def submit(self, plan, label, on_success=None):
+        self.submitted.append((plan, label))
+        return {"id": "j1", **plan}
+
+
+class _Settings:
+    storage_watch_interval = 60.0
+    storage_slack_bytes = 0
+
+
+def _watcher_env(tmp_path, auto, free_gb=1):
+    from app.catalog import Catalog
+    from app.locations import LocationStore
+    from app.policy import StoragePolicyStore
+    hot = tmp_path / "hot"; hot.mkdir()
+    cold = tmp_path / "cold"; cold.mkdir()
+    (hot / "idle.gguf").write_bytes(b"x" * 1000)
+    locs = LocationStore(tmp_path / "locations.json",
+                         disk_usage=lambda p: type("u", (), {
+                             "total": 100 * 10**9, "used": 0,
+                             "free": free_gb * 10**9 if str(p).endswith("hot") else 50 * 10**9})())
+    locs.register({"name": "hot", "path": str(hot), "role": "hot", "store_type": "gguf",
+                   "engine": "lemonade", "watermark_gb": 5.0, "archive_to": "cold", "readonly": False})
+    locs.register({"name": "cold", "path": str(cold), "role": "cold", "store_type": "gguf",
+                   "engine": "none", "watermark_gb": None, "archive_to": None, "readonly": False})
+    cat = Catalog(tmp_path / "catalog.json", locs)
+    pol = StoragePolicyStore(tmp_path / "storage_policy.json")
+    pol.put({"auto": auto})
+    queue = _FakeQueue()
+    watcher = StorageWatcher(_Settings(), locs, cat, pol, queue,
+                             world_fn=lambda: _world(), events_path=tmp_path / "events.jsonl")
+    return watcher, queue, tmp_path / "events.jsonl"
+
+
+def test_auto_on_enqueues_archive(tmp_path):
+    watcher, queue, _ = _watcher_env(tmp_path, auto=True)
+    watcher.tick()
+    assert len(queue.submitted) == 1
+    plan, label = queue.submitted[0]
+    assert plan["unit_id"] == "hot:idle.gguf" and plan["dest_location"] == "cold"
+    assert label == "watermark archive"
+
+
+def test_auto_off_suggests_only(tmp_path):
+    from app.events import tail_events
+    watcher, queue, events = _watcher_env(tmp_path, auto=False)
+    watcher.tick()
+    assert queue.submitted == []
+    kinds = [e["kind"] for e in tail_events(events)]
+    assert "storage_suggestion" in kinds
+
+
+def test_yields_to_active_jobs(tmp_path):
+    watcher, queue, events = _watcher_env(tmp_path, auto=True)
+    queue._active = True
+    watcher.tick()
+    assert queue.submitted == []
+
+
+def test_suggestion_deduped_across_ticks(tmp_path):
+    from app.events import tail_events
+    watcher, queue, events = _watcher_env(tmp_path, auto=False)
+    watcher.tick(); watcher.tick(); watcher.tick()
+    kinds = [e["kind"] for e in tail_events(events)]
+    assert kinds.count("storage_suggestion") == 1
+
+
+def test_healthy_watermark_no_events(tmp_path):
+    from app.events import tail_events
+    watcher, queue, events = _watcher_env(tmp_path, auto=True, free_gb=50)
+    watcher.tick()
+    assert queue.submitted == [] and tail_events(events) == []
+
+
+def test_thread_start_stop(tmp_path):
+    watcher, _, _ = _watcher_env(tmp_path, auto=False)
+    watcher.start()
+    watcher.stop()          # must join promptly (interval-bounded via stop Event)

@@ -13,7 +13,11 @@ destination, a readonly destination, and an underspaced destination are all
 refused with GuardError → HTTP 409.
 """
 
+import threading
+
 from app.engines import GuardError
+from app.events import log_event
+from app.sets import apply_in_progress
 
 EXTRA_PREFIX = "extra."
 
@@ -109,3 +113,93 @@ def storage_decide(units: list[dict], locations: list[dict], world: dict,
             actions.append({"type": "shortfall", "location": loc["name"],
                             "missing_bytes": needed})
     return actions
+
+
+class StorageWatcher:
+    """Slow-cadence auto-tiering loop (60 s default): scan → describe →
+    storage_decide → enqueue (auto) or suggest (manual). Never starts work
+    while a set apply or a move job is in flight; ticks catch-all so the
+    loop survives (arbiter.Watcher idiom)."""
+
+    _DEDUP_KINDS = frozenset({"storage_suggestion", "storage_shortfall",
+                              "storage-tick-error", "storage_skip"})
+
+    def __init__(self, settings, location_store, catalog, storage_policy_store,
+                 job_queue, world_fn, events_path):
+        self._settings = settings
+        self._locations = location_store
+        self._catalog = catalog
+        self._policy = storage_policy_store
+        self._queue = job_queue
+        self._world_fn = world_fn
+        self._events_path = events_path
+        self._interval = getattr(settings, "storage_watch_interval", 60.0)
+        self._slack = getattr(settings, "storage_slack_bytes", 2_000_000_000)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_event_keys: dict = {}  # {kind: key, ...}
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run,
+                                        name="model-deck-storage-watcher", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + 5.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.tick()
+            if self._stop.wait(self._interval):
+                break
+
+    def tick(self) -> None:
+        if apply_in_progress() or self._queue.active():
+            return
+        try:
+            units = self._catalog.scan()
+            locations = self._locations.describe()
+            world = self._world_fn()
+            actions = storage_decide(units, locations, world, self._slack)
+            auto = self._policy.get()["auto"]
+            units_by_id = {u["id"]: u for u in units}
+            locs_by_name = {loc["name"]: loc for loc in locations}
+            suggestions: dict[str, int] = {}
+            for action in actions:
+                if action["type"] == "archive":
+                    if auto:
+                        self._enqueue(action, units_by_id, locs_by_name, world)
+                    else:
+                        loc = units_by_id[action["unit_id"]]["location"]
+                        suggestions[loc] = suggestions.get(loc, 0) + 1
+                elif action["type"] == "shortfall":
+                    self._log("storage_shortfall", {"location": action["location"],
+                                                    "missing_bytes": action["missing_bytes"]})
+            for loc_name, count in sorted(suggestions.items()):
+                self._log("storage_suggestion", {"location": loc_name, "candidates": count})
+        except Exception as exc:  # noqa: BLE001 — supervisor loop survival
+            self._log("storage-tick-error", {"error": str(exc)})
+
+    def _enqueue(self, action, units_by_id, locs_by_name, world) -> None:
+        unit = units_by_id[action["unit_id"]]
+        dest = locs_by_name[action["dest"]]
+        try:
+            plan = plan_move(unit, dest, world, frozenset(),
+                             dest["free_bytes"], self._slack)
+        except GuardError as exc:
+            self._log("storage_skip", {"unit": unit["id"], "reason": str(exc)})
+            return
+        self._queue.submit(plan, label="watermark archive")
+
+    def _log(self, kind: str, detail: dict) -> None:
+        key = tuple(sorted(detail.items()))
+        if kind in self._DEDUP_KINDS:
+            last_key = self._last_event_keys.get(kind)
+            if key == last_key:
+                return
+        log_event(self._events_path, kind, detail)
+        if kind in self._DEDUP_KINDS:
+            self._last_event_keys[kind] = key
