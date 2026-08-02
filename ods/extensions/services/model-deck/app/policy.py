@@ -111,3 +111,43 @@ class PolicyStore:
         current = self.get()
         current.update({tenant: dict(policy) for tenant, policy in policies.items()})
         self._save(current)
+
+
+# --- Storage tiering policy -------------------------------------------------
+
+STORAGE_POLICY_DEFAULT = {"auto": False}
+
+
+class StoragePolicyStore:
+    """Auto-tiering mode, persisted to ``storage_policy.json`` — this module's
+    second owned file. Same atomic-write/self-heal quality bar as PolicyStore."""
+
+    def __init__(self, path: Path):
+        self._path = path
+
+    def _load(self) -> dict | None:
+        try:
+            data = json.loads(self._path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict) or set(data) != {"auto"} or not isinstance(data.get("auto"), bool):
+            return None
+        return data
+
+    def _save(self, data: dict) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, self._path)
+
+    def get(self) -> dict:
+        data = self._load()
+        if data is None:
+            data = dict(STORAGE_POLICY_DEFAULT)
+            self._save(data)
+        return data
+
+    def put(self, policy: dict) -> None:
+        if set(policy) != {"auto"} or not isinstance(policy.get("auto"), bool):
+            raise ValueError('storage policy must be exactly {"auto": <bool>}')
+        self._save(dict(policy))
