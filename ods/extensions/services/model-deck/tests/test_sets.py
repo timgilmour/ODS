@@ -1124,3 +1124,43 @@ def test_apply_tolerates_no_heal_suppressor(tmp_path):
 
     assert report["failed"] is None
     assert clients["lemonade"].calls == [("unload", "extra.live.gguf")]
+
+
+# ===========================================================================
+# last_used observation on the set-apply load step (I5)
+# ===========================================================================
+
+
+class _RecCatalog:
+    def __init__(self):
+        self.noted = []
+
+    def note_used_gguf(self, filename):
+        self.noted.append(filename)
+
+
+def test_apply_load_step_notes_last_used(tmp_path):
+    """A set-apply load is a real observation of the model being used; without
+    it the LRU eviction order treats a model the operator loads via a set as
+    never used."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfg = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+    catalog = _RecCatalog()
+
+    report, clients = run_apply(cfg, world, tmp_path, catalog=catalog)
+
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("load", "extra.d.gguf")]
+    assert catalog.noted == ["d.gguf"]          # bare name, "extra." stripped
+
+
+def test_apply_load_step_without_catalog_still_works(tmp_path):
+    """catalog is optional — unit tests (and any caller without the deck) must
+    keep working."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfg = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+
+    report, clients = run_apply(cfg, world, tmp_path)
+
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("load", "extra.d.gguf")]

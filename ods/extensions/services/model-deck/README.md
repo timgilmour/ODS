@@ -206,7 +206,9 @@ A **watermark** is a minimum free-space target on a hot location. When `free_byt
 
 The watcher ticks every 60 seconds, respects the `auto: on/off` toggle, and yields to in-flight set applies and move jobs.
 
-**`last_used` tracking:** the deck observes when lemonade loads a model or litellm picks a default route, updating `last_used` for LRU ordering. Unobserved models tie-break by filesystem mtime.
+**`last_used` tracking:** `last_used` is updated on every load the deck itself performs — a manual load (`POST /api/tenants/lemonade/load`), a pull-through load of a cold model, a config-set apply's `load_lemonade` step, and the arbiter's contention-heal reload. Models that have never been loaded through the deck (including any loaded out of band, straight against lemonade) keep `last_used = null`, are evicted first, and tie-break among themselves by filesystem mtime.
+
+**Not implemented:** the deck does not observe litellm *default-route changes* — becoming the default route does not itself touch `last_used`. Nothing unsafe follows from that: the current default-route model is exempt from eviction outright, whatever its `last_used` says.
 
 ### The auto toggle
 

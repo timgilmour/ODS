@@ -627,3 +627,30 @@ def test_state_reads_the_catalog_without_rescanning_disk(tmp_path, monkeypatch):
 
     assert client.post("/api/storage/rescan").json() == {"units": 2}
     assert len(client.get("/api/storage/state").json()["units"]) == 2
+
+
+# ===========================================================================
+# last_used observation through the set-apply route (I5 wiring)
+# ===========================================================================
+
+
+def test_set_apply_load_notes_last_used_through_the_router(tmp_path, monkeypatch):
+    """End-to-end for the router half of the set-apply observation wiring."""
+    app, deck = make_app(
+        tmp_path, monkeypatch, litellm=FakeLiteLLM(default="openai/extra.a.gguf")
+    )
+    client = TestClient(app)
+    hot = _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(hot, "a.gguf")
+    deck["catalog"].scan()
+
+    assert client.post("/api/sets", json={
+        "name": "chat", "ephemeral": {"lemonade": {"state": "loaded"}},
+    }).status_code == 200
+    resp = client.post("/api/sets/chat/apply")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["failed"] is None
+    assert deck["lemonade"].calls == [("load", "extra.a.gguf")]
+
+    unit = next(u for u in deck["catalog"].units() if u["name"] == "a.gguf")
+    assert unit["last_used"] is not None

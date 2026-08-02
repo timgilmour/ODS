@@ -561,7 +561,7 @@ def _settings(**overrides):
 
 def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
-    heal_suppressor=None, hostagent=None, **sett,
+    heal_suppressor=None, hostagent=None, catalog=None, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -577,6 +577,7 @@ def _make_watcher(
         read_gpus=read_gpus if read_gpus is not None else RecordingReadGpus(),
         heal_suppressor=heal_suppressor,
         hostagent=hostagent,
+        catalog=catalog,
     )
     return watcher, events_path
 
@@ -1139,3 +1140,63 @@ def test_idle_tick_does_not_probe_host_agent_when_nothing_to_do(tmp_path):
     watcher.tick()  # must not raise (an exploding lifecycle() would blow up)
 
     assert tail_events(events_path) == []
+
+
+# ===========================================================================
+# last_used observation on the heal re-trigger load (I5)
+# ===========================================================================
+
+
+class _RecCatalog:
+    def __init__(self):
+        self.noted = []
+
+    def note_used_gguf(self, filename):
+        self.noted.append(filename)
+
+
+def test_watcher_heal_load_notes_last_used(tmp_path):
+    """The watcher's heal re-trigger is a real load of a real model. Without
+    noting it, an auto-reloaded default-route model looks "never used" to the
+    storage watcher's LRU ordering."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],  # free = 12 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    catalog = _RecCatalog()
+    watcher, _ = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        catalog=catalog,
+    )
+
+    watcher.tick()
+
+    assert catalog.noted == ["model.gguf"]      # bare name, "extra." stripped
+
+
+def test_watcher_failed_heal_load_does_not_note_last_used(tmp_path):
+    """Only a load that actually succeeded counts as an observation."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    catalog = _RecCatalog()
+    watcher, _ = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        lemonade=FakeLemonade(raise_on_load=EngineError("connection refused")),
+        catalog=catalog,
+    )
+
+    watcher.tick()
+
+    assert catalog.noted == []

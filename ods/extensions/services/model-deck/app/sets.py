@@ -56,6 +56,10 @@ from app.events import log_event
 # Reserved on-disk slug for the auto-captured pre-apply snapshot. Written only
 # by apply(); user sets are forbidden from slugging to it (or to "previous",
 # which is what its display name collapses to).
+# Lemonade namespaces store GGUFs as "extra.<filename>"; catalog units carry
+# the bare filename.
+_EXTRA_PREFIX = "extra."
+
 RESERVED_SLUG = "_previous"
 PREVIOUS_NAME = "· previous"
 _RESERVED_SLUGS = frozenset({"_previous", "previous"})
@@ -343,6 +347,7 @@ def apply(
     store: SetStore,
     events_path: Path,
     heal_suppressor=None,
+    catalog=None,
     force: bool = False,
 ) -> dict:
     """Execute ``cfgset`` against the live box, serialized under a module lock.
@@ -352,6 +357,10 @@ def apply(
     healing can't revert this deliberate unload, and a ``load_lemonade`` step
     clears it. None (e.g. in unit tests without the arbiter) simply skips that
     coordination.
+
+    ``catalog`` (optional; None tolerated) is the storage catalog: a
+    ``load_lemonade`` step records the model as used, so the storage watcher's
+    LRU eviction order sees loads made through a set apply.
 
     ``force=True`` skips the hipfire conversation-guard (both the pre-veto
     and the per-step rechecks) for an operator overriding an abandoned
@@ -373,6 +382,7 @@ def apply(
             store=store,
             events_path=events_path,
             heal_suppressor=heal_suppressor,
+            catalog=catalog,
             force=force,
         )
 
@@ -389,6 +399,7 @@ def _run_apply(
     store,
     events_path,
     heal_suppressor=None,
+    catalog=None,
     force=False,
 ) -> dict:
     steps = plan_apply(cfgset, world)
@@ -455,6 +466,7 @@ def _run_apply(
                 hostagent,
                 policy_store,
                 heal_suppressor,
+                catalog,
                 force=force,
             )
         except _HALT_EXCEPTIONS as exc:
@@ -476,7 +488,7 @@ def _run_apply(
 
 def _execute_step(
     step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor=None,
-    force=False,
+    catalog=None, force=False,
 ) -> None:
     name = step["step"]
     if name == "unload_lemonade":
@@ -489,6 +501,10 @@ def _execute_step(
         # Deliberate load: the model is wanted resident, so clear suppression.
         if heal_suppressor is not None:
             heal_suppressor.clear()
+        # ...and it is a real use of the model: feed the storage catalog's LRU
+        # bookkeeping (lemonade names GGUFs "extra.<file>"; units are bare).
+        if catalog is not None:
+            catalog.note_used_gguf(step["model"].removeprefix(_EXTRA_PREFIX))
     elif name == "free_comfyui":
         comfy.free()
     elif name == "park_hipfire":

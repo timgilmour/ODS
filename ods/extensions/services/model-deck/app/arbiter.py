@@ -321,6 +321,7 @@ class Watcher:
         read_gpus,
         heal_suppressor=None,
         hostagent=None,
+        catalog=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -340,6 +341,11 @@ class Watcher:
             else HealSuppressor(settings.heal_suppress_s)
         )
         self._hostagent = hostagent
+        # Optional storage catalog (app.catalog.Catalog): a successful heal
+        # re-trigger is a real load, and the storage watcher's LRU eviction
+        # order is only as good as the loads it gets told about. None (unit
+        # tests, any caller without the deck) simply skips the bookkeeping.
+        self._catalog = catalog
         self._interval = settings.watch_interval
 
         self._stop = threading.Event()
@@ -485,6 +491,12 @@ class Watcher:
                 # Deck-initiated load: the model is wanted resident again, so
                 # clear any suppression left by a prior deliberate unload.
                 self._heal_suppressor.clear()
+                # ...and it's a genuine use of the model: record it so the
+                # storage watcher's LRU order doesn't treat an auto-reloaded
+                # default-route model as "never used".
+                if self._catalog is not None:
+                    self._catalog.note_used_gguf(
+                        pending["model"].removeprefix(_EXTRA_PREFIX))
                 self._log("load-retriggered", {"model": pending["model"]})
 
     # Event kinds whose consecutive identical repeats are collapsed to a

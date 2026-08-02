@@ -107,4 +107,5 @@ def apply_set(slug: str, request: Request, force: bool = False) -> dict:
         store=deck["set_store"],
         events_path=deck["events_path"],
         heal_suppressor=deck["heal_suppressor"],
+        catalog=deck["catalog"],
     )
