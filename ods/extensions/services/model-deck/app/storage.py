@@ -23,8 +23,12 @@ def _strip(name: str | None) -> str | None:
 
 
 def unit_in_use(unit: dict, world: dict) -> str | None:
-    """Reason string when `unit` is in active use by an engine, else None.
-    The default-route check is separate (never overridable) — see plan_move."""
+    """Reason string if unit is in active use by an engine, else None.
+
+    Covers three cases: gguf currently loaded in lemonade, gguf being litellm's
+    default route (never overridable — plan-level invariant), and comfy units
+    while ComfyUI is busy or queue unknown. Callers (plan_move, storage_decide)
+    treat non-None reason as GuardError refusal."""
     if unit["type"] == "gguf":
         if _strip(world["tenants"]["lemonade"]["model"]) == unit["name"]:
             return f"model {unit['name']!r} is currently loaded in lemonade"
@@ -47,9 +51,6 @@ def plan_move(unit: dict, dest: dict, world: dict, active_unit_ids,
     reason = unit_in_use(unit, world)
     if reason:
         raise GuardError(reason)
-    if unit["type"] == "gguf" and _strip(world["default_route"]) == unit["name"]:
-        raise GuardError(
-            f"model {unit['name']!r} is the litellm default route — never movable")
 
     if dest["name"] == unit["location"]:
         raise GuardError("destination equals source location")
