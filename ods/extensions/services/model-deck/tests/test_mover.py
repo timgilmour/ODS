@@ -97,3 +97,89 @@ def test_tree_cancel_keeps_source_removes_staging(tmp_path):
         _cross_fs_mover().execute(repo, dst, lambda b: None, cancel)
     assert (repo / "f1").exists() and (repo / "f2").exists()
     assert not dst.exists() and not dst.with_name(dst.name + ".deck-staging").exists()
+
+
+# -- JobQueue tests (Task 7) -----------------------------------------------
+
+
+from pathlib import Path
+
+from app.catalog import Catalog
+from app.events import tail_events
+from app.locations import LocationStore
+from app.mover import JobQueue
+
+
+def _queue_env(tmp_path):
+    hot = tmp_path / "hot"; hot.mkdir()
+    cold = tmp_path / "cold"; cold.mkdir()
+    (hot / "a.gguf").write_bytes(b"g" * 1000)
+    locs = LocationStore(tmp_path / "locations.json")
+    for name, root, st in [("hot", hot, "gguf"), ("cold", cold, "gguf")]:
+        locs.register({"name": name, "path": str(root), "role": "hot" if name == "hot" else "cold",
+                       "store_type": st, "engine": "none", "watermark_gb": None,
+                       "archive_to": None, "readonly": False})
+    cat = Catalog(tmp_path / "catalog.json", locs)
+    cat.scan()
+    events = tmp_path / "events.jsonl"
+    q = JobQueue(Mover(same_fs=lambda a, b: False), cat, locs, events)
+    plan = {"unit_id": "hot:a.gguf", "src_location": "hot", "dest_location": "cold", "bytes": 1000}
+    return q, cat, plan, events, hot, cold
+
+
+def test_submit_marks_moving_and_process_completes(tmp_path):
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+    job = q.submit(plan, label="manual move")
+    assert cat.get("hot:a.gguf")["state"] == "moving"
+    q._process(q._pending.pop(0))
+    done = q.get(job["id"])
+    assert done["state"] == "done" and done["bytes_done"] == 1000
+    assert (cold / "a.gguf").exists() and not (hot / "a.gguf").exists()
+    assert cat.get("cold:a.gguf")["state"] == "resident" and cat.get("hot:a.gguf") is None
+    kinds = [e["kind"] for e in tail_events(events)]
+    assert kinds == ["move_started", "move_done"]
+
+
+def test_failed_move_restores_unit_state_and_logs(tmp_path, monkeypatch):
+    q, cat, plan, events, hot, _ = _queue_env(tmp_path)
+    monkeypatch.setattr(q._mover, "execute",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("disk gone")))
+    job = q.submit(plan, label="manual move")
+    q._process(q._pending.pop(0))
+    assert q.get(job["id"])["state"] == "failed" and "disk gone" in q.get(job["id"])["error"]
+    assert cat.get("hot:a.gguf")["state"] == "resident" and (hot / "a.gguf").exists()
+    assert [e["kind"] for e in tail_events(events)] == ["move_started", "move_failed"]
+
+
+def test_on_success_failure_marks_job_but_move_stays_done(tmp_path):
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+    def boom(job):
+        raise RuntimeError("engine notify blew up")
+    job = q.submit(plan, label="pull", on_success=boom)
+    q._process(q._pending.pop(0))
+    got = q.get(job["id"])
+    assert got["state"] == "failed" and "engine notify" in got["error"]
+    assert (cold / "a.gguf").exists()                     # move itself completed
+    assert cat.get("cold:a.gguf") is not None
+
+
+def test_cancel_queued_job(tmp_path):
+    q, cat, plan, *_ = _queue_env(tmp_path)
+    job = q.submit(plan, label="manual move")
+    assert q.cancel(job["id"]) is True
+    assert q.get(job["id"])["state"] == "cancelled"
+    assert cat.get("hot:a.gguf")["state"] == "resident"
+
+
+def test_worker_thread_start_stop(tmp_path):
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+    q.start()
+    try:
+        q.submit(plan, label="manual move")
+        import time
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not (cold / "a.gguf").exists():
+            time.sleep(0.02)
+        assert (cold / "a.gguf").exists()
+    finally:
+        q.stop()

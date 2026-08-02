@@ -17,7 +17,12 @@ copy — zero extra reads), write dest once, read dest once for the verify.
 import hashlib
 import os
 import shutil
+import threading
+import time
+import uuid as uuidlib
 from pathlib import Path
+
+from app.events import log_event
 
 CHUNK_BYTES = 8 * 1024 * 1024
 PART_SUFFIX = ".part"
@@ -144,3 +149,163 @@ class Mover:
                     shutil.rmtree(p, ignore_errors=True)
                     removed.append(p)
         return removed
+
+
+_TERMINAL = frozenset({"done", "failed", "cancelled"})
+
+
+class JobQueue:
+    """One-at-a-time move executor (spec #15: serialize disk I/O; queue the
+    rest). Owns the job list; every transition audited to events.jsonl."""
+
+    def __init__(self, mover, catalog, location_store, events_path):
+        self._mover = mover
+        self._catalog = catalog
+        self._locations = location_store
+        self._events_path = events_path
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict] = {}
+        self._pending: list[dict] = []
+        self._cancel_flags: dict[str, bool] = {}
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # -- public --------------------------------------------------------------
+
+    def submit(self, plan: dict, label: str, on_success=None) -> dict:
+        job = {"id": uuidlib.uuid4().hex[:12], "unit_id": plan["unit_id"],
+               "from": plan["src_location"], "to": plan["dest_location"],
+               "label": label, "state": "queued", "bytes_done": 0,
+               "bytes_total": plan["bytes"], "error": None,
+               "created_ts": time.time()}
+        with self._lock:
+            self._jobs[job["id"]] = job
+            self._pending.append({**job, "_on_success": on_success})
+        self._catalog.set_state(plan["unit_id"], "moving")
+        self._wake.set()
+        return dict(job)
+
+    def jobs(self) -> list[dict]:
+        with self._lock:
+            return [dict(j) for j in sorted(self._jobs.values(),
+                                            key=lambda j: j["created_ts"], reverse=True)]
+
+    def get(self, job_id: str) -> dict | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return dict(job) if job else None
+
+    def cancel(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job["state"] in _TERMINAL:
+                return False
+            if job["state"] == "queued":
+                self._pending = [p for p in self._pending if p["id"] != job_id]
+                job["state"] = "cancelled"
+                unit_id = job["unit_id"]
+            else:
+                self._cancel_flags[job_id] = True
+                return True
+        self._catalog.set_state(unit_id, "resident")
+        self._log("move_cancelled", job)
+        return True
+
+    def active(self) -> bool:
+        with self._lock:
+            return any(j["state"] not in _TERMINAL for j in self._jobs.values())
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="model-deck-mover", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(timeout=10.0)
+
+    # -- worker ----------------------------------------------------------------
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                pending = self._pending.pop(0) if self._pending else None
+            if pending is None:
+                self._wake.wait(timeout=1.0)
+                self._wake.clear()
+                continue
+            self._process(pending)
+
+    def _resolve(self, location_name: str) -> dict:
+        loc = self._locations.get(location_name)
+        if loc is None or not self._locations.available(loc):
+            raise RuntimeError(f"location {location_name!r} is unavailable")
+        return loc
+
+    def _process(self, pending: dict) -> None:
+        job_id = pending["id"]
+        on_success = pending.get("_on_success")
+        with self._lock:
+            job = self._jobs[job_id]
+            if job["state"] == "cancelled":
+                return
+            job["state"] = "copying"
+        self._log("move_started", job)
+        unit_id = job["unit_id"]
+        try:
+            unit = self._catalog.get(unit_id)
+            if unit is None:
+                raise RuntimeError(f"unit {unit_id!r} vanished from catalog")
+            src_loc = self._resolve(job["from"])
+            dst_loc = self._resolve(job["to"])
+            src = Path(src_loc["path"]) / unit["relpath"]
+            dst = Path(dst_loc["path"]) / unit["relpath"]
+
+            def progress(done: int) -> None:
+                with self._lock:
+                    job["bytes_done"] = done
+
+            def cancelled() -> bool:
+                with self._lock:
+                    return self._cancel_flags.get(job_id, False)
+
+            self._mover.execute(src, dst, progress, cancelled)
+            with self._lock:
+                job["state"] = "verifying"      # brief post-verify bookkeeping phase
+            self._catalog.record_moved(unit_id, job["to"])
+            self._log("move_done", job)
+            if on_success is not None:
+                try:
+                    on_success(dict(job))
+                except Exception as exc:  # noqa: BLE001 — post-move hook, job must record it
+                    with self._lock:
+                        job["state"] = "failed"
+                        job["error"] = f"post-move: {exc}"
+                    self._log("move_failed", job, error=str(exc), phase="post-move")
+                    return
+            with self._lock:
+                job["state"] = "done"
+        except MoveCancelled:
+            with self._lock:
+                job["state"] = "cancelled"
+            self._catalog.set_state(unit_id, "resident")
+            self._log("move_cancelled", job)
+        except Exception as exc:  # noqa: BLE001 — worker loop must survive any job
+            with self._lock:
+                job["state"] = "failed"
+                job["error"] = str(exc)
+            try:
+                self._catalog.set_state(unit_id, "resident")
+            except ValueError:
+                pass                      # unit really is gone; nothing to restore
+            self._log("move_failed", job, error=str(exc))
+        finally:
+            self._cancel_flags.pop(job_id, None)
+
+    def _log(self, kind: str, job: dict, **extra) -> None:
+        detail = {"job": job["id"], "unit": job["unit_id"],
+                  "from": job["from"], "to": job["to"], **extra}
+        log_event(self._events_path, kind, detail)
