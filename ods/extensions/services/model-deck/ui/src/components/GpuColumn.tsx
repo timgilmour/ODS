@@ -1,4 +1,4 @@
-import { bytesToGB, meterFillClass, type Gpu, type ModelFile, type PolicyMap, type TenantName, type World } from "../api";
+import { bytesToGB, meterFillClass, type Gpu, type ModelFile, type PolicyMap, type StorageUnit, type TenantName, type World } from "../api";
 import TenantCard from "./TenantCard";
 
 // Fixed display order; membership comes from the backend's placement map
@@ -10,10 +10,14 @@ interface GpuColumnProps {
   world: World;
   policy: PolicyMap;
   models: ModelFile[];
+  /** Cold (non-hot-lemonade) resident GGUFs — only meaningful to the
+   * lemonade card's Load dropdown, but threaded through here since GpuColumn
+   * is the only place that knows which tenant column is lemonade. */
+  coldGgufs: StorageUnit[];
   onRefresh: () => void;
 }
 
-export default function GpuColumn({ gpu, world, policy, models, onRefresh }: GpuColumnProps) {
+export default function GpuColumn({ gpu, world, policy, models, coldGgufs, onRefresh }: GpuColumnProps) {
   const pct = gpu.total > 0 ? (gpu.used / gpu.total) * 100 : 0;
   const tenants = TENANT_ORDER.filter((t) => world.placement[t] === gpu.index);
   const externals = world.externals.filter((e) => e.gpu === gpu.index);
@@ -48,6 +52,7 @@ export default function GpuColumn({ gpu, world, policy, models, onRefresh }: Gpu
           data={world.tenants.lemonade}
           policy={policy.lemonade}
           models={models}
+          coldGgufs={coldGgufs}
           onRefresh={onRefresh}
         />
       )}

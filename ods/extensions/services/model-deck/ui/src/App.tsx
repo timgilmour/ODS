@@ -65,6 +65,17 @@ export default function App() {
     return () => clearInterval(id);
   }, [modalOpen, policyModalOpen, refreshAll]);
 
+  // Resident GGUFs sitting on a location that isn't lemonade's hot mount —
+  // i.e. cold from lemonade's point of view. Defaults to [] so the lemonade
+  // card's Load dropdown renders fine even when storage is down/unconfigured.
+  const coldGgufs =
+    storageState?.units.filter(
+      (u) =>
+        u.type === "gguf" &&
+        u.state === "resident" &&
+        storageState.locations.find((l) => l.name === u.location)?.engine !== "lemonade",
+    ) ?? [];
+
   return (
     <>
       <header className="deck-header">
@@ -114,6 +125,7 @@ export default function App() {
                   world={state.world}
                   policy={state.policy}
                   models={state.models}
+                  coldGgufs={coldGgufs}
                   onRefresh={refreshAll}
                 />
               ))}
@@ -148,6 +160,7 @@ export default function App() {
       {policyModalOpen && state && (
         <PolicyModal
           policy={state.policy}
+          storageState={storageState}
           onClose={() => setPolicyModalOpen(false)}
           onSaved={refreshAll}
         />

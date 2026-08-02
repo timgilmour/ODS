@@ -1,8 +1,19 @@
 import { useState } from "react";
-import { putPolicy, type PolicyMap, type TenantName } from "../api";
+import {
+  putPolicy,
+  putStoragePolicy,
+  updateLocation,
+  type PolicyMap,
+  type StorageState,
+  type TenantName,
+} from "../api";
 
 interface PolicyModalProps {
   policy: PolicyMap;
+  /** null when storage is down/unconfigured — the whole Storage section is
+   * omitted rather than shown disabled, matching StorageView's own
+   * loading/absent handling. */
+  storageState: StorageState | null;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -17,7 +28,7 @@ const RANKS = [100, 50, 40];
  * edited in place per row. Save PUTs the full three-tenant mapping and
  * closes; Cancel discards every local edit (nothing is written until
  * Save). */
-export default function PolicyModal({ policy, onClose, onSaved }: PolicyModalProps) {
+export default function PolicyModal({ policy, storageState, onClose, onSaved }: PolicyModalProps) {
   const [order, setOrder] = useState<TenantName[]>(
     () =>
       (Object.keys(policy) as TenantName[]).sort(
@@ -36,6 +47,27 @@ export default function PolicyModal({ policy, onClose, onSaved }: PolicyModalPro
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Storage section — omitted entirely when storageState is null (see
+  // JSX below), but hooks still run unconditionally per rules-of-hooks;
+  // these all just default to empty when there's nothing to edit.
+  // props are stable while this modal is open: App.tsx pauses its poll
+  // for the modal's whole lifetime (see App.tsx's `if (modalOpen ||
+  // policyModalOpen) return`), so diffing local edits against
+  // storageState directly on Save (no separate "initial" snapshot) is safe.
+  const hotLocations = storageState?.locations.filter((l) => l.role === "hot") ?? [];
+  const coldLocations = storageState?.locations.filter((l) => l.role === "cold") ?? [];
+  const [autoTiering, setAutoTiering] = useState<boolean>(() => storageState?.policy.auto ?? false);
+  const [watermarkInputs, setWatermarkInputs] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const loc of hotLocations) out[loc.name] = loc.watermark_gb != null ? String(loc.watermark_gb) : "";
+    return out;
+  });
+  const [archiveInputs, setArchiveInputs] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const loc of hotLocations) out[loc.name] = loc.archive_to ?? "";
+    return out;
+  });
 
   function moveUp(i: number) {
     if (i === 0) return;
@@ -64,6 +96,32 @@ export default function PolicyModal({ policy, onClose, onSaved }: PolicyModalPro
     });
     try {
       await putPolicy(payload);
+
+      if (storageState) {
+        if (autoTiering !== storageState.policy.auto) {
+          await putStoragePolicy({ auto: autoTiering });
+        }
+        const parseWatermark = (raw: string | undefined): number | null => {
+          const trimmed = raw?.trim();
+          if (!trimmed) return null;
+          const n = Number(trimmed);
+          return Number.isFinite(n) ? n : null;
+        };
+        const changedRows = hotLocations.filter((loc) => {
+          const nextWatermark = parseWatermark(watermarkInputs[loc.name]);
+          const nextArchive = archiveInputs[loc.name] || null;
+          return nextWatermark !== loc.watermark_gb || nextArchive !== loc.archive_to;
+        });
+        await Promise.all(
+          changedRows.map((loc) =>
+            updateLocation(loc.name, {
+              watermark_gb: parseWatermark(watermarkInputs[loc.name]),
+              archive_to: archiveInputs[loc.name] || null,
+            }),
+          ),
+        );
+      }
+
       onSaved();
       onClose();
     } catch (err) {
@@ -149,6 +207,68 @@ export default function PolicyModal({ policy, onClose, onSaved }: PolicyModalPro
             ))}
           </tbody>
         </table>
+
+        {storageState && (
+          <div className="policy-storage-section">
+            <h4>Storage</h4>
+            <label>
+              <input
+                type="checkbox"
+                checked={autoTiering}
+                onChange={(e) => setAutoTiering(e.target.checked)}
+              />{" "}
+              Auto-tiering: archive to cold on watermark + silent pull-through
+            </label>
+
+            {hotLocations.length > 0 && (
+              <table className="policy-table">
+                <thead>
+                  <tr>
+                    <th>hot location</th>
+                    <th>watermark (GB)</th>
+                    <th>archive to</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {hotLocations.map((loc) => (
+                    <tr key={loc.name}>
+                      <td className="tenant-name">{loc.name}</td>
+                      <td>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          placeholder="disabled"
+                          aria-label={`${loc.name} watermark GB`}
+                          value={watermarkInputs[loc.name] ?? ""}
+                          onChange={(e) =>
+                            setWatermarkInputs((w) => ({ ...w, [loc.name]: e.target.value }))
+                          }
+                        />
+                      </td>
+                      <td>
+                        <select
+                          aria-label={`${loc.name} archive to`}
+                          value={archiveInputs[loc.name] ?? ""}
+                          onChange={(e) =>
+                            setArchiveInputs((a) => ({ ...a, [loc.name]: e.target.value }))
+                          }
+                        >
+                          <option value="">—</option>
+                          {coldLocations.map((c) => (
+                            <option key={c.name} value={c.name}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
 
         <div className="modal-actions">
           <button onClick={onClose} disabled={saving}>

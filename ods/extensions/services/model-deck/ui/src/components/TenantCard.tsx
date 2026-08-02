@@ -8,6 +8,7 @@ import {
   type HipfireTenant,
   type LemonadeTenant,
   type ModelFile,
+  type StorageUnit,
   type TenantPolicy,
 } from "../api";
 
@@ -17,6 +18,11 @@ type TenantCardProps =
       data: LemonadeTenant;
       policy: TenantPolicy;
       models: ModelFile[];
+      /** Resident-but-cold GGUFs (App.tsx's coldGgufs) — surfaced as a
+       * separate optgroup in the Load dropdown; empty array (never
+       * undefined) so this card renders the same whether storage is
+       * configured or not. */
+      coldGgufs: StorageUnit[];
       onRefresh: () => void;
     }
   | {
@@ -47,21 +53,47 @@ export default function TenantCard(props: TenantCardProps) {
   const [error, setError] = useState<string | null>(null);
   const [offerForcePark, setOfferForcePark] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
+  // Pull-through idiom (Force-park's armed-confirm, applied to a cold
+  // lemonade load): a 409 whose detail contains "pull=true" arms this
+  // banner instead of the plain error one; confirming retries with
+  // ?pull=true. pullingModel tracks the in-flight pull-then-load by bare
+  // model name until a later poll reports it loaded (see isPulling below).
+  const [pullOffer, setPullOffer] = useState<{ model: string; sizeBytes: number } | null>(null);
+  const [pullingModel, setPullingModel] = useState<string | null>(null);
 
-  async function runAction(action: () => Promise<unknown>, opts?: { parkGuard?: boolean }) {
+  async function runAction(
+    action: () => Promise<unknown>,
+    opts?: { parkGuard?: boolean; pullGuard?: { model: string; sizeBytes: number } },
+  ) {
     setBusy(true);
     try {
       await action();
       setError(null);
       setOfferForcePark(false);
+      setPullOffer(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const isPullGuard =
+        Boolean(opts?.pullGuard) &&
+        err instanceof ApiError &&
+        err.status === 409 &&
+        err.message.includes("pull=true");
+      setPullOffer(isPullGuard ? (opts!.pullGuard as { model: string; sizeBytes: number }) : null);
+      setError(isPullGuard ? null : err instanceof Error ? err.message : String(err));
       setOfferForcePark(Boolean(opts?.parkGuard) && err instanceof ApiError && err.status === 409);
     } finally {
       setBusy(false);
       onRefresh();
     }
   }
+
+  // lemonade's "loaded" model comes back with lemonade's internal "extra."
+  // namespace prefix (e.g. "extra.foo.gguf"; see LemonadeClient.status()
+  // docstring) — endsWith() matches regardless of whether that prefix is
+  // present, so this doesn't need to know the exact prefix string.
+  const isPulling =
+    props.name === "lemonade" &&
+    pullingModel != null &&
+    !(props.data.state === "loaded" && props.data.model?.endsWith(pullingModel));
 
   return (
     <div className="tenant-card">
@@ -74,6 +106,11 @@ export default function TenantCard(props: TenantCardProps) {
             title="a conversation turn is being served right now — park/apply will refuse without force"
           >
             in use
+          </span>
+        )}
+        {isPulling && (
+          <span className="chip chip-busy" title="pulling from cold storage to hot, then loading">
+            pulling ❄ → 🔥
           </span>
         )}
       </div>
@@ -116,17 +153,48 @@ export default function TenantCard(props: TenantCardProps) {
         </div>
       )}
 
+      {pullOffer && (
+        <div className="banner-error">
+          <span>
+            model is cold — pull {bytesToGB(pullOffer.sizeBytes)} GB to hot storage then load?
+          </span>
+          <button
+            onClick={() =>
+              runAction(async () => {
+                const res = (await postAction("/tenants/lemonade/load?pull=true", {
+                  model: pullOffer.model,
+                })) as { status?: string };
+                if (res.status === "pulling") {
+                  setPullingModel(pullOffer.model);
+                }
+              })
+            }
+            disabled={busy}
+          >
+            Pull + load
+          </button>
+          <button onClick={() => setPullOffer(null)} aria-label="dismiss">
+            ×
+          </button>
+        </div>
+      )}
+
       <div className="tenant-actions">
         {props.name === "lemonade" && (
             <LemonadeActions
               data={props.data}
               models={props.models}
+              coldGgufs={props.coldGgufs}
               busy={busy}
               selectedModel={selectedModel}
               onSelectModel={setSelectedModel}
-              onLoad={() =>
-                runAction(() => postAction("/tenants/lemonade/load", { model: selectedModel }))
-              }
+              onLoad={() => {
+                const coldUnit = props.coldGgufs.find((u) => u.name === selectedModel);
+                runAction(
+                  () => postAction("/tenants/lemonade/load", { model: selectedModel }),
+                  { pullGuard: coldUnit ? { model: selectedModel, sizeBytes: coldUnit.size } : undefined },
+                );
+              }}
               onUnload={() => runAction(() => postAction("/tenants/lemonade/unload", {}))}
             />
           )}
@@ -155,6 +223,7 @@ export default function TenantCard(props: TenantCardProps) {
 function LemonadeActions({
   data,
   models,
+  coldGgufs,
   busy,
   selectedModel,
   onSelectModel,
@@ -163,28 +232,37 @@ function LemonadeActions({
 }: {
   data: LemonadeTenant;
   models: ModelFile[];
+  coldGgufs: StorageUnit[];
   busy: boolean;
   selectedModel: string;
   onSelectModel: (file: string) => void;
   onLoad: () => void;
   onUnload: () => void;
 }) {
+  const empty = models.length === 0 && coldGgufs.length === 0;
   return (
     <>
       <select
         aria-label="model to load"
         value={selectedModel}
         onChange={(e) => onSelectModel(e.target.value)}
-        disabled={busy || models.length === 0}
+        disabled={busy || empty}
       >
-        <option value="">
-          {models.length === 0 ? "no models found" : "select a model…"}
-        </option>
+        <option value="">{empty ? "no models found" : "select a model…"}</option>
         {models.map((m) => (
           <option key={m.file} value={m.file}>
             {m.file}
           </option>
         ))}
+        {coldGgufs.length > 0 && (
+          <optgroup label="❄ cold">
+            {coldGgufs.map((u) => (
+              <option key={u.id} value={u.name}>
+                {`❄ ${truncateMiddle(u.name)} (${bytesToGB(u.size)} GB)`}
+              </option>
+            ))}
+          </optgroup>
+        )}
       </select>
       <button onClick={onLoad} disabled={busy || !selectedModel}>
         Load
