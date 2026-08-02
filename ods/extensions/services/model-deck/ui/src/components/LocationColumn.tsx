@@ -48,7 +48,10 @@ export default function LocationColumn({
       ? Math.min(((location.watermark_gb * 1e9) / location.total_bytes) * 100, 100)
       : null;
 
-  const otherLocations = locations.filter((l) => l.name !== location.name);
+  // Excludes unavailable (mount-missing) destinations too — a move onto a
+  // location that isn't mounted is guaranteed to fail, so it's never
+  // offered as a target, whether via the select or a drop.
+  const otherLocations = locations.filter((l) => l.name !== location.name && l.available);
 
   async function handlePinToggle(unit: StorageUnit) {
     setPinBusy(unit.id);
@@ -70,9 +73,11 @@ export default function LocationColumn({
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
     const unitId = e.dataTransfer.getData("text/plain");
-    // Ignore malformed drops and drops back onto the unit's current column
-    // (a no-op move) — mirrors SetBuilder's silent-ignore-on-bad-drop idiom.
-    if (!unitId || units.some((u) => u.id === unitId)) return;
+    // Ignore malformed drops, drops back onto the unit's current column (a
+    // no-op move), and drops onto an unavailable (mount-missing) column —
+    // mirrors SetBuilder's silent-ignore-on-bad-drop idiom; a doomed move
+    // is never submitted, same as the "Move to…" select excluding it.
+    if (!unitId || !location.available || units.some((u) => u.id === unitId)) return;
     onRequestMove(unitId, location.name);
   }
 

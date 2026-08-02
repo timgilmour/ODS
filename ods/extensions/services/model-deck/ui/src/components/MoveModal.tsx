@@ -37,8 +37,16 @@ export default function MoveModal({ unit, dest, jobs, onModalOpenChange, onClose
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Cleanup is load-bearing, not cosmetic: StorageView's onClose unmounts
+  // this modal directly (no intermediate "closing" phase), most commonly
+  // from the "confirm" phase via the Cancel button. Without restoring
+  // false on unmount, that path would leave the parent's modalOpen stuck
+  // true forever, freezing the 3s poll for every tab. A phase change still
+  // re-runs this (cleanup-then-effect), so confirm -> progress correctly
+  // resumes polling before any unmount could occur.
   useEffect(() => {
     onModalOpenChange(phase === "confirm");
+    return () => onModalOpenChange(false);
   }, [phase, onModalOpenChange]);
 
   const job = jobId ? (jobs.find((j) => j.id === jobId) ?? null) : null;
