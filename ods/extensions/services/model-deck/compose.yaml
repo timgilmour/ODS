@@ -25,6 +25,15 @@ services:
       # Whole-/sys ro mount: /sys/class/drm entries are symlinks into
       # /sys/devices, so binding the class dir alone leaves them dangling.
       - /sys:/sysfs:ro
+      # --- Storage tiering (optional) --------------------------------------
+      # Each storage location needs a rw bind mount here + a registration in
+      # the deck UI (Storage tab) or POST /api/storage/locations. Examples:
+      #   - /mnt/cold/models:/stores/cold:z        # cold archive drive
+      #   - ./data/models:/stores/gguf-hot:z       # rw view of the GGUF store
+      #     (register as role=hot, store_type=gguf, engine=lemonade; the
+      #     read-only /gguf-store mount above stays — registry keeps using it)
+      # An unregistered mount does nothing; an unmounted registered location
+      # shows as "unavailable" and is never written to (marker-file check).
     # Sits on BOTH the stack default network (ods-network — keeps litellm,
     # llama-server, comfyui, hipfire DNS resolving) AND the private deck-ctl
     # network it shares only with the socket proxy.
