@@ -51,7 +51,11 @@ def register_location(spec: dict, request: Request) -> dict:
 
 @router.put("/locations/{name}")
 def update_location(name: str, patch: LocationPatch, request: Request) -> dict:
-    fields = {k: v for k, v in patch.model_dump().items() if v is not None}
+    # exclude_unset (not "not None"): watermark_gb/archive_to are nullable
+    # fields the UI must be able to explicitly CLEAR ("empty = disabled").
+    # Filtering None out would make an explicit null indistinguishable from
+    # an omitted field and silently drop the clear.
+    fields = patch.model_dump(exclude_unset=True)
     return request.app.state.deck["location_store"].update(name, fields)
 
 

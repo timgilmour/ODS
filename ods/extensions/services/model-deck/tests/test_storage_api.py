@@ -16,6 +16,9 @@ deck["job_queue"]._process(deck["job_queue"]._pending.pop(0)).
 
 from fastapi.testclient import TestClient
 
+import app.routers.control as control_module
+from app.engines import EngineError
+from app.events import tail_events
 from app.main import create_app
 
 # ===========================================================================
@@ -42,6 +45,31 @@ class FakeLemonade:
     def unload(self, model):
         self.calls.append(("unload", model))
         self._loaded = None
+
+
+class _NeverReadyLemonade:
+    """status() succeeds exactly once — satisfying notify_engine's own
+    pre-restart "is something loaded" check, so the restart actually
+    proceeds — then raises EngineError on every call after, simulating a
+    lemonade container that accepted the restart but never becomes healthy.
+    Exercises _pull_through's readiness-poll timeout path specifically
+    (as opposed to notify_engine's own unrelated status() call failing)."""
+
+    def __init__(self):
+        self.calls = []
+        self._first = True
+
+    def status(self):
+        if self._first:
+            self._first = False
+            return {"loaded": None}
+        raise EngineError("still booting")
+
+    def activity(self):
+        return None
+
+    def load(self, model):
+        self.calls.append(("load", model))
 
 
 class FakeComfy:
@@ -213,6 +241,32 @@ def test_register_unmounted_path_409(tmp_path, monkeypatch):
     _, spec = _spec(tmp_path, "ghost", path=str(tmp_path / "does-not-exist"))
     resp = TestClient(app).post("/api/storage/locations", json=spec)
     assert resp.status_code == 409
+
+
+def test_update_location_clears_watermark_with_explicit_null(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    _register(client, tmp_path, "hot", watermark_gb=100.0)
+
+    resp = client.put("/api/storage/locations/hot", json={"watermark_gb": None})
+    assert resp.status_code == 200
+    assert resp.json()["watermark_gb"] is None
+
+    state = client.get("/api/storage/state").json()
+    loc = next(loc for loc in state["locations"] if loc["name"] == "hot")
+    assert loc["watermark_gb"] is None
+
+
+def test_update_location_empty_patch_is_noop(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    _register(client, tmp_path, "hot", watermark_gb=100.0, readonly=True)
+
+    resp = client.put("/api/storage/locations/hot", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["watermark_gb"] == 100.0
+    assert body["readonly"] is True
 
 
 # ===========================================================================
@@ -419,6 +473,60 @@ def test_pull_through_on_success_loads_and_notes(tmp_path, monkeypatch):
     units = deck["catalog"].units()
     moved = next(u for u in units if u["type"] == "gguf" and u["name"] == "a.gguf")
     assert moved["last_used"] is not None
+
+
+def test_pull_through_notify_deferred_completes_without_load(tmp_path, monkeypatch):
+    """notify_engine defers the restart when a model is already loaded — the
+    move must still complete (job "done"); no load is attempted (the file
+    isn't registered until the next restart) and a storage_notify_deferred
+    event records why."""
+    app, deck = make_app(tmp_path, monkeypatch, lemonade=FakeLemonade(loaded="extra.other.gguf"))
+    client = TestClient(app)
+    cold = _register(client, tmp_path, "cold", engine="none")
+    _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(cold, "a.gguf")
+    deck["catalog"].scan()
+
+    resp = client.post("/api/tenants/lemonade/load?pull=true", json={"model": "a.gguf"})
+    job_id = resp.json()["job"]
+
+    pending = deck["job_queue"]._pending.pop(0)
+    deck["job_queue"]._process(pending)
+
+    done = deck["job_queue"].get(job_id)
+    assert done["state"] == "done"
+    assert deck["lemonade"].calls == []
+
+    events = tail_events(deck["events_path"])
+    deferred = [e for e in events if e["kind"] == "storage_notify_deferred"]
+    assert len(deferred) == 1
+    assert deferred[0]["detail"]["job"] == job_id
+    assert deferred[0]["detail"]["model"] == "a.gguf"
+
+
+def test_pull_through_readiness_timeout_fails_job(tmp_path, monkeypatch):
+    """DockerCtl.start() isn't a readiness gate — if lemonade never comes
+    back healthy within the poll window, the job must fail post-move
+    (not silently succeed with a phantom load, and not hang)."""
+    monkeypatch.setattr(control_module, "_READY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(control_module, "_READY_POLL_S", 0.01)
+    app, deck = make_app(tmp_path, monkeypatch, lemonade=_NeverReadyLemonade())
+    client = TestClient(app)
+    cold = _register(client, tmp_path, "cold", engine="none")
+    _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(cold, "a.gguf")
+    deck["catalog"].scan()
+
+    resp = client.post("/api/tenants/lemonade/load?pull=true", json={"model": "a.gguf"})
+    job_id = resp.json()["job"]
+
+    pending = deck["job_queue"]._pending.pop(0)
+    deck["job_queue"]._process(pending)
+
+    done = deck["job_queue"].get(job_id)
+    assert done["state"] == "failed"
+    assert "post-move" in done["error"]
+    assert deck["lemonade"].calls == []
 
 
 def test_hot_load_notes_last_used(tmp_path, monkeypatch):

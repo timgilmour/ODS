@@ -12,6 +12,8 @@ house "let it crash" policy: a 500 with a full traceback is the correct
 signal for a real bug, not a guessed-at error code.
 """
 
+import time
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -20,6 +22,15 @@ router = APIRouter(prefix="/tenants", tags=["control"])
 # Lemonade registers store GGUFs under an "extra." namespace. The Deck select
 # carries bare GGUF filenames, so a manual load must prefix them to match.
 _EXTRA_PREFIX = "extra."
+
+# Pull-through readiness gate: DockerCtl.start() (called by notify_engine's
+# restart) returns as soon as Docker ACCEPTS the request, not once lemonade
+# is actually serving again — a load attempted immediately after would hit
+# a still-booting server and 502. Poll status() until it stops raising, or
+# give up after _READY_TIMEOUT_S (the post-move hook then correctly fails
+# the job rather than silently eating the error).
+_READY_TIMEOUT_S = 60.0
+_READY_POLL_S = 2.0
 
 
 class LemonadeLoadBody(BaseModel):
@@ -92,7 +103,8 @@ def _find_cold_gguf(deck, bare: str):
 
 
 def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
-    from app.engines import GuardError
+    from app.engines import EngineError, GuardError
+    from app.events import log_event
     from app.notify import notify_engine
     from app.routers.storage import submit_move
 
@@ -109,7 +121,30 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
     hot = max(hot_locs, key=lambda loc: loc["free_bytes"])   # most free space wins (spec)
 
     def after(job: dict) -> None:
-        notify_engine(hot, deck)
+        warning = notify_engine(hot, deck)
+        if warning is not None:
+            # A model is already loaded — notify_engine deliberately
+            # deferred the restart (never yanks a loaded model to register
+            # a file). The move itself still succeeded; a load attempt here
+            # is guaranteed to fail (the file isn't registered until the
+            # next restart), so don't make one. The pre-armed suppressor
+            # just expires — "on failure the window simply expires".
+            log_event(deck["events_path"], "storage_notify_deferred",
+                      {"job": job["id"], "warning": warning, "model": bare})
+            return
+        # Restart happened: poll for readiness before handing lemonade a
+        # load (see _READY_TIMEOUT_S/_READY_POLL_S above).
+        deadline = time.monotonic() + _READY_TIMEOUT_S
+        ready = False
+        while time.monotonic() < deadline:
+            try:
+                deck["lemonade"].status()
+                ready = True
+                break
+            except EngineError:
+                time.sleep(_READY_POLL_S)
+        if not ready:
+            raise RuntimeError(f"lemonade not ready {_READY_TIMEOUT_S}s after restart")
         deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
         deck["heal_suppressor"].clear()
         deck["catalog"].note_used_gguf(bare)
