@@ -603,3 +603,27 @@ def test_queued_move_refused_when_model_loaded_before_execution(tmp_path, monkey
     assert "currently loaded" in failed["error"]
     assert (src / "a.gguf").exists() and not (dst / "a.gguf").exists()
     assert deck["catalog"].get("src:a.gguf")["state"] == "resident"
+
+
+# ===========================================================================
+# /state is a read, not a disk walk (I3)
+# ===========================================================================
+
+
+def test_state_reads_the_catalog_without_rescanning_disk(tmp_path, monkeypatch):
+    """GET /state used to walk every location on every poll (the UI polls it
+    on a timer). It now reads the persisted catalog; rescans happen on the
+    watcher tick, POST /rescan, and the cold-model lookup."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    src = _register(client, tmp_path, "src")
+    _write_gguf(src, "a.gguf")
+    deck["catalog"].scan()
+
+    assert len(client.get("/api/storage/state").json()["units"]) == 1
+
+    _write_gguf(src, "b.gguf")          # dropped in behind the deck's back
+    assert len(client.get("/api/storage/state").json()["units"]) == 1
+
+    assert client.post("/api/storage/rescan").json() == {"units": 2}
+    assert len(client.get("/api/storage/state").json()["units"]) == 2

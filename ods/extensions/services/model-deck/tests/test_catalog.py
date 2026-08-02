@@ -88,3 +88,52 @@ def test_set_pinned_unknown_id_raises(tmp_path):
     cat.scan()
     with pytest.raises(ValueError):
         cat.set_pinned("hot:nope.gguf", True)
+
+
+def test_moving_state_survives_rescan(tmp_path):
+    """A move marks its unit "moving" before the worker can see the job; a
+    rescan landing mid-move must not reset it to resident (the storage
+    watcher's candidate filter and plan_move's in-flight guard both read it)."""
+    store, _, _ = _fs(tmp_path)
+    cat = Catalog(tmp_path / "catalog.json", store)
+    cat.scan()
+    cat.set_state("hot:a.gguf", "moving")
+
+    units = {u["id"]: u for u in cat.scan()}
+    assert units["hot:a.gguf"]["state"] == "moving"
+
+
+def test_catalog_operations_are_mutually_exclusive(tmp_path):
+    """Every load-modify-save method shares one lock. Without it a scan can
+    land between a move's source-unlink and record_moved(), erasing the unit
+    and falsifying a successful move."""
+    import threading
+
+    store, _, _ = _fs(tmp_path)
+    cat = Catalog(tmp_path / "catalog.json", store)
+    cat.scan()
+
+    in_write = threading.Event()
+    release = threading.Event()
+    result = {}
+    original_save = cat._save
+
+    def blocking_save(units):
+        original_save(units)
+        in_write.set()
+        assert release.wait(5.0)          # keep holding whatever lock we're under
+
+    cat._save = blocking_save
+    writer = threading.Thread(target=lambda: cat.set_state("hot:a.gguf", "moving"))
+    writer.start()
+    assert in_write.wait(5.0)
+
+    reader = threading.Thread(target=lambda: result.update(n=len(cat.units())))
+    reader.start()
+    reader.join(0.2)
+    assert reader.is_alive(), "units() ran while a writer held the catalog mid-write"
+
+    release.set()
+    reader.join(5.0)
+    writer.join(5.0)
+    assert not reader.is_alive() and result["n"] == 2

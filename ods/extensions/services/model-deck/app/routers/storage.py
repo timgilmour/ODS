@@ -40,8 +40,12 @@ class LocationPatch(BaseModel):
 @router.get("/state")
 def storage_state(request: Request) -> dict:
     deck = request.app.state.deck
+    # A READ, never a disk walk: the UI polls this on a timer, and scanning
+    # every location per poll re-stats every model file on every drive (and
+    # rewrites catalog.json). Rescans belong to the storage watcher's tick,
+    # POST /rescan, and the cold-model lookup in routers/control.py.
     return {"locations": deck["location_store"].describe(),
-            "units": deck["catalog"].scan(),
+            "units": deck["catalog"].units(),
             "jobs": deck["job_queue"].jobs(),
             "policy": deck["storage_policy_store"].get()}
 
