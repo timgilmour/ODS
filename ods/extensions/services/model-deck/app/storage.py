@@ -195,11 +195,13 @@ class StorageWatcher:
         self._queue.submit(plan, label="watermark archive")
 
     def _log(self, kind: str, detail: dict) -> None:
-        key = tuple(sorted(detail.items()))
+        detail_key = tuple(sorted(detail.items()))
         if kind in self._DEDUP_KINDS:
-            last_key = self._last_event_keys.get(kind)
-            if key == last_key:
+            # Extract entity: location or unit (the stable subject of the event)
+            entity = detail.get("location") or detail.get("unit") or ""
+            dedup_key = (kind, entity)
+            last_key = self._last_event_keys.get(dedup_key)
+            if detail_key == last_key:
                 return
+            self._last_event_keys[dedup_key] = detail_key
         log_event(self._events_path, kind, detail)
-        if kind in self._DEDUP_KINDS:
-            self._last_event_keys[kind] = key

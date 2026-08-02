@@ -243,3 +243,49 @@ def test_thread_start_stop(tmp_path):
     watcher, _, _ = _watcher_env(tmp_path, auto=False)
     watcher.start()
     watcher.stop()          # must join promptly (interval-bounded via stop Event)
+
+
+def test_multi_location_suggestions_deduped_per_entity(tmp_path):
+    """Regression: dedup should be per (kind, entity), not per kind.
+    With two hot locations below watermark, each should log exactly one
+    storage_suggestion across multiple ticks (not re-log when the other
+    location's key overwrites the shared dedup state)."""
+    from app.catalog import Catalog
+    from app.locations import LocationStore
+    from app.policy import StoragePolicyStore
+
+    hot1 = tmp_path / "hot1"; hot1.mkdir()
+    hot2 = tmp_path / "hot2"; hot2.mkdir()
+    cold = tmp_path / "cold"; cold.mkdir()
+    (hot1 / "unit1.gguf").write_bytes(b"x" * 1000)
+    (hot2 / "unit2.gguf").write_bytes(b"x" * 1000)
+
+    locs = LocationStore(tmp_path / "locations.json",
+                         disk_usage=lambda p: type("u", (), {
+                             "total": 100 * 10**9, "used": 0,
+                             "free": 1 * 10**9})())  # 1 GB free on all
+    locs.register({"name": "hot1", "path": str(hot1), "role": "hot", "store_type": "gguf",
+                   "engine": "lemonade", "watermark_gb": 5.0, "archive_to": "cold", "readonly": False})
+    locs.register({"name": "hot2", "path": str(hot2), "role": "hot", "store_type": "gguf",
+                   "engine": "lemonade", "watermark_gb": 5.0, "archive_to": "cold", "readonly": False})
+    locs.register({"name": "cold", "path": str(cold), "role": "cold", "store_type": "gguf",
+                   "engine": "none", "watermark_gb": None, "archive_to": None, "readonly": False})
+
+    cat = Catalog(tmp_path / "catalog.json", locs)
+    pol = StoragePolicyStore(tmp_path / "storage_policy.json")
+    pol.put({"auto": False})
+    queue = _FakeQueue()
+    watcher = StorageWatcher(_Settings(), locs, cat, pol, queue,
+                             world_fn=lambda: _world(), events_path=tmp_path / "events.jsonl")
+
+    # Run three ticks; each location should log one suggestion, not re-log
+    watcher.tick(); watcher.tick(); watcher.tick()
+
+    from app.events import tail_events
+    events = tail_events(tmp_path / "events.jsonl")
+    suggestions = [e for e in events if e["kind"] == "storage_suggestion"]
+
+    # Should have exactly 2 suggestions (one per location)
+    assert len(suggestions) == 2
+    locs_in_suggestions = {e["detail"]["location"] for e in suggestions}
+    assert locs_in_suggestions == {"hot1", "hot2"}
