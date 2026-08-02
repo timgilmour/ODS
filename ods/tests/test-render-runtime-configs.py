@@ -713,6 +713,8 @@ def main() -> int:
         test_lemonade_routes_carry_context_windows,
         test_hipfire_context_window_env_fallback,
         test_extra_routes_carry_context_windows,
+        test_extra_routes_carry_supports_function_calling,
+        test_extra_routes_non_bool_supports_function_calling_fails_closed,
         test_lemonade_has_no_wildcard_and_aliases_llm_model,
         test_lemonade_alias_skips_reserved_names,
         test_lemonade_alias_skips_extra_route_names,
@@ -927,6 +929,53 @@ def test_extra_routes_carry_context_windows() -> None:
     assert "max_input_tokens: 229376" in aeon_block
     heretic_block = content.split("- model_name: spark-heretic\n", 1)[1].split("- model_name:", 1)[0]
     assert "model_info" not in heretic_block
+
+
+def test_extra_routes_carry_supports_function_calling() -> None:
+    # Discovery consumers (omp litellm-rich) gate NATIVE tool calling on
+    # model_info.supports_function_calling; without it they fall back to
+    # prompt-embedded tools, which the spark models mangle.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, [
+            {"model_name": "spark-heretic", "model": "openai/heretic",
+             "api_base": "http://192.168.1.15:8000/v1",
+             "max_input_tokens": 262144,
+             "supports_function_calling": True},
+            {"model_name": "spark-tools-only", "model": "openai/x",
+             "api_base": "http://192.168.1.15:8000/v1",
+             "supports_function_calling": True},
+            {"model_name": "spark-aeon", "model": "openai/aeon",
+             "api_base": "http://192.168.1.15:8000/v1",
+             "max_input_tokens": 229376},
+        ])
+        payload = run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                               "--extra-routes-file", path)
+        content = file_by_surface(payload, "litellm-lemonade")["content"]
+    heretic_block = content.split("- model_name: spark-heretic\n", 1)[1].split("- model_name:", 1)[0]
+    assert "max_input_tokens: 262144" in heretic_block
+    assert "supports_function_calling: true" in heretic_block
+    # The flag alone is enough to emit a model_info block.
+    tools_block = content.split("- model_name: spark-tools-only\n", 1)[1].split("- model_name:", 1)[0]
+    assert "supports_function_calling: true" in tools_block
+    assert "max_input_tokens" not in tools_block
+    # Entries without the flag stay exactly as before.
+    aeon_block = content.split("- model_name: spark-aeon\n", 1)[1].split("- model_name:", 1)[0]
+    assert "supports_function_calling" not in aeon_block
+
+
+def test_extra_routes_non_bool_supports_function_calling_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = _extra_routes_file(tmpdir, [
+            {"model_name": "spark-heretic", "model": "openai/heretic",
+             "api_base": "http://192.168.1.15:8000/v1",
+             "supports_function_calling": "yes"}])
+        try:
+            run_renderer("--surface", "all", "--ods-mode", "lemonade",
+                         "--extra-routes-file", path)
+        except subprocess.CalledProcessError as exc:
+            assert "supports_function_calling" in exc.stderr
+        else:
+            raise AssertionError("non-bool supports_function_calling must fail the render")
 
 
 if __name__ == "__main__":

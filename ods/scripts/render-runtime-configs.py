@@ -306,12 +306,19 @@ litellm_settings:
     return RenderedFile("litellm-cloud", "config/litellm/cloud.yaml", content)
 
 
-def _model_info_block(max_input_tokens) -> str:
+def _model_info_block(max_input_tokens, supports_function_calling: bool = False) -> str:
     """Per-route litellm model_info; consumers (omp's litellm discovery, the
-    dashboard) read max_input_tokens as the context window."""
-    if not max_input_tokens or int(max_input_tokens) <= 0:
+    dashboard) read max_input_tokens as the context window and gate NATIVE
+    tool calling on supports_function_calling (absent -> they fall back to
+    prompt-embedded tools)."""
+    lines = []
+    if max_input_tokens and int(max_input_tokens) > 0:
+        lines.append(f"      max_input_tokens: {int(max_input_tokens)}\n")
+    if supports_function_calling:
+        lines.append("      supports_function_calling: true\n")
+    if not lines:
         return ""
-    return f"    model_info:\n      max_input_tokens: {int(max_input_tokens)}\n"
+    return "    model_info:\n" + "".join(lines)
 
 
 _EXTRA_ROUTES_RESERVED = {
@@ -369,6 +376,13 @@ def load_extra_litellm_routes(path_arg: str | None) -> tuple:
                     f"extra-routes: entry {i} field 'max_input_tokens' must be "
                     f"a positive integer (got {max_input!r})")
             cleaned["max_input_tokens"] = max_input
+        supports_fc = entry.get("supports_function_calling")
+        if supports_fc is not None:
+            if not isinstance(supports_fc, bool):
+                raise SystemExit(
+                    f"extra-routes: entry {i} field 'supports_function_calling' "
+                    f"must be a boolean (got {supports_fc!r})")
+            cleaned["supports_function_calling"] = supports_fc
         routes.append(cleaned)
     return tuple(routes)
 
@@ -381,7 +395,8 @@ def extra_route_entry(route: dict) -> str:
         f"      model: {route['model']}\n"
         f"      api_base: {route['api_base']}\n"
         f"      api_key: {route['api_key']}\n"
-        + _model_info_block(route.get("max_input_tokens"))
+        + _model_info_block(route.get("max_input_tokens"),
+                            route.get("supports_function_calling", False))
     )
 
 
