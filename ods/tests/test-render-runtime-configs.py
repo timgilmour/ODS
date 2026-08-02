@@ -713,6 +713,7 @@ def main() -> int:
         test_lemonade_routes_carry_context_windows,
         test_hipfire_context_window_env_fallback,
         test_extra_routes_carry_context_windows,
+        test_core_routes_advertise_function_calling,
         test_extra_routes_carry_supports_function_calling,
         test_extra_routes_non_bool_supports_function_calling_fails_closed,
         test_lemonade_has_no_wildcard_and_aliases_llm_model,
@@ -929,6 +930,38 @@ def test_extra_routes_carry_context_windows() -> None:
     assert "max_input_tokens: 229376" in aeon_block
     heretic_block = content.split("- model_name: spark-heretic\n", 1)[1].split("- model_name:", 1)[0]
     assert "model_info" not in heretic_block
+
+
+def test_core_routes_advertise_function_calling() -> None:
+    # hipfire (llama.cpp fork) and lemonade (llama-server, jinja templates)
+    # both do native OpenAI tool calling — live-verified 2026-08-02 through
+    # litellm, stream + non-stream. default/alias reuse those same backends.
+    payload = run_renderer(
+        "--surface", "litellm-lemonade",
+        "--ods-mode", "lemonade",
+        "--gpu-backend", "amd",
+        "--gguf-file", "Model.gguf",
+        "--model", "qwen3.5-27b",
+        "--context-length", "32768",
+        "--hipfire-enabled",
+        "--hipfire-model", "qwen36-35b-a3b.mq4",
+        "--hipfire-context-length", "262144",
+    )
+    content = file_by_surface(payload, "litellm-lemonade")["content"]
+    for name in ("default", "hipfire", "lemonade", '"qwen3.5-27b"'):
+        block = content.split(f"- model_name: {name}\n", 1)[1].split("- model_name:", 1)[0]
+        assert "supports_function_calling: true" in block, name
+    # The hipfire-disabled branch advertises it on default/alias too.
+    payload = run_renderer(
+        "--surface", "litellm-lemonade",
+        "--ods-mode", "lemonade",
+        "--gpu-backend", "amd",
+        "--gguf-file", "Model.gguf",
+        "--context-length", "32768",
+    )
+    content = file_by_surface(payload, "litellm-lemonade")["content"]
+    default_block = content.split("- model_name: default\n", 1)[1].split("- model_name:", 1)[0]
+    assert "supports_function_calling: true" in default_block
 
 
 def test_extra_routes_carry_supports_function_calling() -> None:

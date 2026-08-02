@@ -482,8 +482,12 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
       api_key: not-needed
 """
         default_params = hipfire_params if inputs.hipfire_active else lemonade_params
-        hipfire_info = _model_info_block(inputs.hipfire_context_length)
-        lemonade_info = _model_info_block(inputs.context_length)
+        # Both engines do native OpenAI tool calling (hipfire = llama.cpp fork,
+        # lemonade = llama-server w/ jinja templates) — live-verified 2026-08-02.
+        hipfire_info = _model_info_block(inputs.hipfire_context_length,
+                                         supports_function_calling=True)
+        lemonade_info = _model_info_block(inputs.context_length,
+                                          supports_function_calling=True)
         default_info = hipfire_info if inputs.hipfire_active else lemonade_info
         content = (
             "model_list:\n"
@@ -503,7 +507,8 @@ def render_litellm_lemonade(inputs: RenderInputs) -> RenderedFile:
         )
         return RenderedFile("litellm-lemonade", "config/litellm/lemonade.yaml", content)
 
-    lemonade_info = _model_info_block(inputs.context_length)
+    lemonade_info = _model_info_block(inputs.context_length,
+                                      supports_function_calling=True)
     content = (
         "model_list:\n"
         f"  - model_name: default\n{lemonade_params}{lemonade_info}"
