@@ -176,10 +176,39 @@ def _decide_idle_release(world: dict, policy: dict) -> list[dict]:
         and comfy_pol["idle_ttl"] > 0
         and comfy["idle_s"] is not None
         and comfy["idle_s"] >= comfy_pol["idle_ttl"]
+        # A free that can't reclaim anything is a no-op that re-arms the TTL
+        # and re-fires every idle_ttl seconds forever, flooding the event
+        # ring. None (comfy's GPU unresolvable) must not suppress the free:
+        # unknown usage is not proof there's nothing to reclaim.
+        and _comfy_reclaimable(world) != 0
     ):
         actions.append({"type": "free_comfyui"})
 
     return actions
+
+
+def _comfy_reclaimable(world: dict) -> int | None:
+    """Estimated bytes a comfy free would reclaim, or None when comfy's GPU
+    isn't in the snapshot. Same estimate as ``_eviction_candidates``: comfy's
+    VRAM presence isn't directly observable, so attribute to it whatever its
+    GPU's usage doesn't explain — minus a co-resident loaded lemonade's
+    footprint and the fixed slack allowance."""
+    placement = world.get("placement") or {}
+    gpu = _find_gpu(world["gpus"], placement.get("comfyui"))
+    if gpu is None:
+        return None
+
+    lem = world["tenants"]["lemonade"]
+    lem_footprint = (
+        lem["footprint"]
+        if (
+            lem["state"] == "loaded"
+            and lem["footprint"]
+            and placement.get("lemonade") == placement.get("comfyui")
+        )
+        else 0
+    )
+    return max(0, gpu["used"] - lem_footprint - _SLACK_BYTES)
 
 
 def _decide_contention(world: dict, policy: dict, pending_load: dict) -> list[dict]:

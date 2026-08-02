@@ -46,7 +46,7 @@ def _gpu(index=1, total=34 * GIB, used=0, free=None):
     return {"index": index, "total": total, "used": used, "free": free}
 
 
-def _world(gpus=None, lemonade=None, comfyui=None, hipfire=None, default_route=None):
+def _world(gpus=None, lemonade=None, comfyui=None, hipfire=None, default_route=None, placement=None):
     return {
         "gpus": gpus if gpus is not None else [_gpu()],
         "tenants": {
@@ -56,6 +56,9 @@ def _world(gpus=None, lemonade=None, comfyui=None, hipfire=None, default_route=N
         },
         "externals": [],
         "default_route": default_route,
+        "placement": placement
+        if placement is not None
+        else {"hipfire": 0, "lemonade": 1, "comfyui": 1},
     }
 
 
@@ -146,12 +149,59 @@ def test_idle_release_no_unload_when_below_ttl():
 
 
 def test_idle_release_frees_comfyui_when_idle_past_ttl():
-    world = _world(comfyui=_comfy(state="idle", queue=0, idle_s=301))
+    # comfy's GPU shows real usage (nothing else accounts for it), so the
+    # free actually reclaims VRAM.
+    world = _world(
+        gpus=[_gpu(index=1, used=6 * GIB)],
+        comfyui=_comfy(state="idle", queue=0, idle_s=301),
+    )
 
     result = decide(world, _policy(comfy_idle=300), None)
 
     assert result == [{"type": "free_comfyui"}]
     _assert_only_valid_actions(result)
+
+
+def test_idle_release_no_free_when_comfy_holds_no_vram():
+    """TTL expiry alone must not free: with comfy's GPU essentially empty
+    (used below the slack allowance), the free is a guaranteed no-op that
+    would just re-arm the TTL and spam the event ring forever."""
+    world = _world(
+        gpus=[_gpu(index=1, used=60 * 1024**2)],
+        comfyui=_comfy(state="idle", queue=0, idle_s=301),
+    )
+
+    result = decide(world, _policy(comfy_idle=300), None)
+
+    assert "free_comfyui" not in _types(result)
+
+
+def test_idle_release_no_free_when_gpu_usage_is_lemonades():
+    """Usage fully accounted for by a loaded lemonade on the same GPU is not
+    comfy's to reclaim — freeing comfy would be a no-op."""
+    world = _world(
+        gpus=[_gpu(index=1, used=10 * GIB)],
+        lemonade=_lem(state="loaded", model="extra.m.gguf", footprint=10 * GIB, idle_s=10),
+        comfyui=_comfy(state="idle", queue=0, idle_s=301),
+    )
+
+    result = decide(world, _policy(comfy_idle=300), None)
+
+    assert "free_comfyui" not in _types(result)
+
+
+def test_idle_release_frees_comfyui_when_gpu_unresolvable():
+    """Placement pointing at a GPU we have no telemetry for must NOT suppress
+    the free — unknown usage is not proof there's nothing to reclaim."""
+    world = _world(
+        gpus=[_gpu(index=0, used=0)],
+        comfyui=_comfy(state="idle", queue=0, idle_s=301),
+        placement={"hipfire": 0, "lemonade": 1, "comfyui": 1},
+    )
+
+    result = decide(world, _policy(comfy_idle=300), None)
+
+    assert result == [{"type": "free_comfyui"}]
 
 
 def test_idle_release_no_free_when_comfy_pinned():
@@ -651,7 +701,10 @@ def test_watcher_successful_free_rearms_comfy_idle_clock(tmp_path):
     """A successful free_comfyui must re-arm the world's comfy idle clock —
     otherwise idle_s keeps growing and the idle-release rule re-emits the
     free on every subsequent tick for as long as comfy stays idle."""
-    snapshot = _world(comfyui=_comfy(state="idle", queue=0, idle_s=5000))
+    snapshot = _world(
+        gpus=[_gpu(index=1, used=6 * GIB)],
+        comfyui=_comfy(state="idle", queue=0, idle_s=5000),
+    )
     world, comfy = FakeWorld(snapshot), FakeComfy()
     watcher, _ = _make_watcher(
         tmp_path, world, FakeRegistry(), _policy(comfy_idle=300), comfy=comfy
@@ -666,7 +719,10 @@ def test_watcher_successful_free_rearms_comfy_idle_clock(tmp_path):
 def test_watcher_raced_free_does_not_rearm_comfy_idle_clock(tmp_path):
     """A GuardError'd free reclaimed nothing — the idle clock must NOT be
     re-armed, so the free is retried once comfy actually drains."""
-    snapshot = _world(comfyui=_comfy(state="idle", queue=0, idle_s=5000))
+    snapshot = _world(
+        gpus=[_gpu(index=1, used=6 * GIB)],
+        comfyui=_comfy(state="idle", queue=0, idle_s=5000),
+    )
     world, comfy = FakeWorld(snapshot), FakeComfy(raise_guard=True)
     watcher, _ = _make_watcher(
         tmp_path, world, FakeRegistry(), _policy(comfy_idle=300), comfy=comfy
