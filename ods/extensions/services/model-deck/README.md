@@ -161,7 +161,7 @@ An unavailable location (e.g., an unplugged cold drive) is treated with extreme 
 - **The deck never writes into an unavailable location** — a forgotten mount can't silently fill the container overlay or shadow-write into an empty mountpoint directory
 - **Manual moves to unavailable locations are refused** with a clear "drive unmounted?" message
 
-**Registration before mounting fails safe:** if you register a location before mounting it in compose, the marker write will fail (permission denied / directory does not exist), and registration is rejected. No orphan entries are created.
+**Registration before mounting fails safe:** if you register a location before mounting it in compose, the path check fails first (GuardError "does not exist — is the drive mounted into the container?"), and registration is rejected. No orphan entries are created.
 
 ### Pull-through on load
 
@@ -189,10 +189,10 @@ After a pull completes, the deck must notify lemonade that a new model file has 
 **If a model is already loaded in lemonade, the restart is deferred with a visible warning:**
 > "lemonade has a model loaded — restart deferred; the new file registers after the next lemonade restart"
 
-The pull job succeeds (files are moved), but the subsequent load attempt fails until lemonade restarts. The operator can:
-- Unload the current model (via `POST /api/tenants/lemonade/unload`), which clears the way for the restart and retry
+The pull job succeeds (files are moved), but no automatic load is attempted. The operator can:
+- Unload the current model (via `POST /api/tenants/lemonade/unload`), which clears the way for the restart, then retry the load
 - Wait for the idle-unload TTL to trigger (if configured), which has the same effect
-- Try again later; the next idle-triggered restart will register the file
+- Issue a new load after a manual restart: `docker compose restart ods-llama-server` followed by the load
 
 **ComfyUI and `engine: none`** locations have no restart caveat: ComfyUI lists files per-request, so no action is needed; plain locations need no engine notification.
 
@@ -342,7 +342,7 @@ Model Deck API (:3015, FastAPI)
 - If the drive is genuinely gone, deregister the location (`DELETE /api/storage/locations/{name}`) and re-register after remounting
 
 **Watermark eviction not kicking in:**
-- Check `storage_policy_store.get()["auto"]` — must be `true`
+- Check the auto mode: `GET /api/storage/policy` should show `"auto": true`
 - Verify the location has a `watermark_gb` set (not null) and a valid `archive_to` destination
 - Run `POST /api/storage/rescan` to force a catalog update
 - Check `events.jsonl` for `storage_suggestion` or `storage_shortfall` events (watcher runs every 60 s)
@@ -350,7 +350,8 @@ Model Deck API (:3015, FastAPI)
 **Models appear "unavailable" in the catalog:**
 - A location's marker file is missing or does not match the stored UUID
 - Confirm the mount is active: `docker compose exec ods-model-deck ls /stores/<name>`
-- If remounted after disconnection, re-run the location registration (it will update the marker)
+- **If the marker file exists on the physical media** (normal case after remount), remounting the drive alone restores availability — no further action needed; the deck will see the marker on the next scan
+- **If the marker file is truly lost** (e.g., drive corruption), deregister the location (`DELETE /api/storage/locations/{name}`) and re-register it. **Warning:** deregistering removes the location's catalog entries, losing pin state and `last_used` usage tracking for those models. Re-register only if the marker cannot be restored
 
 ## License
 
