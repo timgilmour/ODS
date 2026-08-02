@@ -112,7 +112,22 @@ class Mover:
     # -- trees: Task 6 -------------------------------------------------------
 
     def _move_tree(self, src: Path, dst: Path, progress_cb, cancel_check) -> None:
-        raise NotImplementedError  # implemented in the next task
+        staging = dst.with_name(dst.name + STAGING_SUFFIX)
+        if staging.exists():
+            shutil.rmtree(staging)
+        done = 0
+        try:
+            for f in sorted(p for p in src.rglob("*") if p.is_file()):
+                target = staging / f.relative_to(src)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                done = self._copy_verify(f, target, progress_cb, cancel_check,
+                                         bytes_offset=done)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        os.replace(staging, dst)
+        _fsync_dir(dst.parent)
+        shutil.rmtree(src)               # the LAST step (invariant 12)
 
     # -- janitor ---------------------------------------------------------------
 

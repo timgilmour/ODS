@@ -65,3 +65,35 @@ def test_janitor_removes_orphans(tmp_path):
     removed = Mover().janitor([root])
     assert orphan in removed and staging in removed
     assert keep.exists() and not orphan.exists() and not staging.exists()
+
+
+def test_tree_move_is_atomic_unit(tmp_path):
+    src_root = tmp_path / "a"; src_root.mkdir()
+    repo = src_root / "Qwen"; (repo / "sub").mkdir(parents=True)
+    (repo / "config.json").write_bytes(b"{}")
+    (repo / "sub" / "model-00001.safetensors").write_bytes(b"w" * (2 * 1024 * 1024))
+    dst = tmp_path / "b" / "Qwen"
+    progress = []
+    _cross_fs_mover().execute(repo, dst, progress.append, lambda: False)
+    assert not repo.exists()
+    assert (dst / "config.json").exists() and (dst / "sub" / "model-00001.safetensors").exists()
+    assert progress[-1] == 2 + 2 * 1024 * 1024
+    assert not dst.with_name(dst.name + ".deck-staging").exists()
+
+
+def test_tree_cancel_keeps_source_removes_staging(tmp_path):
+    src_root = tmp_path / "a"; src_root.mkdir()
+    repo = src_root / "Qwen"; repo.mkdir()
+    (repo / "f1").write_bytes(b"x" * (16 * 1024 * 1024))
+    (repo / "f2").write_bytes(b"y" * (16 * 1024 * 1024))
+    dst = tmp_path / "b" / "Qwen"
+    calls = {"n": 0}
+
+    def cancel():
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    with pytest.raises(MoveCancelled):
+        _cross_fs_mover().execute(repo, dst, lambda b: None, cancel)
+    assert (repo / "f1").exists() and (repo / "f2").exists()
+    assert not dst.exists() and not dst.with_name(dst.name + ".deck-staging").exists()
