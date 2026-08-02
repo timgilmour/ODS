@@ -138,7 +138,8 @@ def test_snapshot_has_expected_top_level_keys():
 
     result = world.snapshot(**_healthy_kwargs())
 
-    assert set(result) == {"gpus", "tenants", "externals", "default_route", "placement"}
+    assert set(result) == {"gpus", "tenants", "externals", "default_route",
+                           "routes_known", "placement"}
     assert set(result["tenants"]) == {"lemonade", "comfyui", "hipfire"}
 
 
@@ -648,3 +649,26 @@ def test_externals_across_multiple_gpus():
         {"pid": 100, "gpu": 0, "bytes": 2 * _ONE_GIB},
         {"pid": 200, "gpu": 1, "bytes": 3 * _ONE_GIB},
     ]
+
+
+# --- routes_known: "None default_route" is ambiguous without it -------------
+
+
+def test_routes_known_true_when_litellm_answers():
+    world = World(clock=FakeClock())
+
+    result = world.snapshot(**_healthy_kwargs(litellm=StubLiteLLM({})))
+
+    assert result["routes_known"] is True
+
+
+def test_routes_known_false_on_litellm_engineerror():
+    """default_route=None means two different things — "no default route is
+    configured" and "we could not reach litellm to ask". Storage guards must
+    fail closed on the second, so the snapshot distinguishes them."""
+    world = World(clock=FakeClock())
+
+    result = world.snapshot(**_healthy_kwargs(litellm=RaisingLiteLLM()))
+
+    assert result["default_route"] is None
+    assert result["routes_known"] is False

@@ -289,3 +289,43 @@ def test_multi_location_suggestions_deduped_per_entity(tmp_path):
     assert len(suggestions) == 2
     locs_in_suggestions = {e["detail"]["location"] for e in suggestions}
     assert locs_in_suggestions == {"hot1", "hot2"}
+
+
+# routes_known: fail closed when litellm can't be reached (I4)
+
+
+def _world_no_routes(**over):
+    w = _world(**over)
+    w["routes_known"] = False
+    return w
+
+
+def test_plan_move_refuses_gguf_when_routes_unknown():
+    """default_route=None with routes_known=False means "we couldn't ask
+    litellm", not "there is no default route". Moving a gguf on that basis
+    could archive the auto-reload target — refuse instead."""
+    with pytest.raises(GuardError, match="litellm unreachable"):
+        _plan(world=_world_no_routes())
+
+
+def test_plan_move_allows_non_gguf_when_routes_unknown():
+    """Only gguf units can be litellm's default route; an hf_repo or comfy
+    unit is unaffected by an unreachable litellm."""
+    unit = _unit(id="cold:Qwen", type="hf_repo", name="Qwen", relpath="Qwen")
+    assert _plan(unit=unit, world=_world_no_routes())["unit_id"] == "cold:Qwen"
+
+
+def test_storage_decide_excludes_all_gguf_when_routes_unknown():
+    locs = [_loc("hot", free=40 * 10**9, wm=50.0, archive_to="cold"),
+            _loc("cold", role="cold", free=100 * 10**9)]
+    units = [_u("hot:a.gguf"), _u("hot:b.gguf")]
+    actions = storage_decide(units, locs, _world_no_routes(), 0)
+    assert [a["type"] for a in actions] == ["shortfall"]      # nothing eligible
+
+
+def test_storage_decide_unaffected_when_routes_known():
+    locs = [_loc("hot", free=40 * 10**9, wm=50.0, archive_to="cold"),
+            _loc("cold", role="cold", free=100 * 10**9)]
+    units = [_u("hot:a.gguf"), _u("hot:b.gguf")]
+    actions = storage_decide(units, locs, _world(), 0)
+    assert [a["type"] for a in actions][:1] == ["archive"]

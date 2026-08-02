@@ -126,6 +126,11 @@ class World:
             },
             "externals": externals,
             "default_route": default_route,
+            # Disambiguates default_route=None: "litellm says there is no
+            # default route" (True) vs "we could not reach litellm to ask"
+            # (False). The storage guards fail CLOSED on the latter — see
+            # app.storage.plan_move / storage_decide.
+            "routes_known": routes is not None,
             "placement": dict(self._placement),
         }
 

@@ -52,6 +52,13 @@ def plan_move(unit: dict, dest: dict, world: dict, active_unit_ids,
     if unit["state"] == "moving" or unit["id"] in active_unit_ids:
         raise GuardError(f"unit {unit['id']!r} already has a move in flight")
 
+    # FAIL CLOSED: with litellm unreachable, world["default_route"] is None
+    # because we couldn't ask — not because there is no default route. The
+    # default-route guard is "never overridable", so an unverifiable one must
+    # refuse rather than silently pass. (Non-gguf units can't be a route.)
+    if unit["type"] == "gguf" and world.get("routes_known", True) is False:
+        raise GuardError("litellm unreachable — cannot verify default route")
+
     reason = unit_in_use(unit, world)
     if reason:
         raise GuardError(reason)
@@ -77,6 +84,11 @@ def storage_decide(units: list[dict], locations: list[dict], world: dict,
     reports the remainder as a shortfall — it never feasibility-vetoes."""
     by_name = {loc["name"]: loc for loc in locations}
     default_route = _strip(world["default_route"])
+    # Same fail-closed rule as plan_move: an unverifiable default route
+    # disqualifies every gguf candidate (silently — the watcher's job is to
+    # stay quiet until it can act safely; plan_move is where an operator who
+    # asked for a specific move gets told why).
+    routes_known = world.get("routes_known", True) is not False
     actions: list[dict] = []
     planned_to_dest: dict[str, int] = {}
 
@@ -96,6 +108,7 @@ def storage_decide(units: list[dict], locations: list[dict], world: dict,
                 if u["location"] == loc["name"] and u["state"] == "resident"
                 and not u["pinned"] and unit_in_use(u, world) is None
                 and not (u["type"] == "gguf" and u["name"] == default_route)
+                and not (u["type"] == "gguf" and not routes_known)
             ]
             candidates.sort(key=lambda u: (u["last_used"] is not None,
                                            u["last_used"] or 0.0, u["mtime"]))
