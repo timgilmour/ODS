@@ -150,10 +150,18 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
         deck["catalog"].note_used_gguf(bare)
 
     # Pre-arm: the multi-minute pull must not fight the VRAM watcher's
-    # pending-load inference (spec section 3).
+    # pending-load inference (spec section 3). on_progress re-arms it on every
+    # chunk, because a big model's copy easily outlives the 600 s window.
     deck["heal_suppressor"].note_deck_unload()
-    job = submit_move(deck, unit["id"], hot["name"],
-                      label="pull-through load", on_success=after)
+    try:
+        job = submit_move(deck, unit["id"], hot["name"],
+                          label="pull-through load", on_success=after,
+                          on_progress=deck["heal_suppressor"].note_deck_unload)
+    except Exception:
+        # Refused (guard trip, unknown unit, ...): there is no pull to protect,
+        # so the pre-armed window must not linger and mute contention healing.
+        deck["heal_suppressor"].clear()
+        raise
     return {"status": "pulling", "job": job["id"]}
 
 

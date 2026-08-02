@@ -654,3 +654,28 @@ def test_set_apply_load_notes_last_used_through_the_router(tmp_path, monkeypatch
 
     unit = next(u for u in deck["catalog"].units() if u["name"] == "a.gguf")
     assert unit["last_used"] is not None
+
+
+# ===========================================================================
+# Heal-suppression window hygiene around pull-through (I6)
+# ===========================================================================
+
+
+def test_refused_pull_through_does_not_leave_suppression_armed(tmp_path, monkeypatch):
+    """The suppressor is pre-armed BEFORE the move is submitted (a multi-minute
+    pull must not fight the VRAM watcher). If the submit is then refused, the
+    window must not stay armed for its full duration with no pull to protect —
+    that would silently disable contention healing."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    cold = _register(client, tmp_path, "cold", engine="none")
+    hot = _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(cold, "a.gguf")
+    _write_gguf(hot, "a.gguf")          # destination collision -> submit refused
+    deck["catalog"].scan()
+
+    resp = client.post("/api/tenants/lemonade/load?pull=true", json={"model": "a.gguf"})
+
+    assert resp.status_code == 409
+    assert deck["heal_suppressor"].suppressed() is False
+    assert deck["job_queue"].jobs() == []

@@ -189,7 +189,14 @@ class JobQueue:
 
     # -- public --------------------------------------------------------------
 
-    def submit(self, plan: dict, label: str, on_success=None) -> dict:
+    def submit(self, plan: dict, label: str, on_success=None, on_progress=None) -> dict:
+        """Enqueue a planned move.
+
+        ``on_progress`` (optional) is a zero-arg callback invoked on every
+        progress update. It exists for the pull-through path, whose
+        heal-suppression window (600 s) is far shorter than a large model's
+        copy time — each chunk re-arms it, so healing can't wake up mid-pull.
+        """
         job = {"id": uuidlib.uuid4().hex[:12], "unit_id": plan["unit_id"],
                "from": plan["src_location"], "to": plan["dest_location"],
                "label": label, "state": "queued", "bytes_done": 0,
@@ -199,7 +206,8 @@ class JobQueue:
         self._catalog.set_state(plan["unit_id"], "moving")
         with self._lock:
             self._jobs[job["id"]] = job
-            self._pending.append({**job, "_on_success": on_success})
+            self._pending.append({**job, "_on_success": on_success,
+                                  "_on_progress": on_progress})
             self._wake.set()
         return dict(job)
 
@@ -265,6 +273,7 @@ class JobQueue:
     def _process(self, pending: dict) -> None:
         job_id = pending["id"]
         on_success = pending.get("_on_success")
+        on_progress = pending.get("_on_progress")
         with self._lock:
             job = self._jobs[job_id]
             if job["state"] == "cancelled":
@@ -306,6 +315,8 @@ class JobQueue:
             def progress(done: int) -> None:
                 with self._lock:
                     job["bytes_done"] = done
+                if on_progress is not None:
+                    on_progress()     # cheap; per-chunk is fine (see submit)
 
             def cancelled() -> bool:
                 with self._lock:

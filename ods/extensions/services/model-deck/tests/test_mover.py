@@ -262,3 +262,38 @@ def test_same_fs_non_exdev_oserror_reraises(tmp_path, monkeypatch):
         Mover(same_fs=lambda a, b: True).execute(src, dst, lambda b: None, lambda: False)
     assert excinfo.value.errno == errno.EACCES
     assert src.exists() and not dst.exists()
+
+
+# -- progress keeps the heal-suppression window armed (I6) ------------------
+
+
+def test_progress_callback_rearms_the_suppressor_during_a_long_copy(tmp_path,
+                                                                    monkeypatch):
+    """A pull of a 60 GB model can outlast the 600 s suppression window that
+    was armed when it was submitted; healing would then wake up mid-pull and
+    fight it. Each progress chunk re-arms the window."""
+    from app.arbiter import HealSuppressor
+
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+    clock = {"t": 0.0}
+    suppressor = HealSuppressor(600.0, clock=lambda: clock["t"])
+    suppressor.note_deck_unload()
+
+    real_execute = q._mover.execute
+
+    def slow_execute(src, dst, progress_cb, cancel_check):
+        clock["t"] = 700.0                       # the original window expires
+        assert suppressor.suppressed() is False
+        progress_cb(1)                           # a chunk lands -> re-arm
+        assert suppressor.suppressed() is True
+        return real_execute(src, dst, progress_cb, cancel_check)
+
+    monkeypatch.setattr(q._mover, "execute", slow_execute)
+
+    job = q.submit(plan, label="pull-through load",
+                   on_progress=suppressor.note_deck_unload)
+    q._process(q._pending.pop(0))
+
+    assert q.get(job["id"])["state"] == "done"
+    assert (cold / "a.gguf").exists()
+    assert suppressor.suppressed() is True       # still armed at t=700

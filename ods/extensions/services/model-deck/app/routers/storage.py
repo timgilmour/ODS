@@ -71,7 +71,8 @@ def deregister_location(name: str, request: Request) -> dict:
     return {"status": "ok"}
 
 
-def submit_move(deck, unit_id: str, dest_name: str, label: str, on_success=None) -> dict:
+def submit_move(deck, unit_id: str, dest_name: str, label: str, on_success=None,
+                on_progress=None) -> dict:
     """Shared by the manual-move route and control.py's pull-through."""
     unit = deck["catalog"].get(unit_id)
     if unit is None:
@@ -93,7 +94,8 @@ def submit_move(deck, unit_id: str, dest_name: str, label: str, on_success=None)
                        if j["state"] not in _TERMINAL)
     plan = plan_move(unit, dest, world, active, dest["free_bytes"],
                      deck["settings"].storage_slack_bytes)
-    return deck["job_queue"].submit(plan, label=label, on_success=on_success)
+    return deck["job_queue"].submit(plan, label=label, on_success=on_success,
+                                    on_progress=on_progress)
 
 
 @router.post("/moves")
