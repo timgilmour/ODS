@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ApiError,
   bytesToGB,
@@ -63,7 +63,18 @@ export default function TenantCard(props: TenantCardProps) {
 
   async function runAction(
     action: () => Promise<unknown>,
-    opts?: { parkGuard?: boolean; pullGuard?: { model: string; sizeBytes: number } },
+    opts?: {
+      parkGuard?: boolean;
+      pullGuard?: { model: string; sizeBytes: number };
+      // Set by the plain Load/Unload handlers only — NOT by the "Pull +
+      // load" confirm button's own retry, which sets pullingModel itself
+      // from inside its action and must not have this wipe it out again
+      // immediately after. Any *other* successful lemonade action means
+      // whatever pullingModel was tracking is stale (superseded by a fresh
+      // load, or the tenant was unloaded out from under it), so it's
+      // cleared here rather than left for isPulling to reason about.
+      clearPulling?: boolean;
+    },
   ) {
     setBusy(true);
     try {
@@ -71,6 +82,7 @@ export default function TenantCard(props: TenantCardProps) {
       setError(null);
       setOfferForcePark(false);
       setPullOffer(null);
+      if (opts?.clearPulling) setPullingModel(null);
     } catch (err) {
       const isPullGuard =
         Boolean(opts?.pullGuard) &&
@@ -90,10 +102,22 @@ export default function TenantCard(props: TenantCardProps) {
   // namespace prefix (e.g. "extra.foo.gguf"; see LemonadeClient.status()
   // docstring) — endsWith() matches regardless of whether that prefix is
   // present, so this doesn't need to know the exact prefix string.
-  const isPulling =
-    props.name === "lemonade" &&
-    pullingModel != null &&
-    !(props.data.state === "loaded" && props.data.model?.endsWith(pullingModel));
+  const lemonadeState = props.name === "lemonade" ? props.data.state : undefined;
+  const lemonadeModel = props.name === "lemonade" ? props.data.model : undefined;
+
+  // One-shot consumption of the pull-tracking token: the moment a poll
+  // observes the pulled model actually loaded, clear it here so a LATER
+  // unload (or loading something else) can never make the chip resurrect
+  // from a stale pullingModel — isPulling below is a dumb `!= null` check;
+  // clearing is entirely this effect's (plus runAction's clearPulling,
+  // plus the chip's own dismiss button) job.
+  useEffect(() => {
+    if (pullingModel != null && lemonadeState === "loaded" && lemonadeModel?.endsWith(pullingModel)) {
+      setPullingModel(null);
+    }
+  }, [lemonadeState, lemonadeModel, pullingModel]);
+
+  const isPulling = props.name === "lemonade" && pullingModel != null;
 
   return (
     <div className="tenant-card">
@@ -109,9 +133,17 @@ export default function TenantCard(props: TenantCardProps) {
           </span>
         )}
         {isPulling && (
-          <span className="chip chip-busy" title="pulling from cold storage to hot, then loading">
-            pulling ❄ → 🔥
-          </span>
+          <>
+            <span className="chip chip-busy" title="pulling from cold storage to hot, then loading">
+              pulling ❄ → 🔥
+            </span>
+            {/* Covers the failed/cancelled-job case: on_success never runs
+                server-side, so no poll result would ever clear the effect
+                above — this is the only way to unstick the chip then. */}
+            <button onClick={() => setPullingModel(null)} aria-label="dismiss pulling status">
+              ×
+            </button>
+          </>
         )}
       </div>
 
@@ -192,10 +224,15 @@ export default function TenantCard(props: TenantCardProps) {
                 const coldUnit = props.coldGgufs.find((u) => u.name === selectedModel);
                 runAction(
                   () => postAction("/tenants/lemonade/load", { model: selectedModel }),
-                  { pullGuard: coldUnit ? { model: selectedModel, sizeBytes: coldUnit.size } : undefined },
+                  {
+                    pullGuard: coldUnit ? { model: selectedModel, sizeBytes: coldUnit.size } : undefined,
+                    clearPulling: true,
+                  },
                 );
               }}
-              onUnload={() => runAction(() => postAction("/tenants/lemonade/unload", {}))}
+              onUnload={() =>
+                runAction(() => postAction("/tenants/lemonade/unload", {}), { clearPulling: true })
+              }
             />
           )}
           {props.name === "comfyui" && (
