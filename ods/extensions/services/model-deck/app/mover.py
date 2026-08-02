@@ -14,6 +14,7 @@ Total cross-fs I/O: read source once (hash computed in-flight with the
 copy — zero extra reads), write dest once, read dest once for the verify.
 """
 
+import errno
 import hashlib
 import os
 import shutil
@@ -72,9 +73,19 @@ class Mover:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if self._same_fs(src, dst.parent):
             size = src.stat().st_size if src.is_file() else _tree_size_bytes(src)
-            os.replace(src, dst)          # same fs: instant, atomic — no copy
-            progress_cb(size)
-            return
+            try:
+                os.replace(src, dst)      # same fs: instant, atomic — no copy
+            except OSError as exc:
+                # st_dev matching is not a guarantee rename() will work: two
+                # bind mounts of one filesystem are separate mount points, and
+                # the kernel refuses to rename across them (EXDEV). That's not
+                # a failure — it just means "you have to copy". Any other errno
+                # is a real error and must surface.
+                if exc.errno != errno.EXDEV:
+                    raise
+            else:
+                progress_cb(size)
+                return
         if src.is_dir():
             self._move_tree(src, dst, progress_cb, cancel_check)
         else:

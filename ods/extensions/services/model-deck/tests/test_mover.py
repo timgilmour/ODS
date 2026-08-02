@@ -205,3 +205,60 @@ def test_worker_refuses_when_destination_file_already_exists(tmp_path):
     assert (hot / "a.gguf").read_bytes() == b"g" * 1000          # source untouched
     assert (cold / "a.gguf").read_bytes() == b"older archived version"
     assert cat.get("hot:a.gguf")["state"] == "resident"
+
+
+# -- EXDEV fallback on the same-fs fast path (I1) ---------------------------
+
+
+def _exdev_once(monkeypatch, errno_value):
+    """Make the NEXT os.replace raise OSError(errno_value); later ones are real
+    (the .part -> final rename inside the copy path must still work)."""
+    import errno as errno_mod  # noqa: F401 - imported for callers' readability
+    import os as os_mod
+
+    import app.mover as mover_mod
+
+    real = os_mod.replace
+    calls = {"n": 0}
+
+    def fake_replace(a, b):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno_value, os_mod.strerror(errno_value))
+        return real(a, b)
+
+    monkeypatch.setattr(mover_mod.os, "replace", fake_replace)
+    return calls
+
+
+def test_same_fs_exdev_falls_back_to_copy_path(tmp_path, monkeypatch):
+    """Bind mounts across mount points raise EXDEV from rename even when both
+    sides live on one filesystem (so st_dev matched). The move must complete
+    via the copy+verify path rather than failing the job."""
+    import errno
+
+    src, dst = _mk(tmp_path)
+    data = src.read_bytes()
+    _exdev_once(monkeypatch, errno.EXDEV)
+
+    progress = []
+    Mover(same_fs=lambda a, b: True).execute(src, dst, progress.append, lambda: False)
+
+    assert not src.exists()
+    assert dst.read_bytes() == data
+    assert not dst.with_name(dst.name + ".part").exists()
+    assert progress and progress[-1] == len(data)
+
+
+def test_same_fs_non_exdev_oserror_reraises(tmp_path, monkeypatch):
+    """Only EXDEV means "not actually the same filesystem". Any other errno is
+    a real failure and must not be silently downgraded to a slow copy."""
+    import errno
+
+    src, dst = _mk(tmp_path)
+    _exdev_once(monkeypatch, errno.EACCES)
+
+    with pytest.raises(OSError) as excinfo:
+        Mover(same_fs=lambda a, b: True).execute(src, dst, lambda b: None, lambda: False)
+    assert excinfo.value.errno == errno.EACCES
+    assert src.exists() and not dst.exists()
