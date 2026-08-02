@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
-import { getState, type StateResponse } from "./api";
+import { getState, getStorageState, type StateResponse, type StorageState } from "./api";
 import EventLog from "./components/EventLog";
 import GpuColumn from "./components/GpuColumn";
 import PolicyModal from "./components/PolicyModal";
 import SetBuilder from "./components/SetBuilder";
 import SparkCard from "./components/SparkCard";
 import SetStrip from "./components/SetStrip";
+import StorageView from "./components/StorageView";
 
 const POLL_MS = 3000;
 
-type View = "deck" | "builder";
+type View = "deck" | "builder" | "storage";
 
 export default function App() {
   const [state, setState] = useState<StateResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [storageState, setStorageState] = useState<StorageState | null>(null);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const [view, setView] = useState<View>("deck");
   const [modalOpen, setModalOpen] = useState(false);
   const [policyModalOpen, setPolicyModalOpen] = useState(false);
@@ -21,14 +24,31 @@ export default function App() {
   // re-fetches its own window whenever this changes (see EventLog.tsx).
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
+  // Fetches both in parallel (Promise.all-style), but each leg's own
+  // .then/.catch means a storage failure can never reject the whole call
+  // or clobber the main `state` — the Deck and Set Builder tabs must keep
+  // working even when the storage backend is unreachable/misconfigured;
+  // only the Storage tab shows storageError.
   const refreshState = useCallback(async () => {
-    try {
-      const s = await getState();
-      setState(s);
-      setLoadError(null);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
-    }
+    await Promise.all([
+      getState().then(
+        (s) => {
+          setState(s);
+          setLoadError(null);
+        },
+        (err) => setLoadError(err instanceof Error ? err.message : String(err)),
+      ),
+      getStorageState().then(
+        (ss) => {
+          setStorageState(ss);
+          setStorageError(null);
+        },
+        (err) => {
+          setStorageState(null);
+          setStorageError(err instanceof Error ? err.message : String(err));
+        },
+      ),
+    ]);
   }, []);
 
   const refreshAll = useCallback(async () => {
@@ -64,6 +84,12 @@ export default function App() {
             onClick={() => setView("builder")}
           >
             Set Builder
+          </button>
+          <button
+            className={view === "storage" ? "primary" : undefined}
+            onClick={() => setView("storage")}
+          >
+            Storage
           </button>
         </nav>
         <button onClick={() => setPolicyModalOpen(true)} disabled={!state}>
@@ -109,6 +135,15 @@ export default function App() {
         ) : (
           <div className="panel">loading…</div>
         ))}
+
+      {view === "storage" && (
+        <StorageView
+          storageState={storageState}
+          error={storageError}
+          onModalOpenChange={setModalOpen}
+          onChanged={refreshAll}
+        />
+      )}
 
       {policyModalOpen && state && (
         <PolicyModal

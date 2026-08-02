@@ -345,3 +345,79 @@ export function slugify(name: string): string {
 // app/sets.py RESERVED_SLUG) — never produced by slugify() for a
 // user-authored name, so it's kept as its own constant rather than derived.
 export const PREVIOUS_SLUG = "_previous";
+
+// ---------------------------------------------------------------------------
+// Storage tiering (/api/storage/*, see app/routers/storage.py) — hot/cold
+// location registry, unit catalog, and move jobs. Types mirror the router's
+// response shapes exactly (bytes throughout, never pre-converted).
+// ---------------------------------------------------------------------------
+
+export interface StorageLocation {
+  name: string; path: string; role: "hot" | "cold";
+  store_type: "gguf" | "hf" | "comfy" | "plain";
+  engine: "lemonade" | "comfyui" | "none";
+  watermark_gb: number | null; archive_to: string | null; readonly: boolean;
+  uuid: string; available: boolean;
+  free_bytes: number | null; total_bytes: number | null;
+}
+
+export interface StorageUnit {
+  id: string; type: "gguf" | "hf_repo" | "comfy" | "plain";
+  name: string; location: string; relpath: string; size: number; mtime: number;
+  state: "resident" | "moving" | "unavailable";
+  pinned: boolean; last_used: number | null;
+}
+
+export interface StorageJob {
+  id: string; unit_id: string; from: string; to: string; label: string;
+  state: "queued" | "copying" | "verifying" | "done" | "failed" | "cancelled";
+  bytes_done: number; bytes_total: number; error: string | null; created_ts: number;
+}
+
+export interface StorageState {
+  locations: StorageLocation[]; units: StorageUnit[];
+  jobs: StorageJob[]; policy: { auto: boolean };
+}
+
+export function getStorageState(): Promise<StorageState> {
+  return request<StorageState>("/api/storage/state");
+}
+export function postStorageMove(unitId: string, dest: string): Promise<{ job: StorageJob }> {
+  return request<{ job: StorageJob }>("/api/storage/moves", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ unit_id: unitId, dest }),
+  });
+}
+export function cancelStorageJob(id: string): Promise<{ cancelled: boolean }> {
+  return request<{ cancelled: boolean }>(`/api/storage/moves/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+export function putUnitPinned(unitId: string, pinned: boolean): Promise<StorageUnit> {
+  return request<StorageUnit>(`/api/storage/units/${unitId}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pinned }),
+  });
+}
+export function putStoragePolicy(policy: { auto: boolean }): Promise<{ auto: boolean }> {
+  return request<{ auto: boolean }>("/api/storage/policy", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+  });
+}
+export function registerLocation(spec: Omit<StorageLocation, "uuid" | "available" | "free_bytes" | "total_bytes">): Promise<StorageLocation> {
+  return request<StorageLocation>("/api/storage/locations", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(spec),
+  });
+}
+export function updateLocation(name: string, patch: Partial<Pick<StorageLocation, "role" | "watermark_gb" | "archive_to" | "readonly">>): Promise<StorageLocation> {
+  return request<StorageLocation>(`/api/storage/locations/${encodeURIComponent(name)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+export function deleteLocation(name: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/storage/locations/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+export function postStorageRescan(): Promise<{ units: number }> {
+  return request<{ units: number }>("/api/storage/rescan", { method: "POST" });
+}
