@@ -83,3 +83,73 @@ def test_unit_in_use_helper():
     assert unit_in_use(_unit(), _world(lemonade_model="extra.a.gguf")) is not None
     assert unit_in_use(_unit(), _world()) is None
     assert unit_in_use(_unit(name="other.gguf"), _world(default_route="extra.other.gguf")) is not None
+
+
+# storage_decide tests
+from app.storage import storage_decide
+
+
+def _loc(name, role="hot", free=10 * 10**9, wm=None, archive_to=None, available=True, **over):
+    d = {"name": name, "path": f"/stores/{name}", "role": role, "store_type": "gguf",
+         "engine": "none", "watermark_gb": wm, "archive_to": archive_to, "readonly": False,
+         "uuid": "u", "available": available, "free_bytes": free if available else None,
+         "total_bytes": 100 * 10**9}
+    d.update(over)
+    return d
+
+
+def _u(uid, loc="hot", size=2 * 10**9, last_used=None, pinned=False, state="resident", name=None):
+    return {"id": uid, "type": "gguf", "name": name or uid.split(":")[1], "location": loc,
+            "relpath": uid.split(":")[1], "size": size, "mtime": 1.0, "state": state,
+            "pinned": pinned, "last_used": last_used}
+
+
+def test_healthy_watermark_no_actions():
+    locs = [_loc("hot", free=60 * 10**9, wm=50.0, archive_to="cold"), _loc("cold", role="cold")]
+    assert storage_decide([_u("hot:a.gguf")], locs, _world(), 0) == []
+
+
+def test_lru_eviction_until_watermark_met():
+    locs = [_loc("hot", free=47 * 10**9, wm=50.0, archive_to="cold"),
+            _loc("cold", role="cold", free=100 * 10**9)]
+    units = [_u("hot:old.gguf", last_used=100.0), _u("hot:never.gguf", last_used=None),
+             _u("hot:recent.gguf", last_used=999.0)]
+    actions = storage_decide(units, locs, _world(), 0)
+    # needed 3 GB; never-used goes first, then LRU — two 2 GB archives suffice
+    assert [a["unit_id"] for a in actions] == ["hot:never.gguf", "hot:old.gguf"]
+    assert all(a["type"] == "archive" and a["dest"] == "cold" for a in actions)
+
+
+def test_exemptions_pinned_loaded_default_route():
+    locs = [_loc("hot", free=1 * 10**9, wm=50.0, archive_to="cold"),
+            _loc("cold", role="cold", free=100 * 10**9)]
+    units = [_u("hot:pinned.gguf", pinned=True),
+             _u("hot:loaded.gguf"), _u("hot:route.gguf")]
+    world = _world(lemonade_model="extra.loaded.gguf", default_route="extra.route.gguf")
+    actions = storage_decide(units, locs, world, 0)
+    assert [a["type"] for a in actions] == ["shortfall"]          # nothing eligible
+
+
+def test_partial_relief_archives_then_reports_shortfall():
+    locs = [_loc("hot", free=40 * 10**9, wm=50.0, archive_to="cold"),
+            _loc("cold", role="cold", free=100 * 10**9)]
+    units = [_u("hot:only.gguf", size=4 * 10**9)]
+    actions = storage_decide(units, locs, _world(), 0)
+    assert actions[0]["type"] == "archive"
+    assert actions[1] == {"type": "shortfall", "location": "hot",
+                          "missing_bytes": 6 * 10**9}
+
+
+def test_dest_space_accounts_for_planned_archives():
+    locs = [_loc("hot", free=40 * 10**9, wm=50.0, archive_to="cold"),
+            _loc("cold", role="cold", free=3 * 10**9)]              # fits one 2 GB, not two
+    units = [_u("hot:a.gguf", last_used=1.0), _u("hot:b.gguf", last_used=2.0)]
+    actions = storage_decide(units, locs, _world(), 0)
+    archives = [a for a in actions if a["type"] == "archive"]
+    assert [a["unit_id"] for a in archives] == ["hot:a.gguf"]
+
+
+def test_no_archive_to_reports_shortfall_only():
+    locs = [_loc("hot", free=1 * 10**9, wm=50.0, archive_to=None)]
+    actions = storage_decide([_u("hot:a.gguf")], locs, _world(), 0)
+    assert [a["type"] for a in actions] == ["shortfall"]

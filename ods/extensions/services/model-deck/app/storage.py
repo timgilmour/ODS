@@ -64,3 +64,48 @@ def plan_move(unit: dict, dest: dict, world: dict, active_unit_ids,
 
     return {"unit_id": unit["id"], "src_location": unit["location"],
             "dest_location": dest["name"], "bytes": unit["size"]}
+
+
+def storage_decide(units: list[dict], locations: list[dict], world: dict,
+                   slack_bytes: int) -> list[dict]:
+    """Pure watermark-eviction rules. DELIBERATE ASYMMETRY vs VRAM healing:
+    partial relief still helps a disk, so this archives what it can and
+    reports the remainder as a shortfall — it never feasibility-vetoes."""
+    by_name = {loc["name"]: loc for loc in locations}
+    default_route = _strip(world["default_route"])
+    actions: list[dict] = []
+    planned_to_dest: dict[str, int] = {}
+
+    for loc in locations:
+        if loc["role"] != "hot" or not loc["available"] or not loc["watermark_gb"]:
+            continue
+        watermark = int(loc["watermark_gb"] * 1e9)
+        needed = watermark - loc["free_bytes"]
+        if needed <= 0:
+            continue
+
+        dest = by_name.get(loc["archive_to"] or "")
+        candidates = []
+        if dest is not None and dest["available"] and not dest["readonly"]:
+            candidates = [
+                u for u in units
+                if u["location"] == loc["name"] and u["state"] == "resident"
+                and not u["pinned"] and unit_in_use(u, world) is None
+                and not (u["type"] == "gguf" and u["name"] == default_route)
+            ]
+            candidates.sort(key=lambda u: (u["last_used"] is not None,
+                                           u["last_used"] or 0.0, u["mtime"]))
+        for u in candidates:
+            if needed <= 0:
+                break
+            already = planned_to_dest.get(dest["name"], 0)
+            if dest["free_bytes"] - already < u["size"] + slack_bytes:
+                continue                    # dest can't take this one; try smaller
+            actions.append({"type": "archive", "unit_id": u["id"],
+                            "dest": dest["name"], "bytes": u["size"]})
+            planned_to_dest[dest["name"]] = already + u["size"]
+            needed -= u["size"]
+        if needed > 0:
+            actions.append({"type": "shortfall", "location": loc["name"],
+                            "missing_bytes": needed})
+    return actions
