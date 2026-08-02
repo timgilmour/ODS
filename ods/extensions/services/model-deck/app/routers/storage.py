@@ -10,7 +10,6 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.engines import GuardError
 from app.notify import notify_engine
 from app.routers import build_world_snapshot
 from app.events import log_event
@@ -82,18 +81,18 @@ def submit_move(deck, unit_id: str, dest_name: str, label: str, on_success=None,
     if dest is None:
         raise ValueError(f"unknown location {dest_name!r}")
     # Plan/UX half of the destination-collision guard (the worker enforces the
-    # other half at its choke point): refuse up front so the operator gets a
-    # 409 instead of a job that fails minutes later, and so a same-named
-    # archived copy is never a move away from being overwritten.
-    if (Path(dest["path"]) / unit["relpath"]).exists():
-        raise GuardError(
-            f"destination {dest_name!r} already exists: {unit['relpath']!r} "
-            "is already there — move or remove it first")
+    # other half at its choke point): we do the I/O here (this router isn't
+    # pure) and hand plan_move the yes/no, so it gets the operator a 409 up
+    # front instead of a job that fails minutes later — and so a same-named
+    # archived copy is never a move away from being overwritten. plan_move
+    # owns the actual guard decision (and its ordering vs the other guards).
+    dest_occupied = (Path(dest["path"]) / unit["relpath"]).exists()
     world = build_world_snapshot(deck)
     active = frozenset(j["unit_id"] for j in deck["job_queue"].jobs()
                        if j["state"] not in _TERMINAL)
     plan = plan_move(unit, dest, world, active, dest["free_bytes"],
-                     deck["settings"].storage_slack_bytes)
+                     deck["settings"].storage_slack_bytes,
+                     dest_occupied=dest_occupied)
     return deck["job_queue"].submit(plan, label=label, on_success=on_success,
                                     on_progress=on_progress)
 

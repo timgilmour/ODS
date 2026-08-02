@@ -14,6 +14,7 @@ refused with GuardError → HTTP 409.
 """
 
 import threading
+from pathlib import Path
 
 from app.engines import GuardError
 from app.events import log_event
@@ -46,7 +47,8 @@ def unit_in_use(unit: dict, world: dict) -> str | None:
 
 
 def plan_move(unit: dict, dest: dict, world: dict, active_unit_ids,
-              dest_free_bytes: int | None, slack_bytes: int) -> dict:
+              dest_free_bytes: int | None, slack_bytes: int,
+              dest_occupied: bool = False) -> dict:
     if unit["state"] == "unavailable":
         raise GuardError(f"unit {unit['id']!r} is on an unavailable location")
     if unit["state"] == "moving" or unit["id"] in active_unit_ids:
@@ -69,6 +71,14 @@ def plan_move(unit: dict, dest: dict, world: dict, active_unit_ids,
         raise GuardError(f"destination {dest['name']!r} is unavailable (marker missing — drive unmounted?)")
     if dest["readonly"]:
         raise GuardError(f"destination {dest['name']!r} is readonly")
+    # Destination-collision guard (C1b, NEW-1): the caller does the I/O (this
+    # module stays pure) and hands us the yes/no. Placed AFTER same-location/
+    # unavailable/readonly so a same-location "move" still reports "equals
+    # source location" instead of being shadowed by this message — the bug in
+    # the original pre-plan_move exists() check, which ran unconditionally.
+    if dest_occupied:
+        raise GuardError(
+            f"destination already exists: {unit['relpath']!r} — refusing to overwrite")
     if dest_free_bytes is None or dest_free_bytes < unit["size"] + slack_bytes:
         raise GuardError(
             f"insufficient space on {dest['name']!r}: need {unit['size'] + slack_bytes}, have {dest_free_bytes}")
@@ -199,9 +209,15 @@ class StorageWatcher:
     def _enqueue(self, action, units_by_id, locs_by_name, world) -> None:
         unit = units_by_id[action["unit_id"]]
         dest = locs_by_name[action["dest"]]
+        # Same dest-occupied check the router does: a same-named file already
+        # sitting at the archive destination must not be silently clobbered by
+        # an auto-eviction. plan_move's GuardError is absorbed below into a
+        # deduped storage_skip — no job submitted, no churn across ticks.
+        dest_occupied = (Path(dest["path"]) / unit["relpath"]).exists()
         try:
             plan = plan_move(unit, dest, world, frozenset(),
-                             dest["free_bytes"], self._slack)
+                             dest["free_bytes"], self._slack,
+                             dest_occupied=dest_occupied)
         except GuardError as exc:
             self._log("storage_skip", {"unit": unit["id"], "reason": str(exc)})
             return

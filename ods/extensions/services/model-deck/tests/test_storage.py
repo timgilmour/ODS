@@ -30,10 +30,12 @@ def _world(lemonade_model=None, default_route=None, comfy_state="idle", comfy_qu
                         "hipfire": {"state": "parked", "model": None, "footprint": 0, "queue_depth": None}}}
 
 
-def _plan(unit=None, dest=None, world=None, active=frozenset(), free=None, slack=0):
+def _plan(unit=None, dest=None, world=None, active=frozenset(), free=None, slack=0,
+         dest_occupied=False):
     dest = dest or _dest()
     return plan_move(unit or _unit(), dest, world or _world(), active,
-                     dest["free_bytes"] if free is None else free, slack)
+                     dest["free_bytes"] if free is None else free, slack,
+                     dest_occupied=dest_occupied)
 
 
 def test_happy_path_returns_plan():
@@ -83,6 +85,27 @@ def test_unit_in_use_helper():
     assert unit_in_use(_unit(), _world(lemonade_model="extra.a.gguf")) is not None
     assert unit_in_use(_unit(), _world()) is None
     assert unit_in_use(_unit(name="other.gguf"), _world(default_route="extra.other.gguf")) is not None
+
+
+# ===========================================================================
+# Destination-collision guard, routed through plan_move (NEW-1): the caller
+# tells plan_move whether the destination already holds a same-named file
+# instead of plan_move (or a caller) doing I/O itself — the module stays PURE.
+# ===========================================================================
+
+
+def test_dest_occupied_refused():
+    with pytest.raises(GuardError, match="refusing to overwrite"):
+        _plan(dest_occupied=True)
+
+
+def test_dest_equals_source_wins_over_occupied():
+    """Guard order: same-location is checked BEFORE dest_occupied. A
+    same-location 'move' must still report 'equals source location' — not be
+    shadowed by the occupied-destination message — even when dest_occupied is
+    True (as it trivially would be, since dest IS source)."""
+    with pytest.raises(GuardError, match="equals source location"):
+        _plan(dest=_dest(name="hot"), dest_occupied=True)
 
 
 # storage_decide tests
@@ -230,6 +253,22 @@ def test_suggestion_deduped_across_ticks(tmp_path):
     watcher.tick(); watcher.tick(); watcher.tick()
     kinds = [e["kind"] for e in tail_events(events)]
     assert kinds.count("storage_suggestion") == 1
+
+
+def test_watcher_skips_dest_occupied_without_submitting(tmp_path):
+    """The watcher must consult the same dest-occupied guard the router uses:
+    if the archive destination already holds a same-named file, plan_move
+    refuses and _enqueue must swallow the GuardError via the existing
+    storage_skip path — no job submitted, no repeated churn across ticks."""
+    from app.events import tail_events
+    watcher, queue, events = _watcher_env(tmp_path, auto=True)
+    (tmp_path / "cold" / "idle.gguf").write_bytes(b"already archived")
+
+    watcher.tick(); watcher.tick(); watcher.tick()
+
+    assert queue.submitted == []
+    kinds = [e["kind"] for e in tail_events(events)]
+    assert kinds.count("storage_skip") == 1
 
 
 def test_healthy_watermark_no_events(tmp_path):
