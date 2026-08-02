@@ -6,6 +6,7 @@ Model Deck HTTP routers — one module per resource area, all mounted under
   control.py — POST /tenants/{lemonade,comfyui,hipfire}/... (admin)
   sets.py — config-set CRUD + preview/apply (mixed: GETs open, mutations admin)
   policy.py — GET/PUT policy (GET open, PUT admin)
+  storage.py — locations/catalog/moves/pins/tiering policy (no auth)
 
 Every router pulls its dependencies from ``request.app.state.deck`` (see
 ``app.main._build_deck``) rather than constructing clients itself, so tests

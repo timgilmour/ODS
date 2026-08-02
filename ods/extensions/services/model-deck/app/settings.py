@@ -98,3 +98,8 @@ class Settings(BaseSettings):
     # /sys/devices resolve inside the container.
     drm_root: Path = Path("/sysfs/class/drm")
     kfd_root: Path = Path("/sysfs/class/kfd/kfd/proc")
+
+    # --- Storage tiering ---
+    storage_watch_interval: float = 60.0
+    # Free-space slack required at a move destination beyond the unit size.
+    storage_slack_bytes: int = 2_000_000_000

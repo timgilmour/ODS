@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.engines import BusyError, EngineError, GuardError
 from app.gateway import detect_default_gateway
-from app.routers import control, policy, sets, spark, status
+from app.routers import control, policy, sets, spark, status, storage
 from app.settings import Settings
 
 # The GGUF store is bound read-only into the container at this path (see
@@ -86,6 +86,7 @@ def _build_deck(settings: Settings) -> dict:
         return cached[1]
 
     from app.arbiter import HealSuppressor
+    from app.catalog import Catalog
     from app.engines.comfyui import ComfyClient
     from app.engines.docker_ctl import DockerCtl
     from app.engines.hipfire import HipfireClient
@@ -93,7 +94,9 @@ def _build_deck(settings: Settings) -> dict:
     from app.engines.lemonade import LemonadeClient
     from app.engines.litellm import LiteLLMClient
     from app.gpu import read_gpus
-    from app.policy import PolicyStore
+    from app.locations import LocationStore
+    from app.mover import JobQueue, Mover
+    from app.policy import PolicyStore, StoragePolicyStore
     from app.registry import Registry
     from app.sets import SetStore
     from app.state import World
@@ -138,6 +141,11 @@ def _build_deck(settings: Settings) -> dict:
                 litellm=litellm,
             )
 
+    location_store = LocationStore(data_dir / "locations.json")
+    catalog = Catalog(data_dir / "catalog.json", location_store)
+    mover = Mover()
+    job_queue = JobQueue(mover, catalog, location_store, data_dir / "events.jsonl")
+
     deck = {
         "settings": settings,
         "world": World(placement={
@@ -162,6 +170,12 @@ def _build_deck(settings: Settings) -> dict:
         # set-apply) so every deck-initiated unload/load coordinates on one
         # suppression window.
         "heal_suppressor": HealSuppressor(settings.heal_suppress_s),
+        "dockerctl": dockerctl,
+        "location_store": location_store,
+        "catalog": catalog,
+        "storage_policy_store": StoragePolicyStore(data_dir / "storage_policy.json"),
+        "mover": mover,
+        "job_queue": job_queue,
     }
     _deck_by_settings_id[id(settings)] = (settings, deck)
     return deck
@@ -190,6 +204,20 @@ def _build_watcher(settings: Settings):
     )
 
 
+def _build_storage_watcher(settings: Settings):
+    """Construct the StorageWatcher from the same shared deck _build_deck
+    hands the HTTP routers (see the cache comment above) — same
+    settings-id-keyed cache pattern as _build_watcher."""
+    from app.routers import build_world_snapshot
+    from app.storage import StorageWatcher
+
+    deck = _build_deck(settings)
+    return StorageWatcher(settings=deck["settings"], location_store=deck["location_store"],
+                          catalog=deck["catalog"], storage_policy_store=deck["storage_policy_store"],
+                          job_queue=deck["job_queue"], world_fn=lambda: build_world_snapshot(deck),
+                          events_path=deck["events_path"])
+
+
 def create_app() -> FastAPI:
     """Build the Model Deck FastAPI app. Requires no environment variables."""
     settings = Settings()
@@ -197,15 +225,26 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        from pathlib import Path as _Path
+        roots = [_Path(loc["path"]) for loc in deck["location_store"].list()
+                 if deck["location_store"].available(loc)]
+        deck["mover"].janitor(roots)
+        deck["job_queue"].start()
         watcher = None
+        storage_watcher = None
         if os.environ.get("MODEL_DECK_NO_WATCHER") != "1":
             watcher = _build_watcher(settings)
             watcher.start()
+            storage_watcher = _build_storage_watcher(settings)
+            storage_watcher.start()
         try:
             yield
         finally:
+            if storage_watcher is not None:
+                storage_watcher.stop()
             if watcher is not None:
                 watcher.stop()
+            deck["job_queue"].stop()
 
     app = FastAPI(title="Model Deck", lifespan=lifespan)
     app.state.settings = settings
@@ -236,6 +275,7 @@ def create_app() -> FastAPI:
     app.include_router(sets.router, prefix="/api")
     app.include_router(policy.router, prefix="/api")
     app.include_router(spark.router, prefix="/api")
+    app.include_router(storage.router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when
     # present so the API keeps working standalone until then. Mounted LAST:

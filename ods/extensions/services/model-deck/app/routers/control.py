@@ -53,12 +53,23 @@ def _ensure_host_agent_idle(deck, force: bool) -> None:
 
 
 @router.post("/lemonade/load")
-def lemonade_load(body: LemonadeLoadBody, request: Request, force: bool = False) -> dict:
+def lemonade_load(body: LemonadeLoadBody, request: Request,
+                  force: bool = False, pull: bool = False) -> dict:
     deck = request.app.state.deck
     _ensure_host_agent_idle(deck, force)
     model = body.model
     if not model.startswith(_EXTRA_PREFIX):
         model = f"{_EXTRA_PREFIX}{model}"
+    bare = model.removeprefix(_EXTRA_PREFIX)
+
+    hot_files = {m["file"] for m in deck["registry"].scan()}
+    if bare not in hot_files:
+        cold_unit = _find_cold_gguf(deck, bare)
+        if cold_unit is not None:
+            return _pull_through(deck, bare, cold_unit, pull)
+
+    # Hot path — unchanged semantics (see original comments for suppressor
+    # rationale), plus last-used bookkeeping for the storage catalog.
     # Arm suppression for the in-flight window: while the blocking load runs,
     # lemonade still reports "unloaded" and the GPU is already filling, so an
     # un-suppressed watcher tick would infer a pending default-route load and
@@ -67,7 +78,48 @@ def lemonade_load(body: LemonadeLoadBody, request: Request, force: bool = False)
     deck["lemonade"].load(model)
     # Deliberate load succeeded: clear the window (and any prior unload's).
     deck["heal_suppressor"].clear()
+    deck["catalog"].note_used_gguf(bare)
     return {"status": "ok"}
+
+
+def _find_cold_gguf(deck, bare: str):
+    for unit in deck["catalog"].scan():
+        if unit["type"] == "gguf" and unit["name"] == bare and unit["state"] == "resident":
+            loc = deck["location_store"].get(unit["location"])
+            if loc and loc["engine"] != "lemonade":
+                return unit
+    return None
+
+
+def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
+    from app.engines import GuardError
+    from app.notify import notify_engine
+    from app.routers.storage import submit_move
+
+    auto = deck["storage_policy_store"].get()["auto"]
+    if not (auto or pull):
+        raise GuardError(
+            f"model {bare!r} is cold (in {unit['location']!r}) — "
+            f"re-request with ?pull=true to pull it to hot storage first")
+
+    hot_locs = [loc for loc in deck["location_store"].describe()
+                if loc["engine"] == "lemonade" and loc["available"] and not loc["readonly"]]
+    if not hot_locs:
+        raise GuardError("no available hot lemonade location is registered")
+    hot = max(hot_locs, key=lambda loc: loc["free_bytes"])   # most free space wins (spec)
+
+    def after(job: dict) -> None:
+        notify_engine(hot, deck)
+        deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
+        deck["heal_suppressor"].clear()
+        deck["catalog"].note_used_gguf(bare)
+
+    # Pre-arm: the multi-minute pull must not fight the VRAM watcher's
+    # pending-load inference (spec section 3).
+    deck["heal_suppressor"].note_deck_unload()
+    job = submit_move(deck, unit["id"], hot["name"],
+                      label="pull-through load", on_success=after)
+    return {"status": "pulling", "job": job["id"]}
 
 
 @router.post("/lemonade/unload")
