@@ -179,11 +179,12 @@ class JobQueue:
                "label": label, "state": "queued", "bytes_done": 0,
                "bytes_total": plan["bytes"], "error": None,
                "created_ts": time.time()}
+        # Set catalog state BEFORE job becomes visible to worker thread
+        self._catalog.set_state(plan["unit_id"], "moving")
         with self._lock:
             self._jobs[job["id"]] = job
             self._pending.append({**job, "_on_success": on_success})
-        self._catalog.set_state(plan["unit_id"], "moving")
-        self._wake.set()
+            self._wake.set()
         return dict(job)
 
     def jobs(self) -> list[dict]:
