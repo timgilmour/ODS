@@ -66,6 +66,10 @@ class Settings(BaseSettings):
 
     # --- Parking / arbitration ---
     hipfire_container: str = "ods-hipfire"
+    # Lemonade wrapper container (llama-server) — restarted by the storage
+    # notify hook so a freshly moved-in GGUF registers (lemonade scans its
+    # store only at startup; verified live v10.2.0, no rescan endpoint).
+    lemonade_container: str = "ods-llama-server"
     # Seconds after hipfire's last observed served request during which
     # park/apply refuse to restart it (the single-slot conversation cache
     # means a restart between turns costs the next turn minutes of
