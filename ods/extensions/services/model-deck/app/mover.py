@@ -174,6 +174,11 @@ class JobQueue:
         self._catalog = catalog
         self._locations = location_store
         self._events_path = events_path
+        # Optional () -> world-snapshot callable, set by app.main after the
+        # deck dict exists (the queue is constructed before it, so this cannot
+        # be a constructor arg without a chicken-and-egg). None = no re-check,
+        # which keeps every standalone unit test thread-free and I/O-free.
+        self.world_fn = None
         self._lock = threading.Lock()
         self._jobs: dict[str, dict] = {}
         self._pending: list[dict] = []
@@ -275,6 +280,18 @@ class JobQueue:
             dst_loc = self._resolve(job["to"])
             src = Path(src_loc["path"]) / unit["relpath"]
             dst = Path(dst_loc["path"]) / unit["relpath"]
+
+            # EXECUTION-START RE-CHECK (spec section 2: guards evaluated at
+            # plan time AND re-checked here). A job can sit queued behind a
+            # multi-hour copy; by the time it runs, the model may have been
+            # loaded or become litellm's default route — both of which
+            # unit_in_use() reports. Fail the job rather than yank the file.
+            if self.world_fn is not None:
+                from app.storage import unit_in_use
+
+                reason = unit_in_use(unit, self.world_fn())
+                if reason:
+                    raise RuntimeError(f"refused at execution start: {reason}")
 
             # THE CHOKE POINT (invariant 12 corollary): the same-fs fast path
             # is an os.replace, which silently clobbers a same-named file at

@@ -570,3 +570,36 @@ def test_move_onto_existing_destination_file_409(tmp_path, monkeypatch):
     assert "already exists" in resp.json()["detail"]
     assert (dst / "a.gguf").read_bytes() == b"older archived version"
     assert (src / "a.gguf").exists()
+
+
+# ===========================================================================
+# Execution-start guard re-check (I2 — spec section 2: guards are evaluated at
+# plan time AND re-checked at execution start)
+# ===========================================================================
+
+
+def test_queued_move_refused_when_model_loaded_before_execution(tmp_path, monkeypatch):
+    """A move can sit queued for a long time behind another job. If the model
+    gets loaded in the meantime, the worker must refuse rather than yank the
+    file out from under lemonade — the plan-time guard alone is not enough."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    src = _register(client, tmp_path, "src")
+    dst = _register(client, tmp_path, "dst")
+    _write_gguf(src, "a.gguf")
+    deck["catalog"].scan()
+
+    job_id = client.post(
+        "/api/storage/moves", json={"unit_id": "src:a.gguf", "dest": "dst"}
+    ).json()["job"]["id"]
+
+    # Reality moves between plan time and execution start.
+    deck["lemonade"] = FakeLemonade(loaded="extra.a.gguf")
+
+    deck["job_queue"]._process(deck["job_queue"]._pending.pop(0))
+
+    failed = deck["job_queue"].get(job_id)
+    assert failed["state"] == "failed"
+    assert "currently loaded" in failed["error"]
+    assert (src / "a.gguf").exists() and not (dst / "a.gguf").exists()
+    assert deck["catalog"].get("src:a.gguf")["state"] == "resident"

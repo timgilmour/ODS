@@ -177,6 +177,13 @@ def _build_deck(settings: Settings) -> dict:
         "mover": mover,
         "job_queue": job_queue,
     }
+    # Late-bound so the queue's execution-start guard can re-snapshot the world
+    # (spec section 2). It has to be assigned rather than injected: the queue is
+    # constructed above, before the deck dict it would need to read from exists.
+    from app.routers import build_world_snapshot
+
+    job_queue.world_fn = lambda: build_world_snapshot(deck)
+
     _deck_by_settings_id[id(settings)] = (settings, deck)
     return deck
 
