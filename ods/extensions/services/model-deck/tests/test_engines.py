@@ -442,6 +442,29 @@ def test_dockerctl_stop_hits_correct_path():
     assert req.url.path == "/containers/ods-hipfire/stop"
 
 
+def test_dockerctl_stop_sends_5s_grace_period_query_param():
+    handler = _recording_handler(204, {})
+    ctl = _dockerctl(handler)
+
+    ctl.stop("ods-hipfire")
+
+    req = handler.calls[0]
+    assert req.url.params["t"] == "5"
+
+
+def test_dockerctl_stop_uses_extended_read_timeout():
+    seen = {}
+
+    def handler(request):
+        seen.update(request.extensions.get("timeout", {}))
+        return httpx.Response(204, request=request)
+
+    ctl = _dockerctl(handler)
+    ctl.stop("ods-hipfire")
+
+    assert seen.get("read") == 30.0
+
+
 def test_dockerctl_start_hits_correct_path():
     handler = _recording_handler(204, {})
     ctl = _dockerctl(handler)

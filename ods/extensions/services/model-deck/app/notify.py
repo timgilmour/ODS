@@ -11,7 +11,22 @@ the way.
 
 comfyui (verified live): /api/models/{type} lists files per request — no
 action needed. engine "none": nothing to notify.
+
+stop() resilience (LIVE-VERIFIED): ods-llama-server ignores SIGTERM, so
+even with DockerCtl's extended stop timeout the container can still be
+mid-SIGKILL when the HTTP call times out client-side and raises
+EngineError, while the container goes on to actually stop. If stop()
+raises, the container is very likely just still stopping — wait out
+Docker's grace period, then attempt start() anyway (the normal next step
+regardless of how stop() finished). If start() then succeeds, the goal
+state ("container restarting") is reached and we return None same as the
+happy path. If start() also raises, that EngineError propagates — a real
+double failure, not a timing race, should surface as a failure.
 """
+
+import time
+
+from app.engines import EngineError
 
 
 def notify_engine(location: dict, deck: dict) -> str | None:
@@ -21,6 +36,9 @@ def notify_engine(location: dict, deck: dict) -> str | None:
         return ("lemonade has a model loaded — restart deferred; the new file "
                 "registers after the next lemonade restart")
     container = deck["settings"].lemonade_container
-    deck["dockerctl"].stop(container)
+    try:
+        deck["dockerctl"].stop(container)
+    except EngineError:
+        time.sleep(10)
     deck["dockerctl"].start(container)
     return None
