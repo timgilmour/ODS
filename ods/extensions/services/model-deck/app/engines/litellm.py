@@ -54,6 +54,21 @@ class LiteLLMClient:
         """Raw /model/info entries — for callers needing api_base etc."""
         return self._model_info()
 
+    def health(self) -> dict:
+        """Raw GET /health body: healthy_endpoints / unhealthy_endpoints.
+
+        Note this is the *proxy's* per-route probe, which actively calls each
+        backend. Interpretation lives in ``interpret_health`` — a non-2xx or
+        transport failure here raises EngineError like every other call.
+        """
+        try:
+            resp = self._client.get("/health")
+        except httpx.TransportError as exc:
+            raise EngineError(str(exc)) from exc
+        if not resp.is_success:
+            raise EngineError(resp.text)
+        return resp.json()
+
     def _model_info(self) -> list[dict]:
         try:
             resp = self._client.get("/model/info")
@@ -62,3 +77,35 @@ class LiteLLMClient:
         if not resp.is_success:
             raise EngineError(resp.text)
         return resp.json()["data"]
+
+
+# Substrings identifying "the node answered, it just isn't serving this
+# model" — the normal resting state of every single-slot engine. Anything
+# else is treated as unreachable: an unrecognised error must fail loud
+# rather than be silently downgraded to a benign reading.
+_NOT_LOADED_MARKERS = ("does not exist", "notfounderror", "model_not_found")
+
+
+def interpret_health(body: dict) -> dict[str, dict]:
+    """Map a /health body to ``{route: {reachable, loaded, detail}}``.
+
+    The load-bearing rule (design doc, 'LiteLLM interpretation rule'): a
+    connection error means the node is DOWN; a model-not-found error on a
+    reachable node means NOT LOADED and is never an alarm. On 2026-08-03,
+    five of six 'unhealthy' routes were the latter and entirely correct.
+    """
+    result: dict[str, dict] = {}
+
+    for entry in body.get("healthy_endpoints") or []:
+        result[entry["model"]] = {"reachable": True, "loaded": True, "detail": "healthy"}
+
+    for entry in body.get("unhealthy_endpoints") or []:
+        error = str(entry.get("error", ""))
+        not_loaded = any(marker in error.lower() for marker in _NOT_LOADED_MARKERS)
+        result[entry["model"]] = {
+            "reachable": not_loaded,
+            "loaded": False,
+            "detail": error or "unknown error",
+        }
+
+    return result
