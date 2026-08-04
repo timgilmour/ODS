@@ -74,13 +74,25 @@ Design notes that are load-bearing (and tested):
   and a deduped ``host-agent-busy`` event is logged instead. An idle tick
   (nothing to do) never probes the agent at all. ``hostagent=None`` (the
   default) disables the check entirely, so this is opt-in.
+
+* LIFECYCLE RECONCILIATION (``_reconcile_pass``) is a second, independent
+  pass at the END of every tick. Arbitration answers "who must give up VRAM
+  right now"; reconciliation answers "is what the operator asked for still
+  true", by comparing app.intent against this tick's observation. It is what
+  stops ods-hipfire sitting Exited(0) for 26 hours looking exactly like a
+  deliberate park (2026-08-03). ``intent_store=None`` (the default) disables
+  it entirely — same opt-in shape as ``hostagent``.
 """
 
 import threading
 import time
 
-from app.engines import EngineError, GuardError
+from app.engines import BusyError, EngineError, GuardError
+from app.engines.spark import boot_in_flight
 from app.events import log_event
+from app.lifecycle import derive_status
+from app.observe import merge_observations, observe_local, observe_spark
+from app.reconcile import plan_reconcile
 from app.sets import apply_in_progress
 
 # VRAM overhead slack subtracted when estimating comfyui's reclaimable bytes
@@ -322,6 +334,8 @@ class Watcher:
         heal_suppressor=None,
         hostagent=None,
         catalog=None,
+        intent_store=None,
+        spark=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -346,6 +360,14 @@ class Watcher:
         # order is only as good as the loads it gets told about. None (unit
         # tests, any caller without the deck) simply skips the bookkeeping.
         self._catalog = catalog
+        # Durable desired state, shared with the HTTP routers (which write it
+        # on every deliberate action). None disables the reconcile pass, which
+        # is what every pre-lifecycle caller and unit test gets.
+        self._intent_store = intent_store
+        # Remote single-slot node. None on a box with no spark configured —
+        # observe_spark then emits no key at all, so an undeclared resource
+        # can never appear as a phantom failure.
+        self._spark = spark
         self._interval = settings.watch_interval
 
         self._stop = threading.Event()
@@ -418,6 +440,7 @@ class Watcher:
                     })
                     return
             self._execute(actions, pending)
+            self._reconcile_pass(world)
         except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above
             self._log("tick-error", {"error": str(exc)})
 
@@ -499,13 +522,137 @@ class Watcher:
                         pending["model"].removeprefix(_EXTRA_PREFIX))
                 self._log("load-retriggered", {"model": pending["model"]})
 
+    # --- lifecycle reconciliation ------------------------------------------
+
+    def _reconcile_pass(self, world: dict) -> None:
+        """Compare intent against this tick's observation and restore what
+        died. Runs AFTER arbitration on the same snapshot: arbitration
+        settles VRAM contention happening right now, reconciliation settles
+        desired state over time, and doing it the other way round can
+        restore a model arbitration is about to evict (a load/evict flap).
+
+        No-op when no intent store is wired (unit tests and any caller that
+        predates the lifecycle work).
+        """
+        if self._intent_store is None:
+            return
+
+        intents = self._intent_store.get()
+        spark_status = self._spark_status()
+        observed = merge_observations(
+            observe_local(world),
+            observe_spark(spark_status),
+        )
+
+        statuses = {
+            key: derive_status(intents.get(key), obs) for key, obs in observed.items()
+        }
+
+        for key, status in statuses.items():
+            if status["status"] == "serving":
+                self._intent_store.note_healthy(key)
+
+        actions = plan_reconcile(
+            statuses,
+            intents,
+            auto_enabled=self._policy_store.auto_enabled(),
+            boot_window_active=bool(
+                spark_status and spark_status["swap_in_progress"]),
+        )
+
+        for action in actions:
+            self._execute_restore(action)
+
+    def _spark_status(self) -> dict | None:
+        """The spark node's state in app.observe's vocabulary, or None when
+        no spark is configured.
+
+        Two shape translations happen here and nowhere else, because the
+        node payload (``{"profiles", "swap_status", "serving"}``) is not the
+        observation shape:
+
+        * identity is the PROFILE the node last swapped to, not the served
+          model name (mm27b serves as `aeon`; comparing served names would
+          report permanent drift for a correct placement);
+        * an engine failure reads as unreachable, never as "nothing loaded"
+          — we failed to look, which is not the same as looking and seeing
+          nothing.
+        """
+        if self._spark is None:
+            return None
+        try:
+            status = self._spark.status()
+        except (EngineError, GuardError, BusyError) as exc:
+            self._log("lifecycle-spark-unreachable", {"error": str(exc)})
+            return {"profile": None, "serving": None, "reachable": False,
+                    "swap_in_progress": False}
+        swap_status = status.get("swap_status") or {}
+        return {
+            "profile": swap_status.get("profile"),
+            "serving": status.get("serving"),
+            "reachable": True,
+            "swap_in_progress": boot_in_flight(status),
+        }
+
+    def _execute_restore(self, action: dict) -> None:
+        """Perform one restore, recording success or failure against the
+        failure budget. A restore that raises must never escape into the
+        tick's broad catch — that would skip the remaining actions and hide
+        which key failed."""
+        key = action["key"]
+        try:
+            self._restore(action)
+        except Exception as exc:  # noqa: BLE001 — per-action isolation, see docstring
+            count = self._intent_store.note_failure(key)
+            self._log("lifecycle-restore-failed",
+                      {"key": key, "error": str(exc), "failures": count})
+            if self._intent_store.get().get(key, {}).get("quarantined"):
+                self._log("lifecycle-quarantined", {"key": key})
+            return
+        self._log("lifecycle-restore", {"key": key, "model": action["model"]})
+
+    def _restore(self, action: dict) -> None:
+        """Dispatch a restore to the engine that owns the resource.
+
+        Engine dispatch is a mapping of behaviours, not an if-chain over
+        resource names, so a new engine is a new entry. The method names are
+        the REAL client APIs: hipfire resumes its container
+        (app/engines/hipfire.py:162), lemonade loads by name
+        (app/engines/lemonade.py:64), spark swaps a profile
+        (app/engines/spark.py).
+
+        ComfyUI is deliberately absent, and cannot reach here: app.observe
+        maps its 'unknown' state to unreachable, so a down ComfyUI derives
+        'unreachable', never 'down'. A handler for it would be dead code
+        implying a capability ComfyClient does not have (queue_len/free only).
+        """
+        engine = action["engine"]
+
+        if engine == "hipfire":
+            self._hipfire.resume()
+            return
+        if engine == "lemonade":
+            self._lemonade.load(action["model"])
+            return
+        if engine == "spark":
+            if self._spark is None:
+                raise EngineError(
+                    "spark restore requested but no spark client is configured")
+            # Spark intent stores the PROFILE in `model` — that is what swap
+            # takes, and what observe_spark compares against.
+            self._spark.swap(action["model"])
+            return
+
+        raise EngineError(f"no restore handler for engine {engine!r}")
+
     # Event kinds whose consecutive identical repeats are collapsed to a
     # single log line, so a persistent state (a stuck 'wont-fit', a crashing
     # tick, a comfy queue that keeps racing) doesn't spam the audit log every
     # tick. A different kind — or the same kind with a different detail — in
     # between resets the suppression. Real one-shot actions (unloads, frees,
     # loads) are NEVER deduped and always logged.
-    _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced", "host-agent-busy"})
+    _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced", "host-agent-busy",
+                          "lifecycle-spark-unreachable"})
 
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))

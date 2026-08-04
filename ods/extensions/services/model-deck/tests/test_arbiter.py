@@ -22,6 +22,11 @@ from app.arbiter import HealSuppressor, Watcher, decide
 from app.engines import EngineError, GuardError
 from app.events import tail_events
 
+# The reconcile pass is the first watcher code to call the hipfire client, so
+# it needs a real fake rather than the bare object() the arbitration tests
+# pass. Reuse test_api's rather than growing a second, subtly different one.
+from tests.test_api import FakeHipfire
+
 GIB = 1024**3
 
 
@@ -508,11 +513,18 @@ class FakeRegistry:
 
 
 class FakePolicyStore:
-    def __init__(self, policy):
+    def __init__(self, policy, auto=True):
         self._policy = policy
+        self._auto = auto
 
     def get(self):
         return self._policy
+
+    def auto_enabled(self):
+        return self._auto
+
+    def set_auto(self, enabled):
+        self._auto = bool(enabled)
 
 
 class FakeLemonade:
@@ -561,7 +573,8 @@ def _settings(**overrides):
 
 def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
-    heal_suppressor=None, hostagent=None, catalog=None, **sett,
+    heal_suppressor=None, hostagent=None, catalog=None, hipfire=None,
+    intent_store=None, spark=None, auto=True, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -569,15 +582,17 @@ def _make_watcher(
         world=world,
         lemonade=lemonade if lemonade is not None else FakeLemonade(),
         comfy=comfy if comfy is not None else FakeComfy(),
-        hipfire=object(),
+        hipfire=hipfire if hipfire is not None else object(),
         litellm=object(),
         registry=registry,
-        policy_store=FakePolicyStore(policy),
+        policy_store=FakePolicyStore(policy, auto=auto),
         events_path=events_path,
         read_gpus=read_gpus if read_gpus is not None else RecordingReadGpus(),
         heal_suppressor=heal_suppressor,
         hostagent=hostagent,
         catalog=catalog,
+        intent_store=intent_store,
+        spark=spark,
     )
     return watcher, events_path
 
@@ -1200,3 +1215,307 @@ def test_watcher_failed_heal_load_does_not_note_last_used(tmp_path):
     watcher.tick()
 
     assert catalog.noted == []
+
+
+# ===========================================================================
+# WATCHER — LIFECYCLE RECONCILE PASS (task 8)
+# ===========================================================================
+#
+# The reconcile pass answers a different question from arbitration: not
+# "who must give up VRAM right now" but "is what we asked for still true".
+# It runs after arbitration on the same snapshot — see Watcher._reconcile_pass
+# for why that order is load-bearing.
+
+
+class FakeSpark:
+    """Mirrors SparkClient's real surface: status() returns the NODE payload
+    shape ({"profiles", "swap_status", "serving"}) — not the observation
+    shape — and swap() takes a profile name. The watcher does the translation,
+    so faking the node payload is what actually exercises it."""
+
+    def __init__(self, profile="heretic", serving_model=None, endpoint_ok=False,
+                 swap_state="error", swap_ts=None, raises=None):
+        self.calls = []
+        self.raises = raises
+        self.swap_fail = None
+        self._payload = {
+            "profiles": [{"name": profile, "engine": "vllm"}],
+            "swap_status": {"state": swap_state, "profile": profile,
+                            "ts": swap_ts},
+            "serving": {"model": serving_model, "endpoint_ok": endpoint_ok,
+                        "container_status": None},
+        }
+
+    def status(self):
+        if self.raises is not None:
+            raise self.raises
+        return self._payload
+
+    def swap(self, profile, force=False):
+        self.calls.append(("swap", profile))
+        if self.swap_fail is not None:
+            raise self.swap_fail
+        return {"id": "u1", "profile": profile}
+
+
+def _intent(tmp_path, key="local/hipfire", state="loaded", model=None, engine="hipfire"):
+    from app.intent import IntentStore
+
+    store = IntentStore(tmp_path / "intent.json")
+    store.record(key, state=state, model=model, engine=engine)
+    return store
+
+
+def _reconcile_watcher(tmp_path, intent_store, hipfire=None, snapshot=None, **kw):
+    """A watcher with nothing for arbitration to do, so only the reconcile
+    pass can produce an action."""
+    return _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot if snapshot is not None else _world()),
+        FakeRegistry(),
+        _policy(),
+        hipfire=hipfire if hipfire is not None else FakeHipfire(state="parked"),
+        intent_store=intent_store,
+        **kw,
+    )
+
+
+def test_tick_restores_a_down_resource(tmp_path):
+    """The reboot case: intent says loaded, nothing is loaded, so restore."""
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    watcher, events_path = _reconcile_watcher(tmp_path, store, hipfire=hipfire)
+
+    watcher.tick()
+
+    assert "resume" in hipfire.calls
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "lifecycle-restore" in kinds
+
+
+def test_tick_does_not_restore_a_parked_resource(tmp_path):
+    """THE regression. A deliberate park must survive every tick forever."""
+    store = _intent(tmp_path, state="unloaded", model=None)
+    hipfire = FakeHipfire(state="parked")
+    watcher, _ = _reconcile_watcher(tmp_path, store, hipfire=hipfire)
+
+    watcher.tick()
+    watcher.tick()
+    watcher.tick()
+
+    assert "resume" not in hipfire.calls
+
+
+def test_tick_does_not_restore_an_unmanaged_resource(tmp_path):
+    """No intent recorded at all is not a licence to act: the deck did not
+    author this state, so it reports and leaves it alone."""
+    from app.intent import IntentStore
+
+    store = IntentStore(tmp_path / "intent.json")   # nothing recorded
+    hipfire = FakeHipfire(state="parked")
+    watcher, _ = _reconcile_watcher(tmp_path, store, hipfire=hipfire)
+
+    watcher.tick()
+
+    assert hipfire.calls == []
+
+
+def test_tick_stamps_last_healthy_when_serving(tmp_path):
+    store = _intent(tmp_path)
+    watcher, _ = _reconcile_watcher(
+        tmp_path, store,
+        snapshot=_world(hipfire=_hip(state="running", model="gpt-oss")),
+        hipfire=FakeHipfire(state="running"),
+    )
+
+    watcher.tick()
+
+    assert store.get()["local/hipfire"]["last_healthy_ts"] is not None
+
+
+def test_two_failed_restores_quarantine_and_stop_retrying(tmp_path):
+    """The crash-loop guard: after FAILURE_BUDGET attempts, stop."""
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    hipfire.fail = EngineError("boom")
+    watcher, events_path = _reconcile_watcher(tmp_path, store, hipfire=hipfire)
+
+    watcher.tick()
+    watcher.tick()
+    watcher.tick()
+    watcher.tick()
+
+    assert hipfire.calls.count("resume") == 2
+    assert store.get()["local/hipfire"]["quarantined"] is True
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "lifecycle-quarantined" in kinds
+
+
+def test_restore_failure_is_logged_as_an_event(tmp_path):
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    hipfire.fail = EngineError("boom")
+    watcher, events_path = _reconcile_watcher(tmp_path, store, hipfire=hipfire)
+
+    watcher.tick()
+
+    events = tail_events(events_path)
+    failed = [e for e in events if e["kind"] == "lifecycle-restore-failed"]
+    assert failed
+    assert failed[0]["detail"]["key"] == "local/hipfire"
+    assert "boom" in failed[0]["detail"]["error"]
+
+
+def test_auto_disabled_stops_restores(tmp_path):
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    watcher, _ = _reconcile_watcher(tmp_path, store, hipfire=hipfire, auto=False)
+
+    watcher.tick()
+
+    assert "resume" not in hipfire.calls
+
+
+def test_reconcile_error_does_not_kill_the_tick(tmp_path):
+    """Supervisor-loop rule: a reconcile bug must not stop arbitration, and an
+    unroutable engine must be isolated to its own key rather than escaping
+    into the tick's broad catch."""
+    store = _intent(tmp_path, model="x", engine="nonexistent-engine")
+    watcher, events_path = _reconcile_watcher(tmp_path, store)
+
+    watcher.tick()   # must not raise
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "lifecycle-restore-failed" in kinds
+    assert "tick-error" not in kinds
+
+
+def test_reconcile_pass_is_a_noop_without_an_intent_store(tmp_path):
+    """Every watcher constructed before this task (and every caller that
+    doesn't want lifecycle) keeps working untouched."""
+    hipfire = FakeHipfire(state="parked")
+    watcher, _ = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(), hipfire=hipfire,
+    )
+
+    watcher.tick()
+
+    assert hipfire.calls == []
+
+
+def test_restore_runs_after_arbitration(tmp_path):
+    """Ordering guard: arbitration's actions are executed before any restore,
+    so reconciliation can never load something arbitration is about to evict."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],   # free = 12 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+        hipfire=_hip(state="parked"),
+    )
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        hipfire=hipfire,
+        intent_store=store,
+    )
+
+    watcher.tick()
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert kinds.index("load-retriggered") < kinds.index("lifecycle-restore")
+
+
+def test_restore_dispatches_a_lemonade_load(tmp_path):
+    store = _intent(tmp_path, key="local/lemonade", model="extra.model.gguf",
+                    engine="lemonade")
+    lemonade = FakeLemonade()
+    watcher, _ = _reconcile_watcher(tmp_path, store, lemonade=lemonade)
+
+    watcher.tick()
+
+    assert lemonade.loaded == ["extra.model.gguf"]
+
+
+# --- spark slot -------------------------------------------------------------
+
+
+def test_restore_dispatches_a_spark_swap(tmp_path):
+    """A swap that errored never started a boot, so a down endpoint is a
+    genuine 'down' and the profile is swapped back in."""
+    store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
+    spark = FakeSpark(profile="heretic", swap_state="error")
+    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+
+    watcher.tick()
+
+    assert spark.calls == [("swap", "heretic")]
+
+
+def test_restore_dispatches_a_spark_swap_after_the_boot_window_expires(tmp_path):
+    """swap_status stays 'done' forever after a successful swap — a model that
+    died hours later must still be restored, not read as 'still booting'."""
+    from datetime import UTC, datetime, timedelta
+
+    old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
+    spark = FakeSpark(profile="heretic", swap_state="done", swap_ts=old)
+    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+
+    watcher.tick()
+
+    assert spark.calls == [("swap", "heretic")]
+
+
+def test_spark_boot_window_suppresses_restores(tmp_path):
+    """While a swap is booting, 'not loaded yet' and 'died' are the same
+    observation and guessing wrong costs a multi-minute swap."""
+    from datetime import UTC, datetime
+
+    store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
+    spark = FakeSpark(profile="heretic", swap_state="done",
+                      swap_ts=datetime.now(UTC).isoformat())
+    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+
+    watcher.tick()
+
+    assert spark.calls == []
+
+
+def test_unreachable_spark_is_not_a_dead_model(tmp_path):
+    """Failing to look is not the same as looking and seeing nothing."""
+    store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
+    spark = FakeSpark(raises=EngineError("connection refused"))
+    watcher, events_path = _reconcile_watcher(tmp_path, store, spark=spark)
+
+    watcher.tick()
+
+    assert spark.calls == []
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "tick-error" not in kinds
+
+
+def test_spark_serving_the_intended_profile_is_left_alone(tmp_path):
+    store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
+    spark = FakeSpark(profile="heretic", serving_model="heretic", endpoint_ok=True)
+    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+
+    watcher.tick()
+
+    assert spark.calls == []
+    assert store.get()["sparky/slot0"]["last_healthy_ts"] is not None
+
+
+def test_no_spark_configured_emits_no_phantom_key(tmp_path):
+    store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
+    watcher, events_path = _reconcile_watcher(tmp_path, store, spark=None)
+
+    watcher.tick()
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "lifecycle-restore" not in kinds
+    assert "lifecycle-restore-failed" not in kinds

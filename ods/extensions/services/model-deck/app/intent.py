@@ -87,9 +87,15 @@ class IntentStore:
     ) -> None:
         """Record a deliberate action as the new intent for `key`.
 
-        Preserves `last_healthy_ts` and `failures` across a re-record: the
-        operator changing which model they want does not reset the health
-        history of the resource itself.
+        Preserves `last_healthy_ts` — the health history of the resource
+        itself, unrelated to what the operator wants of it — but RESETS
+        `failures`/`quarantined`. A deliberate load or unload is evidence
+        that the situation changed (backend fixed, VRAM freed, a different
+        model chosen), so the resource earns a fresh restore budget.
+        Leaving the flag set would exclude it from automatic restore
+        forever, and invisibly: derive_status only reports ``quarantined``
+        on the loaded-intent branch, so a quarantined-and-parked resource
+        hides the flag while still being permanently excluded.
         """
         if state not in VALID_STATES:
             raise ValueError(f"state must be one of {VALID_STATES}, got {state!r}")
@@ -102,8 +108,8 @@ class IntentStore:
             "engine": engine,
             "updated_ts": now or _now_iso(),
             "last_healthy_ts": previous.get("last_healthy_ts"),
-            "failures": previous.get("failures", 0),
-            "quarantined": previous.get("quarantined", False),
+            "failures": 0,
+            "quarantined": False,
         }
         self._save(data)
 

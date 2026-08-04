@@ -66,7 +66,10 @@ def test_record_arbitrary_new_key_accepted(tmp_path):
     assert "sparky/slot0" in store.get()
 
 
-def test_record_preserves_last_healthy_and_failures(tmp_path):
+def test_record_preserves_last_healthy_but_resets_failure_budget(tmp_path):
+    """last_healthy_ts is the resource's own health history and survives a
+    re-record; the failure budget does not. A deliberate action is the signal
+    that the situation changed, so the resource earns a fresh budget."""
     store = IntentStore(tmp_path / "intent.json")
     store.record("local/hipfire", state="loaded", model="a", engine="hipfire")
     store.note_healthy("local/hipfire", now="2026-08-04T01:00:00+00:00")
@@ -76,7 +79,25 @@ def test_record_preserves_last_healthy_and_failures(tmp_path):
 
     record = store.get()["local/hipfire"]
     assert record["last_healthy_ts"] == "2026-08-04T01:00:00+00:00"
-    assert record["failures"] == 1
+    assert record["failures"] == 0
+    assert record["quarantined"] is False
+
+
+def test_record_releases_a_quarantine(tmp_path):
+    """Without this the spent budget is permanent — and once the resource is
+    parked it is invisible too, since derive_status only reports quarantine on
+    the loaded-intent branch."""
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("local/hipfire", state="loaded", model="a", engine="hipfire")
+    store.note_failure("local/hipfire")
+    store.note_failure("local/hipfire")
+    assert store.get()["local/hipfire"]["quarantined"] is True
+
+    store.record("local/hipfire", state="loaded", model="a", engine="hipfire")
+
+    record = store.get()["local/hipfire"]
+    assert record["quarantined"] is False
+    assert record["failures"] == 0
 
 
 def test_note_failure_returns_running_count_and_quarantines_at_two(tmp_path):

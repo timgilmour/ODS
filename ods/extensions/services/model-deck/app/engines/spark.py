@@ -31,6 +31,7 @@ The node-agent's own 409 (pending request / helper mid-swap) surfaces as
 BusyError; its 4xx validation answers surface as EngineError.
 """
 
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import httpx
@@ -41,6 +42,57 @@ from app.engines.litellm import LiteLLMClient
 _TIMEOUT = httpx.Timeout(5.0)
 
 _BUSY_METRICS = ("vllm:num_requests_running", "vllm:num_requests_waiting")
+
+# swap_status states that mean a boot may still be under way. "done" is in
+# here because the helper reports "done" as soon as swap.sh *launched*, not
+# when the model is serving (found live 2026-07-30); "error" never started a
+# boot at all.
+_BOOTING_STATES = ("swapping", "done")
+
+# How long after a swap was launched a down endpoint may still be called
+# "booting". Generously above the worst observed boot: a first, uncached
+# FlashInfer autotune ran ~13-15 min before the 2026-08-02 cache mounts cut
+# warm boots to ~5 min.
+_BOOT_WINDOW_MAX_S = 20 * 60
+
+
+def boot_in_flight(status: dict, now: datetime | None = None) -> bool:
+    """Whether a swap is still booting, judged from one ``status()`` payload.
+
+    All THREE conditions are required, and each drops a different false
+    reading:
+
+    * the last swap must be in a booting state — an "error" swap never
+      started a boot at all;
+    * the serving endpoint must be down — a live endpoint is the boot having
+      finished;
+    * the swap must be recent. This is the one that is easy to miss:
+      ``swap_status`` stays ``"done"`` forever after a successful swap, so
+      state+endpoint alone would call a model that died hours later "still
+      booting" and shield it from restore permanently — the exact 26-hour
+      hipfire failure, reproduced on the spark.
+
+    A missing or unparseable timestamp reads as still booting: unsure means
+    do not act, and guessing wrong costs a multi-minute swap.
+    """
+    swap_status = status.get("swap_status") or {}
+    if swap_status.get("state") not in _BOOTING_STATES:
+        return False
+    if (status.get("serving") or {}).get("endpoint_ok"):
+        return False
+    return _recent(swap_status.get("ts"), now)
+
+
+def _recent(ts: str | None, now: datetime | None = None) -> bool:
+    if not isinstance(ts, str) or not ts:
+        return True
+    try:
+        started = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) - started < timedelta(seconds=_BOOT_WINDOW_MAX_S)
 
 
 class SparkClient:
@@ -86,6 +138,12 @@ class SparkClient:
             "swap_status": profiles.get("swap_status"),
             "serving": serving,
         }
+
+    def swap_in_progress(self) -> bool:
+        """True while a previous swap is still booting. Same judgement the
+        boot-window guard in swap() makes, exposed for the deck's lifecycle
+        reconciler; adds no node-agent endpoint."""
+        return boot_in_flight(self.status())
 
     def busy_requests(self) -> int:
         """Sum of running+waiting requests from vLLM's /metrics."""

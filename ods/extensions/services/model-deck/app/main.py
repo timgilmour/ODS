@@ -214,6 +214,11 @@ def _build_watcher(settings: Settings):
         heal_suppressor=deck["heal_suppressor"],
         hostagent=deck["hostagent"],
         catalog=deck["catalog"],
+        # Lifecycle reconciliation: the same intent store the HTTP routers
+        # write on every deliberate action, plus the spark client whose slot
+        # is one of the reconciled resources (None on a box without one).
+        intent_store=deck["intent_store"],
+        spark=deck["spark"],
     )
 
 

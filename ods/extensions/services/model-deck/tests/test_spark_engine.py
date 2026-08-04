@@ -6,13 +6,14 @@ exercised through a real LiteLLMClient wired to its own MockTransport.
 """
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
 from app.engines import BusyError, EngineError, GuardError
 from app.engines.litellm import LiteLLMClient
-from app.engines.spark import SparkClient
+from app.engines.spark import SparkClient, boot_in_flight
 
 NODE_URL = "http://sparky:7720"
 SERVING_URL = "http://sparky:8000"
@@ -285,3 +286,75 @@ def test_swap_with_no_swap_status_probes_metrics():
     client = _client(handler, metrics_handler=_metrics_handler(running=1))
     with pytest.raises(GuardError):
         client.swap("mm27b")
+
+
+# --- boot-in-flight (lifecycle reconciler's boot window) ---
+
+def _swap_status(state="done", ts=None, profile="laguna"):
+    return {"state": state, "profile": profile, "id": "u0",
+            "message": "swap launched",
+            "ts": ts or datetime.now(UTC).isoformat().replace("+00:00", "Z")}
+
+
+def test_boot_in_flight_true_while_endpoint_down_after_a_recent_swap():
+    assert boot_in_flight({
+        "swap_status": _swap_status("done"),
+        "serving": {"model": None, "endpoint_ok": False},
+    }) is True
+
+
+def test_boot_in_flight_false_once_the_endpoint_is_up():
+    """swap_status stays 'done' forever — the live endpoint is what ends the
+    boot window."""
+    assert boot_in_flight({
+        "swap_status": _swap_status("done"),
+        "serving": {"model": "aeon", "endpoint_ok": True},
+    }) is False
+
+
+def test_boot_in_flight_false_for_a_failed_swap():
+    """A swap whose helper errored never started a boot."""
+    assert boot_in_flight({
+        "swap_status": _swap_status("error"),
+        "serving": {"model": None, "endpoint_ok": False},
+    }) is False
+
+
+def test_boot_in_flight_expires_so_a_dead_model_is_not_shielded_forever():
+    """THE regression this bound exists for: hours after a successful swap,
+    swap_status still reads 'done'. Without ageing it out, a model that died
+    later would look like it was still booting and never be restored."""
+    old = (datetime.now(UTC) - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    assert boot_in_flight({
+        "swap_status": _swap_status("done", ts=old),
+        "serving": {"model": None, "endpoint_ok": False},
+    }) is False
+
+
+def test_boot_in_flight_without_a_timestamp_stays_conservative():
+    """Unsure means do not act — guessing wrong costs a multi-minute swap."""
+    assert boot_in_flight({
+        "swap_status": {"state": "done", "profile": "laguna"},
+        "serving": {"model": None, "endpoint_ok": False},
+    }) is True
+
+    assert boot_in_flight({
+        "swap_status": {"state": "done", "ts": "not-a-timestamp"},
+        "serving": {"model": None, "endpoint_ok": False},
+    }) is True
+
+
+def test_boot_in_flight_false_with_no_swap_status_at_all():
+    assert boot_in_flight({"swap_status": None,
+                           "serving": {"model": None, "endpoint_ok": False}}) is False
+
+
+def test_swap_in_progress_reads_the_live_node():
+    handler = _node_handler(
+        swap_status=_swap_status("done"),
+        serving={"model": None, "endpoint_ok": False, "container_status": None})
+    assert _client(handler).swap_in_progress() is True
+
+
+def test_swap_in_progress_false_while_serving():
+    assert _client(_node_handler(swap_status=_swap_status("done"))).swap_in_progress() is False
