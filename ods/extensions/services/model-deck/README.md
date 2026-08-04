@@ -20,6 +20,7 @@ The deck maintains a pure planning core (guards, feasibility checks, LRU orderin
 - **Pull-through load** — cold models appear in the Load dropdown (marked ❄), can pull and load in one action
 - **Model pins** — prevent eviction of important models; pins survive across restarts
 - **Multi-node GPU** — deck orchestrates Spark (single-slot GPU node) model serving and hot-swaps
+- **Lifecycle reconciliation** — records what each resource is *supposed* to be running and restores it when it dies, while never touching a deliberate park (see [Lifecycle](#lifecycle-intent-status-and-reconciliation))
 - **Audit trail** — every load, unload, move, and policy change logged to `events.jsonl`
 
 ## Configuration
@@ -51,9 +52,8 @@ Settings (Python `MODEL_DECK_*` env prefix, or defaults in `app/settings.py`):
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |
-| `GET` | `/api/status` | Tenant status (GPU, loaded model, queue, default route) |
-| `GET` | `/api/registry` | Scan lemonade and ComfyUI stores for available models |
-| `GET` | `/api/policy` | Current VRAM policy and set registry |
+| `GET` | `/api/state` | Live snapshot: `world` (GPUs + tenants + default route), `policy`, `models` (registry scan), `lifecycle` (intent × observation, see below) |
+| `GET` | `/api/events?n=` | Audit-log tail (`events.jsonl`) |
 
 ### Tenant Control
 
@@ -105,8 +105,19 @@ See the **Storage tiering** section below for detailed semantics.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/spark/nodes` | List known Spark nodes and GPU availability |
-| `POST` | `/api/spark/swap` | Hot-swap a model in Spark (move ↔ load) |
+| `GET` | `/api/spark/status` | Spark node status (profiles, swap status, what is serving) |
+| `POST` | `/api/spark/swap` | Hot-swap the node's single slot to a profile (`{profile, force}`) |
+
+### Lifecycle
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/state` | The `lifecycle` block: per-resource `{status, reason, intent, observed, last_healthy_ts}` |
+| `POST` | `/api/lifecycle/quarantine/{key}/clear` | Release a quarantine so the reconciler will try again (404 if the key has no intent) |
+| `POST` | `/api/lifecycle/adopt/{key}` | Record what is *already* running as the intent. Bookkeeping only — never loads, unloads, or restarts anything |
+
+`{key}` is a resource key and contains a slash (`local/hipfire`), e.g.
+`POST /api/lifecycle/adopt/local/hipfire`.
 
 ## Storage tiering (hot/cold model moves)
 
@@ -255,7 +266,123 @@ A practical configuration:
   - Unplug the cold drive → all catalog entries survive, but moves to `cold` are refused ("unavailable")
   - Replug the cold drive → deck sees the marker file, location becomes available again, moves resume
 
-## Safety invariants (12–17)
+## Lifecycle: intent, status, and reconciliation
+
+The bug this feature exists to kill: **a deliberately parked engine and a dead one produce identical observations.** `ods-hipfire` sat `Exited(0)` for 26 hours on 2026-08-03 while the deck displayed it exactly as it displays a park, and nothing anywhere said otherwise. Status therefore cannot be read off an observation alone — it is a function of the observation **and** of what the deck intended.
+
+### `intent.json` — desired state (`/data/intent.json`)
+
+A flat `{"<node>/<resource>": record}` mapping recording what each resource is *supposed* to be running:
+
+```json
+{
+  "local/hipfire": {
+    "state": "loaded",
+    "model": null,
+    "engine": "hipfire",
+    "updated_ts": "2026-08-04T09:12:44.117034+00:00",
+    "last_healthy_ts": "2026-08-04T09:31:02.550881+00:00",
+    "failures": 0,
+    "quarantined": false
+  }
+}
+```
+
+- Keys are `<node>/<resource>`: `local/lemonade`, `local/hipfire`, `local/comfyui`, `sparky/slot0`. There are **no known-key defaults** — keys are discovered at runtime, which is what lets a new engine or node work without a code change, and a missing file is legitimately empty rather than "needs materializing".
+- `model: null` means *"loaded, no opinion which model"* — the correct record for single-model engines like hipfire, whose model the deck does not choose. Recording a name the deck cannot observe would manufacture permanent drift. For `sparky/slot0` the recorded identity is the **profile**, not the served model name (mm27b serves under `--served-model-name aeon`).
+- `state: "unloaded"` is intent, **not** an absence of it. A deliberate park is a recorded decision and the reconciler will never undo one. Deleting a key (`IntentStore.forget`) is the only way to say "the deck has no opinion".
+- Intent is recorded **implicitly, on every deliberate action, and only after it succeeds**: lemonade load/unload (including the deferred pull-through load, minutes later), hipfire park/resume, spark swap, and every *completed* step of a set apply. A guard-refused action never happened, so it records nothing.
+- Writes are atomic (temp + `os.replace`); a missing or corrupt file reads as `{}`.
+
+### Status vocabulary (`app/lifecycle.py`)
+
+`derive_status(intent, observed)` is a pure function returning `{status, reason}`. Reachability is checked first, then a boot in flight, then intent × observation:
+
+| Status | Intent | Observed | Meaning |
+|---|---|---|---|
+| `serving` | loaded | loaded, same model (or `model: null`) | as intended |
+| `drifted` | loaded | loaded, **different** model | something else is running here |
+| `down` | loaded | not loaded, node **reachable** | it died — **the only actionable status** |
+| `parked` | unloaded | not loaded | deliberate. Never restored |
+| `unexpected` | unloaded | loaded | somebody else started it |
+| `unmanaged` | *none* | loaded | running, no intent — an adopt candidate |
+| `idle` | *none* | not loaded | no intent recorded, nothing loaded |
+| `unreachable` | any (retained) | node did not answer | **we failed to look.** Not evidence of anything |
+| `quarantined` | loaded | not loaded, budget spent | restores failed repeatedly; awaiting an operator |
+| `warming` | any | a load/boot in flight | transient; never actionable |
+
+Two ordering rules that are easy to get wrong:
+
+- **`unreachable` beats everything.** An engine whose status call *raised* was not observed to be unloaded — we failed to observe at all. Calling that "not loaded" would let the reconciler restore something that is already running. (This is the storage feature's `unavailable ≠ empty` rule, one level up.)
+- **Quarantine is checked *after* a healthy match.** A quarantined resource that is nonetheless serving reports `serving`: quarantine describes our restore attempts, not reality.
+
+`app/observe.py` is the single place per-engine vocabulary is translated into the one shape `{reachable, loaded, model, transitioning}`. Adding an engine means adding a mapping there, not editing status derivation, reconciliation, or the API. Notable mappings: a tenant degraded to `"unknown"` by `World.snapshot` becomes **unreachable**, hipfire's `"loading"` becomes **transitioning** (→ `warming`), and ComfyUI's `"idle"` still counts as **loaded** (it holds VRAM between jobs).
+
+### The reconcile pass
+
+`Watcher._reconcile_pass` runs at the **end of every watcher tick, after arbitration, on the same snapshot** — deliberately. Arbitration settles VRAM contention happening right now; reconciliation settles desired state over time. The other order can restore a model that arbitration is about to evict (a load/evict flap).
+
+`plan_reconcile` (pure, `app/reconcile.py`) emits an action for exactly **one** status: `down`. Every other status is inert, and each refusal is a real incident rather than caution for its own sake — restoring a `parked` resource fights the operator every tick; auto-correcting `drifted`/`unexpected`/`unmanaged` means acting on state the deck did not author; retrying a `quarantined` key is the crash loop the budget exists to stop; `unreachable` is a node being off, not a model having fallen over; `warming` is a boot whose "not loaded yet" is indistinguishable from "died".
+
+Restores dispatch by engine: hipfire resumes its container, lemonade loads by name, spark swaps a profile. **ComfyUI is deliberately absent** and cannot reach the dispatcher — a dead ComfyUI derives `unreachable`, never `down`.
+
+A `serving` status stamps `last_healthy_ts` (`IntentStore.note_healthy`), which is what turns "down" into "down *since when*".
+
+### Failure budget and quarantine
+
+A restore counts as failed only when it **raises**. After `FAILURE_BUDGET` (2) consecutive failures the key is quarantined and the reconciler stops touching it, logging `lifecycle-restore-failed` and then `lifecycle-quarantined`.
+
+Three things release a quarantine:
+
+1. `POST /api/lifecycle/quarantine/{key}/clear` — the operator's "try again".
+2. A successful observation (`note_healthy`, on any `serving` tick).
+3. **Any new deliberate load or unload** — `IntentStore.record()` resets `failures`/`quarantined` (decided 2026-08-04). A deliberate action is evidence the situation changed (backend fixed, VRAM freed, different model chosen), so the resource earns a fresh budget. Leaving the flag set would exclude it from automatic restore forever *and invisibly*: `derive_status` only reports `quarantined` on the loaded-intent branch, so a quarantined-and-parked resource hides the flag while still being permanently excluded. `record()` preserves `last_healthy_ts` — that is the resource's health history, unrelated to what the operator now wants of it.
+
+### Adoption
+
+`POST /api/lifecycle/adopt/{key}` records the resource's *current observed* state as its intent, turning an `unmanaged` resource into a managed one. It changes bookkeeping only and must never load, unload, or restart anything — adoption that actuates would make "start managing this" a dangerous button, and nobody would press it.
+
+Adopting an **unreachable** resource is refused with **409**: an observation we failed to make is not evidence, and the record it would write (`state: "unloaded"`) is a park nobody asked for — after which the reconciler would correctly refuse to restore it forever.
+
+### The automation toggle
+
+Auto-restore is **on by default** (unlike storage tiering, whose automation moves bytes and defaults off): lifecycle auto-restore only returns a resource to a state the operator already chose, and its absence is what let hipfire stay dead for 26 hours. `plan_reconcile` returns nothing at all when it is off.
+
+The toggle lives in the reserved `_auto` key of `policy.json` (`{"_auto": {"enabled": false}}`), read via `PolicyStore.auto_enabled()`. **There is currently no HTTP route or UI control for it** — `PUT /api/policy` explicitly *rejects* `_auto` as reserved, and `set_auto()` has no caller outside tests. Turning automation off today means editing `data/model-deck/policy.json` and restarting the deck. (Exposing it belongs with the settings work in Plan C.)
+
+### Audit events
+
+`lifecycle-restore` · `lifecycle-restore-failed` · `lifecycle-quarantined` · `lifecycle-spark-unreachable` (deduped — sparky is normally off).
+
+### Spark observation cost
+
+`SparkClient.status()` costs two node-agent requests, and the watcher ticks every 2 s. When sparky is off — its normal state — each of those blocks on a 5 s HTTP timeout, which would stretch the arbiter's cadence to ~12 s exactly when nothing is wrong. `app/observe.py::SparkObserver` therefore TTL-caches the observation (10 s) and backs off exponentially on failure (15 s → 300 s cap), and one instance is shared by the watcher and the HTTP paths, so a tick and a `GET /api/state` in the same second cost one probe. A swap invalidates the cache. A probe failure reads as **unreachable**, never as "nothing loaded", and is parked for the watcher to log once (it owns the audit trail).
+
+### Test coverage, and one honest gap
+
+Unit rows cover intent, status derivation, reconcile planning, observation, the routes, and the watcher pass. Live drills (`livetests/test_disruptive_lifecycle.py`, disruptive tier):
+
+- **D7 — out-of-band stop is restored.** Stop `ods-hipfire` behind the deck's back; it must read `down` (never `parked`) and come back unaided. **Passes live.**
+- **D9 — a deliberate park stays parked.** THE regression: park hipfire, watch ~30 reconcile ticks, nothing may touch it. **Passes live.**
+- **D8 — quarantine after two failed restores. SKIPPED, and not passing.** There is no live-safe failure injection on this box: a restore only counts a failure when it *raises*, and `DockerCtl.start()` returns 204 even for a container that starts and instantly exits; a removed or renamed container makes `status()` raise and therefore derives `unreachable`, never the actionable `down`; the one remaining lever (stopping `ods-docker-ctl`) would disable the very restore path under test; and sparky, the other natural source of failing restores, is powered off. **The failure budget is proven by unit tests only.** What *is* asserted live is the release route (D7 exercises the quarantine-clear endpoint).
+
+### Safety invariants (18–21): lifecycle
+
+**18.** A deliberate park is never undone. `parked` produces no action, ever — the single most important invariant in the lifecycle work (drill D9).
+
+**19.** `down` is the only status that acts. State the deck did not author (`drifted`, `unexpected`, `unmanaged`) is reported, never corrected.
+
+**20.** A failed observation is never treated as an absence: `unreachable` retains the last-known intent and is not actionable, and adoption of an unreachable resource is refused (409).
+
+**21.** A resource is restored at most `FAILURE_BUDGET` (2) consecutive times before it is quarantined and left alone for an operator.
+
+### Known lifecycle gaps
+
+- `interpret_health` (`app/engines/litellm.py`) — the "not-loaded ≠ down" reading of LiteLLM's health payload — is built and unit-tested but **not yet consumed** by status derivation. Local engines are observed directly, which is strictly better information; wiring it in for *remote* routes waits for the multi-node work that makes a route's node knowable.
+- `observe_local` names the three current tenants explicitly. That is the adapter's job (it is the vocabulary boundary), but a fourth local engine does touch that file.
+- **There is no lifecycle UI.** The `lifecycle` block is served and typed (`ui/src/api.ts`), but no component renders status, quarantine release, or adopt — those are curl-level operations today.
+
+## Safety invariants (12–17): storage
 
 The storage feature enforces six safety invariants (continuing the deck's numbered safety list):
 
@@ -284,9 +411,15 @@ Model Deck API (:3015, FastAPI)
   │    ├── policy.py ──────────── VRAM policy, autoheal
   │    ├── sets.py ────────────── Set Builder (load groups)
   │    ├── spark.py ──────────── Remote Spark node swap
-  │    └── status.py ──────────── System and tenant status
+  │    ├── lifecycle.py ──────── Quarantine release + adoption
+  │    └── status.py ──────────── System, tenant, and lifecycle status
   ├── app/
   │    ├── arbiter.py ────────────── VRAM policy enforcement (watcher + pure planner)
+  │    │                             + the reconcile pass (end of every tick)
+  │    ├── intent.py ──────────── IntentStore — durable desired state (intent.json)
+  │    ├── lifecycle.py ──────── derive_status: intent × observation → one status
+  │    ├── observe.py ─────────── Engine vocabularies → one observation shape
+  │    ├── reconcile.py ───────── plan_reconcile: which statuses justify acting
   │    ├── storage.py ──────────── Storage tiering (watcher + pure planner)
   │    ├── locations.py ────────── Location store, marker files
   │    ├── catalog.py ─────────── Model catalog (scanner, unit tracking)
@@ -308,8 +441,12 @@ Model Deck API (:3015, FastAPI)
 ## Files
 
 - `app/main.py` — FastAPI application, startup, exception handlers
-- `app/routers/` — Endpoint modules (control, storage, policy, sets, spark, status)
-- `app/arbiter.py` — VRAM arbitration, watcher, planning
+- `app/routers/` — Endpoint modules (control, storage, policy, sets, spark, lifecycle, status)
+- `app/arbiter.py` — VRAM arbitration, watcher, planning, lifecycle reconcile pass
+- `app/intent.py` — IntentStore: durable desired state (`/data/intent.json`), failure budget
+- `app/lifecycle.py` — `derive_status`: intent × observation → one status (pure)
+- `app/observe.py` — Per-engine observation adapter + `SparkObserver` (TTL cache, backoff)
+- `app/reconcile.py` — `plan_reconcile`: the one status (`down`) that justifies acting (pure)
 - `app/storage.py` — Storage tiering logic, watermark rules, StorageWatcher
 - `app/locations.py` — Location store, marker files, availability checks
 - `app/catalog.py` — Model catalog scanner, unit state
@@ -329,13 +466,22 @@ Model Deck API (:3015, FastAPI)
 ## Troubleshooting
 
 **Model not appearing in Load dropdown:**
-- Check registry: `GET /api/registry` shows models found in lemonade's store
+- Check the registry scan: `GET /api/state` → `models` lists what was found in lemonade's store
 - If missing, verify the compose mount and lemonade's `MODEL_PATH` environment variable
 
 **Pull-through load fails with "lemonade not ready":**
 - Lemonade is restarting to register the pulled file. The deck waits up to 60 seconds.
 - Check lemonade logs: `docker compose logs ods-llama-server`
 - If it doesn't come back, restart manually: `docker compose restart ods-llama-server`
+
+**An engine died and the deck did not restore it:**
+- `GET /api/state` → `lifecycle["local/<engine>"]`. `parked` means the deck has a recorded *deliberate unload* — resume it normally (that also re-records intent). `unmanaged` means no intent was ever recorded, so there is nothing to restore to: adopt it (`POST /api/lifecycle/adopt/local/<engine>`) while it is healthy, or just use the normal load/park/resume routes, which record intent themselves.
+- `unreachable` means the deck could not reach the engine at all — that is a probe/network problem, not a dead model, and it is deliberately not actionable.
+- `quarantined` means two restores in a row raised. Fix the cause, then `POST /api/lifecycle/quarantine/local/<engine>/clear`. Check `events.jsonl` for `lifecycle-restore-failed`.
+- Also confirm automation is on: `policy.json` must not contain `{"_auto": {"enabled": false}}` (it defaults to enabled).
+
+**Something the deck parked keeps coming back:**
+- That would be a bug in the reconciler, which never acts on `parked` (drill D9). Far more likely it is the *arbiter*'s pending-load healing reloading the litellm default-route model — a different mechanism entirely (see HealSuppressor / VRAM policy), and it logs `load-retriggered`, not `lifecycle-restore`.
 
 **"Location unavailable — drive unmounted?" when moving:**
 - The bind mount in compose.yaml is missing or the drive is disconnected

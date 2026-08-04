@@ -75,10 +75,60 @@ export interface ModelFile {
   footprint: number;
 }
 
+/** One resource's derived status — mirrors app/lifecycle.py's STATUSES. */
+export type LifecycleStatus =
+  | "serving"
+  | "drifted"
+  | "down"
+  | "parked"
+  | "unexpected"
+  | "unmanaged"
+  | "idle"
+  | "unreachable"
+  | "quarantined"
+  | "warming";
+
+/** A durable intent record — mirrors app/intent.py's IntentStore.record. */
+export interface IntentRecord {
+  state: "loaded" | "unloaded";
+  /** null means "loaded, no opinion which model" (single-model engines). */
+  model: string | null;
+  engine: string;
+  updated_ts: string;
+  last_healthy_ts: string | null;
+  failures: number;
+  quarantined: boolean;
+}
+
+/** One observation in app/observe.py's single shape. */
+export interface Observation {
+  reachable: boolean;
+  loaded: boolean;
+  model: string | null;
+  transitioning: boolean;
+}
+
+/** Mirrors app/routers/__init__.py's build_lifecycle_view, keyed
+ * `<node>/<resource>` (e.g. "local/hipfire", "sparky/slot0"). `intent` is
+ * null when nothing was ever recorded — which is exactly what makes the
+ * status `unmanaged`/`idle` rather than `down`/`parked`. */
+export interface LifecycleEntry {
+  status: LifecycleStatus;
+  reason: string;
+  intent: IntentRecord | null;
+  observed: Observation;
+  last_healthy_ts: string | null;
+}
+
+export type LifecycleMap = Record<string, LifecycleEntry>;
+
 export interface StateResponse {
   world: World;
   policy: PolicyMap;
   models: ModelFile[];
+  /** Empty object when no intent store is wired (app/routers/__init__.py
+   * returns {} rather than omitting the key). */
+  lifecycle: LifecycleMap;
 }
 
 export interface EventEntry {
