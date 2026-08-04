@@ -66,6 +66,15 @@ class LitellmDirect:
         data = self._c.get("/model/info").json()["data"]
         return {e["model_name"]: e["litellm_params"]["model"] for e in data}
 
+    def default_targets_hipfire(self) -> bool:
+        """The same predicate HipfireClient.park() guards on, read from the
+        same field (api_base, not the model name) — so a drill's skip
+        condition cannot disagree with the guard that would refuse it."""
+        for entry in self._c.get("/model/info").json()["data"]:
+            if entry["model_name"] == "default":
+                return "hipfire" in entry["litellm_params"].get("api_base", "")
+        return False
+
     def completion(self, route: str, max_tokens: int = 64) -> dict:
         """One real served request; returns the response message dict.
 

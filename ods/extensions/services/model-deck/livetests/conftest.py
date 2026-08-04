@@ -9,6 +9,7 @@ end state drifted from its start state.
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -28,6 +29,13 @@ HIPFIRE_URL = os.environ.get("HIPFIRE_URL", "http://ods-hipfire:11435")
 # (dashboard:3001/api/*): dashboard-api's own port (3002) 401s without a key,
 # and dashboard-api:3001 is nothing at all (conn-refused).
 CATALOG_URL = os.environ.get("CATALOG_URL", "http://dashboard:3001")
+# The socket proxy the deck itself parks containers through. It lives on the
+# PRIVATE deck-ctl network (compose.yaml), so the wrapper attaches this
+# container to that network too — see ../deck-drill. It is the only
+# out-of-band container lever available: the proxy permits exactly
+# GET /containers/x/json and POST /containers/x/{start,stop}, nothing else.
+DOCKER_CTL_URL = os.environ.get("DOCKER_CTL_URL", "http://docker-ctl:2375")
+HIPFIRE_CONTAINER = os.environ.get("HIPFIRE_CONTAINER", "ods-hipfire")
 GGUF_STORE = Path("/gguf-store")
 
 # Watcher tick is 2 s; TTL drills wait TTL + 3 ticks + margin.
@@ -99,6 +107,50 @@ def lemonade_guard(deck, lemonade_direct):
         deck.post("/api/tenants/lemonade/load",
                   json={"model": before.removeprefix(EXTRA)},
                   timeout=240.0).raise_for_status()
+
+
+@pytest.fixture(scope="session")
+def docker():
+    """Out-of-band container control, through the deck's own socket proxy.
+
+    Reuses ``app.engines.docker_ctl.DockerCtl`` for the same reason
+    ``clients.read_vram`` reuses ``app.gpu``: identical wire handling, no
+    second copy of the 304-is-success rule. The allowlist is OURS and names
+    exactly one container — a drill must not be able to stop anything else,
+    however the proxy is configured.
+    """
+    from app.engines.docker_ctl import DockerCtl
+
+    return DockerCtl(DOCKER_CTL_URL, allowlist=[HIPFIRE_CONTAINER])
+
+
+HIPFIRE_RESTORE_TIMEOUT = 600.0
+
+
+def wait_hipfire_state(deck, wanted: str, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if deck.get("/api/state").json()["world"]["tenants"]["hipfire"]["state"] == wanted:
+            return True
+        time.sleep(2)
+    return False
+
+
+@pytest.fixture
+def restore_hipfire(deck):
+    """UNCONDITIONAL teardown: ods-hipfire ends running, and managed.
+
+    Runs on pass, fail and error alike — a lifecycle drill that left hipfire
+    down would recreate the very 26-hour outage this work exists to prevent
+    (2026-08-03). Restoring through the deck's resume route rather than the
+    socket proxy is deliberate: it is the deliberate action that records
+    intent ``loaded`` and clears any failure budget the drill spent, so the
+    reconciler is left with a truthful record instead of a stale park.
+    """
+    yield
+    deck.post("/api/tenants/hipfire/resume", params={"force": "true"}, timeout=60.0)
+    assert wait_hipfire_state(deck, "running", HIPFIRE_RESTORE_TIMEOUT), \
+        "TEARDOWN FAILED: ods-hipfire is not running again"
 
 
 @pytest.fixture

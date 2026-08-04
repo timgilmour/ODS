@@ -46,8 +46,24 @@ LEMONADE_API_KEY="$(grep -E '^LEMONADE_API_KEY=' "$ODS_ENV" | cut -d= -f2- || tr
 LITELLM_KEY="$(grep -E '^LITELLM_KEY=' "$ODS_ENV" | cut -d= -f2- || true)"
 export LEMONADE_API_KEY LITELLM_KEY
 
+# The lifecycle drills (D7) need an OUT-OF-BAND container stop — the deck must
+# not be told, since "somebody stopped it behind our back" is the case under
+# test. The only lever is the same socket proxy the deck itself parks through,
+# and that proxy sits on the PRIVATE deck-ctl network (compose.yaml) precisely
+# so no sibling stack container can reach it. So this first-party, ephemeral
+# drill container is attached to that network too — NOT to the raw docker
+# socket, which would be host-root: the proxy permits exactly
+# GET /containers/x/json and POST /containers/x/{start,stop}. If the network is
+# absent (an older stack) the lifecycle cases fail loudly on connect rather
+# than silently testing nothing.
+DECK_CTL_NET="${DECK_CTL_NET:-ods-deck-ctl}"
+NET_ARGS=(--network ods-network)
+if docker network inspect "$DECK_CTL_NET" >/dev/null 2>&1; then
+  NET_ARGS+=(--network "$DECK_CTL_NET")
+fi
+
 set +e
-docker run --rm --network ods-network \
+docker run --rm "${NET_ARGS[@]}" \
   --user "$(id -u):$(id -g)" \
   -v "$EXT_DIR":/suite:ro \
   -v /sys:/sysfs:ro \
