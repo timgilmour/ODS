@@ -277,3 +277,17 @@ def test_auto_key_is_not_returned_as_a_tenant(tmp_path):
     store.set_auto(False)
 
     assert "_auto" not in store.get()
+
+
+def test_set_auto_on_a_fresh_file_still_seeds_the_tenant_defaults(tmp_path):
+    """set_auto must not be able to create a policy.json that permanently
+    suppresses default seeding: get() self-heals only when the file is
+    missing or corrupt, so a file containing just _auto would look valid
+    and leave every tenant unpolicied forever."""
+    path = tmp_path / "policy.json"
+
+    PolicyStore(path).set_auto(False)
+
+    store = PolicyStore(path)
+    assert set(store.get()) == set(DEFAULT_POLICIES)
+    assert store.auto_enabled() is False

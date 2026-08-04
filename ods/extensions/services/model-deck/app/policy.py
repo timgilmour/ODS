@@ -136,7 +136,17 @@ class PolicyStore:
         return bool(value)
 
     def set_auto(self, enabled: bool) -> None:
-        data = self._load() or {}
+        """Persist the automation toggle, seeding tenant defaults if the file
+        does not exist yet.
+
+        The seeding matters: get() self-heals only when the file is missing or
+        corrupt, so a policy.json containing nothing but ``_auto`` would read
+        as valid and leave every tenant unpolicied forever. Writing the
+        toggle first must not be able to cost the deck its defaults.
+        """
+        data = self._load()
+        if data is None:
+            data = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
         data[_AUTO_KEY] = {"enabled": bool(enabled)}
         self._save(data)
 
