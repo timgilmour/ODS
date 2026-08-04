@@ -10,6 +10,24 @@ that map them to their HTTP status (409/409/502). A malformed engine
 response that raises a bare ``KeyError`` is NOT caught here either, per the
 house "let it crash" policy: a 500 with a full traceback is the correct
 signal for a real bug, not a guessed-at error code.
+
+Every route that actually changes engine state records the result as
+*intent* (``app.intent``), which is what lets the reconciler tell a
+deliberate park from a dead backend. Two placement rules, both load-bearing:
+
+* **Record AFTER the engine call returns.** Intent is last-known-GOOD; a
+  load that raised never happened, and recording it would make the
+  reconciler chase a state that never existed. Since engine exceptions
+  propagate uncaught (above), simply putting the record call last is the
+  whole implementation.
+* **``state="unloaded"`` is intent, not its absence.** A park writes a
+  record; it never deletes one. Deleting would make a deliberate unload
+  indistinguishable from "nobody ever asked", and the reconciler would
+  restore it on the next tick.
+
+``comfyui/free`` deliberately records nothing: it drops cached VRAM while
+the server stays up and keeps observing as loaded, so an "unloaded" intent
+would derive as a permanent ``unexpected``.
 """
 
 import time
@@ -31,6 +49,11 @@ _EXTRA_PREFIX = "extra."
 # the job rather than silently eating the error).
 _READY_TIMEOUT_S = 60.0
 _READY_POLL_S = 2.0
+
+# Intent keys for the local node's tenants (app.observe uses the same
+# "<node>/<resource>" shape).
+_LEMONADE_KEY = "local/lemonade"
+_HIPFIRE_KEY = "local/hipfire"
 
 
 class LemonadeLoadBody(BaseModel):
@@ -90,6 +113,12 @@ def lemonade_load(body: LemonadeLoadBody, request: Request,
     # Deliberate load succeeded: clear the window (and any prior unload's).
     deck["heal_suppressor"].clear()
     deck["catalog"].note_used_gguf(bare)
+    # Last: the load is known-good only now (an EngineError above propagates
+    # before anything is recorded). Record the PREFIXED name — that is what
+    # lemonade was told and what the observation will report back.
+    deck["intent_store"].record(
+        _LEMONADE_KEY, state="loaded", model=model, engine="lemonade"
+    )
     return {"status": "ok"}
 
 
@@ -148,6 +177,12 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
         deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
         deck["heal_suppressor"].clear()
         deck["catalog"].note_used_gguf(bare)
+        # The pull-through load lands here, minutes after the request
+        # returned "pulling" — it is no less deliberate, so it records too.
+        deck["intent_store"].record(
+            _LEMONADE_KEY, state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
+            engine="lemonade",
+        )
 
     # Pre-arm: the multi-minute pull must not fight the VRAM watcher's
     # pending-load inference (spec section 3). on_progress re-arms it on every
@@ -177,6 +212,11 @@ def lemonade_unload(body: LemonadeUnloadBody, request: Request, force: bool = Fa
     deck["lemonade"].unload(model)
     # Deliberate unload: arm suppression so the arbiter doesn't heal it back.
     deck["heal_suppressor"].note_deck_unload()
+    # ...and record it as intent, which is the durable half of the same
+    # statement: the suppression window expires, this does not.
+    deck["intent_store"].record(
+        _LEMONADE_KEY, state="unloaded", model=None, engine="lemonade"
+    )
     return {"status": "ok"}
 
 
@@ -193,6 +233,9 @@ def hipfire_park(request: Request, force: bool = False) -> dict:
     deck = request.app.state.deck
     _ensure_host_agent_idle(deck, force)
     deck["hipfire"].park(force=force)
+    deck["intent_store"].record(
+        _HIPFIRE_KEY, state="unloaded", model=None, engine="hipfire"
+    )
     return {"status": "ok"}
 
 
@@ -201,4 +244,11 @@ def hipfire_resume(request: Request, force: bool = False) -> dict:
     deck = request.app.state.deck
     _ensure_host_agent_idle(deck, force)
     deck["hipfire"].resume()
+    # model=None, not a name: hipfire is single-model and the Deck does not
+    # choose that model (it comes from the litellm route table, app/state.py).
+    # None reads as "loaded, no opinion which model"; recording a name the
+    # Deck cannot observe would manufacture permanent drift.
+    deck["intent_store"].record(
+        _HIPFIRE_KEY, state="loaded", model=None, engine="hipfire"
+    )
     return {"status": "ok"}

@@ -17,6 +17,7 @@ state to diff against.
 from fastapi.testclient import TestClient
 
 from app.engines import EngineError, GuardError
+from app.intent import IntentStore
 from app.main import create_app
 from app.policy import DEFAULT_POLICIES, PolicyStore
 from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
@@ -31,6 +32,9 @@ class FakeLemonade:
     def __init__(self, loaded=None):
         self.calls = []  # mutating only: ("load", model) / ("unload", model)
         self.fail = None
+        # Fails load() only (``fail`` fails both) — lets a test prove that a
+        # load which errored records no intent while an unload still works.
+        self.load_raises = None
         self._loaded = loaded
 
     def status(self):
@@ -41,6 +45,8 @@ class FakeLemonade:
 
     def load(self, model):
         self.calls.append(("load", model))
+        if self.load_raises:
+            raise self.load_raises
         if self.fail:
             raise self.fail
         self._loaded = model
@@ -199,6 +205,11 @@ def make_app(tmp_path, monkeypatch):
             "read_gpus": FakeReadGpus(),
             "policy_store": PolicyStore(tmp_path / "policy.json"),
             "set_store": SetStore(tmp_path / "sets"),
+            # Real store (like policy_store), pointed at tmp_path: every
+            # deliberate action now writes intent, and the default deck's
+            # store points at the container's /data, which does not exist
+            # under test.
+            "intent_store": IntentStore(tmp_path / "intent.json"),
             "events_path": tmp_path / "events.jsonl",
         }
     )
@@ -912,3 +923,169 @@ def test_mutating_endpoints_open_without_any_auth(tmp_path, monkeypatch):
         },
     )
     assert resp.status_code == 200
+
+
+# ===========================================================================
+# Intent recording — every deliberate action leaves a last-known-good record
+# ===========================================================================
+
+
+def test_lemonade_load_records_loaded_intent(tmp_path, monkeypatch):
+    """Every deliberate action must leave a record, or the reconciler has
+    nothing to restore to after a reboot."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    TestClient(app).post(
+        "/api/tenants/lemonade/load", json={"model": "extra.qwen.gguf"}
+    )
+
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.qwen.gguf"
+    assert record["engine"] == "lemonade"
+
+
+def test_lemonade_load_records_the_prefixed_name_actually_loaded(tmp_path, monkeypatch):
+    """Intent must match what the engine was told, not what the caller typed
+    — otherwise the recorded model can never equal the observed one."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    TestClient(app).post(
+        "/api/tenants/lemonade/load", json={"model": "qwen.gguf"}
+    )
+
+    assert deck["intent_store"].get()["local/lemonade"]["model"] == "extra.qwen.gguf"
+
+
+def test_lemonade_unload_records_unloaded_intent(tmp_path, monkeypatch):
+    """A park is intent, not the absence of it — this is what stops the
+    reconciler reloading something you deliberately took down."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf")
+
+    TestClient(app).post("/api/tenants/lemonade/unload", json={})
+
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "unloaded"
+    assert record["model"] is None
+
+
+def test_hipfire_park_records_unloaded_intent(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    TestClient(app).post("/api/tenants/hipfire/park")
+
+    record = deck["intent_store"].get()["local/hipfire"]
+    assert record["state"] == "unloaded"
+    assert record["engine"] == "hipfire"
+
+
+def test_hipfire_resume_records_loaded_intent(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    TestClient(app).post("/api/tenants/hipfire/resume")
+
+    record = deck["intent_store"].get()["local/hipfire"]
+    assert record["state"] == "loaded"
+    # hipfire is single-model and the Deck does not choose that model (it
+    # comes from the litellm route table), so intent records None: "loaded,
+    # no opinion which model". A name we cannot observe would derive as
+    # permanent drift.
+    assert record["model"] is None
+
+
+def test_failed_load_records_no_intent(tmp_path, monkeypatch):
+    """Intent is last-known-GOOD. Recording a load that errored would make
+    the reconciler chase a state that never existed."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"].load_raises = EngineError("boom")
+
+    TestClient(app).post(
+        "/api/tenants/lemonade/load", json={"model": "extra.qwen.gguf"}
+    )
+
+    assert deck["intent_store"].get() == {}
+
+
+def test_failed_park_records_no_intent(tmp_path, monkeypatch):
+    """Same invariant on the other side: a park that the route guard refused
+    never happened, so it must not become the state we restore to."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hipfire"] = FakeHipfire(state="running")
+    deck["hipfire"].fail = GuardError("hipfire serves the default route")
+
+    resp = TestClient(app).post("/api/tenants/hipfire/park")
+
+    assert resp.status_code == 409
+    assert deck["intent_store"].get() == {}
+
+
+def test_guarded_action_records_no_intent(tmp_path, monkeypatch):
+    """A 409 from the host-agent busy guard means no engine call was made at
+    all — there is nothing to record."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["hostagent"] = _BusyHostAgent()
+
+    resp = TestClient(app).post("/api/tenants/hipfire/park")
+
+    assert resp.status_code == 409
+    assert deck["intent_store"].get() == {}
+
+
+def test_comfyui_free_records_no_intent(tmp_path, monkeypatch):
+    """ComfyUI's /free drops cached VRAM; the server stays up and keeps
+    reporting itself loaded. Recording 'unloaded' would derive as a
+    permanent 'unexpected' — an alarm that is always on is an alarm nobody
+    reads. ComfyUI gets intent only once something can actually park it."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).post("/api/tenants/comfyui/free")
+
+    assert resp.status_code == 200
+    assert deck["intent_store"].get() == {}
+
+
+def test_apply_records_intent_for_each_completed_step(tmp_path, monkeypatch):
+    """A set apply is as deliberate as a button press — the same actions
+    through a different door must leave the same record."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded=None)
+    deck["hipfire"] = FakeHipfire(state="parked")
+    client = TestClient(app)
+    client.post(
+        "/api/sets",
+        json={
+            "name": "Chat",
+            "ephemeral": {
+                "lemonade": {"state": "loaded"},
+                "hipfire": {"state": "running"},
+            },
+        },
+    )
+
+    resp = client.post("/api/sets/chat/apply")
+
+    assert resp.status_code == 200
+    intents = deck["intent_store"].get()
+    assert intents["local/lemonade"]["state"] == "loaded"
+    assert intents["local/lemonade"]["model"] == "extra.model.gguf"
+    assert intents["local/hipfire"]["state"] == "loaded"
+
+
+def test_apply_records_nothing_for_a_step_that_never_ran(tmp_path, monkeypatch):
+    """The apply report's 'failed' step is not a completed action; only the
+    steps that actually succeeded may become intent."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded=None)
+    deck["lemonade"].fail = EngineError("boom")
+    client = TestClient(app)
+    client.post(
+        "/api/sets",
+        json={"name": "Chat", "ephemeral": {"lemonade": {"state": "loaded"}}},
+    )
+
+    resp = client.post("/api/sets/chat/apply")
+
+    assert resp.status_code == 200
+    assert resp.json()["failed"] == {"step": "load_lemonade", "model": "extra.model.gguf"}
+    assert deck["intent_store"].get() == {}

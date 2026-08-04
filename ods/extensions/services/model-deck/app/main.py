@@ -94,6 +94,7 @@ def _build_deck(settings: Settings) -> dict:
     from app.engines.lemonade import LemonadeClient
     from app.engines.litellm import LiteLLMClient
     from app.gpu import read_gpus
+    from app.intent import IntentStore
     from app.locations import LocationStore
     from app.mover import JobQueue, Mover
     from app.policy import PolicyStore, StoragePolicyStore
@@ -161,6 +162,10 @@ def _build_deck(settings: Settings) -> dict:
         "litellm": litellm,
         "registry": Registry(data_dir / "registry.json", _GGUF_DIR),
         "policy_store": PolicyStore(data_dir / "policy.json"),
+        # Durable desired state. Shared, like policy_store, between the HTTP
+        # routers (which write it on every deliberate action) and — once the
+        # reconcile pass lands — the watcher, which reads it.
+        "intent_store": IntentStore(data_dir / "intent.json"),
         "set_store": SetStore(data_dir / "sets"),
         "events_path": data_dir / "events.jsonl",
         "read_gpus": read_gpus,
