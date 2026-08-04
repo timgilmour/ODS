@@ -1471,9 +1471,14 @@ def test_restore_dispatches_a_spark_swap_after_the_boot_window_expires(tmp_path)
     assert spark.calls == [("swap", "heretic")]
 
 
-def test_spark_boot_window_suppresses_restores(tmp_path):
+def test_spark_boot_in_flight_derives_warming_and_is_not_restored(tmp_path):
     """While a swap is booting, 'not loaded yet' and 'died' are the same
-    observation and guessing wrong costs a multi-minute swap."""
+    observation and guessing wrong costs a multi-minute swap.
+
+    The suppression is per-resource: observe_spark marks the slot
+    ``transitioning``, which derives ``warming``, which plan_reconcile never
+    acts on. (It used to be a GLOBAL boot-window flag that also froze local
+    hipfire and lemonade — see tests/test_reconcile.py.)"""
     from datetime import UTC, datetime
 
     store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")

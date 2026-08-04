@@ -16,6 +16,7 @@ from tests.test_api import make_app
 class FakeSpark:
     def __init__(self):
         self.calls = []  # mutating only: ("swap", profile, force)
+        self.status_calls = 0
         self.fail = None
         self._status = {
             "profiles": [
@@ -30,6 +31,7 @@ class FakeSpark:
         }
 
     def status(self):
+        self.status_calls += 1
         return self._status
 
     def swap(self, profile, force=False):
@@ -104,3 +106,56 @@ def test_swap_engine_error_maps_to_502(tmp_path, monkeypatch):
     deck["spark"].fail = EngineError("node down")
     r = TestClient(app).post("/api/spark/swap", json={"profile": "laguna"})
     assert r.status_code == 502
+
+
+# --- intent (Task 9, correction 0b) ------------------------------------------
+
+
+def test_swap_records_intent_for_the_spark_slot(tmp_path, monkeypatch):
+    """Without this the spark slot is only ever READ: it derives 'unmanaged'
+    forever and the reconciler's spark restore branch is unreachable."""
+    from app.observe import SPARK_SLOT_KEY
+
+    app, deck = _spark_app(tmp_path, monkeypatch)
+
+    TestClient(app).post("/api/spark/swap", json={"profile": "laguna"})
+
+    record = deck["intent_store"].get()[SPARK_SLOT_KEY]
+    assert record["state"] == "loaded"
+    assert record["engine"] == "spark"
+
+
+def test_swap_records_the_profile_not_the_served_model(tmp_path, monkeypatch):
+    """mm27b serves under --served-model-name aeon. observe_spark reports the
+    PROFILE, so recording the served name would be permanent false drift."""
+    from app.observe import SPARK_SLOT_KEY
+
+    app, deck = _spark_app(tmp_path, monkeypatch)
+
+    TestClient(app).post("/api/spark/swap", json={"profile": "mm27b"})
+
+    assert deck["intent_store"].get()[SPARK_SLOT_KEY]["model"] == "mm27b"
+
+
+def test_failed_swap_records_no_intent(tmp_path, monkeypatch):
+    """Intent is last-known-GOOD: a guard-refused swap never happened."""
+    app, deck = _spark_app(tmp_path, monkeypatch)
+    deck["spark"].fail = GuardError("busy")
+
+    TestClient(app).post("/api/spark/swap", json={"profile": "laguna"})
+
+    assert deck["intent_store"].get() == {}
+
+
+def test_swap_invalidates_the_cached_spark_observation(tmp_path, monkeypatch):
+    """A swap just changed the thing the TTL cache is holding; the next read
+    must not report the outgoing profile."""
+    app, deck = _spark_app(tmp_path, monkeypatch)
+    observer = deck["spark_observer"]
+    observer.status()
+    before = deck["spark"].status_calls
+
+    TestClient(app).post("/api/spark/swap", json={"profile": "laguna"})
+    observer.status()
+
+    assert deck["spark"].status_calls > before

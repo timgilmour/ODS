@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.engines import BusyError, EngineError, GuardError
 from app.gateway import detect_default_gateway
-from app.routers import control, policy, sets, spark, status, storage
+from app.routers import control, lifecycle, policy, sets, spark, status, storage
 from app.settings import Settings
 
 # The GGUF store is bound read-only into the container at this path (see
@@ -189,6 +189,13 @@ def _build_deck(settings: Settings) -> dict:
 
     job_queue.world_fn = lambda: build_world_snapshot(deck)
 
+    # Also late-bound, and for a second reason: it reads deck["spark"] on
+    # every call rather than capturing the client, so a test that swaps the
+    # deck entry after create_app() is still observed by the one shared cache.
+    from app.observe import SparkObserver
+
+    deck["spark_observer"] = SparkObserver(lambda: deck["spark"])
+
     _deck_by_settings_id[id(settings)] = (settings, deck)
     return deck
 
@@ -219,6 +226,10 @@ def _build_watcher(settings: Settings):
         # is one of the reconciled resources (None on a box without one).
         intent_store=deck["intent_store"],
         spark=deck["spark"],
+        # One cached spark probe for the whole process, shared with the HTTP
+        # paths: status() costs two node-agent requests and an absent sparky
+        # burns a 5 s timeout on each.
+        spark_observer=deck["spark_observer"],
     )
 
 
@@ -293,6 +304,7 @@ def create_app() -> FastAPI:
     app.include_router(sets.router, prefix="/api")
     app.include_router(policy.router, prefix="/api")
     app.include_router(spark.router, prefix="/api")
+    app.include_router(lifecycle.router, prefix="/api")
     app.include_router(storage.router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when

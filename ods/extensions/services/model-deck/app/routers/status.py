@@ -1,14 +1,14 @@
 """
 Status router — read-only observability endpoints: a live world/policy/
-registry snapshot (GET /state) and the arbiter's append-only audit trail
-(GET /events). No auth: these expose no controls, only what's already
+registry/lifecycle snapshot (GET /state) and the arbiter's append-only audit
+trail (GET /events). No auth: these expose no controls, only what's already
 visible from a live box.
 """
 
 from fastapi import APIRouter, Request
 
 from app.events import tail_events
-from app.routers import build_world_snapshot
+from app.routers import build_lifecycle_view, build_world_snapshot
 
 router = APIRouter(tags=["status"])
 
@@ -16,10 +16,14 @@ router = APIRouter(tags=["status"])
 @router.get("/state")
 def get_state(request: Request) -> dict:
     deck = request.app.state.deck
+    world = build_world_snapshot(deck)
     return {
-        "world": build_world_snapshot(deck),
+        "world": world,
         "policy": deck["policy_store"].get(),
         "models": deck["registry"].scan(),
+        # intent x observation, derived from the SAME snapshot the world
+        # block reports, so the two can never describe different moments.
+        "lifecycle": build_lifecycle_view(deck, world),
     }
 
 

@@ -240,7 +240,7 @@ def test_api_state_shape(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"world", "policy", "models"}
+    assert set(body.keys()) == {"world", "policy", "models", "lifecycle"}
     assert body["policy"] == DEFAULT_POLICIES
     assert body["models"] == [{"file": "m.gguf", "size": 1, "footprint": 2}]
     assert body["world"]["default_route"] == "extra.model.gguf"
@@ -1089,3 +1089,148 @@ def test_apply_records_nothing_for_a_step_that_never_ran(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["failed"] == {"step": "load_lemonade", "model": "extra.model.gguf"}
     assert deck["intent_store"].get() == {}
+
+
+# ===========================================================================
+# /api/state lifecycle block, /api/lifecycle/*
+# ===========================================================================
+
+
+def test_state_includes_lifecycle_block(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("local/hipfire", state="unloaded", model=None, engine="hipfire")
+    deck["intent_store"] = store
+    deck["hipfire"] = FakeHipfire(state="parked")
+
+    body = TestClient(app).get("/api/state").json()
+
+    assert body["lifecycle"]["local/hipfire"]["status"] == "parked"
+    assert body["lifecycle"]["local/hipfire"]["intent"]["state"] == "unloaded"
+    assert body["lifecycle"]["local/hipfire"]["observed"]["loaded"] is False
+    assert "last_healthy_ts" in body["lifecycle"]["local/hipfire"]
+
+
+def test_lifecycle_block_distinguishes_parked_from_down(tmp_path, monkeypatch):
+    """The whole point, expressed at the API boundary: the SAME observation
+    (hipfire stopped) reads 'parked' above and 'down' here. Only intent
+    differs."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("local/hipfire", state="loaded", model=None, engine="hipfire")
+    deck["intent_store"] = store
+    deck["hipfire"] = FakeHipfire(state="parked")
+
+    body = TestClient(app).get("/api/state").json()
+
+    assert body["lifecycle"]["local/hipfire"]["status"] == "down"
+
+
+def test_lifecycle_block_omits_spark_when_none_configured(tmp_path, monkeypatch):
+    """An undeclared resource must not appear as a phantom failure."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    body = TestClient(app).get("/api/state").json()
+
+    assert "sparky/slot0" not in body["lifecycle"]
+
+
+def test_clear_quarantine_releases_the_key(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("local/hipfire", state="loaded", model="a", engine="hipfire")
+    store.note_failure("local/hipfire")
+    store.note_failure("local/hipfire")
+    deck["intent_store"] = store
+    assert store.get()["local/hipfire"]["quarantined"] is True
+
+    resp = TestClient(app).post("/api/lifecycle/quarantine/local/hipfire/clear")
+
+    assert resp.status_code == 200
+    assert store.get()["local/hipfire"]["quarantined"] is False
+
+
+def test_clear_quarantine_unknown_key_is_404(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+
+    resp = TestClient(app).post("/api/lifecycle/quarantine/nope/nothing/clear")
+
+    assert resp.status_code == 404
+
+
+def test_adopt_records_observed_state_as_intent(tmp_path, monkeypatch):
+    """Bootstrap adoption: turn an unmanaged resource into a managed one
+    WITHOUT touching it — adopting must never restart anything."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    deck["intent_store"] = store
+    deck["hipfire"] = FakeHipfire(state="running")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 200
+    record = store.get()["local/hipfire"]
+    assert record["state"] == "loaded"
+    assert record["engine"] == "hipfire"
+    assert record["failures"] == 0
+
+
+def test_adopt_a_stopped_resource_records_a_park(tmp_path, monkeypatch):
+    """Adoption records what IS, not what we wish: adopting a stopped engine
+    means 'this is deliberately off', which is exactly what stops the
+    reconciler from starting it."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    deck["intent_store"] = store
+    deck["hipfire"] = FakeHipfire(state="parked")
+
+    TestClient(app).post("/api/lifecycle/adopt/local/hipfire")
+
+    assert store.get()["local/hipfire"]["state"] == "unloaded"
+
+
+def test_adopt_does_not_actuate(tmp_path, monkeypatch):
+    """'Start managing this' must be a safe button. If adopt could restart
+    a serving model, nobody would ever press it."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+    deck["hipfire"] = FakeHipfire(state="running")
+    deck["lemonade"] = FakeLemonade(loaded="qwen")
+
+    TestClient(app).post("/api/lifecycle/adopt/local/hipfire")
+
+    assert deck["hipfire"].calls == []
+    assert deck["lemonade"].calls == []
+
+
+def test_adopt_unknown_key_is_404(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/nope/nothing")
+
+    assert resp.status_code == 404
+
+
+class _UnreachableHipfire(FakeHipfire):
+    """status() raising is what app.state degrades to tenant 'unknown', which
+    app.observe maps to unreachable (we failed to look, not looked and saw
+    nothing)."""
+
+    def status(self):
+        raise EngineError("connection refused")
+
+
+def test_adopt_an_unreachable_resource_is_refused(tmp_path, monkeypatch):
+    """Failing to look is not evidence of anything, and recording 'unloaded'
+    from it would manufacture a park nobody asked for."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    deck["intent_store"] = store
+    deck["hipfire"] = _UnreachableHipfire()
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 409
+    assert store.get() == {}

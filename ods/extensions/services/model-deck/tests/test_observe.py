@@ -141,3 +141,172 @@ def test_engine_for_known_and_unknown_keys():
     assert engine_for("local/hipfire") == "hipfire"
     assert engine_for("sparky/slot0") == "spark"
     assert engine_for("nope/nothing") is None
+
+
+# ===========================================================================
+# SparkObserver — the one cached, backed-off translation of the node payload
+# ===========================================================================
+
+
+class _CountingSpark:
+    """Counts status() calls and returns the NODE payload shape, so a test
+    exercises the same translation production does."""
+
+    def __init__(self, profile="heretic", serving_model="heretic",
+                 endpoint_ok=True, raises=None):
+        self.calls = 0
+        self.raises = raises
+        self._payload = {
+            "profiles": [{"name": profile, "engine": "vllm"}],
+            "swap_status": {"state": "error", "profile": profile, "ts": None},
+            "serving": {"model": serving_model, "endpoint_ok": endpoint_ok},
+        }
+
+    def status(self):
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self._payload
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def _observer(spark, clock=None, **kw):
+    from app.observe import SparkObserver
+
+    return SparkObserver(lambda: spark, clock=clock or _Clock(), **kw)
+
+
+def test_spark_observer_translates_the_node_payload():
+    """SparkClient.status() returns {'profiles','swap_status','serving'} —
+    NOT the observation shape. Identity is the PROFILE, not the served name."""
+    spark = _CountingSpark(profile="heretic", serving_model="aeon")
+
+    status = _observer(spark).status()
+
+    assert status["profile"] == "heretic"
+    assert status["reachable"] is True
+    assert status["swap_in_progress"] is False
+    assert observe_spark(status)["sparky/slot0"]["model"] == "heretic"
+
+
+def test_spark_observer_returns_none_without_a_spark():
+    assert _observer(None).status() is None
+
+
+def test_spark_observer_caches_within_the_ttl():
+    """watch_interval defaults to 2 s; probing the node twice a tick is how
+    the Deck went sluggish."""
+    clock = _Clock()
+    spark = _CountingSpark()
+    obs = _observer(spark, clock=clock, ttl_s=10.0)
+
+    obs.status()
+    clock.advance(9.0)
+    obs.status()
+
+    assert spark.calls == 1
+
+
+def test_spark_observer_reprobes_after_the_ttl():
+    clock = _Clock()
+    spark = _CountingSpark()
+    obs = _observer(spark, clock=clock, ttl_s=10.0)
+
+    obs.status()
+    clock.advance(11.0)
+    obs.status()
+
+    assert spark.calls == 2
+
+
+def test_spark_observer_backs_off_after_failures():
+    """An absent sparky is its NORMAL state. Each failed probe costs two 5 s
+    httpx timeouts, so a tick-rate probe stretches a 2 s cadence to ~12 s."""
+    from app.engines import EngineError
+
+    clock = _Clock()
+    spark = _CountingSpark(raises=EngineError("connection refused"))
+    obs = _observer(spark, clock=clock, ttl_s=10.0, backoff_base_s=15.0)
+
+    obs.status()
+    clock.advance(11.0)          # past the TTL, inside the backoff
+    status = obs.status()
+
+    assert spark.calls == 1
+    assert status["reachable"] is False
+
+
+def test_spark_observer_backoff_grows_and_is_capped():
+    from app.engines import EngineError
+
+    clock = _Clock()
+    spark = _CountingSpark(raises=EngineError("down"))
+    obs = _observer(spark, clock=clock, backoff_base_s=10.0, backoff_max_s=25.0)
+
+    obs.status()                 # probe 1 -> wait 10
+    clock.advance(10.0)
+    obs.status()                 # probe 2 -> wait 20
+    clock.advance(10.0)
+    obs.status()                 # still inside the second backoff
+    assert spark.calls == 2
+    clock.advance(10.0)
+    obs.status()                 # probe 3 -> wait 40, capped to 25
+    assert spark.calls == 3
+    clock.advance(25.0)
+    obs.status()
+
+    assert spark.calls == 4
+
+
+def test_spark_observer_recovers_immediately_after_a_success():
+    from app.engines import EngineError
+
+    clock = _Clock()
+    spark = _CountingSpark(raises=EngineError("down"))
+    obs = _observer(spark, clock=clock, ttl_s=10.0, backoff_base_s=15.0)
+
+    obs.status()
+    spark.raises = None
+    clock.advance(16.0)
+    obs.status()                 # recovers: back to the short TTL
+    clock.advance(11.0)
+    obs.status()
+
+    assert spark.calls == 3
+
+
+def test_spark_observer_hands_the_error_to_its_caller_once():
+    """The watcher owns the audit log, so the observer parks the error and
+    the watcher takes it — probing from an HTTP thread must not double-log."""
+    from app.engines import EngineError
+
+    spark = _CountingSpark(raises=EngineError("connection refused"))
+    obs = _observer(spark)
+
+    obs.status()
+
+    assert "connection refused" in obs.take_error()
+    assert obs.take_error() is None
+
+
+def test_spark_observer_invalidate_forces_a_fresh_probe():
+    """A swap just changed the thing being cached."""
+    clock = _Clock()
+    spark = _CountingSpark()
+    obs = _observer(spark, clock=clock, ttl_s=60.0)
+
+    obs.status()
+    obs.invalidate()
+    obs.status()
+
+    assert spark.calls == 2

@@ -87,11 +87,15 @@ Design notes that are load-bearing (and tested):
 import threading
 import time
 
-from app.engines import BusyError, EngineError, GuardError
-from app.engines.spark import boot_in_flight
+from app.engines import EngineError, GuardError
 from app.events import log_event
 from app.lifecycle import derive_status
-from app.observe import merge_observations, observe_local, observe_spark
+from app.observe import (
+    SparkObserver,
+    merge_observations,
+    observe_local,
+    observe_spark,
+)
 from app.reconcile import plan_reconcile
 from app.sets import apply_in_progress
 
@@ -336,6 +340,7 @@ class Watcher:
         catalog=None,
         intent_store=None,
         spark=None,
+        spark_observer=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -368,6 +373,12 @@ class Watcher:
         # observe_spark then emits no key at all, so an undeclared resource
         # can never appear as a phantom failure.
         self._spark = spark
+        # Shared with the HTTP routers when app.main wires it (one cache for
+        # the process); self-built otherwise so a bare Watcher still works.
+        self._spark_observer = (
+            spark_observer if spark_observer is not None
+            else SparkObserver(lambda: self._spark)
+        )
         self._interval = settings.watch_interval
 
         self._stop = threading.Event()
@@ -556,8 +567,6 @@ class Watcher:
             statuses,
             intents,
             auto_enabled=self._policy_store.auto_enabled(),
-            boot_window_active=bool(
-                spark_status and spark_status["swap_in_progress"]),
         )
 
         for action in actions:
@@ -567,32 +576,17 @@ class Watcher:
         """The spark node's state in app.observe's vocabulary, or None when
         no spark is configured.
 
-        Two shape translations happen here and nowhere else, because the
-        node payload (``{"profiles", "swap_status", "serving"}``) is not the
-        observation shape:
-
-        * identity is the PROFILE the node last swapped to, not the served
-          model name (mm27b serves as `aeon`; comparing served names would
-          report permanent drift for a correct placement);
-        * an engine failure reads as unreachable, never as "nothing loaded"
-          — we failed to look, which is not the same as looking and seeing
-          nothing.
+        The translation and its TTL cache live in app.observe.SparkObserver,
+        shared with the HTTP paths so a tick and a GET cost one probe. All
+        this adds is the audit trail: the observer parks a probe failure and
+        the watcher — which owns the events log — reports it here, once,
+        wherever the failing probe actually ran.
         """
-        if self._spark is None:
-            return None
-        try:
-            status = self._spark.status()
-        except (EngineError, GuardError, BusyError) as exc:
-            self._log("lifecycle-spark-unreachable", {"error": str(exc)})
-            return {"profile": None, "serving": None, "reachable": False,
-                    "swap_in_progress": False}
-        swap_status = status.get("swap_status") or {}
-        return {
-            "profile": swap_status.get("profile"),
-            "serving": status.get("serving"),
-            "reachable": True,
-            "swap_in_progress": boot_in_flight(status),
-        }
+        status = self._spark_observer.status()
+        error = self._spark_observer.take_error()
+        if error is not None:
+            self._log("lifecycle-spark-unreachable", {"error": error})
+        return status
 
     def _execute_restore(self, action: dict) -> None:
         """Perform one restore, recording success or failure against the

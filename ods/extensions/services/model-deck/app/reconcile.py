@@ -17,11 +17,15 @@ sake:
 * ``quarantined`` — the failure budget is spent; retrying is the crash
   loop we are here to prevent.
 * ``unreachable`` — a node being off is not a model having fallen over.
+* ``warming`` — a load or boot is in flight; "not loaded yet" and "died"
+  are the same observation, and guessing wrong costs a multi-minute swap.
 
-Two global suppressions: ``auto_enabled`` (the policy toggle) and
-``boot_window_active`` (right after a node boots, "not loaded yet" and
-"died" are indistinguishable; waiting costs seconds, guessing wrong costs
-a multi-minute swap).
+ONE global suppression: ``auto_enabled`` (the policy toggle). There was a
+second — a global ``boot_window_active`` — and it was wrong twice over: a
+spark swap booting suppressed restore of local hipfire and lemonade for up
+to 20 minutes, and it was redundant for the slot it meant to protect, whose
+``transitioning`` observation already derives ``warming``. Boot suppression
+belongs to the resource that is booting, not to the whole box.
 """
 
 ACTIONABLE_STATUS = "down"
@@ -32,10 +36,9 @@ def plan_reconcile(
     intents: dict[str, dict],
     *,
     auto_enabled: bool,
-    boot_window_active: bool,
 ) -> list[dict]:
     """Return the restore actions justified by `statuses`, in key order."""
-    if not auto_enabled or boot_window_active:
+    if not auto_enabled:
         return []
 
     actions = []
