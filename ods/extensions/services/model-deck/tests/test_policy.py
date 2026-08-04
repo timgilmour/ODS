@@ -106,11 +106,14 @@ def test_put_parent_dir_created_when_file_never_read(tmp_path):
     assert policy_path.is_file()
 
 
-def test_put_rejects_unknown_tenant_naming_it(tmp_path):
+def test_put_rejects_the_reserved_auto_key_naming_it(tmp_path):
+    """Superseded the old unknown-tenant rejection: arbitrary tenants are now
+    accepted (see test_put_accepts_a_tenant_outside_the_defaults), but the
+    reserved config key is still not a tenant and put() must say so."""
     store = PolicyStore(tmp_path / "policy.json")
 
-    with pytest.raises(ValueError, match="sdxl"):
-        store.put({"sdxl": {"priority": 1, "pinned": False, "idle_ttl": 5}})
+    with pytest.raises(ValueError, match="_auto"):
+        store.put({"_auto": {"priority": 1, "pinned": False, "idle_ttl": 5}})
 
 
 def test_put_rejects_missing_field(tmp_path):
@@ -185,7 +188,12 @@ def test_put_rejected_payload_leaves_file_unchanged(tmp_path):
     before = store.get()
 
     with pytest.raises(ValueError):
-        store.put({"sdxl": {"priority": 1, "pinned": False, "idle_ttl": 5}})
+        store.put(
+            {
+                "hipfire": {"priority": 9, "pinned": False, "idle_ttl": 5},
+                "sdxl": {"priority": "high", "pinned": False, "idle_ttl": 5},
+            }
+        )
 
     assert store.get() == before
 
@@ -214,3 +222,58 @@ def test_non_dict_json_treated_as_defaults(tmp_path):
     store = PolicyStore(policy_path)
 
     assert store.get() == DEFAULT_POLICIES
+
+
+def test_put_accepts_a_tenant_outside_the_defaults(tmp_path):
+    """Extensibility: a new engine or node must not require a code change."""
+    store = PolicyStore(tmp_path / "policy.json")
+
+    store.put({"sparky-vllm": {"priority": 60, "pinned": False, "idle_ttl": 0}})
+
+    assert store.get()["sparky-vllm"]["priority"] == 60
+
+
+def test_put_still_validates_field_types_for_new_tenants(tmp_path):
+    store = PolicyStore(tmp_path / "policy.json")
+
+    with pytest.raises(ValueError):
+        store.put({"sparky-vllm": {"priority": "high", "pinned": False, "idle_ttl": 0}})
+
+
+def test_put_still_rejects_unknown_fields(tmp_path):
+    store = PolicyStore(tmp_path / "policy.json")
+
+    with pytest.raises(ValueError):
+        store.put({"sparky-vllm": {"priority": 1, "pinned": False, "idle_ttl": 0, "wat": 1}})
+
+
+def test_defaults_still_seeded_for_the_known_three(tmp_path):
+    store = PolicyStore(tmp_path / "policy.json")
+
+    assert set(store.get()) == set(DEFAULT_POLICIES)
+
+
+def test_auto_enabled_defaults_to_true(tmp_path):
+    """Lifecycle auto-restore is ON by default (a deliberate difference from
+    storage tiering, whose automation defaults off)."""
+    store = PolicyStore(tmp_path / "policy.json")
+
+    assert store.auto_enabled() is True
+
+
+def test_set_auto_persists(tmp_path):
+    path = tmp_path / "policy.json"
+    store = PolicyStore(path)
+
+    store.set_auto(False)
+
+    assert PolicyStore(path).auto_enabled() is False
+
+
+def test_auto_key_is_not_returned_as_a_tenant(tmp_path):
+    """'_auto' is config, not a tenant — it must never show up in the
+    policy table the UI renders or the arbiter iterates."""
+    store = PolicyStore(tmp_path / "policy.json")
+    store.set_auto(False)
+
+    assert "_auto" not in store.get()

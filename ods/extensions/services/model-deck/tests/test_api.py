@@ -853,14 +853,25 @@ def test_policy_put_roundtrip_partial_by_tenant(tmp_path, monkeypatch):
     assert again.json() == body
 
 
-def test_policy_put_unknown_tenant_422(tmp_path, monkeypatch):
+def test_policy_put_accepts_runtime_tenant_but_rejects_reserved_key(tmp_path, monkeypatch):
+    """Replaces the old unknown-tenant-422 test: DEFAULT_POLICIES is seed data,
+    not an allowlist, so policying a new node or engine no longer needs a code
+    change. The reserved ``_auto`` config key is still not a tenant."""
     app, _ = make_app(tmp_path, monkeypatch)
-    resp = TestClient(app).put(
+    client = TestClient(app)
+
+    resp = client.put(
         "/api/policy",
-        json={"bogus": {"priority": 5, "pinned": True, "idle_ttl": 0}},
-       
+        json={"sparky-vllm": {"priority": 5, "pinned": True, "idle_ttl": 0}},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 200
+    assert resp.json()["sparky-vllm"] == {"priority": 5, "pinned": True, "idle_ttl": 0}
+
+    reserved = client.put(
+        "/api/policy",
+        json={"_auto": {"priority": 5, "pinned": True, "idle_ttl": 0}},
+    )
+    assert reserved.status_code == 422
 
 
 def test_policy_put_bad_field_type_422(tmp_path, monkeypatch):

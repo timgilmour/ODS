@@ -29,6 +29,10 @@ DEFAULT_POLICIES: dict[str, TenantPolicy] = {
 
 _FIELDS = {"priority": int, "pinned": bool, "idle_ttl": int}
 
+# Reserved non-tenant key inside policy.json holding lifecycle automation
+# config. Filtered out of get() so callers iterating tenants never see it.
+_AUTO_KEY = "_auto"
+
 
 def _validate_policy(tenant: str, policy: dict) -> None:
     """Raise ValueError if `policy` doesn't have exactly priority/pinned/idle_ttl
@@ -81,7 +85,7 @@ class PolicyStore:
         os.replace(tmp_path, self._path)
 
     def get(self) -> dict[str, TenantPolicy]:
-        """Full tenant->policy mapping.
+        """Full tenant->policy mapping, excluding reserved config keys.
 
         On first read (file missing or corrupt), materializes the default
         policies and persists them before returning.
@@ -90,27 +94,51 @@ class PolicyStore:
         if data is None:
             data = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
             self._save(data)
-        return data
+        return {k: v for k, v in data.items() if k != _AUTO_KEY}
 
     def put(self, policies: dict[str, TenantPolicy]) -> None:
         """Partial update by tenant: replaces the whole record for each tenant
         named in `policies`, leaving tenants not named untouched.
 
-        Raises ValueError (naming the offending tenant) if a key isn't a
-        known tenant, or if a policy doesn't have exactly the three fields
-        with correct types (priority: int not bool; pinned: bool;
-        idle_ttl: int >= 0, not bool). Validates the whole payload before
-        writing anything, so a rejected `put` leaves the file unchanged.
+        Tenants outside DEFAULT_POLICIES are accepted: the defaults are seed
+        data, not an allowlist. Requiring a code edit to policy a new node or
+        engine is exactly the rigidity the lifecycle work removes. Field
+        validation is unchanged and still strict (priority: int not bool;
+        pinned: bool; idle_ttl: int >= 0, not bool), and the whole payload is
+        validated before anything is written, so a rejected put leaves the
+        file untouched.
         """
-        unknown = set(policies) - set(DEFAULT_POLICIES)
-        if unknown:
-            raise ValueError(f"unknown tenant(s): {sorted(unknown)}")
+        if _AUTO_KEY in policies:
+            raise ValueError(f"{_AUTO_KEY!r} is reserved; use set_auto()")
         for tenant, policy in policies.items():
             _validate_policy(tenant, policy)
 
-        current = self.get()
+        # _load() rather than get(): get() filters the reserved _auto key, so
+        # reading through it would silently drop the automation setting on
+        # every policy write. A missing/corrupt file still seeds the defaults,
+        # matching get()'s self-heal, so a put on a fresh deck doesn't leave
+        # the untouched tenants unpolicied.
+        current = self._load()
+        if current is None:
+            current = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
         current.update({tenant: dict(policy) for tenant, policy in policies.items()})
         self._save(current)
+
+    # --- lifecycle automation toggle ---------------------------------------
+
+    def auto_enabled(self) -> bool:
+        """Whether the reconciler may act. Defaults to True: unlike storage
+        tiering (whose automation moves bytes and defaults off), lifecycle
+        auto-restore only returns a resource to a state the operator already
+        chose, and its absence is what let hipfire stay dead for 26 hours."""
+        data = self._load() or {}
+        value = data.get(_AUTO_KEY, {}).get("enabled", True)
+        return bool(value)
+
+    def set_auto(self, enabled: bool) -> None:
+        data = self._load() or {}
+        data[_AUTO_KEY] = {"enabled": bool(enabled)}
+        self._save(data)
 
 
 # --- Storage tiering policy -------------------------------------------------
