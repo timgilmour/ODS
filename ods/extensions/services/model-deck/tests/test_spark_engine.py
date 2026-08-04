@@ -97,6 +97,18 @@ def _metrics_handler(running=0, waiting=0):
     return handler
 
 
+def _no_matching_gauge_metrics_handler():
+    # A 200 scrape that doesn't contain ANY of the expected gauge prefixes
+    # for either engine -- simulates a misconfigured endpoint or an
+    # upstream metric rename, not a transport failure.
+    text = "# HELP some_other_metric unrelated\nsome_other_metric 1.0\n"
+
+    def handler(request):
+        return httpx.Response(200, text=text, request=request)
+
+    return handler
+
+
 def _ds4_metrics_handler(inflight=0):
     # ds4_requests_started_total is a counter, not the guard signal — its
     # presence in the payload checks that the guard doesn't accidentally
@@ -359,6 +371,31 @@ def test_swap_away_from_ds4_allowed_when_ds4_idle():
     client = _client(handler, metrics_handler=_ds4_metrics_handler(inflight=0))
     out = client.swap("laguna")
     assert out["id"] == "i2"
+
+
+def test_swap_away_from_ds4_refused_when_metrics_matches_no_known_gauge():
+    # A 200 scrape that matches none of ds4's expected prefixes must NOT
+    # read as "0 busy" -- that would silently let a swap kill an in-flight
+    # generation if the gauge were ever renamed or the scrape misconfigured.
+    # ds4 fails closed here (Tim's 2026-08-04 ruling); see
+    # _STRICT_BUSY_ENGINES.
+    handler = _node_handler(
+        profiles=DS4_MIX_PROFILES,
+        swap_status={"state": "done", "profile": "ds4", "id": "u0",
+                     "message": "swap launched", "ts": "2026-08-04T00:00:00Z"})
+    client = _client(handler, metrics_handler=_no_matching_gauge_metrics_handler())
+    with pytest.raises(EngineError):
+        client.swap("laguna")
+    assert not [r for r in handler.calls if r.url.path == "/v1/node/swap"]
+
+
+def test_swap_between_vllm_profiles_allows_when_metrics_matches_no_known_gauge():
+    # Pins the "vLLM untouched" requirement: today's fail-open-on-absent-
+    # gauges behavior is unchanged for vllm -- only ds4 fails closed.
+    handler = _node_handler()  # DEFAULT_PROFILES, swap_status=None -> engine
+                                # unknown -> "vllm" fallback, same as today.
+    client = _client(handler, metrics_handler=_no_matching_gauge_metrics_handler())
+    assert client.swap("laguna")["id"] == "u1"
 
 
 # --- boot-in-flight (lifecycle reconciler's boot window) ---

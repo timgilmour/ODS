@@ -25,7 +25,13 @@ Guard order in swap(), mirroring hipfire.py's park():
      v1 documented limitation, no ComfyUI queue visibility, the operator
      owns not swapping mid-render. All engines share one /metrics fetch —
      the node serves one profile at a time on one port (serving_url) — so
-     only the metric names differ per engine, not the scrape URL.
+     only the metric names differ per engine, not the scrape URL. A 200
+     scrape that matches NONE of the engine's expected prefixes is "0 busy"
+     (fail-open) for vLLM, unchanged since launch — except for engines in
+     _STRICT_BUSY_ENGINES (ds4), where it is EngineError instead: a
+     misconfigured scrape or a renamed gauge must not silently read as
+     "idle" and let a swap kill an in-flight generation with no signal
+     anywhere (Tim's ruling, 2026-08-04).
   3. boot-window guard — endpoint down + last swap "done"/"swapping" means
      a boot (possibly a ~15 min autotune) is in flight; refuse rather than
      silently restart it. force=True interrupts — which is also the
@@ -54,6 +60,24 @@ _BUSY_METRICS: dict[str, tuple[str, ...]] = {
     "vllm": ("vllm:num_requests_running", "vllm:num_requests_waiting"),
     "ds4": ("ds4_requests_inflight",),
 }
+
+# Engines where a 200 /metrics scrape matching NONE of _BUSY_METRICS[engine]
+# is EngineError (loud refusal) rather than "0 busy" (silent allow, vLLM's
+# behavior since launch and unchanged here). ds4-only, per Tim's 2026-08-04
+# ruling: a misconfigured or upstream-renamed gauge must not let a swap kill
+# an in-flight generation with no signal anywhere. New engine = new entry;
+# an engine absent from this set keeps the fail-open default (matches vLLM's
+# untouched behavior — the plan's "conservative path unchanged" mandate).
+#
+# Safe for ds4 specifically: ds4_requests_inflight is rendered from a
+# zero-initialized *static* global registry (ds4.c:755 `static ds4_metrics
+# g_metrics;`, comment at ds4.c:748 "Zero-initialized global"), unconditionally
+# emitted by send_metrics() on every /metrics call (ds4_server.c:13421-13423)
+# — present (reading 0) from the first successful scrape of a fresh,
+# zero-traffic boot, never lazily created on first request. Verified
+# read-only against ds4 tag v0.5.3 / commit 4ad370b4a338 on sparky
+# (~/ds4), 2026-08-04.
+_STRICT_BUSY_ENGINES = frozenset({"ds4"})
 
 # swap_status states that mean a boot may still be under way. "done" is in
 # here because the helper reports "done" as soon as swap.sh *launched*, not
@@ -157,14 +181,20 @@ class SparkClient:
         reconciler; adds no node-agent endpoint."""
         return boot_in_flight(self.status())
 
-    def busy_requests(self, metric_prefixes: tuple[str, ...]) -> int:
-        """Sum of in-flight values from the serving engine's /metrics.
+    def busy_requests(self, engine: str) -> int:
+        """Sum of in-flight values from ``engine``'s /metrics.
 
-        ``metric_prefixes`` is the current engine's entry from
-        _BUSY_METRICS — the node serves one profile at a time on one port
-        (serving_url), so the scrape URL is the same regardless of engine;
-        only which metric lines count as "busy" changes.
+        ``engine`` is a _BUSY_METRICS key (e.g. "vllm" or "ds4") — the node
+        serves one profile at a time on one port (serving_url), so the
+        scrape URL is the same regardless of engine; only which metric
+        lines count as "busy" changes.
+
+        A 200 scrape that matches none of the engine's expected prefixes is
+        "0 busy" (fail-open) unless ``engine`` is in _STRICT_BUSY_ENGINES,
+        in which case it is EngineError (fail-closed) — see that set's
+        comment for why ds4 is the one engine that needs this.
         """
+        metric_prefixes = _BUSY_METRICS[engine]
         try:
             resp = self._serving.get("/metrics")
         except httpx.TransportError as exc:
@@ -172,12 +202,19 @@ class SparkClient:
         if not resp.is_success:
             raise EngineError(resp.text)
         total = 0.0
+        matched = False
         for line in resp.text.splitlines():
             if line.startswith(metric_prefixes):
+                matched = True
                 try:
                     total += float(line.rsplit(None, 1)[-1])
                 except ValueError:
                     raise EngineError(f"unparseable metric line: {line!r}")
+        if not matched and engine in _STRICT_BUSY_ENGINES:
+            raise EngineError(
+                f"/metrics matched none of {metric_prefixes!r} for engine "
+                f"{engine!r}; refusing to treat an unreadable busy signal "
+                "as idle")
         return int(total)
 
     # -- swap -------------------------------------------------------------
@@ -218,10 +255,9 @@ class SparkClient:
 
         serving = self._node_get("/v1/node/serving")
         if serving.get("endpoint_ok") and not force:
-            engine = self._current_engine()
-            metric_prefixes = _BUSY_METRICS.get(engine or "vllm")
-            if metric_prefixes is not None:
-                n = self.busy_requests(metric_prefixes)
+            engine = self._current_engine() or "vllm"
+            if engine in _BUSY_METRICS:
+                n = self.busy_requests(engine)
                 if n > 0:
                     raise GuardError(
                         f"spark serving has {n} in-flight request(s); "
