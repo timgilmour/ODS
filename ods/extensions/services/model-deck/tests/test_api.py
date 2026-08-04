@@ -1234,3 +1234,50 @@ def test_adopt_an_unreachable_resource_is_refused(tmp_path, monkeypatch):
 
     assert resp.status_code == 409
     assert store.get() == {}
+
+
+def test_get_auto_defaults_to_enabled(tmp_path, monkeypatch):
+    """Automation is on by default — its absence is what let hipfire stay
+    dead for 26 hours."""
+    app, _ = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).get("/api/lifecycle/auto")
+
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is True
+
+
+def test_auto_can_be_turned_off_and_back_on(tmp_path, monkeypatch):
+    """THE point of this route: shipping auto-actuation with no brake means
+    the only way to stop the reconciler is hand-editing policy.json and
+    restarting the container."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    assert client.post("/api/lifecycle/auto", json={"enabled": False}).status_code == 200
+    assert client.get("/api/lifecycle/auto").json()["enabled"] is False
+    assert deck["policy_store"].auto_enabled() is False
+
+    assert client.post("/api/lifecycle/auto", json={"enabled": True}).status_code == 200
+    assert deck["policy_store"].auto_enabled() is True
+
+
+def test_turning_auto_off_preserves_tenant_policies(tmp_path, monkeypatch):
+    """set_auto() seeds defaults on a fresh file; going through the route must
+    not cost the deck its tenant policies."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    client.post("/api/lifecycle/auto", json={"enabled": False})
+
+    policies = deck["policy_store"].get()
+    assert "hipfire" in policies and "lemonade" in policies and "comfyui" in policies
+    assert "_auto" not in policies
+
+
+def test_auto_rejects_a_non_boolean(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).post("/api/lifecycle/auto", json={"enabled": "yes"})
+
+    assert resp.status_code == 422

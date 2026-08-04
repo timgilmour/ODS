@@ -115,6 +115,8 @@ See the **Storage tiering** section below for detailed semantics.
 | `GET` | `/api/state` | The `lifecycle` block: per-resource `{status, reason, intent, observed, last_healthy_ts}` |
 | `POST` | `/api/lifecycle/quarantine/{key}/clear` | Release a quarantine so the reconciler will try again (404 if the key has no intent) |
 | `POST` | `/api/lifecycle/adopt/{key}` | Record what is *already* running as the intent. Bookkeeping only — never loads, unloads, or restarts anything |
+| `GET` | `/api/lifecycle/auto` | Whether the reconciler may act |
+| `POST` | `/api/lifecycle/auto` | Turn automation on/off (`{"enabled": bool}`, strict). Off stops the Deck acting; it unloads nothing |
 
 `{key}` is a resource key and contains a slash (`local/hipfire`), e.g.
 `POST /api/lifecycle/adopt/local/hipfire`.
@@ -348,7 +350,18 @@ Adopting an **unreachable** resource is refused with **409**: an observation we 
 
 Auto-restore is **on by default** (unlike storage tiering, whose automation moves bytes and defaults off): lifecycle auto-restore only returns a resource to a state the operator already chose, and its absence is what let hipfire stay dead for 26 hours. `plan_reconcile` returns nothing at all when it is off.
 
-The toggle lives in the reserved `_auto` key of `policy.json` (`{"_auto": {"enabled": false}}`), read via `PolicyStore.auto_enabled()`. **There is currently no HTTP route or UI control for it** — `PUT /api/policy` explicitly *rejects* `_auto` as reserved, and `set_auto()` has no caller outside tests. Turning automation off today means editing `data/model-deck/policy.json` and restarting the deck. (Exposing it belongs with the settings work in Plan C.)
+The toggle lives in the reserved `_auto` key of `policy.json` (`{"_auto": {"enabled": false}}`), read via `PolicyStore.auto_enabled()`.
+
+Control it over HTTP:
+
+```
+GET  /api/lifecycle/auto     ->  {"enabled": true}
+POST /api/lifecycle/auto     <-  {"enabled": false}
+```
+
+It needs its own route because `PUT /api/policy` deliberately *rejects* `_auto` as reserved, so the toggle cannot ride on the tenant policy payload. `enabled` is a `StrictBool`: `"yes"` or `1` are refused with a **422** rather than guessed at, because a brake should never interpret an ambiguous value.
+
+**Turning it off does not unload anything.** It stops the Deck acting on its own and leaves every resource exactly where it is. There is still no UI control — the whole lifecycle surface is curl-level today.
 
 ### Audit events
 

@@ -17,11 +17,43 @@ No auth, matching the rest of the deck. Keys contain a slash
 """
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, StrictBool
 
 from app.observe import engine_for
 from app.routers import build_observations, build_world_snapshot
 
 router = APIRouter(prefix="/lifecycle", tags=["lifecycle"])
+
+
+class AutoBody(BaseModel):
+    # StrictBool, not bool: pydantic's lax mode coerces "yes"/"on"/1 to True,
+    # and a safety brake should refuse an ambiguous value rather than guess
+    # which way the operator meant it. Matches policy.py's strict validation.
+    enabled: StrictBool
+
+
+@router.get("/auto")
+def get_auto(request: Request) -> dict:
+    """Whether the reconciler may act."""
+    return {"enabled": request.app.state.deck["policy_store"].auto_enabled()}
+
+
+@router.post("/auto")
+def set_auto(body: AutoBody, request: Request) -> dict:
+    """Turn lifecycle automation on or off.
+
+    The brake. Without it the reconciler's only off switch is hand-editing
+    ``policy.json`` and restarting the container — an unacceptable answer for
+    a component that starts and stops real engines, and the reason this route
+    exists at all. ``PUT /api/policy`` deliberately rejects the reserved
+    ``_auto`` key, so the toggle needs its own surface rather than riding on
+    the tenant policy payload.
+
+    Off does NOT unload anything: it stops the Deck acting on its own, and
+    leaves every resource exactly as it is.
+    """
+    request.app.state.deck["policy_store"].set_auto(body.enabled)
+    return {"enabled": body.enabled}
 
 
 @router.post("/quarantine/{key:path}/clear")
