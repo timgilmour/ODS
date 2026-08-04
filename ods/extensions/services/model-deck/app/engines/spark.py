@@ -14,13 +14,18 @@ Guard order in swap(), mirroring hipfire.py's park():
      read propagates unchanged (can't see the table -> don't swap).
      force NEVER skips this guard.
   2. busy guard — refuse while the live model has running or waiting
-     requests (vLLM /metrics). A metrics failure while the endpoint is up
-     is EngineError, not "not busy". force=True skips this guard. Engine-
-     aware: only runs when the current profile's engine is "vllm" or
-     unknown (conservative default); a non-vllm engine (e.g. comfyui) has
-     no /metrics to consult, so the guard is skipped — v1 documented
-     limitation, no ComfyUI queue visibility, the operator owns not
-     swapping mid-render.
+     requests (the serving engine's /metrics). A metrics failure while the
+     endpoint is up is EngineError, not "not busy". force=True skips this
+     guard. Engine-aware: which metric lines count as "busy" is looked up
+     per engine in _BUSY_METRICS (vllm's two gauges, ds4's single
+     ds4_requests_inflight gauge — see profiles.json's "engine" field);
+     unknown engine (None) is treated as "vllm" — conservative default, run
+     the probe when unsure. An engine with no entry in _BUSY_METRICS (e.g.
+     comfyui) has no known /metrics to consult, so the guard is skipped —
+     v1 documented limitation, no ComfyUI queue visibility, the operator
+     owns not swapping mid-render. All engines share one /metrics fetch —
+     the node serves one profile at a time on one port (serving_url) — so
+     only the metric names differ per engine, not the scrape URL.
   3. boot-window guard — endpoint down + last swap "done"/"swapping" means
      a boot (possibly a ~15 min autotune) is in flight; refuse rather than
      silently restart it. force=True interrupts — which is also the
@@ -41,7 +46,14 @@ from app.engines.litellm import LiteLLMClient
 
 _TIMEOUT = httpx.Timeout(5.0)
 
-_BUSY_METRICS = ("vllm:num_requests_running", "vllm:num_requests_waiting")
+# Per-engine busy-metric line prefixes, matched against /metrics via
+# str.startswith(). New engine with a /metrics gauge -> new entry here; an
+# engine with no entry (e.g. comfyui) has the busy guard skipped entirely
+# (see swap()'s guard-order docstring above).
+_BUSY_METRICS: dict[str, tuple[str, ...]] = {
+    "vllm": ("vllm:num_requests_running", "vllm:num_requests_waiting"),
+    "ds4": ("ds4_requests_inflight",),
+}
 
 # swap_status states that mean a boot may still be under way. "done" is in
 # here because the helper reports "done" as soon as swap.sh *launched*, not
@@ -145,8 +157,14 @@ class SparkClient:
         reconciler; adds no node-agent endpoint."""
         return boot_in_flight(self.status())
 
-    def busy_requests(self) -> int:
-        """Sum of running+waiting requests from vLLM's /metrics."""
+    def busy_requests(self, metric_prefixes: tuple[str, ...]) -> int:
+        """Sum of in-flight values from the serving engine's /metrics.
+
+        ``metric_prefixes`` is the current engine's entry from
+        _BUSY_METRICS — the node serves one profile at a time on one port
+        (serving_url), so the scrape URL is the same regardless of engine;
+        only which metric lines count as "busy" changes.
+        """
         try:
             resp = self._serving.get("/metrics")
         except httpx.TransportError as exc:
@@ -155,7 +173,7 @@ class SparkClient:
             raise EngineError(resp.text)
         total = 0.0
         for line in resp.text.splitlines():
-            if line.startswith(_BUSY_METRICS):
+            if line.startswith(metric_prefixes):
                 try:
                     total += float(line.rsplit(None, 1)[-1])
                 except ValueError:
@@ -201,16 +219,17 @@ class SparkClient:
         serving = self._node_get("/v1/node/serving")
         if serving.get("endpoint_ok") and not force:
             engine = self._current_engine()
-            if engine in (None, "vllm"):
-                n = self.busy_requests()
+            metric_prefixes = _BUSY_METRICS.get(engine or "vllm")
+            if metric_prefixes is not None:
+                n = self.busy_requests(metric_prefixes)
                 if n > 0:
                     raise GuardError(
                         f"spark serving has {n} in-flight request(s); "
                         "retry later or use force")
-            # else: non-vllm engine (e.g. comfyui) — no /metrics to consult;
-            # busy guard deliberately skipped (v1 documented limitation: no
-            # ComfyUI queue visibility — the operator owns not swapping
-            # mid-render).
+            # else: engine has no entry in _BUSY_METRICS (e.g. comfyui) —
+            # no /metrics to consult; busy guard deliberately skipped (v1
+            # documented limitation: no ComfyUI queue visibility — the
+            # operator owns not swapping mid-render).
         if not serving.get("endpoint_ok") and not force:
             last = self._node_get("/v1/node/profiles").get("swap_status") or {}
             if last.get("state") in ("swapping", "done"):

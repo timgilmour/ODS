@@ -45,6 +45,23 @@ COMFY_MIX_PROFILES = (
      "health_url": "http://sparky:8188/system_stats", "container": "comfyui"},
 )
 
+# A node whose last swap landed on ds4 — live profiles.json shape
+# (2026-08-04): ds4 serves Prometheus metrics at :8000/metrics, same port
+# vLLM profiles use on sparky's host networking.
+DS4_MIX_PROFILES = (
+    {"name": "laguna", "engine": "vllm", "health_url": None, "container": None},
+    {"name": "ds4", "engine": "ds4",
+     "health_url": "http://127.0.0.1:8000/metrics", "container": "spark-ds4"},
+)
+
+# A profile whose engine has no entry in _BUSY_METRICS at all (not comfyui,
+# not vllm, not ds4) — exercises the mapping's "no entry -> skip" default
+# for any future engine that hasn't been wired up yet.
+UNMAPPED_ENGINE_PROFILES = (
+    {"name": "laguna", "engine": "vllm", "health_url": None, "container": None},
+    {"name": "mystery", "engine": "sglang", "health_url": None, "container": None},
+)
+
 
 def _node_handler(profiles=DEFAULT_PROFILES, swap_status=None,
                   serving=None, swap_response=(202, {"id": "u1"})):
@@ -73,6 +90,19 @@ def _node_handler(profiles=DEFAULT_PROFILES, swap_status=None,
 def _metrics_handler(running=0, waiting=0):
     text = (f'vllm:num_requests_running{{model="m"}} {running}.0\n'
             f'vllm:num_requests_waiting{{model="m"}} {waiting}.0\n')
+
+    def handler(request):
+        return httpx.Response(200, text=text, request=request)
+
+    return handler
+
+
+def _ds4_metrics_handler(inflight=0):
+    # ds4_requests_started_total is a counter, not the guard signal — its
+    # presence in the payload checks that the guard doesn't accidentally
+    # count it (startswith("ds4_requests_inflight") must not match it).
+    text = (f'ds4_requests_inflight {inflight}.0\n'
+            f'ds4_requests_started_total 42.0\n')
 
     def handler(request):
         return httpx.Response(200, text=text, request=request)
@@ -286,6 +316,49 @@ def test_swap_with_no_swap_status_probes_metrics():
     client = _client(handler, metrics_handler=_metrics_handler(running=1))
     with pytest.raises(GuardError):
         client.swap("mm27b")
+
+
+def test_swap_skips_busy_probe_for_engine_with_no_busy_metrics_mapping():
+    # A named engine that simply isn't in _BUSY_METRICS yet (not comfyui)
+    # takes the same skip path as comfyui: mapping miss -> no probe, not an
+    # EngineError from a 404'd /metrics call.
+    handler = _node_handler(
+        profiles=UNMAPPED_ENGINE_PROFILES,
+        swap_status={"state": "done", "profile": "mystery", "id": "u0",
+                     "message": "swap launched", "ts": "2026-08-04T00:00:00Z"},
+        swap_response=(202, {"id": "i3", "profile": "laguna"}))
+
+    def metrics_404(request):
+        return httpx.Response(404, text="not found", request=request)
+
+    client = _client(handler, metrics_handler=metrics_404)
+    out = client.swap("laguna")
+    assert out["id"] == "i3"
+
+
+# --- ds4 busy guard (ds4_requests_inflight gauge at :8000/metrics, same
+# port vLLM serves on sparky's host networking) ---
+
+def test_swap_away_from_ds4_refused_when_ds4_busy():
+    handler = _node_handler(
+        profiles=DS4_MIX_PROFILES,
+        swap_status={"state": "done", "profile": "ds4", "id": "u0",
+                     "message": "swap launched", "ts": "2026-08-04T00:00:00Z"})
+    client = _client(handler, metrics_handler=_ds4_metrics_handler(inflight=1))
+    with pytest.raises(GuardError):
+        client.swap("laguna")
+    assert not [r for r in handler.calls if r.url.path == "/v1/node/swap"]
+
+
+def test_swap_away_from_ds4_allowed_when_ds4_idle():
+    handler = _node_handler(
+        profiles=DS4_MIX_PROFILES,
+        swap_status={"state": "done", "profile": "ds4", "id": "u0",
+                     "message": "swap launched", "ts": "2026-08-04T00:00:00Z"},
+        swap_response=(202, {"id": "i2", "profile": "laguna"}))
+    client = _client(handler, metrics_handler=_ds4_metrics_handler(inflight=0))
+    out = client.swap("laguna")
+    assert out["id"] == "i2"
 
 
 # --- boot-in-flight (lifecycle reconciler's boot window) ---
