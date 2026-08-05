@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { messages } from "../model/messages";
 import Banner from "../ui/Banner";
+import ArmedButton from "../ui/ArmedButton";
 
 /** Tenant states are the engine's OWN vocabulary, not LifecycleStatus, so
  * StatePill (typed to the latter) cannot render them — but they take the
@@ -158,12 +159,11 @@ export default function PlacementActions({
           apart — dismiss the banner and a bare "Force park" button sits
           there with nothing left on screen saying what it overrides. */}
       {error && offerForcePark && (
-        <button
+        <ArmedButton
+          label="Force park"
           disabled={busy}
-          onClick={() => runAction(() => postAction("/tenants/hipfire/park?force=true"))}
-        >
-          Force park
-        </button>
+          onConfirm={() => runAction(() => postAction("/tenants/hipfire/park?force=true"))}
+        />
       )}
 
       {pullOffer && (

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ApiError, sparkSwap, type SparkStatus } from "../api";
 import { messages } from "../model/messages";
 import Banner from "../ui/Banner";
+import ArmedButton from "../ui/ArmedButton";
 
 /** Spark's profile picker. Swap can 409 two ways: the busy guard (in-flight
  * requests — force helps) and an already-running swap (force will not help;
@@ -55,9 +56,7 @@ export default function SparkSwap({
           dismiss the banner and a bare "Force swap" sits there with nothing
           on screen saying what it overrides. */}
       {error && offerForce && (
-        <button disabled={busy} onClick={() => doSwap(true)}>
-          Force swap
-        </button>
+        <ArmedButton label="Force swap" disabled={busy} onConfirm={() => doSwap(true)} />
       )}
       <select value={selected} onChange={(e) => setSelected(e.target.value)} disabled={busy}>
         <option value="">swap to…</option>

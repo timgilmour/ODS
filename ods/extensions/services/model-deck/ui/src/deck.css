@@ -1135,3 +1135,20 @@ input[type="password"] {
 .node-age::after {
   content: ")";
 }
+
+/* Outlined, transparent fill — deliberately NOT a solid red button. */
+.armed-button {
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: var(--radius);
+  padding: var(--space);
+}
+
+.armed-hint {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.85em;
+  margin-top: calc(var(--space) / 2);
+}
