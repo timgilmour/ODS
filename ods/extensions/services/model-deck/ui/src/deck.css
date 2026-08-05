@@ -175,11 +175,6 @@ input[type="password"] {
   font-size: 1rem;
 }
 
-.load-error {
-  color: var(--danger);
-  font-size: 0.85rem;
-}
-
 /* ---------------------------------------------------------------- banner */
 
 .banner-error {
@@ -1057,4 +1052,31 @@ input[type="password"] {
   font-style: italic;
   color: var(--text-dim);
   font-size: 0.85em;
+}
+
+/* --- Board --------------------------------------------------------------
+   Nodes stack; resources inside a node are a responsive grid, so the layout
+   follows the data rather than a hardcoded GPU count. Tokens only, no hex. */
+
+.board {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 2);
+}
+
+.node-card { margin-bottom: 0; }
+
+.node-label { font-size: 1.25rem; font-weight: 700; }
+
+.node-resources {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: calc(var(--space) * 2);
+}
+
+.resource-placement {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  margin-top: var(--space);
 }

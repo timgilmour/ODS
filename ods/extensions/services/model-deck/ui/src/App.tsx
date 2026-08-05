@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
-import { getState, getStorageState, type StateResponse, type StorageState } from "./api";
+import {
+  getSparkStatus,
+  getState,
+  getStorageState,
+  type SparkStatus,
+  type StateResponse,
+  type StorageState,
+} from "./api";
+import Board from "./components/Board";
 import EventLog from "./components/EventLog";
-import GpuColumn from "./components/GpuColumn";
 import PolicyModal from "./components/PolicyModal";
 import SetBuilder from "./components/SetBuilder";
-import SparkCard from "./components/SparkCard";
 import SetStrip from "./components/SetStrip";
 import StorageView from "./components/StorageView";
+import { messages } from "./model/messages";
+import { buildNodes } from "./model/nodes";
+import Banner from "./ui/Banner";
 
 const POLL_MS = 3000;
 
@@ -17,6 +26,7 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [storageState, setStorageState] = useState<StorageState | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const [spark, setSpark] = useState<SparkStatus | null>(null);
   const [view, setView] = useState<View>("deck");
   const [modalOpen, setModalOpen] = useState(false);
   const [policyModalOpen, setPolicyModalOpen] = useState(false);
@@ -24,7 +34,7 @@ export default function App() {
   // re-fetches its own window whenever this changes (see EventLog.tsx).
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  // Fetches both in parallel (Promise.all-style), but each leg's own
+  // Fetches all three in parallel (Promise.all-style), but each leg's own
   // .then/.catch means a storage failure can never reject the whole call
   // or clobber the main `state` — the Deck and Set Builder tabs must keep
   // working even when the storage backend is unreachable/misconfigured;
@@ -47,6 +57,17 @@ export default function App() {
           setStorageState(null);
           setStorageError(err instanceof Error ? err.message : String(err));
         },
+      ),
+      getSparkStatus().then(
+        (s) => setSpark(s),
+        // Deliberately does NOT clear `spark`. getSparkStatus resolves to
+        // null only for a 503 — "no spark configured on this deployment",
+        // which correctly removes the card. Every other failure means a
+        // CONFIGURED node we currently cannot reach, and the adapter's whole
+        // contract is that such a node keeps its card and its last-known
+        // placements, marked stale. Overwriting with null here would blank
+        // the node on the first failed poll and silently defeat that rule.
+        () => {},
       ),
     ]);
   }, []);
@@ -108,31 +129,22 @@ export default function App() {
         </button>
       </header>
 
-      {loadError && (
-        <div className="load-error">state refresh failed: {loadError}</div>
-      )}
+      {loadError && <Banner message={messages.stateRefreshFailed(loadError)} />}
 
       {view === "deck" && (
         <>
           <SetStrip onModalOpenChange={setModalOpen} onChanged={refreshAll} />
 
           {state && (
-            <div className="gpu-row">
-              {state.world.gpus.map((gpu) => (
-                <GpuColumn
-                  key={gpu.index}
-                  gpu={gpu}
-                  world={state.world}
-                  policy={state.policy}
-                  models={state.models}
-                  coldGgufs={coldGgufs}
-                  onRefresh={refreshAll}
-                />
-              ))}
-            </div>
+            <Board
+              nodes={buildNodes(state, spark)}
+              world={state.world}
+              models={state.models}
+              coldGgufs={coldGgufs}
+              spark={spark}
+              onRefresh={refreshAll}
+            />
           )}
-
-          <SparkCard refreshTrigger={refreshTrigger} onChanged={refreshAll} />
         </>
       )}
 

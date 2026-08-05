@@ -37,6 +37,21 @@ describe("messages", () => {
     expect(m.title).toBe("Click again to confirm");
   });
 
+  it("offers the cold pull as a warning carrying the size and its own action", () => {
+    // Warning, not danger: nothing failed — the operator is being asked
+    // whether to spend the copy. The action label is what arms the retry.
+    const m = messages.modelIsCold("18.5");
+    expect(m.tone).toBe("warning");
+    expect(m.body).toContain("18.5");
+    expect(m.action?.label).toBe("Pull + load");
+  });
+
+  it("treats an in-flight pull as neutral, with no action", () => {
+    const m = messages.pullingFromCold();
+    expect(m.tone).toBe("neutral");
+    expect(m.action).toBeUndefined();
+  });
+
   it("reports state refresh failure with danger tone", () => {
     const m = messages.stateRefreshFailed("connection timeout");
     expect(m.tone).toBe("danger");

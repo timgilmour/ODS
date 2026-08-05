@@ -50,6 +50,19 @@ export const messages = {
     title: "Click again to confirm",
   }),
 
+  modelIsCold: (sizeGb: string): Message => ({
+    tone: "warning",
+    title: "Model is cold",
+    body: `pull ${sizeGb} GB to hot storage, then load?`,
+    action: { label: "Pull + load" },
+  }),
+
+  pullingFromCold: (): Message => ({
+    tone: "neutral",
+    title: "Pulling from cold storage",
+    body: "the model will load once it lands on hot storage.",
+  }),
+
   stateRefreshFailed: (detail: string): Message => ({
     tone: "danger",
     title: "State refresh failed",
