@@ -208,8 +208,10 @@ def test_d6_spark_ds4_round_trip(deck, spark_serving, ds4_window, lemonade_guard
     served = ds4_window
     ds4_profile = next(p for p in _status(deck)["profiles"] if p["name"] == DS4)
     assert ds4_profile["container"], \
-        "node-agent lists no container for ds4 — the swap teardown derives what " \
-        "to remove from exactly this field, and a null here is the port fight"
+        "node-agent lists no container for ds4 — swap.sh's teardown derives " \
+        "what to remove from compose-ds4.yaml's container_name: (this field " \
+        "is a parallel agreeing copy, not the source), and a null here means " \
+        "the two have drifted apart, which is how the port fight happens"
 
     # --- the guard REFUSES while a generation is in flight ----------------
     with ThreadPoolExecutor(max_workers=1) as pool:
