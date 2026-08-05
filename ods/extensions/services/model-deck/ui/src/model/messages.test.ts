@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { messages } from "./messages";
+import { labels, messages } from "./messages";
 
 describe("messages", () => {
   it("gives an unreachable node a tone of danger and an age", () => {
@@ -60,5 +60,12 @@ describe("messages", () => {
     const m = messages.lastKnown();
     expect(m.tone).toBe("neutral");
     expect(m.title).toBe("last known");
+  });
+});
+
+describe("labels", () => {
+  it("exports a non-empty dismiss label", () => {
+    expect(labels.dismiss).toEqual(expect.any(String));
+    expect(labels.dismiss.length).toBeGreaterThan(0);
   });
 });

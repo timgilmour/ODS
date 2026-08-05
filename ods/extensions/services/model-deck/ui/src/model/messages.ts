@@ -62,3 +62,9 @@ export const messages = {
 
   lastKnown: (): Message => ({ tone: "neutral", title: "last known" }),
 };
+
+/** Short imperative labels for controls. Not notices, hence not `Message`s —
+ * but still operator-visible text, so still centralized here. */
+export const labels = {
+  dismiss: "Dismiss",
+};
