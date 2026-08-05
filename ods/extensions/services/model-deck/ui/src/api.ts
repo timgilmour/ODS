@@ -122,7 +122,15 @@ export interface LifecycleEntry {
 
 export type LifecycleMap = Record<string, LifecycleEntry>;
 
+/** Identity of the box serving this UI. Mirrors app/routers/status.py's
+ * `node` block; `id` matches app.observe's local-node key prefix. */
+export interface NodeIdentity {
+  id: string;
+  label: string;
+}
+
 export interface StateResponse {
+  node: NodeIdentity;
   world: World;
   policy: PolicyMap;
   models: ModelFile[];

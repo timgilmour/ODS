@@ -1,0 +1,123 @@
+import { describe, expect, it } from "vitest";
+import type { StateResponse } from "../api";
+import { buildNodes } from "./nodes";
+
+function state(overrides: Partial<StateResponse> = {}): StateResponse {
+  return {
+    node: { id: "local", label: "autarch" },
+    world: {
+      gpus: [
+        { index: 0, total: 34_000_000_000, used: 22_100_000_000, free: 11_900_000_000 },
+        { index: 1, total: 34_000_000_000, used: 200_000_000, free: 33_800_000_000 },
+      ],
+      tenants: {
+        lemonade: { state: "unloaded", model: null, footprint: null, idle_s: null },
+        comfyui: { state: "idle", queue: 0, idle_s: 12 },
+        hipfire: { state: "running", model: "Qwen3.6-35B-A3B-heretic-NVFP4", footprint: 21_400_000_000, queue_depth: 0 },
+      },
+      externals: [],
+      default_route: null,
+      placement: { hipfire: 0, lemonade: 1, comfyui: 1 },
+    },
+    policy: {
+      lemonade: { priority: 1, pinned: false, idle_ttl: 900 },
+      comfyui: { priority: 2, pinned: false, idle_ttl: 300 },
+      hipfire: { priority: 3, pinned: true, idle_ttl: 0 },
+    },
+    models: [],
+    lifecycle: {},
+    ...overrides,
+  };
+}
+
+describe("buildNodes", () => {
+  it("returns nothing before the first successful poll", () => {
+    expect(buildNodes(null, null)).toEqual([]);
+  });
+
+  it("names the local node from the backend, not a hardcoded string", () => {
+    const [local] = buildNodes(state(), null);
+    expect(local.id).toBe("local");
+    expect(local.label).toBe("autarch");
+    expect(local.status).toBe("reachable");
+  });
+
+  it("makes one resource per GPU, in index order", () => {
+    const [local] = buildNodes(state(), null);
+    expect(local.resources.map((r) => r.id)).toEqual(["gpu0", "gpu1"]);
+    expect(local.resources[0].label).toBe("GPU 0");
+    expect(local.resources[0].capacity).toEqual({ used: 22_100_000_000, total: 34_000_000_000 });
+  });
+
+  it("places a tenant on the GPU the backend assigned it", () => {
+    const [local] = buildNodes(state(), null);
+    const gpu0 = local.resources[0];
+    expect(gpu0.placements.map((p) => p.name)).toEqual(["Qwen3.6-35B-A3B-heretic-NVFP4"]);
+    expect(gpu0.placements[0].engine).toBe("hipfire");
+    expect(gpu0.placements[0].bytes).toBe(21_400_000_000);
+  });
+
+  it("keeps a model identity verbatim", () => {
+    const [local] = buildNodes(state(), null);
+    expect(local.resources[0].placements[0].name).toBe("Qwen3.6-35B-A3B-heretic-NVFP4");
+  });
+
+  it("omits an unloaded tenant rather than showing an empty chip", () => {
+    const [local] = buildNodes(state(), null);
+    const gpu1 = local.resources[1];
+    expect(gpu1.placements.some((p) => p.engine === "lemonade")).toBe(false);
+  });
+
+  it("keeps an unloaded tenant's controls on its resource", () => {
+    // The empty-slot case: no chip, but lemonade's Load dropdown still has
+    // to render somewhere, so the resource carries the control list.
+    const [local] = buildNodes(state(), null);
+    expect(local.resources[1].controls).toEqual(["lemonade", "comfyui"]);
+    expect(local.resources[0].controls).toEqual(["hipfire"]);
+  });
+
+  it("shows a loaded tenant", () => {
+    const s = state();
+    s.world.tenants.lemonade = {
+      state: "loaded",
+      model: "qwen2.5-14b-instruct-4k-q4_k_m.gguf",
+      footprint: 9_500_000_000,
+      idle_s: 4,
+    };
+    const [local] = buildNodes(s, null);
+    expect(local.resources[1].placements.map((p) => p.name)).toContain(
+      "qwen2.5-14b-instruct-4k-q4_k_m.gguf",
+    );
+  });
+
+  it("omits a parked hipfire", () => {
+    const s = state();
+    s.world.tenants.hipfire = { state: "parked", model: null, footprint: 0, queue_depth: null };
+    const [local] = buildNodes(s, null);
+    expect(local.resources[0].placements).toEqual([]);
+  });
+
+  it("surfaces an external process as its own placement", () => {
+    const s = state();
+    s.world.externals = [{ pid: 4242, gpu: 0, bytes: 1_200_000_000 }];
+    const [local] = buildNodes(s, null);
+    const external = local.resources[0].placements.find((p) => p.kind === "external");
+    expect(external?.bytes).toBe(1_200_000_000);
+    expect(external?.status).toBe("unmanaged");
+  });
+
+  it("takes a placement's status from the lifecycle view", () => {
+    const s = state();
+    s.lifecycle = {
+      "local/hipfire": {
+        status: "drifted",
+        reason: "settings changed",
+        intent: null,
+        observed: { reachable: true, loaded: true, model: null, transitioning: false },
+        last_healthy_ts: null,
+      },
+    };
+    const [local] = buildNodes(s, null);
+    expect(local.resources[0].placements[0].status).toBe("drifted");
+  });
+});
