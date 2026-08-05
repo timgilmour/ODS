@@ -1155,9 +1155,17 @@ input[type="password"] {
 
 /* No vertical gridlines and no zebra striping — rows separate on a single
    rule so the coloured severity pills are the only thing drawing the eye. */
+/* The kind column is max-content, not a fixed width: a real kind
+   ("lifecycle-spark-unreachable") can run well past the fixed 8rem this
+   used to be, and .ui-pill is deliberately nowrap (kind names are never
+   truncated — that's the thing being scanned for), so a fixed track just
+   overflowed into the detail column with nothing clipping it. Detail gets
+   the remaining space and min-width: 0, which is what actually lets a grid
+   item shrink below its content size so its own ellipsis can fire instead
+   of the row growing wider. */
 .event-row {
   display: grid;
-  grid-template-columns: 12rem 8rem 1fr;
+  grid-template-columns: 12rem max-content 1fr;
   gap: var(--space);
   padding: calc(var(--space) / 2) 0;
   border-bottom: 1px solid var(--panel-border);
@@ -1171,6 +1179,7 @@ input[type="password"] {
 }
 
 .event-detail {
+  min-width: 0;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;

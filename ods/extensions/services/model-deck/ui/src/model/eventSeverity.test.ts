@@ -83,6 +83,9 @@ describe("eventSeverity — neutral", () => {
     expect(eventSeverity("unload_lemonade")).toBe("neutral");
     expect(eventSeverity("free_comfyui")).toBe("neutral");
     expect(eventSeverity("load-retriggered")).toBe("neutral");
+    expect(eventSeverity("move_cancelled")).toBe("neutral");
+    expect(eventSeverity("storage_skip")).toBe("neutral");
+    expect(eventSeverity("storage_notify_deferred")).toBe("neutral");
   });
 
   it("falls through to neutral for a kind nobody enumerated here — the whole point of matching by convention", () => {
