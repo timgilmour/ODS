@@ -33,6 +33,10 @@
   --chip-parked-bg: #e6e8eb;
   --chip-parked-fg: #40474f;
   --overlay-bg: rgba(20, 22, 26, 0.55);
+
+  /* Layout rhythm — R1's 8px grid, so padding/gap never gets hand-picked. */
+  --space: 8px;
+  --radius: 8px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -882,4 +886,85 @@ input[type="password"] {
 .failed {
   color: var(--danger);
   font-size: 0.85rem;
+}
+
+/* --- Primitives ---------------------------------------------------------
+   Every rule below references tokens only. No raw hex: that is what keeps
+   the light theme working without anyone verifying it by hand. */
+
+.ui-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: calc(var(--space) * 2);
+}
+
+.ui-panel-draft {
+  border-style: dashed;
+}
+
+.ui-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  margin-bottom: var(--space);
+}
+
+.ui-panel-title {
+  font-weight: 600;
+  margin: 0;
+  font-size: 1rem;
+}
+
+.ui-panel-actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space);
+}
+
+.ui-banner {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space);
+  padding: var(--space) calc(var(--space) * 1.5);
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  margin: var(--space) 0;
+}
+
+.ui-banner-neutral {
+  background: var(--chip-idle-bg);
+  color: var(--chip-idle-fg);
+  border-color: var(--chip-idle-fg);
+}
+
+.ui-banner-warning {
+  background: var(--chip-busy-bg);
+  color: var(--chip-busy-fg);
+  border-color: var(--chip-busy-fg);
+}
+
+.ui-banner-danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.ui-banner-title {
+  font-weight: 600;
+}
+
+/* Backend detail strings arrive lowercase and mid-sentence. Capitalizing in
+   CSS means the payload is never mutated to make it presentable. */
+.ui-banner-title::first-letter,
+.ui-banner-body::first-letter {
+  text-transform: uppercase;
+}
+
+.ui-banner-body {
+  opacity: 0.9;
+}
+
+.ui-banner-spacer {
+  margin-left: auto;
 }
