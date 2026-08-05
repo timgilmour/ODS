@@ -111,6 +111,24 @@ describe("labels", () => {
     expect(labels.dismiss.length).toBeGreaterThan(0);
   });
 
+  it("names every tab, so no tab is left as a literal beside a catalogued one", () => {
+    // The Events tab used to be the only one reading from here. A rule
+    // applied to one of five siblings is the rule dying quietly.
+    for (const tab of [labels.deck, labels.setBuilder, labels.storage, labels.events]) {
+      expect(tab).toEqual(expect.any(String));
+      expect(tab.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("labels a swap profile with its engine only when it has a non-default one", () => {
+    expect(labels.swapOption("heretic", null)).toBe("heretic");
+    expect(labels.swapOption("ds4", "ds4")).toBe("ds4 (ds4)");
+  });
+
+  it("marks a cold model with its size in the load picker", () => {
+    expect(labels.coldOption("qwen.gguf", "18.5")).toBe("❄ qwen.gguf (18.5 GB)");
+  });
+
   it("formats an eviction priority", () => {
     expect(labels.priority(3)).toBe("P3");
   });

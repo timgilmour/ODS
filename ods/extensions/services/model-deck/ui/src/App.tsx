@@ -115,27 +115,27 @@ export default function App() {
     <>
       <header className="deck-header">
         <div>
-          <h1>Model Deck</h1>
-          <div className="deck-subtitle">GPU/VRAM control for lemonade, ComfyUI, hipfire</div>
+          <h1>{labels.appTitle}</h1>
+          <div className="deck-subtitle">{labels.appSubtitle}</div>
         </div>
         <nav className="view-tabs">
           <button
             className={view === "deck" ? "primary" : undefined}
             onClick={() => setView("deck")}
           >
-            Deck
+            {labels.deck}
           </button>
           <button
             className={view === "builder" ? "primary" : undefined}
             onClick={() => setView("builder")}
           >
-            Set Builder
+            {labels.setBuilder}
           </button>
           <button
             className={view === "storage" ? "primary" : undefined}
             onClick={() => setView("storage")}
           >
-            Storage
+            {labels.storage}
           </button>
           <button
             className={view === "events" ? "primary" : undefined}
@@ -145,7 +145,7 @@ export default function App() {
           </button>
         </nav>
         <button onClick={() => setPolicyModalOpen(true)} disabled={!state}>
-          Policy
+          {labels.policy}
         </button>
       </header>
 
@@ -181,7 +181,7 @@ export default function App() {
             onModalOpenChange={setModalOpen}
           />
         ) : (
-          <div className="panel">loading…</div>
+          <div className="panel">{labels.loading}</div>
         ))}
 
       {view === "storage" && (

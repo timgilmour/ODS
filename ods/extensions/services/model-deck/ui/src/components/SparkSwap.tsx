@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ApiError, sparkSwap, type SparkStatus } from "../api";
 import { messages, labels } from "../model/messages";
+import { SPARK_CONTROL, SPARK_DEFAULT_ENGINE } from "../model/nodes";
 import Banner from "../ui/Banner";
 import ArmedButton from "../ui/ArmedButton";
 
@@ -64,7 +65,10 @@ export default function SparkSwap({
           node card above says which node; this says what on it these verbs
           drive — which stops being obvious the moment a node has more than
           one slot. */}
-      <span className="tenant-name">spark</span>
+      {/* The control surface's own name, from the adapter — not a literal.
+          PlacementActions renders `{tenant}` the same way: these rows are
+          labelled by the data that put them there. */}
+      <span className="tenant-name">{SPARK_CONTROL}</span>
 
       {error && (
         <Banner message={messages.guardRefused(error)} onDismiss={() => setError(null)} />
@@ -82,11 +86,16 @@ export default function SparkSwap({
           onConfirm={() => doSwap(true)}
         />
       )}
-      <select value={selected} onChange={(e) => setSelected(e.target.value)} disabled={busy}>
-        <option value="">swap to…</option>
+      <select
+        aria-label={labels.swapTo}
+        value={selected}
+        onChange={(e) => setSelected(e.target.value)}
+        disabled={busy}
+      >
+        <option value="">{labels.swapTo}</option>
         {spark.profiles.map((p) => (
           <option key={p.name} value={p.name}>
-            {p.engine !== "vllm" ? `${p.name} (${p.engine})` : p.name}
+            {labels.swapOption(p.name, p.engine === SPARK_DEFAULT_ENGINE ? null : p.engine)}
           </option>
         ))}
       </select>
@@ -94,7 +103,7 @@ export default function SparkSwap({
         disabled={busy || !selected || spark.swap_status?.state === "swapping"}
         onClick={() => doSwap(false)}
       >
-        Swap
+        {labels.swap}
       </button>
     </div>
   );

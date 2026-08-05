@@ -200,13 +200,15 @@ export default function PlacementActions({
       {tenant === "lemonade" && (
         <>
           <select
-            aria-label="model to load"
+            aria-label={labels.modelToLoad}
             value={selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
             disabled={busy || (models.length === 0 && coldGgufs.length === 0)}
           >
             <option value="">
-              {models.length === 0 && coldGgufs.length === 0 ? "no models found" : "select a model…"}
+              {models.length === 0 && coldGgufs.length === 0
+                ? labels.noModels
+                : labels.selectModel}
             </option>
             {models.map((m) => (
               <option key={m.file} value={m.file}>
@@ -214,10 +216,10 @@ export default function PlacementActions({
               </option>
             ))}
             {coldGgufs.length > 0 && (
-              <optgroup label="❄ cold">
+              <optgroup label={labels.coldGroup}>
                 {coldGgufs.map((u) => (
                   <option key={u.id} value={u.name}>
-                    {`❄ ${truncateMiddle(u.name)} (${bytesToGB(u.size)} GB)`}
+                    {labels.coldOption(truncateMiddle(u.name), bytesToGB(u.size))}
                   </option>
                 ))}
               </optgroup>
@@ -235,7 +237,7 @@ export default function PlacementActions({
               });
             }}
           >
-            Load
+            {labels.load}
           </button>
           <button
             disabled={busy || lemonade.state !== "loaded"}
@@ -243,7 +245,7 @@ export default function PlacementActions({
               runAction(() => postAction("/tenants/lemonade/unload", {}), { clearPulling: true })
             }
           >
-            Unload
+            {labels.unload}
           </button>
         </>
       )}
@@ -255,10 +257,10 @@ export default function PlacementActions({
           // queue disables Free while the tenant still reads "idle", so
           // narrowing this to state === "busy" would leave that case a
           // greyed-out button with no explanation.
-          title={comfyuiBlocked ? "ComfyUI is busy or has a non-empty queue" : undefined}
+          title={comfyuiBlocked ? labels.comfyuiBlockedTitle : undefined}
           onClick={() => runAction(() => postAction("/tenants/comfyui/free"))}
         >
-          Free
+          {labels.free}
         </button>
       )}
 
@@ -268,13 +270,13 @@ export default function PlacementActions({
             disabled={busy || world.tenants.hipfire.state === "parked"}
             onClick={() => runAction(() => postAction("/tenants/hipfire/park"), { parkGuard: true })}
           >
-            Park
+            {labels.park}
           </button>
           <button
             disabled={busy || world.tenants.hipfire.state === "running"}
             onClick={() => runAction(() => postAction("/tenants/hipfire/resume"))}
           >
-            Resume
+            {labels.resume}
           </button>
         </>
       )}

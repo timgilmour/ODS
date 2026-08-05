@@ -117,8 +117,40 @@ export const labels = {
   dismiss: "Dismiss",
   forcePark: "Force park",
   forceSwap: "Force swap",
-  events: "Events",
   filterEvents: "Filter events…",
+
+  // Top-level chrome and navigation. `events` was the only tab that ever
+  // came from here, which is precisely how a half-applied rule dies: the
+  // next author copies whichever neighbour they happened to read first.
+  appTitle: "Model Deck",
+  appSubtitle: "GPU/VRAM control for lemonade, ComfyUI, hipfire",
+  deck: "Deck",
+  setBuilder: "Set Builder",
+  storage: "Storage",
+  events: "Events",
+  policy: "Policy",
+  loading: "loading…",
+
+  // Placement controls.
+  modelToLoad: "model to load",
+  selectModel: "select a model…",
+  noModels: "no models found",
+  coldGroup: "❄ cold",
+  coldOption: (name: string, sizeGb: string) => `❄ ${name} (${sizeGb} GB)`,
+  load: "Load",
+  unload: "Unload",
+  free: "Free",
+  comfyuiBlockedTitle: "ComfyUI is busy or has a non-empty queue",
+  park: "Park",
+  resume: "Resume",
+
+  // Spark's profile picker.
+  swapTo: "swap to…",
+  swap: "Swap",
+  /** A profile whose engine is not the node's usual one says so in the
+   * picker, the same fact the chip's engine badge carries. */
+  swapOption: (profile: string, engine: string | null) =>
+    engine ? `${profile} (${engine})` : profile,
 
   // Placement facts (see Placement's "operational facts" block in nodes.ts).
   pinned: "📌",
