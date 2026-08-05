@@ -1283,9 +1283,9 @@ def test_auto_rejects_a_non_boolean(tmp_path, monkeypatch):
     assert resp.status_code == 422
 
 
-def test_state_reports_node_identity():
+def test_state_reports_node_identity(tmp_path, monkeypatch):
     """The board needs a name for this box; /state is where it comes from."""
-    app = create_app()
+    app, deck = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
 
     body = client.get("/api/state").json()
@@ -1293,9 +1293,18 @@ def test_state_reports_node_identity():
     assert body["node"] == {"id": "local", "label": "local"}
 
 
-def test_state_node_label_follows_settings():
-    app = create_app()
-    app.state.deck["settings"].node_label = "autarch"
+def test_state_node_label_follows_settings(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["settings"].node_label = "autarch"
     client = TestClient(app)
 
     assert client.get("/api/state").json()["node"]["label"] == "autarch"
+
+
+def test_node_label_empty_env_var_falls_through_to_default(monkeypatch):
+    """Empty env var must not override the Python default. When compose.yaml
+    passes MODEL_DECK_NODE_LABEL= (empty), Settings must still yield "local"."""
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_NODE_LABEL", "")
+    assert Settings().node_label == "local"
