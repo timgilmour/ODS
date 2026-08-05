@@ -14,7 +14,7 @@ import SetBuilder from "./components/SetBuilder";
 import SetStrip from "./components/SetStrip";
 import StorageView from "./components/StorageView";
 import { messages } from "./model/messages";
-import { buildNodes } from "./model/nodes";
+import { buildNodes, SPARK_NODE_ID } from "./model/nodes";
 import Banner from "./ui/Banner";
 
 const POLL_MS = 3000;
@@ -27,6 +27,10 @@ export default function App() {
   const [storageState, setStorageState] = useState<StorageState | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
   const [spark, setSpark] = useState<SparkStatus | null>(null);
+  // Separate from `spark` on purpose: the last-known status must survive a
+  // failed poll (see the rejection handler below), but the failure itself
+  // still has to reach the screen.
+  const [sparkError, setSparkError] = useState<string | null>(null);
   const [view, setView] = useState<View>("deck");
   const [modalOpen, setModalOpen] = useState(false);
   const [policyModalOpen, setPolicyModalOpen] = useState(false);
@@ -59,7 +63,10 @@ export default function App() {
         },
       ),
       getSparkStatus().then(
-        (s) => setSpark(s),
+        (s) => {
+          setSpark(s);
+          setSparkError(null);
+        },
         // Deliberately does NOT clear `spark`. getSparkStatus resolves to
         // null only for a 503 — "no spark configured on this deployment",
         // which correctly removes the card. Every other failure means a
@@ -67,7 +74,14 @@ export default function App() {
         // contract is that such a node keeps its card and its last-known
         // placements, marked stale. Overwriting with null here would blank
         // the node on the first failed poll and silently defeat that rule.
-        () => {},
+        //
+        // Keeping the data is not the same as hiding the failure, though.
+        // buildSparkNode derives reachability from the BACKEND's lifecycle
+        // view, so if THIS page's fetch is what broke, the node would keep
+        // rendering a confident status pill over data that stopped updating
+        // minutes ago. The error is recorded here and banner-ed on the node
+        // it belongs to, which is the one thing this handler must not skip.
+        (err) => setSparkError(err instanceof Error ? err.message : String(err)),
       ),
     ]);
   }, []);
@@ -142,6 +156,10 @@ export default function App() {
               models={state.models}
               coldGgufs={coldGgufs}
               spark={spark}
+              // App owns the fetches, so App is what knows which node an
+              // error belongs to. Board stays node-agnostic: it just looks
+              // each node up by id.
+              nodeErrors={{ [SPARK_NODE_ID]: sparkError }}
               onRefresh={refreshAll}
             />
           )}

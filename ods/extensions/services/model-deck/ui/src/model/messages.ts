@@ -36,6 +36,16 @@ export const messages = {
     title: "first boot can autotune for about 15 minutes — this is normal",
   }),
 
+  // Distinct from nodeUnreachable, which reports what the BACKEND says about
+  // a node. This one says THIS PAGE could not reach the deck's own endpoint
+  // for that node — so everything below it may be minutes old even while the
+  // backend's own view still calls the node reachable.
+  nodeFetchFailed: (label: string, detail: string): Message => ({
+    tone: "danger",
+    title: `Cannot reach ${label} from this page`,
+    body: `${detail} — what follows may be out of date.`,
+  }),
+
   guardRefused: (detail: string): Message => ({
     tone: "danger",
     title: "Refused",

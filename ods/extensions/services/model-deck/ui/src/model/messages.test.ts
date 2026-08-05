@@ -21,6 +21,18 @@ describe("messages", () => {
     expect(messages.warmingFirstBoot().tone).toBe("neutral");
   });
 
+  it("names the node and says a failed fetch leaves stale data on screen", () => {
+    // Deliberately NOT nodeUnreachable: that reports what the backend says
+    // about a node. This is the page's OWN fetch failing while the backend
+    // still believes the node is fine — the case that would otherwise show
+    // minutes-old data under a confident status pill.
+    const m = messages.nodeFetchFailed("sparky", "500 Internal Server Error");
+    expect(m.tone).toBe("danger");
+    expect(m.title).toContain("sparky");
+    expect(m.body).toContain("500 Internal Server Error");
+    expect(m.body).toContain("out of date");
+  });
+
   it("passes a guard refusal through verbatim as the body", () => {
     const m = messages.guardRefused("busy — 2 requests in flight");
     expect(m.tone).toBe("danger");

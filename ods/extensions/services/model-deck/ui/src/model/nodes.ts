@@ -70,7 +70,20 @@ export interface DeckNode {
 const SPARK_SLOT_KEY = "sparky/slot0";
 const SPARK_NODE_ID = "sparky";
 
-const TENANT_ORDER: TenantName[] = ["hipfire", "lemonade", "comfyui"];
+/** Fixed display order — and the authoritative list of what a tenant
+ * control name can be. Exported so components dispatch off THIS list
+ * instead of keeping a second copy: a copy makes adding a tenant here
+ * silently drop its verbs there. */
+export const TENANT_ORDER: TenantName[] = ["hipfire", "lemonade", "comfyui"];
+
+/** Narrows a `DeckResource.controls` entry to a tenant. `controls` is
+ * deliberately `string[]` (the spark resource sets "spark", which is not a
+ * tenant name), so the board needs a guard rather than a cast — a cast lets
+ * an unrecognized control render as nothing at all, with no type error and
+ * no failing test to catch it. */
+export function isTenantName(control: string): control is TenantName {
+  return (TENANT_ORDER as readonly string[]).includes(control);
+}
 
 function statusOf(lifecycle: LifecycleMap, key: string, fallback: LifecycleStatus): LifecycleStatus {
   return lifecycle[key]?.status ?? fallback;

@@ -40,10 +40,21 @@ export default function SparkSwap({
 
   return (
     <div className="tenant-actions">
+      {/* Names the group, like every tenant control row on the board. The
+          node card above says which node; this says what on it these verbs
+          drive — which stops being obvious the moment a node has more than
+          one slot. */}
+      <span className="tenant-name">spark</span>
+
       {error && (
         <Banner message={messages.guardRefused(error)} onDismiss={() => setError(null)} />
       )}
-      {offerForce && (
+      {/* Gated on `error` too: in the card this moved from, Force swap was a
+          CHILD of the refusal banner, so dismissing the refusal took the
+          override with it. Left as independent siblings they come apart —
+          dismiss the banner and a bare "Force swap" sits there with nothing
+          on screen saying what it overrides. */}
+      {error && offerForce && (
         <button disabled={busy} onClick={() => doSwap(true)}>
           Force swap
         </button>

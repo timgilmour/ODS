@@ -1080,3 +1080,28 @@ input[type="password"] {
   gap: var(--space);
   margin-top: var(--space);
 }
+
+/* A guard banner is a full-width row inside its control group, never a flex
+   item competing with the select and buttons beside it. .ui-banner is itself
+   a flex container whose spacer relies on margin-left:auto, which only means
+   anything at full width — and .tenant-actions sits inside a
+   minmax(320px, 1fr) grid column, so an inline banner would squeeze a
+   backend detail string down to a few characters. */
+.tenant-actions > .ui-banner {
+  flex-basis: 100%;
+  /* ...and its own parts wrap onto new lines rather than each shrinking to
+     min-content: in a 320px column an unwrapped banner renders its title as
+     "Model / is / cold". Scoped to the control row because that is the only
+     place a banner sits in a column this narrow. */
+  flex-wrap: wrap;
+}
+
+/* A <select> takes its intrinsic width from its LONGEST option, and a flex
+   item will not shrink below that on its own — a 40-character checkpoint
+   name pushed the model picker ~50px past the edge of a narrow grid column.
+   The full name still lives in the option list; only the closed control's
+   display text is clipped. */
+.tenant-actions select {
+  min-width: 0;
+  max-width: 100%;
+}

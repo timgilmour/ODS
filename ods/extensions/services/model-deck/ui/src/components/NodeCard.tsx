@@ -1,5 +1,7 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
+import { messages } from "../model/messages";
 import type { DeckNode } from "../model/nodes";
+import Banner from "../ui/Banner";
 import Panel from "../ui/Panel";
 import ResourcePanel from "./ResourcePanel";
 
@@ -16,6 +18,7 @@ export default function NodeCard({
   models,
   coldGgufs,
   spark,
+  fetchError,
   onRefresh,
 }: {
   node: DeckNode;
@@ -23,6 +26,11 @@ export default function NodeCard({
   models: ModelFile[];
   coldGgufs: StorageUnit[];
   spark: SparkStatus | null;
+  /** This page's own fetch for the node failed. Note this can be set while
+   * `node.status` still reads "reachable": that pill is the backend's
+   * verdict, and disagreeing with it is exactly the point — everything below
+   * is as old as the last successful poll. */
+  fetchError: string | null;
   onRefresh: () => void;
 }) {
   return (
@@ -35,6 +43,8 @@ export default function NodeCard({
         </>
       }
     >
+      {fetchError && <Banner message={messages.nodeFetchFailed(node.label, fetchError)} />}
+
       <div className="node-resources">
         {node.resources.map((r) => (
           <ResourcePanel

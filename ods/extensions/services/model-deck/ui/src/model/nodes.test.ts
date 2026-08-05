@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LifecycleEntry, SparkStatus, StateResponse } from "../api";
-import { buildNodes } from "./nodes";
+import { buildNodes, isTenantName, TENANT_ORDER } from "./nodes";
 
 function state(overrides: Partial<StateResponse> = {}): StateResponse {
   return {
@@ -206,5 +206,23 @@ describe("buildNodes — spark", () => {
       sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: null } }),
     )[1];
     expect(spark.resources[0].placements).toEqual([]);
+  });
+});
+
+describe("isTenantName", () => {
+  it("accepts every tenant the adapter can emit as a control", () => {
+    for (const t of TENANT_ORDER) expect(isTenantName(t)).toBe(true);
+  });
+
+  it("rejects the spark control, which is a surface and not a tenant", () => {
+    // The board dispatches on this: if it ever returned true for "spark",
+    // PlacementActions would be handed a non-tenant and read
+    // world.tenants.spark — the exact confusion the guard exists to stop.
+    expect(isTenantName("spark")).toBe(false);
+  });
+
+  it("rejects an unknown control rather than guessing", () => {
+    expect(isTenantName("vllm")).toBe(false);
+    expect(isTenantName("")).toBe(false);
   });
 });

@@ -1,13 +1,11 @@
-import type { ModelFile, SparkStatus, StorageUnit, TenantName, World } from "../api";
+import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import { messages } from "../model/messages";
-import type { DeckResource } from "../model/nodes";
+import { isTenantName, type DeckResource } from "../model/nodes";
 import Meter from "../ui/Meter";
 import ModelChip from "../ui/ModelChip";
 import Panel from "../ui/Panel";
 import PlacementActions from "./PlacementActions";
 import SparkSwap from "./SparkSwap";
-
-const TENANTS: readonly string[] = ["lemonade", "comfyui", "hipfire"];
 
 export default function ResourcePanel({
   resource,
@@ -46,12 +44,18 @@ export default function ResourcePanel({
         resource.controls.map((control) =>
           control === "spark" ? (
             spark && <SparkSwap key={control} spark={spark} onChanged={onRefresh} />
-          ) : TENANTS.includes(control) ? (
+          ) : isTenantName(control) ? (
             <PlacementActions
               key={control}
-              tenant={control as TenantName}
+              tenant={control}
               world={world}
               models={models}
+              // Whether this tenant already has a chip on this resource. A
+              // parked hipfire deliberately has none, and then the control
+              // row is the only thing that can say which tenant it is and
+              // what state it is in. Computed here because the placements
+              // are already in hand.
+              hasPlacement={resource.placements.some((p) => p.engine === control)}
               coldGgufs={coldGgufs}
               onRefresh={onRefresh}
             />

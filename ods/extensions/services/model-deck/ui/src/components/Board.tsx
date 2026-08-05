@@ -12,6 +12,7 @@ export default function Board({
   models,
   coldGgufs,
   spark,
+  nodeErrors,
   onRefresh,
 }: {
   nodes: DeckNode[];
@@ -19,6 +20,11 @@ export default function Board({
   models: ModelFile[];
   coldGgufs: StorageUnit[];
   spark: SparkStatus | null;
+  /** Per-node fetch failures, keyed by node id: "this page could not reach
+   * that node's endpoint", which is a different claim from the backend's own
+   * reachability verdict in `node.status`. A plain map rather than a
+   * spark-shaped prop, so a real node registry needs no change here. */
+  nodeErrors: Record<string, string | null>;
   onRefresh: () => void;
 }) {
   return (
@@ -31,6 +37,7 @@ export default function Board({
           models={models}
           coldGgufs={coldGgufs}
           spark={spark}
+          fetchError={nodeErrors[node.id] ?? null}
           onRefresh={onRefresh}
         />
       ))}

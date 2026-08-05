@@ -12,6 +12,20 @@ import {
 import { messages } from "../model/messages";
 import Banner from "../ui/Banner";
 
+/** Tenant states are the engine's OWN vocabulary, not LifecycleStatus, so
+ * StatePill (typed to the latter) cannot render them — but they take the
+ * same four tones, so the two can never disagree about what green means. */
+const STATE_TONE: Record<string, string> = {
+  loaded: "good",
+  running: "good",
+  loading: "busy",
+  busy: "busy",
+  unloaded: "off",
+  parked: "off",
+  idle: "off",
+  unknown: "bad",
+};
+
 /** Controls for one tenant on one resource, plus the guard banners its
  * actions can raise. Keyed by tenant rather than by placement, because an
  * UNLOADED tenant still needs its Load control and has no placement.
@@ -25,12 +39,18 @@ export default function PlacementActions({
   tenant,
   world,
   models,
+  hasPlacement,
   coldGgufs,
   onRefresh,
 }: {
   tenant: TenantName;
   world: World;
   models: ModelFile[];
+  /** Whether this tenant already has a chip on the resource above. When it
+   * does not — a parked hipfire, an unloaded lemonade — this control row is
+   * the only thing on the panel naming the tenant, so the state has to come
+   * with the name instead of being implied by which buttons are enabled. */
+  hasPlacement: boolean;
   /** Resident-but-cold GGUFs (App.tsx's coldGgufs) — surfaced as a separate
    * optgroup in the Load dropdown; empty array (never undefined) so these
    * controls render the same whether storage is configured or not. */
@@ -112,8 +132,19 @@ export default function PlacementActions({
     }
   }, [lemonade.state, lemonade.model, pullingModel]);
 
+  const state = world.tenants[tenant].state;
+
   return (
     <div className="tenant-actions">
+      {/* Names the group. On a GPU hosting two tenants these would otherwise
+          be two anonymous rows of buttons; and when the tenant has no chip
+          above (parked hipfire, unloaded lemonade) this is the only thing
+          saying which tenant it is and what it is doing. */}
+      <span className="tenant-name">{tenant}</span>
+      {!hasPlacement && (
+        <span className={`ui-pill ui-pill-${STATE_TONE[state] ?? "off"}`}>{state}</span>
+      )}
+
       {error && (
         <Banner
           message={messages.guardRefused(error)}
@@ -121,7 +152,12 @@ export default function PlacementActions({
         />
       )}
 
-      {offerForcePark && (
+      {/* Gated on `error` as well as the offer: in the card this moved from,
+          Force park was a CHILD of the refusal banner, so dismissing the
+          refusal took the override with it. As siblings they would come
+          apart — dismiss the banner and a bare "Force park" button sits
+          there with nothing left on screen saying what it overrides. */}
+      {error && offerForcePark && (
         <button
           disabled={busy}
           onClick={() => runAction(() => postAction("/tenants/hipfire/park?force=true"))}
