@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import type { DeckNode } from "../model/nodes";
+import { applyOrder, loadOrder, saveOrder } from "../model/nodeOrder";
 import NodeCard from "./NodeCard";
 
 /** Nodes stack vertically, arbitrary count. Resources within a node lay out
@@ -27,19 +29,40 @@ export default function Board({
   nodeErrors: Record<string, string | null>;
   onRefresh: () => void;
 }) {
+  const [order, setOrder] = useState<string[]>(loadOrder);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const ordered = applyOrder(nodes, order);
+
+  function dropOn(targetId: string) {
+    if (!dragging || dragging === targetId) return;
+    const ids = ordered.map((n) => n.id).filter((id) => id !== dragging);
+    ids.splice(ids.indexOf(targetId), 0, dragging);
+    setOrder(ids);
+    saveOrder(ids);
+    setDragging(null);
+  }
+
   return (
     <div className="board">
-      {nodes.map((node) => (
-        <NodeCard
+      {ordered.map((node) => (
+        <div
           key={node.id}
-          node={node}
-          world={world}
-          models={models}
-          coldGgufs={coldGgufs}
-          spark={spark}
-          fetchError={nodeErrors[node.id] ?? null}
-          onRefresh={onRefresh}
-        />
+          draggable
+          onDragStart={() => setDragging(node.id)}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={() => dropOn(node.id)}
+          className={dragging === node.id ? "node-dragging" : undefined}
+        >
+          <NodeCard
+            node={node}
+            world={world}
+            models={models}
+            coldGgufs={coldGgufs}
+            spark={spark}
+            fetchError={nodeErrors[node.id] ?? null}
+            onRefresh={onRefresh}
+          />
+        </div>
       ))}
     </div>
   );

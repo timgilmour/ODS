@@ -1105,3 +1105,5 @@ input[type="password"] {
   min-width: 0;
   max-width: 100%;
 }
+
+.node-dragging { opacity: 0.5; }
