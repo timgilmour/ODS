@@ -37,13 +37,22 @@ export function applyOrder(nodes: DeckNode[], order: string[]): DeckNode[] {
  * forward drag onto the very next card a silent no-op — pull A out of
  * [A, B], reinsert before B, and you have [A, B] again. `dragging ===
  * target` (dropping a card back on itself) is a no-op by definition, not an
- * error — the array is still returned as a fresh copy. */
+ * error — the array is still returned as a fresh copy.
+ *
+ * An id that is not in `ids` is also a no-op, and that guard is load-bearing
+ * rather than defensive: a poll landing mid-drag can drop a node from the
+ * board, and `splice(-1, 1)` deletes the LAST element instead of nothing,
+ * which would then be written to localStorage as a corrupted order. The
+ * previous `.filter()`-based removal did not have this failure mode; the
+ * index arithmetic that made forward drags work introduced it. */
 export function reorder(ids: string[], dragging: string, target: string): string[] {
   const next = [...ids];
   if (dragging === target) return next;
 
   const from = next.indexOf(dragging);
   const to = next.indexOf(target);
+  if (from === -1 || to === -1) return next;
+
   next.splice(from, 1);
   next.splice(to, 0, dragging);
   return next;

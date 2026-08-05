@@ -53,4 +53,15 @@ describe("reorder", () => {
   it("is a no-op when a card is dropped on itself", () => {
     expect(reorder(["A", "B", "C"], "B", "B")).toEqual(["A", "B", "C"]);
   });
+
+  it("does not eat the last card when the dragged one vanished mid-drag", () => {
+    // A poll can remove a node while a drag is in flight. indexOf returns
+    // -1, and splice(-1, 1) deletes the LAST element — which Board then
+    // writes to localStorage as a persistently corrupted order.
+    expect(reorder(["A", "B", "C"], "GONE", "B")).toEqual(["A", "B", "C"]);
+  });
+
+  it("does not eat the last card when the drop target vanished mid-drag", () => {
+    expect(reorder(["A", "B", "C"], "A", "GONE")).toEqual(["A", "B", "C"]);
+  });
 });
