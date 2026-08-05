@@ -34,7 +34,7 @@ export default function ModelChip({
 
   if (!onClick) return <div className="ui-chip">{body}</div>;
   return (
-    <button className="ui-chip" onClick={onClick}>
+    <button type="button" className="ui-chip" onClick={onClick}>
       {body}
     </button>
   );

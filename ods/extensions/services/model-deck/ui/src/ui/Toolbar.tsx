@@ -29,6 +29,7 @@ export default function Toolbar({
       {filters.map((f) => (
         <button
           key={f.id}
+          type="button"
           className={`ui-filter-chip ${f.active ? "ui-filter-active" : ""}`}
           onClick={() => onToggleFilter(f.id)}
         >
