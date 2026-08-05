@@ -185,13 +185,28 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
 
   const entry = lifecycle[SPARK_SLOT_KEY];
   const reachable = entry?.observed.reachable ?? true;
+  // The backend's own boot verdict, and the ONLY reliable one. The node's
+  // swap helper reports swap_status.state === "done" the moment swap.sh
+  // *launches* — not when the model serves (live finding 2026-07-30,
+  // recorded in app/engines/spark.py's _BOOTING_STATES comment). So for the
+  // 5-15 minutes of weight load and FlashInfer autotune the state reads
+  // "done" with the endpoint still down, and reading `swapping` alone called
+  // a perfectly healthy boot "down": a red failure pill, the reassurance
+  // banner suppressed, and a blue `warming` placement pill sitting under it.
+  // app/observe.py sets observed.transitioning from spark.boot_in_flight(),
+  // which weighs state AND endpoint AND recency together — the judgement
+  // this line must not try to re-derive.
+  const transitioning = entry?.observed.transitioning ?? false;
+  // Kept as a fallback for the poll where /api/spark/status is fresher than
+  // the lifecycle view (the observer caches for SPARK_OBSERVE_TTL_S), so a
+  // swap the operator just fired reads as warming immediately.
   const swapping = spark.swap_status?.state === "swapping";
   const endpointOk = spark.serving.endpoint_ok;
 
   let status: NodeStatus;
   if (!reachable) status = "unreachable";
   else if (endpointOk) status = "reachable";
-  else if (swapping) status = "warming";
+  else if (transitioning || swapping) status = "warming";
   else status = "down";
 
   const stale = status === "unreachable";

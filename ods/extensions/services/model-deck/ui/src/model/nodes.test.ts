@@ -192,6 +192,34 @@ describe("buildNodes — spark", () => {
     expect(spark.status).toBe("warming");
   });
 
+  it("reads as warming through the long tail of a boot the helper already calls done", () => {
+    // The case a real spark boot spends nearly all its time in, and the one
+    // the swap_status-only rule got wrong. The helper reports "done" as soon
+    // as swap.sh launches (app/engines/spark.py, _BOOTING_STATES), so the
+    // 5-15 minutes of weight load and autotune look like this: state "done",
+    // endpoint still down. app/observe.py's boot_in_flight() is what knows
+    // better, and it arrives here as observed.transitioning.
+    const s = state();
+    s.lifecycle = {
+      "sparky/slot0": lifecycleEntry({
+        status: "warming",
+        reason: "a load or boot is in flight",
+        observed: { reachable: true, loaded: false, model: null, transitioning: true },
+      }),
+    };
+    const spark = buildNodes(
+      s,
+      sparkStatus({
+        serving: { model: "heretic", endpoint_ok: false, container_status: "running" },
+        swap_status: {
+          state: "done", profile: "heretic", id: "1",
+          message: "", ts: "2026-08-05T00:00:00Z",
+        },
+      }),
+    )[1];
+    expect(spark.status).toBe("warming");
+  });
+
   it("is down, not warming, when the endpoint is dead with no swap running", () => {
     const spark = buildNodes(
       state(),
