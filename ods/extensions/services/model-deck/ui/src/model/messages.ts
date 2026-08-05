@@ -97,6 +97,8 @@ export const messages = {
  * but still operator-visible text, so still centralized here. */
 export const labels = {
   dismiss: "Dismiss",
+  forcePark: "Force park",
+  forceSwap: "Force swap",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

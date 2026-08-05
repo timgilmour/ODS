@@ -9,7 +9,7 @@ import {
   type TenantName,
   type World,
 } from "../api";
-import { messages } from "../model/messages";
+import { messages, labels } from "../model/messages";
 import Banner from "../ui/Banner";
 import ArmedButton from "../ui/ArmedButton";
 
@@ -69,6 +69,9 @@ export default function PlacementActions({
   // model name until a later poll reports it loaded (see the effect below).
   const [pullOffer, setPullOffer] = useState<{ model: string; sizeBytes: number } | null>(null);
   const [pullingModel, setPullingModel] = useState<string | null>(null);
+  // Token to disarm ArmedButton on every new refusal, even if the error
+  // message stays the same (e.g. retrying a guard that still 409s)
+  const [refusalSeq, setRefusalSeq] = useState(0);
 
   async function runAction(
     action: () => Promise<unknown>,
@@ -101,6 +104,8 @@ export default function PlacementActions({
       setPullOffer(isPullGuard ? (opts!.pullGuard as { model: string; sizeBytes: number }) : null);
       setError(isPullGuard ? null : err instanceof Error ? err.message : String(err));
       setOfferForcePark(Boolean(opts?.parkGuard) && err instanceof ApiError && err.status === 409);
+      // Bump refusal sequence to disarm any armed Force button on retry
+      setRefusalSeq((n) => n + 1);
     } finally {
       setBusy(false);
       onRefresh();
@@ -160,8 +165,9 @@ export default function PlacementActions({
           there with nothing left on screen saying what it overrides. */}
       {error && offerForcePark && (
         <ArmedButton
-          label="Force park"
+          label={labels.forcePark}
           disabled={busy}
+          resetToken={refusalSeq}
           onConfirm={() => runAction(() => postAction("/tenants/hipfire/park?force=true"))}
         />
       )}

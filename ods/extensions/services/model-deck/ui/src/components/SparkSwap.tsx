@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ApiError, sparkSwap, type SparkStatus } from "../api";
-import { messages } from "../model/messages";
+import { messages, labels } from "../model/messages";
 import Banner from "../ui/Banner";
 import ArmedButton from "../ui/ArmedButton";
 
@@ -19,6 +19,9 @@ export default function SparkSwap({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [offerForce, setOfferForce] = useState(false);
+  // Token to disarm ArmedButton on every new refusal, even if the error
+  // message stays the same (e.g. retrying a guard that still 409s)
+  const [refusalSeq, setRefusalSeq] = useState(0);
 
   async function doSwap(force = false) {
     if (!selected) return;
@@ -33,6 +36,8 @@ export default function SparkSwap({
       // Only the busy guard is force-retryable; a mid-swap 409 or the
       // litellm guard won't yield to force, so don't offer it for those.
       setOfferForce(err instanceof ApiError && err.status === 409 && msg.includes("in-flight"));
+      // Bump refusal sequence to disarm any armed Force button on retry
+      setRefusalSeq((n) => n + 1);
     } finally {
       setBusy(false);
       onChanged();
@@ -56,7 +61,12 @@ export default function SparkSwap({
           dismiss the banner and a bare "Force swap" sits there with nothing
           on screen saying what it overrides. */}
       {error && offerForce && (
-        <ArmedButton label="Force swap" disabled={busy} onConfirm={() => doSwap(true)} />
+        <ArmedButton
+          label={labels.forceSwap}
+          disabled={busy}
+          resetToken={refusalSeq}
+          onConfirm={() => doSwap(true)}
+        />
       )}
       <select value={selected} onChange={(e) => setSelected(e.target.value)} disabled={busy}>
         <option value="">swap to…</option>
