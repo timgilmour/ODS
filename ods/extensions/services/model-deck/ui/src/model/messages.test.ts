@@ -98,12 +98,6 @@ describe("messages", () => {
     expect(m.title).toBe("no events yet");
   });
 
-  it("presents empty slot with neutral tone", () => {
-    const m = messages.emptySlot();
-    expect(m.tone).toBe("neutral");
-    expect(m.title).toBe("Serving slot");
-  });
-
   it("presents last known with neutral tone", () => {
     const m = messages.lastKnown();
     expect(m.tone).toBe("neutral");
@@ -115,6 +109,19 @@ describe("labels", () => {
   it("exports a non-empty dismiss label", () => {
     expect(labels.dismiss).toEqual(expect.any(String));
     expect(labels.dismiss.length).toBeGreaterThan(0);
+  });
+
+  // Replaces the old `messages.emptySlot()` assertion. That entry existed
+  // only to caption an empty resource and was consumed as a bare `.title`,
+  // which threw away the tone that made it a Message in the first place —
+  // and its text named the spark's slot, so an empty GPU 0 with hipfire
+  // parked read "GPU 0 / Serving slot". The caption is a label now, and what
+  // matters about it is that it names no particular kind of resource.
+  it("captions an empty resource without naming what kind it is", () => {
+    expect(labels.nothingPlaced).toEqual(expect.any(String));
+    expect(labels.nothingPlaced.length).toBeGreaterThan(0);
+    expect(labels.nothingPlaced.toLowerCase()).not.toContain("slot");
+    expect(labels.nothingPlaced.toLowerCase()).not.toContain("gpu");
   });
 
   it("names every tab, so no tab is left as a literal beside a catalogued one", () => {

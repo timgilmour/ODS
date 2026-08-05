@@ -101,8 +101,6 @@ export const messages = {
 
   noEvents: (): Message => ({ tone: "neutral", title: "no events yet" }),
 
-  emptySlot: (): Message => ({ tone: "neutral", title: "Serving slot" }),
-
   lastKnown: (): Message => ({ tone: "neutral", title: "last known" }),
 
   // The state pill already reads "last known"; this answers the next
@@ -124,6 +122,14 @@ export const labels = {
   forcePark: "Force park",
   forceSwap: "Force swap",
   filterEvents: "Filter events…",
+
+  /** Caption for a resource with nothing on it. Deliberately says nothing
+   * about WHAT the resource is — the panel above it is already titled
+   * "GPU 0" or "Serving slot", and the previous copy ("Serving slot", taken
+   * from a Message meant for the spark) rendered as "GPU 0 / Serving slot"
+   * on the most common empty state the board has. A caption is a label, not
+   * a notice: it carries no tone, so it is not a Message. */
+  nothingPlaced: "nothing placed",
 
   // Top-level chrome and navigation. `events` was the only tab that ever
   // came from here, which is precisely how a half-applied rule dies: the

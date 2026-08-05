@@ -78,7 +78,7 @@ export default function ResourcePanel({
       <Meter capacity={resource.capacity} />
 
       {resource.placements.length === 0 ? (
-        <div className="dropzone-empty">{messages.emptySlot().title}</div>
+        <div className="dropzone-empty">{labels.nothingPlaced}</div>
       ) : (
         resource.placements.map((p) => (
           <div key={p.id} className="resource-placement">
