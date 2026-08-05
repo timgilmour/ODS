@@ -315,6 +315,73 @@ describe("buildNodes — spark", () => {
     expect(ds4.resources[0].placements[0].engineBadge).toBe("ds4");
   });
 
+  it("carries the swap helper's error text as the node's detail", () => {
+    // The failed-swap case: without this the board shows a red pill and
+    // nothing anywhere says the helper died.
+    const spark = buildNodes(
+      state(),
+      sparkStatus({
+        serving: { model: null, endpoint_ok: false, container_status: "exited" },
+        swap_status: {
+          state: "error", profile: "ornith", id: "7",
+          message: "swap-helper: container spark-ornith exited (1)",
+          ts: "2026-08-05T00:00:00Z",
+        },
+      }),
+    )[1];
+    expect(spark.status).toBe("down");
+    expect(spark.detail).toBe("swap-helper: container spark-ornith exited (1)");
+  });
+
+  it("falls back to lifecycle's own reason when no swap failed", () => {
+    const s = state();
+    s.lifecycle = {
+      "sparky/slot0": lifecycleEntry({
+        status: "down",
+        reason: "intended 'heretic' is not loaded",
+        observed: { reachable: true, loaded: false, model: null, transitioning: false },
+      }),
+    };
+    const spark = buildNodes(
+      s,
+      sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
+    )[1];
+    expect(spark.status).toBe("down");
+    expect(spark.detail).toBe("intended 'heretic' is not loaded");
+  });
+
+  it("prefers a real reason over an error swap with an empty message", () => {
+    // A blank explanation is worse than the generic one: it renders as a
+    // banner trailing an em-dash into nothing.
+    const s = state();
+    s.lifecycle = {
+      "sparky/slot0": lifecycleEntry({
+        status: "down",
+        reason: "intended 'heretic' is not loaded",
+        observed: { reachable: true, loaded: false, model: null, transitioning: false },
+      }),
+    };
+    const spark = buildNodes(
+      s,
+      sparkStatus({
+        serving: { model: null, endpoint_ok: false, container_status: "exited" },
+        swap_status: {
+          state: "error", profile: "ornith", id: "7", message: "",
+          ts: "2026-08-05T00:00:00Z",
+        },
+      }),
+    )[1];
+    expect(spark.detail).toBe("intended 'heretic' is not loaded");
+  });
+
+  it("leaves detail absent when the backend offered no reason at all", () => {
+    const spark = buildNodes(
+      state(),
+      sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
+    )[1];
+    expect(spark.detail).toBeUndefined();
+  });
+
   it("has an empty slot when nothing is serving", () => {
     const spark = buildNodes(
       state(),

@@ -106,6 +106,12 @@ export interface DeckNode {
   status: NodeStatus;
   lastSeen: string | null;
   resources: DeckResource[];
+  /** The backend's own sentence about why this node is in the state it is —
+   * never a phrase invented here. It is what a `down` node's banner shows,
+   * which is the difference between "a swap failed and here is the helper's
+   * error" and a red pill with no explanation anywhere on screen. Absent
+   * when the backend offered no reason. */
+  detail?: string;
 }
 
 // Spark is a single-slot node and its lifecycle key is a fixed constant
@@ -287,10 +293,22 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
   const model = spark.serving.model;
   const engine = spark.profiles.find((p) => p.name === model)?.engine ?? SPARK_DEFAULT_ENGINE;
 
+  // Both candidates are sentences the BACKEND wrote, so the banner reports
+  // rather than guesses. The swap helper's own message wins when the last
+  // swap ended in "error" — that is the specific failure (the helper died,
+  // the container never came up), and it is the thing an asynchronous swap
+  // failure would otherwise leave nowhere on screen. Otherwise
+  // app/lifecycle.py's `reason` for the derived status, which is already
+  // phrased for a human. An "error" swap with an empty message falls
+  // through to the reason rather than showing a blank explanation.
+  const swapError = spark.swap_status?.state === "error" ? spark.swap_status.message : null;
+  const detail = swapError || entry?.reason || undefined;
+
   return {
     id: SPARK_NODE_ID,
     label: SPARK_NODE_ID,
     status,
+    detail,
     lastSeen: entry?.last_healthy_ts ?? null,
     resources: [
       {

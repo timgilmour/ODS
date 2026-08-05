@@ -15,6 +15,21 @@ describe("messages", () => {
     expect(m.body).not.toContain("undefined");
   });
 
+  it("reports a down node with the backend's own detail and a retry", () => {
+    const m = messages.nodeDown("sparky", "swap-helper: container exited (1)");
+    expect(m.tone).toBe("danger");
+    expect(m.body).toContain("sparky");
+    expect(m.body).toContain("swap-helper: container exited (1)");
+    expect(m.action?.label).toBe("Retry");
+  });
+
+  it("does not trail into a dangling detail when there is none", () => {
+    const m = messages.nodeDown("sparky", null);
+    expect(m.body).not.toContain("null");
+    expect(m.body).not.toContain("undefined");
+    expect(m.body?.trimEnd().endsWith("—")).toBe(false);
+  });
+
   it("treats warming as neutral, not a warning", () => {
     // Decision 5: amber is reserved for things wanting a decision. A first
     // boot that is proceeding normally is not one of those.

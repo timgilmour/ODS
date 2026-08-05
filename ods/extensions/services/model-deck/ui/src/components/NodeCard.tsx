@@ -60,6 +60,16 @@ export default function NodeCard({
       {unreachable && (
         <Banner message={messages.nodeUnreachable(node.label, age)} onAction={onRefresh} />
       )}
+      {/* Without this, `down` was the one node status with a red pill and no
+          explanation — an asynchronous swap failure (helper died, container
+          never came up) rendered with nothing anywhere on screen saying so.
+          The detail is the backend's own sentence; the adapter picks it. */}
+      {node.status === "down" && (
+        <Banner
+          message={messages.nodeDown(node.label, node.detail ?? null)}
+          onAction={onRefresh}
+        />
+      )}
       {node.status === "warming" && <Banner message={messages.warmingFirstBoot()} />}
 
       <div className="node-resources">

@@ -31,6 +31,20 @@ export const messages = {
     action: { label: "Retry" },
   }),
 
+  // The node answered; what it should be running is not running. Distinct
+  // from nodeUnreachable (we cannot see the box at all) and from warming (a
+  // boot is legitimately in flight). `detail` is the backend's own sentence
+  // — a swap helper error, or lifecycle's reason — because without it a
+  // failed asynchronous swap renders as a red pill and nothing else.
+  nodeDown: (label: string, detail: string | null): Message => ({
+    tone: "danger",
+    title: "Node is down",
+    body: detail
+      ? `${label} answered, but nothing is serving — ${detail}`
+      : `${label} answered, but nothing is serving.`,
+    action: { label: "Retry" },
+  }),
+
   warmingFirstBoot: (): Message => ({
     tone: "neutral",
     title: "first boot can autotune for about 15 minutes — this is normal",
