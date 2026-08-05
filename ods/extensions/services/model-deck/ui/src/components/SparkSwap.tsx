@@ -4,10 +4,22 @@ import { messages, labels } from "../model/messages";
 import Banner from "../ui/Banner";
 import ArmedButton from "../ui/ArmedButton";
 
-/** Spark's profile picker. Swap can 409 two ways: the busy guard (in-flight
- * requests — force helps) and an already-running swap (force will not help;
- * the message says so). The litellm default-route guard also 409s and is
- * deliberately not force-offerable — the backend ignores force for it. */
+/** Spark's profile picker. Swap can 409 three ways, and exactly one of them
+ * gets a Force button:
+ *
+ * - **busy guard** (in-flight requests). Force works, and the override is
+ *   offered inline — retrying later is the only alternative.
+ * - **a previous swap still booting.** Force works here too: the
+ *   boot-window guard in app/engines/spark.py:swap() is inside
+ *   `if not endpoint_ok and not force`, so force skips it outright, and the
+ *   guard's own message says "use force to interrupt it". The button is
+ *   withheld anyway, deliberately — interrupting a boot discards the 5-15
+ *   minutes of weight load and FlashInfer autotune already spent, so an
+ *   operator who really means it is made to go to the API for it. This is
+ *   friction on a working override, not a missing capability; do not "fix"
+ *   it by arming the button.
+ * - **the litellm default-route guard.** This is the one force genuinely
+ *   cannot help with: it runs before the force check and says so itself. */
 export default function SparkSwap({
   spark,
   onChanged,
@@ -33,8 +45,10 @@ export default function SparkSwap({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
-      // Only the busy guard is force-retryable; a mid-swap 409 or the
-      // litellm guard won't yield to force, so don't offer it for those.
+      // Only the busy guard ARMS Force. A mid-swap 409 would yield to force
+      // as well, but interrupting a boot throws its autotune away, so that
+      // override deliberately lives at the API only; the litellm guard is
+      // the one that force cannot help with at all. See the docstring.
       setOfferForce(err instanceof ApiError && err.status === 409 && msg.includes("in-flight"));
       // Bump refusal sequence to disarm any armed Force button on retry
       setRefusalSeq((n) => n + 1);

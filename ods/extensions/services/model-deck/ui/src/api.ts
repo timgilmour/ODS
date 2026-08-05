@@ -344,9 +344,11 @@ export async function getSparkStatus(): Promise<SparkStatus | null> {
   }
 }
 
-/** POST /api/spark/swap. Throws ApiError(409) for both guard refusals
- * (busy serving — force-retryable) and an already-running swap (not
- * force-retryable; the message says which). */
+/** POST /api/spark/swap. Throws ApiError(409) for the busy-serving guard,
+ * for a previous swap still booting, and for the litellm default-route
+ * guard. Force overrides the first two backend-side and is ignored by the
+ * third; which of them the UI actually offers a Force button for is a
+ * separate, deliberate decision — see SparkSwap.tsx's docstring. */
 export function sparkSwap(profile: string, force = false): Promise<unknown> {
   return request<unknown>("/api/spark/swap", {
     method: "POST",
