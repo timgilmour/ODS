@@ -968,3 +968,93 @@ input[type="password"] {
 .ui-banner-spacer {
   margin-left: auto;
 }
+
+.ui-meter {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+}
+
+.ui-meter-track {
+  position: relative;
+  flex: 1;
+  height: var(--space);
+  border-radius: var(--radius);
+  background: var(--meter-track);
+  overflow: hidden;
+}
+
+/* Unknown capacity — an unreachable node. Hatching says "no reading", which
+   an empty track would misreport as "zero used". */
+.ui-meter-unknown {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--meter-track),
+    var(--meter-track) 4px,
+    var(--panel) 4px,
+    var(--panel) 8px
+  );
+}
+
+.ui-meter-fill {
+  height: 100%;
+}
+
+.ui-meter-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--text);
+}
+
+.ui-meter-label {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ui-pill {
+  border-radius: var(--radius);
+  padding: 0 var(--space);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.ui-pill-good { background: var(--chip-loaded-bg); color: var(--chip-loaded-fg); }
+.ui-pill-busy { background: var(--chip-idle-bg); color: var(--chip-idle-fg); }
+.ui-pill-warn { background: var(--chip-busy-bg); color: var(--chip-busy-fg); }
+.ui-pill-bad { background: var(--chip-unknown-bg); color: var(--chip-unknown-fg); }
+.ui-pill-off { background: var(--chip-unloaded-bg); color: var(--chip-unloaded-fg); }
+
+.ui-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  padding: var(--space);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  width: 100%;
+  text-align: left;
+}
+
+.ui-chip-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-chip-size {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-chip-stale-note {
+  display: block;
+  font-style: italic;
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
