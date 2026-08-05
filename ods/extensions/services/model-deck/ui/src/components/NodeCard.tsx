@@ -1,5 +1,5 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
-import { messages } from "../model/messages";
+import { humanizeAge, messages } from "../model/messages";
 import type { DeckNode } from "../model/nodes";
 import Banner from "../ui/Banner";
 import Panel from "../ui/Panel";
@@ -33,17 +33,28 @@ export default function NodeCard({
   fetchError: string | null;
   onRefresh: () => void;
 }) {
+  const unreachable = node.status === "unreachable";
+  const age = humanizeAge(node.lastSeen);
+
   return (
+    // The whole node desaturates as ONE unit when unreachable, so it reads as
+    // a box going quiet rather than as individually greyed-out widgets. Its
+    // placements stay on screen: unreachable is not empty.
     <Panel
-      className="node-card"
+      className={`node-card ${unreachable ? "node-stale" : ""}`}
       title={
         <>
           <span className="node-label">{node.label}</span>
           <span className={`ui-pill ${DOT[node.status]}`}>{node.status}</span>
+          {unreachable && age && <span className="node-age">(last seen {age} ago)</span>}
         </>
       }
     >
       {fetchError && <Banner message={messages.nodeFetchFailed(node.label, fetchError)} />}
+      {unreachable && (
+        <Banner message={messages.nodeUnreachable(node.label, age)} onAction={onRefresh} />
+      )}
+      {node.status === "warming" && <Banner message={messages.warmingFirstBoot()} />}
 
       <div className="node-resources">
         {node.resources.map((r) => (
@@ -54,7 +65,8 @@ export default function NodeCard({
             models={models}
             coldGgufs={coldGgufs}
             spark={spark}
-            stale={node.status === "unreachable"}
+            stale={unreachable}
+            staleAge={age}
             onRefresh={onRefresh}
           />
         ))}

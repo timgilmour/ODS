@@ -14,6 +14,7 @@ export default function ResourcePanel({
   coldGgufs,
   spark,
   stale,
+  staleAge,
   onRefresh,
 }: {
   resource: DeckResource;
@@ -24,6 +25,11 @@ export default function ResourcePanel({
   /** True when the owning node is unreachable: show what we last knew, but
    * offer no verbs, because none of them can currently reach anything. */
   stale: boolean;
+  /** Humanized age of the owning node's last successful contact, or null
+   * when unknown. Rendered as a caption under each chip: the state pill
+   * already says "last known", this answers the next question, which is
+   * *how* stale — a different fact, not a redundant one. */
+  staleAge: string | null;
   onRefresh: () => void;
 }) {
   return (
@@ -36,6 +42,11 @@ export default function ResourcePanel({
         resource.placements.map((p) => (
           <div key={p.id} className="resource-placement">
             <ModelChip placement={p} />
+            {stale && staleAge && (
+              <span className="ui-chip-stale-note">
+                {messages.lastSeen(staleAge).title}
+              </span>
+            )}
           </div>
         ))
       )}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { labels, messages } from "./messages";
+import { humanizeAge, labels, messages } from "./messages";
 
 describe("messages", () => {
   it("gives an unreachable node a tone of danger and an age", () => {
@@ -94,5 +94,29 @@ describe("labels", () => {
   it("exports a non-empty dismiss label", () => {
     expect(labels.dismiss).toEqual(expect.any(String));
     expect(labels.dismiss.length).toBeGreaterThan(0);
+  });
+});
+
+describe("humanizeAge", () => {
+  const now = Date.parse("2026-08-05T12:00:00Z");
+
+  it("returns null with no timestamp", () => {
+    expect(humanizeAge(null, now)).toBeNull();
+  });
+
+  it("returns null for an unparseable timestamp", () => {
+    expect(humanizeAge("not a date", now)).toBeNull();
+  });
+
+  it("counts hours", () => {
+    expect(humanizeAge("2026-08-04T10:00:00Z", now)).toBe("26h");
+  });
+
+  it("counts days", () => {
+    expect(humanizeAge("2026-08-01T12:00:00Z", now)).toBe("4d");
+  });
+
+  it("never reports a negative age from clock skew", () => {
+    expect(humanizeAge("2026-08-05T12:00:30Z", now)).toBe("0s");
   });
 });

@@ -84,6 +84,13 @@ export const messages = {
   emptySlot: (): Message => ({ tone: "neutral", title: "Serving slot" }),
 
   lastKnown: (): Message => ({ tone: "neutral", title: "last known" }),
+
+  // The state pill already reads "last known"; this answers the next
+  // question, which is *how* stale — a different fact, not a redundant one.
+  lastSeen: (age: string): Message => ({
+    tone: "neutral",
+    title: `last seen ${age} ago`,
+  }),
 };
 
 /** Short imperative labels for controls. Not notices, hence not `Message`s —
@@ -91,3 +98,25 @@ export const messages = {
 export const labels = {
   dismiss: "Dismiss",
 };
+
+/** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is
+ * no timestamp to age. Callers pass the result into nodeUnreachable.
+ *
+ * `now` is injected so this stays pure and testable; production callers omit
+ * it. Ages clamp at zero: a node whose clock runs ahead of ours must not be
+ * reported as last seen in the future.
+ *
+ * Stays in hours through the second day (< 48h) before switching to days —
+ * a 24h cutoff would print a 26-hour-old reading as "1d", which throws away
+ * exactly the precision an operator needs right after a node drops. */
+export function humanizeAge(iso: string | null, now: number = Date.now()): string | null {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return null;
+
+  const seconds = Math.max(0, Math.floor((now - then) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 2 * 86_400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
+}

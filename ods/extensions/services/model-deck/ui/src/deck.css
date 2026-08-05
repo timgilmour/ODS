@@ -1107,3 +1107,18 @@ input[type="password"] {
 }
 
 .node-dragging { opacity: 0.5; }
+
+/* One filter on the whole card, not per-element greying: the node reads as
+   a single thing going quiet. The banner is excluded so the one actionable
+   element stays legible. */
+.node-stale .node-resources,
+.node-stale .node-label,
+.node-stale .node-age {
+  opacity: 0.45;
+  filter: saturate(0.4);
+}
+
+.node-age {
+  color: var(--text-dim);
+  font-style: italic;
+}
