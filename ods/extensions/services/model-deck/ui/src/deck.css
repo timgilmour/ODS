@@ -1055,11 +1055,16 @@ input[type="password"] {
   gap: calc(var(--space) * 2);
 }
 
+/* A placement is a group: the chip, then the facts about THAT chip. The gap
+   inside the group is deliberately half the gap between groups — at equal
+   spacing a meta row reads as floating between two chips, and on a GPU
+   hosting a tenant plus an external process it was genuinely ambiguous which
+   one "in use · 📌 · P3" belonged to. */
 .resource-placement {
   display: flex;
   flex-direction: column;
-  gap: var(--space);
-  margin-top: var(--space);
+  gap: calc(var(--space) / 2);
+  margin-top: calc(var(--space) * 2);
 }
 
 /* .tenant-meta carries its own top margin because on the legacy tenant card
