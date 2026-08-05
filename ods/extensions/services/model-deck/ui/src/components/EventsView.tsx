@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getEvents, type EventEntry } from "../api";
 import { eventSeverity, type Severity } from "../model/eventSeverity";
 import { labels, messages } from "../model/messages";
+import Banner from "../ui/Banner";
 import Panel from "../ui/Panel";
 import Toolbar, { type Filter } from "../ui/Toolbar";
 
@@ -64,7 +65,13 @@ export default function EventsView({ refreshTrigger }: { refreshTrigger: number 
           setKinds((cur) => (cur.includes(id) ? cur.filter((k) => k !== id) : [...cur, id]))
         }
       />
-      {error && <div className="banner-error">{error}</div>}
+      {/* Through Banner, not the legacy .banner-error div this file had
+          drifted back to: App routes the identical class of failure through
+          Banner, and the bespoke markup lost the tone-driven colour, the
+          role="alert" live region, and the ::first-letter capitalization
+          that keeps a lowercase backend string presentable without anyone
+          mutating the payload. */}
+      {error && <Banner message={messages.eventsFetchFailed(error)} />}
       <div className="event-table">
         {rows.length === 0 ? (
           <div>{messages.noEvents().title}</div>

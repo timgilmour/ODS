@@ -93,6 +93,12 @@ export const messages = {
     body: detail,
   }),
 
+  eventsFetchFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Could not load events",
+    body: detail,
+  }),
+
   noEvents: (): Message => ({ tone: "neutral", title: "no events yet" }),
 
   emptySlot: (): Message => ({ tone: "neutral", title: "Serving slot" }),

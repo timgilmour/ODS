@@ -86,6 +86,12 @@ describe("messages", () => {
     expect(m.body).toBe("connection timeout");
   });
 
+  it("reports an events fetch failure as danger, carrying the detail", () => {
+    const m = messages.eventsFetchFailed("503 Service Unavailable");
+    expect(m.tone).toBe("danger");
+    expect(m.body).toBe("503 Service Unavailable");
+  });
+
   it("presents no events with neutral tone", () => {
     const m = messages.noEvents();
     expect(m.tone).toBe("neutral");
