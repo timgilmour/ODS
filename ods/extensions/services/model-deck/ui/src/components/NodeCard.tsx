@@ -46,7 +46,13 @@ export default function NodeCard({
         <>
           <span className="node-label">{node.label}</span>
           <span className={`ui-pill ${DOT[node.status]}`}>{node.status}</span>
-          {unreachable && age && <span className="node-age">(last seen {age} ago)</span>}
+          {/* Same fact as the per-chip caption below, so it comes from the
+              same catalog entry. Any parenthesising is markup/CSS, never
+              baked into the string — two hand-written renderings of one
+              fact drift. */}
+          {unreachable && age && (
+            <span className="node-age">{messages.lastSeen(age).title}</span>
+          )}
         </>
       }
     >

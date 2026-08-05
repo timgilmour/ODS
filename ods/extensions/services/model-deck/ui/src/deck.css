@@ -1110,7 +1110,9 @@ input[type="password"] {
 
 /* One filter on the whole card, not per-element greying: the node reads as
    a single thing going quiet. The banner is excluded so the one actionable
-   element stays legible. */
+   element stays legible, and so — deliberately — is the status pill: it is
+   the one word explaining why everything else is grey, so it stays full
+   saturation for the same reason the banner does. Do not add it here. */
 .node-stale .node-resources,
 .node-stale .node-label,
 .node-stale .node-age {
@@ -1121,4 +1123,15 @@ input[type="password"] {
 .node-age {
   color: var(--text-dim);
   font-style: italic;
+}
+
+/* Visual parentheses only — punctuation lives in CSS, never baked into the
+   catalog string, so messages.lastSeen's text stays the single source of
+   truth for the words themselves. */
+.node-age::before {
+  content: "(";
+}
+
+.node-age::after {
+  content: ")";
 }

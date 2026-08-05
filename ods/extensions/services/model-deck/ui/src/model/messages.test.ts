@@ -116,6 +116,14 @@ describe("humanizeAge", () => {
     expect(humanizeAge("2026-08-01T12:00:00Z", now)).toBe("4d");
   });
 
+  it("stays in hours right up to the 48h boundary", () => {
+    expect(humanizeAge("2026-08-03T13:00:00Z", now)).toBe("47h");
+  });
+
+  it("switches to days exactly at 48h", () => {
+    expect(humanizeAge("2026-08-03T12:00:00Z", now)).toBe("2d");
+  });
+
   it("never reports a negative age from clock skew", () => {
     expect(humanizeAge("2026-08-05T12:00:30Z", now)).toBe("0s");
   });

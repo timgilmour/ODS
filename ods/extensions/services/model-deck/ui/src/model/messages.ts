@@ -100,7 +100,11 @@ export const labels = {
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is
- * no timestamp to age. Callers pass the result into nodeUnreachable.
+ * no timestamp to age. NodeCard computes this once per node and threads it
+ * into every place that fact is shown: the header's own age span, the
+ * `nodeUnreachable` banner body, and `staleAge` on ResourcePanel (which
+ * feeds the per-chip `lastSeen` caption) — one computed age, several
+ * renderings, rather than each caller re-deriving it.
  *
  * `now` is injected so this stays pure and testable; production callers omit
  * it. Ages clamp at zero: a node whose clock runs ahead of ours must not be
