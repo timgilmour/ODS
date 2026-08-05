@@ -1152,3 +1152,45 @@ input[type="password"] {
   font-size: 0.85em;
   margin-top: calc(var(--space) / 2);
 }
+
+.ui-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  margin-bottom: var(--space);
+  flex-wrap: wrap;
+}
+
+.ui-toolbar-search { flex: 1; min-width: 200px; }
+
+.ui-filter-chip { border-radius: var(--radius); }
+
+.ui-filter-active {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.event-table { display: flex; flex-direction: column; }
+
+/* No vertical gridlines and no zebra striping — rows separate on a single
+   rule so the coloured severity pills are the only thing drawing the eye. */
+.event-row {
+  display: grid;
+  grid-template-columns: 12rem 8rem 1fr;
+  gap: var(--space);
+  padding: calc(var(--space) / 2) 0;
+  border-bottom: 1px solid var(--panel-border);
+  align-items: baseline;
+}
+
+.event-ts {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+}
+
+.event-detail {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

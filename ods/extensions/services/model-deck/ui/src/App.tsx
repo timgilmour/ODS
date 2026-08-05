@@ -8,18 +8,18 @@ import {
   type StorageState,
 } from "./api";
 import Board from "./components/Board";
-import EventLog from "./components/EventLog";
+import EventsView from "./components/EventsView";
 import PolicyModal from "./components/PolicyModal";
 import SetBuilder from "./components/SetBuilder";
 import SetStrip from "./components/SetStrip";
 import StorageView from "./components/StorageView";
-import { messages } from "./model/messages";
+import { labels, messages } from "./model/messages";
 import { buildNodes, SPARK_NODE_ID } from "./model/nodes";
 import Banner from "./ui/Banner";
 
 const POLL_MS = 3000;
 
-type View = "deck" | "builder" | "storage";
+type View = "deck" | "builder" | "storage" | "events";
 
 export default function App() {
   const [state, setState] = useState<StateResponse | null>(null);
@@ -34,8 +34,8 @@ export default function App() {
   const [view, setView] = useState<View>("deck");
   const [modalOpen, setModalOpen] = useState(false);
   const [policyModalOpen, setPolicyModalOpen] = useState(false);
-  // Bumped on every poll tick and after any mutating action; EventLog
-  // re-fetches its own window whenever this changes (see EventLog.tsx).
+  // Bumped on every poll tick and after any mutating action; EventsView
+  // re-fetches its own window whenever this changes (see EventsView.tsx).
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   // Fetches all three in parallel (Promise.all-style), but each leg's own
@@ -137,6 +137,12 @@ export default function App() {
           >
             Storage
           </button>
+          <button
+            className={view === "events" ? "primary" : undefined}
+            onClick={() => setView("events")}
+          >
+            {labels.events}
+          </button>
         </nav>
         <button onClick={() => setPolicyModalOpen(true)} disabled={!state}>
           Policy
@@ -187,6 +193,8 @@ export default function App() {
         />
       )}
 
+      {view === "events" && <EventsView refreshTrigger={refreshTrigger} />}
+
       {policyModalOpen && state && (
         <PolicyModal
           policy={state.policy}
@@ -195,8 +203,6 @@ export default function App() {
           onSaved={refreshAll}
         />
       )}
-
-      <EventLog refreshTrigger={refreshTrigger} />
     </>
   );
 }
