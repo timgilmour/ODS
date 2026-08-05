@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import type { DeckNode } from "../model/nodes";
-import { applyOrder, loadOrder, saveOrder } from "../model/nodeOrder";
+import { applyOrder, loadOrder, reorder, saveOrder } from "../model/nodeOrder";
 import NodeCard from "./NodeCard";
 
 /** Nodes stack vertically, arbitrary count. Resources within a node lay out
@@ -35,8 +35,7 @@ export default function Board({
 
   function dropOn(targetId: string) {
     if (!dragging || dragging === targetId) return;
-    const ids = ordered.map((n) => n.id).filter((id) => id !== dragging);
-    ids.splice(ids.indexOf(targetId), 0, dragging);
+    const ids = reorder(ordered.map((n) => n.id), dragging, targetId);
     setOrder(ids);
     saveOrder(ids);
     setDragging(null);
@@ -51,6 +50,13 @@ export default function Board({
           onDragStart={() => setDragging(node.id)}
           onDragOver={(e) => e.preventDefault()}
           onDrop={() => dropOn(node.id)}
+          // Fires on every drag termination — successful drop, drop on a
+          // non-card target, or an Escape-cancelled drag — unlike onDrop,
+          // which only fires on a successful drop. Without it, "pick up a
+          // card and let go outside any drop target" (or drop it back on
+          // itself, which dropOn bails out of before clearing state) left
+          // that card stuck at half opacity indefinitely.
+          onDragEnd={() => setDragging(null)}
           className={dragging === node.id ? "node-dragging" : undefined}
         >
           <NodeCard

@@ -28,6 +28,27 @@ export function applyOrder(nodes: DeckNode[], order: string[]): DeckNode[] {
   return [...ordered, ...known.values()];
 }
 
+/** Computes the id list after dragging `dragging` onto `target`.
+ *
+ * Both indices are taken BEFORE the removal, which is what makes this
+ * direction-aware for free: after splicing the dragged id out, `to` lands
+ * just past the target for a forward drag and on it for a backward one.
+ * Computing `to` after removal instead ("insert before target") makes a
+ * forward drag onto the very next card a silent no-op — pull A out of
+ * [A, B], reinsert before B, and you have [A, B] again. `dragging ===
+ * target` (dropping a card back on itself) is a no-op by definition, not an
+ * error — the array is still returned as a fresh copy. */
+export function reorder(ids: string[], dragging: string, target: string): string[] {
+  const next = [...ids];
+  if (dragging === target) return next;
+
+  const from = next.indexOf(dragging);
+  const to = next.indexOf(target);
+  next.splice(from, 1);
+  next.splice(to, 0, dragging);
+  return next;
+}
+
 export function loadOrder(): string[] {
   try {
     const raw = localStorage.getItem(KEY);
