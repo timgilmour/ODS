@@ -44,7 +44,12 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" "$EXT_
 
 LEMONADE_API_KEY="$(grep -E '^LEMONADE_API_KEY=' "$ODS_ENV" | cut -d= -f2- || true)"
 LITELLM_KEY="$(grep -E '^LITELLM_KEY=' "$ODS_ENV" | cut -d= -f2- || true)"
-export LEMONADE_API_KEY LITELLM_KEY
+# The spark serves on the LAN, not on ods-network, so its address is
+# deployment config rather than a container name. D6 reads that port
+# directly for ground truth (/v1/models, /metrics) instead of trusting the
+# deck's own view of it; unset simply skips the case.
+SPARK_SERVING_URL="$(grep -E '^MODEL_DECK_SPARK_SERVING_URL=' "$ODS_ENV" | cut -d= -f2- || true)"
+export LEMONADE_API_KEY LITELLM_KEY SPARK_SERVING_URL
 
 # The lifecycle drills (D7) need an OUT-OF-BAND container stop — the deck must
 # not be told, since "somebody stopped it behind our back" is the case under
@@ -69,7 +74,8 @@ docker run --rm "${NET_ARGS[@]}" \
   -v /sys:/sysfs:ro \
   -v "$HOME/ods/data/models":/gguf-store:ro \
   -v "$REPORT_DIR":/reports \
-  -e LEMONADE_API_KEY -e LITELLM_KEY -e DECK_DRILL_FORCE="$FORCE" \
+  -e LEMONADE_API_KEY -e LITELLM_KEY -e SPARK_SERVING_URL \
+  -e DECK_DRILL_FORCE="$FORCE" \
   "$IMAGE" python -m pytest /suite/livetests -m "$MARKER" "${PYTEST_ARGS[@]}"
 RC=$?
 set -e

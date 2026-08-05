@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, "/suite")  # extension root: makes `from app.gpu import ...` work
 
 from clients import (Catalog, ComfyDirect, EventCursor, LemonadeDirect,  # noqa: E402
-                     LitellmDirect, EXTRA)
+                     LitellmDirect, SparkServingDirect, EXTRA)
 
 DECK_URL = os.environ.get("DECK_URL", "http://model-deck:3015")
 LEMONADE_URL = os.environ.get("LEMONADE_URL", "http://llama-server:8080")
@@ -36,6 +36,12 @@ CATALOG_URL = os.environ.get("CATALOG_URL", "http://dashboard:3001")
 # GET /containers/x/json and POST /containers/x/{start,stop}, nothing else.
 DOCKER_CTL_URL = os.environ.get("DOCKER_CTL_URL", "http://docker-ctl:2375")
 HIPFIRE_CONTAINER = os.environ.get("HIPFIRE_CONTAINER", "ods-hipfire")
+# The spark's serving port is on the LAN, not on ods-network, and its
+# address is deployment config rather than a fixed container name — so
+# ../deck-drill passes in the same MODEL_DECK_SPARK_SERVING_URL the deck's
+# own spark client scrapes, instead of the suite hard-coding a host. Empty
+# (no spark on this box) makes the spark serving fixture skip.
+SPARK_SERVING_URL = os.environ.get("SPARK_SERVING_URL", "")
 GGUF_STORE = Path("/gguf-store")
 
 # Watcher tick is 2 s; TTL drills wait TTL + 3 ticks + margin.
@@ -65,6 +71,14 @@ def comfy_direct():
 @pytest.fixture(scope="session")
 def litellm_direct():
     return LitellmDirect(LITELLM_URL, os.environ.get("LITELLM_KEY", ""))
+
+
+@pytest.fixture(scope="session")
+def spark_serving():
+    """Ground truth for whatever profile owns the spark's serving port."""
+    if not SPARK_SERVING_URL:
+        pytest.skip("SPARK_SERVING_URL unset — no spark serving endpoint to observe")
+    return SparkServingDirect(SPARK_SERVING_URL)
 
 
 @pytest.fixture(scope="session")
