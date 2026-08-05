@@ -106,6 +106,78 @@ describe("buildNodes", () => {
     expect(external?.status).toBe("unmanaged");
   });
 
+  it("carries each tenant's policy onto its placement", () => {
+    // The board's 📌 and P{n}. They come from state.policy, which buildNodes
+    // already has in hand — the alternative is drilling a `policy` prop back
+    // down to every card, which is the coupling this adapter exists to end.
+    const s = state();
+    s.world.tenants.lemonade = {
+      state: "loaded", model: "qwen.gguf", footprint: 9_000_000_000, idle_s: 4,
+    };
+    const [local] = buildNodes(s, null);
+    const hipfire = local.resources[0].placements[0];
+    const lemonade = local.resources[1].placements.find((p) => p.engine === "lemonade");
+
+    expect(hipfire.pinned).toBe(true);
+    expect(hipfire.priority).toBe(3);
+    expect(lemonade?.pinned).toBe(false);
+    expect(lemonade?.priority).toBe(1);
+  });
+
+  it("marks hipfire busy when a turn is in flight, and not otherwise", () => {
+    // Predicts the park refusal BEFORE the click: hipfire's single admission
+    // slot is what makes park/apply 409 without force.
+    const idle = buildNodes(state(), null)[0].resources[0].placements[0];
+    expect(idle.busy).toBe(false);
+
+    const s = state();
+    s.world.tenants.hipfire = { ...s.world.tenants.hipfire, queue_depth: 2 };
+    expect(buildNodes(s, null)[0].resources[0].placements[0].busy).toBe(true);
+  });
+
+  it("treats a missing hipfire queue reading as not busy", () => {
+    const s = state();
+    s.world.tenants.hipfire = { ...s.world.tenants.hipfire, queue_depth: null };
+    expect(buildNodes(s, null)[0].resources[0].placements[0].busy).toBe(false);
+  });
+
+  it("carries ComfyUI's queue and idle time, and gives hipfire neither", () => {
+    const s = state();
+    s.world.tenants.comfyui = { state: "busy", queue: 3, idle_s: 0 };
+    const [local] = buildNodes(s, null);
+    const comfy = local.resources[1].placements.find((p) => p.engine === "comfyui");
+    const hipfire = local.resources[0].placements[0];
+
+    expect(comfy?.queue).toBe(3);
+    expect(comfy?.idleSeconds).toBe(0);
+    // Absent, not zero: hipfire has no queue and reports no idle time, and
+    // "0" on screen would be a claim neither engine ever made.
+    expect(hipfire.queue).toBeUndefined();
+    expect(hipfire.idleSeconds).toBeUndefined();
+  });
+
+  it("keeps a drained ComfyUI queue distinct from an unreadable one", () => {
+    const zero = buildNodes(state(), null)[0].resources[1].placements
+      .find((p) => p.engine === "comfyui");
+    expect(zero?.queue).toBe(0);
+
+    const s = state();
+    s.world.tenants.comfyui = { state: "unknown", queue: null, idle_s: null };
+    const unknown = buildNodes(s, null)[0].resources[1].placements
+      .find((p) => p.engine === "comfyui");
+    expect(unknown?.queue).toBeNull();
+  });
+
+  it("never badges a local tenant with its own engine name", () => {
+    // The badge answers "what is this node running that it usually isn't".
+    // On the local box each tenant IS its engine, so there is no such
+    // question and no badge.
+    const [local] = buildNodes(state(), null);
+    for (const r of local.resources) {
+      for (const p of r.placements) expect(p.engineBadge).toBeUndefined();
+    }
+  });
+
   it("takes a placement's status from the lifecycle view", () => {
     const s = state();
     s.lifecycle = {
@@ -226,6 +298,21 @@ describe("buildNodes — spark", () => {
       sparkStatus({ serving: { model: "heretic", endpoint_ok: false, container_status: "exited" } }),
     )[1];
     expect(spark.status).toBe("down");
+  });
+
+  it("badges a non-default engine and stays silent about the default one", () => {
+    const vllm = buildNodes(state(), sparkStatus())[1];
+    expect(vllm.resources[0].placements[0].engine).toBe("vllm");
+    expect(vllm.resources[0].placements[0].engineBadge).toBeUndefined();
+
+    const ds4 = buildNodes(
+      state(),
+      sparkStatus({
+        profiles: [{ name: "ds4", engine: "ds4", health_url: null, container: "spark-ds4" }],
+        serving: { model: "ds4", endpoint_ok: true, container_status: "running" },
+      }),
+    )[1];
+    expect(ds4.resources[0].placements[0].engineBadge).toBe("ds4");
   });
 
   it("has an empty slot when nothing is serving", () => {

@@ -93,14 +93,31 @@ export const messages = {
   }),
 };
 
-/** Short imperative labels for controls. Not notices, hence not `Message`s —
- * but still operator-visible text, so still centralized here. */
+/** Short labels — control text, badges, captions and the `title` tooltips
+ * that explain them. Not notices, hence not `Message`s (there is no tone to
+ * carry), but every one of them is operator-visible text and an ARIA name or
+ * a tooltip is read out loud, so they are centralized here for the same
+ * reason the notices are. Parameterized entries are plain pure functions;
+ * they format a fact, they do not decide anything. */
 export const labels = {
   dismiss: "Dismiss",
   forcePark: "Force park",
   forceSwap: "Force swap",
   events: "Events",
   filterEvents: "Filter events…",
+
+  // Placement facts (see Placement's "operational facts" block in nodes.ts).
+  pinned: "📌",
+  pinnedTitle: "pinned — exempt from idle eviction",
+  priority: (n: number) => `P${n}`,
+  priorityTitle: "eviction priority",
+  inUse: "in use",
+  inUseTitle:
+    "a conversation turn is being served right now — park/apply will refuse without force",
+  queue: (n: number | null) => `queue ${n ?? "—"}`,
+  queueTitle: "jobs waiting on this engine",
+  idle: (seconds: number) => `idle ${Math.round(seconds)} s`,
+  idleTitle: "time since last activity — counts towards the idle-TTL eviction",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

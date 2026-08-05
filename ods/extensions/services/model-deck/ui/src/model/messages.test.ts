@@ -95,6 +95,28 @@ describe("labels", () => {
     expect(labels.dismiss).toEqual(expect.any(String));
     expect(labels.dismiss.length).toBeGreaterThan(0);
   });
+
+  it("formats an eviction priority", () => {
+    expect(labels.priority(3)).toBe("P3");
+  });
+
+  it("formats a queue depth, and says so rather than lying when it is unknown", () => {
+    expect(labels.queue(0)).toBe("queue 0");
+    expect(labels.queue(3)).toBe("queue 3");
+    expect(labels.queue(null)).toBe("queue —");
+  });
+
+  it("rounds an idle time to whole seconds", () => {
+    expect(labels.idle(0)).toBe("idle 0 s");
+    expect(labels.idle(12.4)).toBe("idle 12 s");
+  });
+
+  it("explains the pin and the in-use badge in their tooltips", () => {
+    // Both are glyph/two-word badges; the tooltip is the only place their
+    // meaning is written down, and a tooltip is read out loud.
+    expect(labels.pinnedTitle).toContain("evict");
+    expect(labels.inUseTitle).toContain("force");
+  });
 });
 
 describe("humanizeAge", () => {

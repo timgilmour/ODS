@@ -1062,6 +1062,13 @@ input[type="password"] {
   margin-top: var(--space);
 }
 
+/* .tenant-meta carries its own top margin because on the legacy tenant card
+   it followed a heading row directly. Inside a .resource-placement the
+   column gap already supplies that space, so the margin would double it. */
+.resource-placement .tenant-meta {
+  margin-top: 0;
+}
+
 /* A guard banner is a full-width row inside its control group, never a flex
    item competing with the select and buttons beside it. .ui-banner is itself
    a flex container whose spacer relies on margin-left:auto, which only means
