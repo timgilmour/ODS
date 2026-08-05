@@ -42,8 +42,11 @@ export const messages = {
     body: detail,
   }),
 
+  // Warning, not danger: this is asking the operator for a decision, which
+  // is what warning means here. Nothing has failed or been refused — the
+  // red-outlined button above it is what carries the danger.
   forceConfirm: (): Message => ({
-    tone: "danger",
+    tone: "warning",
     title: "Click again to confirm",
   }),
 

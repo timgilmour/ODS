@@ -27,4 +27,38 @@ describe("messages", () => {
     expect(m.title).toBe("Refused");
     expect(m.body).toBe("busy — 2 requests in flight");
   });
+
+  it("treats force-confirm as warning, not danger, because it asks for a decision", () => {
+    // Warning, not danger: this is asking the operator for a decision, which
+    // is what warning means here. Nothing has failed or been refused — the
+    // red-outlined button above it is what carries the danger.
+    const m = messages.forceConfirm();
+    expect(m.tone).toBe("warning");
+    expect(m.title).toBe("Click again to confirm");
+  });
+
+  it("reports state refresh failure with danger tone", () => {
+    const m = messages.stateRefreshFailed("connection timeout");
+    expect(m.tone).toBe("danger");
+    expect(m.title).toBe("State refresh failed");
+    expect(m.body).toBe("connection timeout");
+  });
+
+  it("presents no events with neutral tone", () => {
+    const m = messages.noEvents();
+    expect(m.tone).toBe("neutral");
+    expect(m.title).toBe("no events yet");
+  });
+
+  it("presents empty slot with neutral tone", () => {
+    const m = messages.emptySlot();
+    expect(m.tone).toBe("neutral");
+    expect(m.title).toBe("Serving slot");
+  });
+
+  it("presents last known with neutral tone", () => {
+    const m = messages.lastKnown();
+    expect(m.tone).toBe("neutral");
+    expect(m.title).toBe("last known");
+  });
 });
