@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StateResponse } from "../api";
+import type { LifecycleEntry, SparkStatus, StateResponse } from "../api";
 import { buildNodes } from "./nodes";
 
 function state(overrides: Partial<StateResponse> = {}): StateResponse {
@@ -119,5 +119,92 @@ describe("buildNodes", () => {
     };
     const [local] = buildNodes(s, null);
     expect(local.resources[0].placements[0].status).toBe("drifted");
+  });
+});
+
+function sparkStatus(overrides: Partial<SparkStatus> = {}): SparkStatus {
+  return {
+    profiles: [{ name: "heretic", engine: "vllm", health_url: null, container: "spark-heretic" }],
+    swap_status: null,
+    serving: { model: "heretic", endpoint_ok: true, container_status: "running" },
+    ...overrides,
+  };
+}
+
+function lifecycleEntry(overrides: Partial<LifecycleEntry> = {}): LifecycleEntry {
+  return {
+    status: "serving",
+    reason: "",
+    intent: null,
+    observed: { reachable: true, loaded: true, model: "heretic", transitioning: false },
+    last_healthy_ts: "2026-08-04T14:23:11Z",
+    ...overrides,
+  };
+}
+
+describe("buildNodes — spark", () => {
+  it("omits the node entirely when spark is not configured", () => {
+    expect(buildNodes(state(), null).map((n) => n.id)).toEqual(["local"]);
+  });
+
+  it("adds a single serving-slot resource when configured", () => {
+    const nodes = buildNodes(state(), sparkStatus());
+    const spark = nodes[1];
+    expect(spark.id).toBe("sparky");
+    expect(spark.status).toBe("reachable");
+    expect(spark.resources.map((r) => r.label)).toEqual(["Serving slot"]);
+    expect(spark.resources[0].placements[0].name).toBe("heretic");
+  });
+
+  it("reports unknown capacity rather than zero", () => {
+    const spark = buildNodes(state(), sparkStatus())[1];
+    expect(spark.resources[0].capacity).toBeNull();
+  });
+
+  it("retains last-known placements when unreachable, and marks them stale", () => {
+    const s = state();
+    s.lifecycle = {
+      "sparky/slot0": lifecycleEntry({
+        status: "unreachable",
+        observed: { reachable: false, loaded: false, model: null, transitioning: false },
+      }),
+    };
+    const spark = buildNodes(s, sparkStatus())[1];
+
+    expect(spark.status).toBe("unreachable");
+    expect(spark.lastSeen).toBe("2026-08-04T14:23:11Z");
+    // The whole point: an offline node must never blank out.
+    expect(spark.resources[0].placements[0].name).toBe("heretic");
+    expect(spark.resources[0].placements[0].stale).toBe(true);
+  });
+
+  it("reads as warming while a swap is in flight and the endpoint is down", () => {
+    const spark = buildNodes(
+      state(),
+      sparkStatus({
+        serving: { model: "heretic", endpoint_ok: false, container_status: "running" },
+        swap_status: {
+          state: "swapping", profile: "heretic", id: "1",
+          message: "", ts: "2026-08-05T00:00:00Z",
+        },
+      }),
+    )[1];
+    expect(spark.status).toBe("warming");
+  });
+
+  it("is down, not warming, when the endpoint is dead with no swap running", () => {
+    const spark = buildNodes(
+      state(),
+      sparkStatus({ serving: { model: "heretic", endpoint_ok: false, container_status: "exited" } }),
+    )[1];
+    expect(spark.status).toBe("down");
+  });
+
+  it("has an empty slot when nothing is serving", () => {
+    const spark = buildNodes(
+      state(),
+      sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: null } }),
+    )[1];
+    expect(spark.resources[0].placements).toEqual([]);
   });
 });

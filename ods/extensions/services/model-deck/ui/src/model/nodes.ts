@@ -160,9 +160,60 @@ export function buildNodes(
   return nodes;
 }
 
-// Implemented in the next task; declared here so this file compiles.
-function buildSparkNode(_lifecycle: LifecycleMap, _spark: SparkStatus | null): DeckNode | null {
-  return null;
+/** The spark half of the board.
+ *
+ * `spark === null` means the engine is not configured on this deployment
+ * (the backend answers 503) — an ABSENT node, so no card at all. That is a
+ * different thing from a configured node we cannot reach, which keeps its
+ * card and its last-known placements.
+ */
+function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): DeckNode | null {
+  if (spark === null) return null;
+
+  const entry = lifecycle[SPARK_SLOT_KEY];
+  const reachable = entry?.observed.reachable ?? true;
+  const swapping = spark.swap_status?.state === "swapping";
+  const endpointOk = spark.serving.endpoint_ok;
+
+  let status: NodeStatus;
+  if (!reachable) status = "unreachable";
+  else if (endpointOk) status = "reachable";
+  else if (swapping) status = "warming";
+  else status = "down";
+
+  const stale = status === "unreachable";
+  const model = spark.serving.model;
+
+  return {
+    id: SPARK_NODE_ID,
+    label: SPARK_NODE_ID,
+    status,
+    lastSeen: entry?.last_healthy_ts ?? null,
+    resources: [
+      {
+        id: "slot0",
+        label: "Serving slot",
+        // Spark reports no VRAM figures to the deck — unknown, not zero.
+        capacity: null,
+        // The profile picker, which must render whether or not a model is
+        // currently serving.
+        controls: ["spark"],
+        placements: model
+          ? [
+              {
+                id: SPARK_SLOT_KEY,
+                name: model,
+                bytes: null,
+                status: entry?.status ?? (endpointOk ? "serving" : "down"),
+                engine: spark.profiles.find((p) => p.name === model)?.engine ?? "vllm",
+                kind: "model",
+                stale,
+              },
+            ]
+          : [],
+      },
+    ],
+  };
 }
 
 export { SPARK_NODE_ID, SPARK_SLOT_KEY };
