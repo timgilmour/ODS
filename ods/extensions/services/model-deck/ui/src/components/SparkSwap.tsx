@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ApiError, sparkSwap, type SparkStatus } from "../api";
+import { isArmedFor } from "../model/armed";
 import { messages, labels } from "../model/messages";
 import { SPARK_CONTROL, SPARK_DEFAULT_ENGINE } from "../model/nodes";
 import Banner from "../ui/Banner";
@@ -32,9 +33,14 @@ export default function SparkSwap({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [offerForce, setOfferForce] = useState(false);
-  // Token to disarm ArmedButton on every new refusal, even if the error
-  // message stays the same (e.g. retrying a guard that still 409s)
+  // Identity of the refusal currently on screen. It increments on EVERY
+  // refusal, including a retry that produces the same message, which is what
+  // makes it usable as an identity rather than the message text.
   const [refusalSeq, setRefusalSeq] = useState(0);
+  // Which refusal the operator armed Force against — null if none. `armed`
+  // is then a pure comparison of two numbers (model/armed.ts), so a stale
+  // arming cannot survive into a refusal nobody clicked.
+  const [armedForSeq, setArmedForSeq] = useState<number | null>(null);
 
   async function doSwap(force = false) {
     if (!selected) return;
@@ -82,7 +88,8 @@ export default function SparkSwap({
         <ArmedButton
           label={labels.forceSwap}
           disabled={busy}
-          resetToken={refusalSeq}
+          armed={isArmedFor(armedForSeq, refusalSeq)}
+          onArm={() => setArmedForSeq(refusalSeq)}
           onConfirm={() => doSwap(true)}
         />
       )}

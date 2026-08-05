@@ -9,6 +9,7 @@ import {
   type TenantName,
   type World,
 } from "../api";
+import { isArmedFor } from "../model/armed";
 import { messages, labels } from "../model/messages";
 import Banner from "../ui/Banner";
 import ArmedButton from "../ui/ArmedButton";
@@ -69,9 +70,14 @@ export default function PlacementActions({
   // model name until a later poll reports it loaded (see the effect below).
   const [pullOffer, setPullOffer] = useState<{ model: string; sizeBytes: number } | null>(null);
   const [pullingModel, setPullingModel] = useState<string | null>(null);
-  // Token to disarm ArmedButton on every new refusal, even if the error
-  // message stays the same (e.g. retrying a guard that still 409s)
+  // Identity of the refusal currently on screen. It increments on EVERY
+  // refusal, including a retry that produces the same message, which is what
+  // makes it usable as an identity rather than the message text.
   const [refusalSeq, setRefusalSeq] = useState(0);
+  // Which refusal the operator armed Force against — null if none. `armed`
+  // is then a pure comparison of two numbers (model/armed.ts), so a stale
+  // arming cannot survive into a refusal nobody clicked.
+  const [armedForSeq, setArmedForSeq] = useState<number | null>(null);
 
   async function runAction(
     action: () => Promise<unknown>,
@@ -167,7 +173,8 @@ export default function PlacementActions({
         <ArmedButton
           label={labels.forcePark}
           disabled={busy}
-          resetToken={refusalSeq}
+          armed={isArmedFor(armedForSeq, refusalSeq)}
+          onArm={() => setArmedForSeq(refusalSeq)}
           onConfirm={() => runAction(() => postAction("/tenants/hipfire/park?force=true"))}
         />
       )}
