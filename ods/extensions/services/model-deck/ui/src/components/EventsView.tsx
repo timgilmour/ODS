@@ -1,16 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { getEvents, type EventEntry } from "../api";
+import { eventSeverity, type Severity } from "../model/eventSeverity";
 import { labels, messages } from "../model/messages";
 import Panel from "../ui/Panel";
 import Toolbar, { type Filter } from "../ui/Toolbar";
 
-const SEVERITY: Record<string, string> = {
-  refused: "ui-pill-bad",
-  error: "ui-pill-bad",
-  reconciled: "ui-pill-good",
-  load: "ui-pill-off",
-  unload: "ui-pill-off",
-  pull: "ui-pill-off",
+// eventSeverity classifies by the real backend vocabulary's naming
+// conventions (see eventSeverity.ts) rather than an exhaustive kind list —
+// a hardcoded map was tried first here and matched none of the real event
+// kinds, so every row rendered neutral regardless of what actually happened.
+const SEVERITY_CLASS: Record<Severity, string> = {
+  failure: "ui-pill-bad",
+  success: "ui-pill-good",
+  attention: "ui-pill-warn",
+  neutral: "ui-pill-off",
 };
 
 /** The full event view. Replaces the strip that used to sit under the board:
@@ -69,7 +72,7 @@ export default function EventsView({ refreshTrigger }: { refreshTrigger: number 
           rows.map((e, i) => (
             <div className="event-row" key={`${e.ts}-${i}`}>
               <span className="event-ts">{e.ts}</span>
-              <span className={`ui-pill ${SEVERITY[e.kind] ?? "ui-pill-off"}`}>{e.kind}</span>
+              <span className={`ui-pill ${SEVERITY_CLASS[eventSeverity(e.kind)]}`}>{e.kind}</span>
               <span className="event-detail">{JSON.stringify(e.detail)}</span>
             </div>
           ))

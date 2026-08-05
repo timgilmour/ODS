@@ -445,25 +445,6 @@ input[type="password"] {
   color: var(--danger);
 }
 
-/* ---------------------------------------------------------------- events */
-
-.event-log-body {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.78rem;
-  max-height: 260px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.event-line {
-  white-space: pre-wrap;
-  word-break: break-word;
-  border-bottom: 1px solid var(--panel-border);
-  padding: 0.15rem 0;
-}
-
 /* ---------------------------------------------------------------- view tabs */
 
 .view-tabs {
@@ -1186,6 +1167,7 @@ input[type="password"] {
 .event-ts {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .event-detail {
