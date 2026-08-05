@@ -11,6 +11,8 @@ services:
       - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
       - LITELLM_KEY=${LITELLM_KEY:-}
       - HOST_AGENT_KEY=${ODS_AGENT_KEY:-} # live installs name the agent key ODS_AGENT_KEY
+      # What this box is called on the deck board. Unset ⇒ "local".
+      - MODEL_DECK_NODE_LABEL=${MODEL_DECK_NODE_LABEL:-}
       # Spark (remote single-slot node) — engine stays unbuilt unless the
       # URLs are set AND ODS_REMOTE_NODE_KEYS carries an entry for the node
       # (same credential dashboard-api's remote-node poller uses).

@@ -18,6 +18,10 @@ def get_state(request: Request) -> dict:
     deck = request.app.state.deck
     world = build_world_snapshot(deck)
     return {
+        # Node identity. The deck has exactly one local node today; the key
+        # matches app.observe's _LOCAL_NODE prefix so the UI adapter can join
+        # this against lifecycle keys like "local/hipfire" without a mapping.
+        "node": {"id": "local", "label": deck["settings"].node_label},
         "world": world,
         "policy": deck["policy_store"].get(),
         "models": deck["registry"].scan(),

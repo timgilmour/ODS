@@ -240,7 +240,7 @@ def test_api_state_shape(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"world", "policy", "models", "lifecycle"}
+    assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle"}
     assert body["policy"] == DEFAULT_POLICIES
     assert body["models"] == [{"file": "m.gguf", "size": 1, "footprint": 2}]
     assert body["world"]["default_route"] == "extra.model.gguf"
@@ -1281,3 +1281,21 @@ def test_auto_rejects_a_non_boolean(tmp_path, monkeypatch):
     resp = TestClient(app).post("/api/lifecycle/auto", json={"enabled": "yes"})
 
     assert resp.status_code == 422
+
+
+def test_state_reports_node_identity():
+    """The board needs a name for this box; /state is where it comes from."""
+    app = create_app()
+    client = TestClient(app)
+
+    body = client.get("/api/state").json()
+
+    assert body["node"] == {"id": "local", "label": "local"}
+
+
+def test_state_node_label_follows_settings():
+    app = create_app()
+    app.state.deck["settings"].node_label = "autarch"
+    client = TestClient(app)
+
+    assert client.get("/api/state").json()["node"]["label"] == "autarch"

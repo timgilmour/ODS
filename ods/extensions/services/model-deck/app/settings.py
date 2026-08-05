@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # --- Storage ---
     data_dir: str = "/data"
 
+    # --- Identity ---
+    # What this box is called on the board. Deliberately NOT the container
+    # hostname, which is a random hex string under compose. Set per install
+    # via MODEL_DECK_NODE_LABEL; "local" is a truthful fallback, not a guess.
+    node_label: str = "local"
+
     # --- Lemonade ---
     lemonade_url: str = "http://llama-server:8080"
     lemonade_key: str = Field(default="", validation_alias="LEMONADE_API_KEY")
