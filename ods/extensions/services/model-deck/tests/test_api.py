@@ -29,13 +29,18 @@ from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
 
 
 class FakeLemonade:
-    def __init__(self, loaded=None):
+    def __init__(self, loaded=None, raise_on_load=None, raise_on_unload=None):
         self.calls = []  # mutating only: ("load", model) / ("unload", model)
         self.fail = None
         # Fails load() only (``fail`` fails both) — lets a test prove that a
         # load which errored records no intent while an unload still works.
         self.load_raises = None
         self._loaded = loaded
+        # Per-method injection, distinct from `fail`/`load_raises` above:
+        # lets a single test fail exactly one of load()/unload() without
+        # touching the other's fixture wiring.
+        self.raise_on_load = raise_on_load
+        self.raise_on_unload = raise_on_unload
 
     def status(self):
         return {"loaded": self._loaded}
@@ -47,12 +52,16 @@ class FakeLemonade:
         self.calls.append(("load", model))
         if self.load_raises:
             raise self.load_raises
+        if self.raise_on_load:
+            raise self.raise_on_load
         if self.fail:
             raise self.fail
         self._loaded = model
 
     def unload(self, model):
         self.calls.append(("unload", model))
+        if self.raise_on_unload:
+            raise self.raise_on_unload
         if self.fail:
             raise self.fail
         self._loaded = None
@@ -991,6 +1000,49 @@ def test_lemonade_unload_records_unloaded_intent(tmp_path, monkeypatch):
     assert record["model"] is None
 
 
+def test_unload_records_intent_even_when_engine_fails(tmp_path, monkeypatch):
+    """Intent is the operator's statement, recorded before actuation: an
+    unload whose engine call then dies must leave intent=unloaded (deriving
+    the inert 'unexpected', never a restore). 2026-08-06 design ruling."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded="extra.m.gguf",
+                                    raise_on_unload=EngineError("engine boom"))
+    client = TestClient(app)
+
+    resp = client.post("/api/tenants/lemonade/unload", json={"model": None})
+
+    assert resp.status_code == 502
+    assert deck["intent_store"].get()["local/lemonade"]["state"] == "unloaded"
+
+
+def test_load_records_intent_even_when_engine_fails(tmp_path, monkeypatch):
+    """A failed deliberate load leaves intent=loaded so the reconciler
+    retries it under the failure budget — bounded auto-retry, by design."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(raise_on_load=EngineError("engine boom"))
+    client = TestClient(app)
+
+    resp = client.post("/api/tenants/lemonade/load", json={"model": "m.gguf"})
+
+    assert resp.status_code == 502
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.m.gguf"
+
+
+def test_guard_refused_unload_records_nothing(tmp_path, monkeypatch):
+    """Guards run BEFORE the record: a 409 (nothing loaded) must not write
+    intent — a refused action never happened."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["lemonade"] = FakeLemonade(loaded=None)
+    client = TestClient(app)
+
+    resp = client.post("/api/tenants/lemonade/unload", json={"model": None})
+
+    assert resp.status_code == 409
+    assert "local/lemonade" not in deck["intent_store"].get()
+
+
 def test_hipfire_park_records_unloaded_intent(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
 
@@ -1015,9 +1067,11 @@ def test_hipfire_resume_records_loaded_intent(tmp_path, monkeypatch):
     assert record["model"] is None
 
 
-def test_failed_load_records_no_intent(tmp_path, monkeypatch):
-    """Intent is last-known-GOOD. Recording a load that errored would make
-    the reconciler chase a state that never existed."""
+def test_failed_load_still_records_intent(tmp_path, monkeypatch):
+    """2026-08-06 reversal (see test_load_records_intent_even_when_engine_fails
+    above): lemonade's record moved before the engine call, so a load that
+    raises still leaves intent=loaded — exercised here via the fake's other
+    failure-injection path (`load_raises`, distinct from `raise_on_load`)."""
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"].load_raises = EngineError("boom")
 
@@ -1025,7 +1079,9 @@ def test_failed_load_records_no_intent(tmp_path, monkeypatch):
         "/api/tenants/lemonade/load", json={"model": "extra.qwen.gguf"}
     )
 
-    assert deck["intent_store"].get() == {}
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.qwen.gguf"
 
 
 def test_failed_park_records_no_intent(tmp_path, monkeypatch):

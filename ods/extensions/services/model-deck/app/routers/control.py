@@ -15,11 +15,15 @@ Every route that actually changes engine state records the result as
 *intent* (``app.intent``), which is what lets the reconciler tell a
 deliberate park from a dead backend. Two placement rules, both load-bearing:
 
-* **Record AFTER the engine call returns.** Intent is last-known-GOOD; a
-  load that raised never happened, and recording it would make the
-  reconciler chase a state that never existed. Since engine exceptions
-  propagate uncaught (above), simply putting the record call last is the
-  whole implementation.
+* **Record placement depends on how long the engine call can run.**
+  hipfire/comfyui/spark record AFTER the engine call returns: their guards
+  raise inside the client call itself, so putting the record last already
+  means "never record a call that didn't happen". The lemonade routes are
+  the exception — a lemonade load/unload can run for seconds, and a
+  reconciler tick landing in that window must see the operator's stated
+  intent, not stale state; a call that raises is retried under the failure
+  budget, not un-recorded (2026-08-06 design ruling). Either way, guards and
+  model resolution still run first: a refused (409) action records nothing.
 * **``state="unloaded"`` is intent, not its absence.** A park writes a
   record; it never deletes one. Deleting would make a deliberate unload
   indistinguishable from "nobody ever asked", and the reconciler would
@@ -34,6 +38,8 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from app.observe import LOCAL_LEMONADE_KEY
 
 router = APIRouter(prefix="/tenants", tags=["control"])
 
@@ -50,9 +56,10 @@ _EXTRA_PREFIX = "extra."
 _READY_TIMEOUT_S = 60.0
 _READY_POLL_S = 2.0
 
-# Intent keys for the local node's tenants (app.observe uses the same
-# "<node>/<resource>" shape).
-_LEMONADE_KEY = "local/lemonade"
+# Intent key for the local node's hipfire tenant (app.observe uses the same
+# "<node>/<resource>" shape). Lemonade's equivalent, LOCAL_LEMONADE_KEY, is
+# imported above — app.arbiter's reconcile pass needs the same constant, so
+# it lives in app.observe rather than being re-typed here.
 _HIPFIRE_KEY = "local/hipfire"
 
 
@@ -109,16 +116,18 @@ def lemonade_load(body: LemonadeLoadBody, request: Request,
     # un-suppressed watcher tick would infer a pending default-route load and
     # stomp this one. On failure the window simply expires.
     deck["heal_suppressor"].note_deck_unload()
+    # Recorded BEFORE the call, not after: this load can run for seconds, and
+    # a reconciler tick landing mid-call must see the operator's stated
+    # intent, not stale state. A raise below is retried under the failure
+    # budget, not un-recorded. Record the PREFIXED name — that is what
+    # lemonade was told and what the observation will report back.
+    deck["intent_store"].record(
+        LOCAL_LEMONADE_KEY, state="loaded", model=model, engine="lemonade"
+    )
     deck["lemonade"].load(model)
     # Deliberate load succeeded: clear the window (and any prior unload's).
     deck["heal_suppressor"].clear()
     deck["catalog"].note_used_gguf(bare)
-    # Last: the load is known-good only now (an EngineError above propagates
-    # before anything is recorded). Record the PREFIXED name — that is what
-    # lemonade was told and what the observation will report back.
-    deck["intent_store"].record(
-        _LEMONADE_KEY, state="loaded", model=model, engine="lemonade"
-    )
     return {"status": "ok"}
 
 
@@ -174,15 +183,16 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
                 time.sleep(_READY_POLL_S)
         if not ready:
             raise RuntimeError(f"lemonade not ready {_READY_TIMEOUT_S}s after restart")
+        # The pull-through load lands here, minutes after the request
+        # returned "pulling" — it is no less deliberate, so it records too,
+        # and BEFORE the call for the same reason as the hot path above.
+        deck["intent_store"].record(
+            LOCAL_LEMONADE_KEY, state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
+            engine="lemonade",
+        )
         deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
         deck["heal_suppressor"].clear()
         deck["catalog"].note_used_gguf(bare)
-        # The pull-through load lands here, minutes after the request
-        # returned "pulling" — it is no less deliberate, so it records too.
-        deck["intent_store"].record(
-            _LEMONADE_KEY, state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
-            engine="lemonade",
-        )
 
     # Pre-arm: the multi-minute pull must not fight the VRAM watcher's
     # pending-load inference (spec section 3). on_progress re-arms it on every
@@ -209,14 +219,17 @@ def lemonade_unload(body: LemonadeUnloadBody, request: Request, force: bool = Fa
         model = deck["lemonade"].status()["loaded"]
         if not model:
             raise HTTPException(status_code=409, detail="no model is currently loaded")
-    deck["lemonade"].unload(model)
-    # Deliberate unload: arm suppression so the arbiter doesn't heal it back.
+    # Recorded BEFORE the call: unload takes ~2.2s, and a 2s watcher tick
+    # landing mid-call must derive this as a deliberate park, never a dead
+    # backend to restore. The 409 guard above already ran, so a refused
+    # unload never reaches here and records nothing.
     deck["heal_suppressor"].note_deck_unload()
     # ...and record it as intent, which is the durable half of the same
     # statement: the suppression window expires, this does not.
     deck["intent_store"].record(
-        _LEMONADE_KEY, state="unloaded", model=None, engine="lemonade"
+        LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade"
     )
+    deck["lemonade"].unload(model)
     return {"status": "ok"}
 
 
