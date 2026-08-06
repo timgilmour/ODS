@@ -7,6 +7,11 @@ import {
   type ConfigSet,
   type PreviewResponse,
 } from "../api";
+import { previewRows, reportRows } from "../model/applySteps";
+import { labels, messages } from "../model/messages";
+import Banner from "../ui/Banner";
+import Modal from "../ui/Modal";
+import StepList from "../ui/StepList";
 
 type Phase = "preview" | "confirm" | "applying" | "result";
 
@@ -66,79 +71,79 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
   }
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true">
-      <div className="modal-box">
-        <h3>{cfgset.name}</h3>
-        {cfgset.notes && <p className="modal-notes">{cfgset.notes}</p>}
-
-        {phase === "preview" && !error && <p>Loading preview…</p>}
-
-        {error && (
-          <div className="banner-error">
-            <span>{error}</span>
-            <button onClick={() => setError(null)} aria-label="dismiss error">
-              ×
-            </button>
-          </div>
-        )}
-
-        {preview && (phase === "confirm" || phase === "applying") && (
-          <>
-            <div className="step-list">
-              {preview.steps.length === 0 ? (
-                <div>(no changes — already matches this set)</div>
-              ) : (
-                preview.steps.map((step, i) => <div key={i}>{JSON.stringify(step)}</div>)
-              )}
-            </div>
-            <p>~{preview.estimate_s}s</p>
-          </>
-        )}
-
-        {phase === "result" && report && (
-          <div className="apply-report">
-            <p>{report.completed.length} step(s) completed.</p>
-            {report.failed && (
-              <p className="failed">
-                Failed at {JSON.stringify(report.failed)}: {report.error}
-              </p>
-            )}
-            {report.warnings.length > 0 && (
-              <ul className="warnings">
-                {report.warnings.map((w, i) => (
-                  <li key={i}>{w}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
-        <div className="modal-actions">
-          {phase === "preview" && <button onClick={onClose}>Cancel</button>}
+    <Modal
+      title={cfgset.name}
+      subtitle={cfgset.notes || undefined}
+      onClose={phase === "applying" ? undefined : onClose}
+      footer={
+        <>
+          {phase === "preview" && (
+            <button type="button" onClick={onClose}>{labels.cancel}</button>
+          )}
           {phase === "confirm" && (
             <>
-              <button onClick={onClose}>Cancel</button>
+              <button type="button" onClick={onClose}>{labels.cancel}</button>
               {offerForce && (
                 <button
+                  type="button"
                   onClick={() => confirmApply(true)}
-                  title="override the hipfire conversation-guard — the live/recent conversation will lose its cache and its next turn will re-read the whole history"
+                  title={labels.forceApplyTitle}
                 >
-                  Force apply
+                  {labels.forceApply}
                 </button>
               )}
-              <button className="primary" onClick={() => confirmApply()}>
-                Confirm
+              <button type="button" className="primary" onClick={() => confirmApply()}>
+                {labels.confirm}
               </button>
             </>
           )}
-          {phase === "applying" && <button disabled>Applying…</button>}
+          {phase === "applying" && (
+            <button type="button" disabled>{labels.applying}</button>
+          )}
           {phase === "result" && (
-            <button className="primary" onClick={onClose}>
-              Close
+            <button type="button" className="primary" onClick={onClose}>
+              {labels.close}
             </button>
           )}
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      {phase === "preview" && !error && <p>{labels.loadingPreview}</p>}
+
+      {error && (
+        <Banner
+          message={messages.stateRefreshFailed(error)}
+          onDismiss={() => setError(null)}
+        />
+      )}
+
+      {preview && (phase === "confirm" || phase === "applying") && (
+        <>
+          {preview.steps.length === 0 ? (
+            <p>{labels.noChanges}</p>
+          ) : (
+            <StepList items={previewRows(preview.steps)} />
+          )}
+          <p className="helper-text">{labels.estimate(preview.estimate_s)}</p>
+        </>
+      )}
+
+      {phase === "result" && report && (
+        <>
+          <StepList items={reportRows(report)} />
+          <p className="helper-text">{labels.stepsCompleted(report.completed.length)}</p>
+          {report.error && (
+            <Banner message={messages.guardRefused(report.error)} />
+          )}
+          {report.warnings.length > 0 && (
+            <ul className="warnings">
+              {report.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </Modal>
   );
 }

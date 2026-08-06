@@ -120,6 +120,13 @@ export const messages = {
 export const labels = {
   dismiss: "Dismiss",
   close: "Close",
+  cancel: "Cancel",
+  confirm: "Confirm",
+  applying: "Applying…",
+  forceApply: "Force apply",
+  forceApplyTitle:
+    "override the hipfire conversation-guard — the live/recent conversation will lose its cache and its next turn will re-read the whole history",
+  loadingPreview: "Loading preview…",
   forcePark: "Force park",
   forceSwap: "Force swap",
   filterEvents: "Filter events…",
