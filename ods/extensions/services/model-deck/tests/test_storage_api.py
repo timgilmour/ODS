@@ -28,9 +28,13 @@ from app.main import create_app
 
 
 class FakeLemonade:
-    def __init__(self, loaded=None):
+    def __init__(self, loaded=None, raise_on_load=None):
         self.calls = []  # mutating only: ("load", model) / ("unload", model)
         self._loaded = loaded
+        # Fails the pull-through restart branch's load() specifically (see
+        # test_pull_through_on_load_failure_still_records_intent) —
+        # additive, existing call sites are unaffected.
+        self.raise_on_load = raise_on_load
 
     def status(self):
         return {"loaded": self._loaded}
@@ -40,6 +44,8 @@ class FakeLemonade:
 
     def load(self, model):
         self.calls.append(("load", model))
+        if self.raise_on_load:
+            raise self.raise_on_load
         self._loaded = model
 
     def unload(self, model):
@@ -473,6 +479,43 @@ def test_pull_through_on_success_loads_and_notes(tmp_path, monkeypatch):
     units = deck["catalog"].units()
     moved = next(u for u in units if u["type"] == "gguf" and u["name"] == "a.gguf")
     assert moved["last_used"] is not None
+
+    # The restart branch's load is exactly as deliberate as the hot path's —
+    # same intent-first ordering (task-3-brief), so it must record too.
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.a.gguf"
+
+
+def test_pull_through_on_load_failure_still_records_intent(tmp_path, monkeypatch):
+    """2026-08-06 design ruling: the restart branch's intent record sits
+    BEFORE its load() call (mirroring the hot path) — a load that then
+    raises must still leave intent=loaded, so the reconciler retries it
+    under the failure budget instead of losing track of it. The job itself
+    fails through the same post-move path as a readiness timeout."""
+    app, deck = make_app(
+        tmp_path, monkeypatch,
+        lemonade=FakeLemonade(raise_on_load=EngineError("engine boom")),
+    )
+    client = TestClient(app)
+    cold = _register(client, tmp_path, "cold", engine="none")
+    _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(cold, "a.gguf")
+    deck["catalog"].scan()
+
+    resp = client.post("/api/tenants/lemonade/load?pull=true", json={"model": "a.gguf"})
+    job_id = resp.json()["job"]
+
+    pending = deck["job_queue"]._pending.pop(0)
+    deck["job_queue"]._process(pending)
+
+    done = deck["job_queue"].get(job_id)
+    assert done["state"] == "failed"
+    assert "post-move" in done["error"]
+
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.a.gguf"
 
 
 def test_pull_through_notify_deferred_completes_without_load(tmp_path, monkeypatch):
