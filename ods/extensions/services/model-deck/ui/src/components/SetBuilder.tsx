@@ -18,6 +18,13 @@ import {
   type TenantPolicy,
   type World,
 } from "../api";
+import {
+  buildDraft,
+  derivePlacedModel,
+  draftEquals,
+  EXTRA_PREFIX,
+  fieldsFromSet,
+} from "../model/setDraft";
 import ApplyModal from "./ApplyModal";
 import ModelLibrary from "./ModelLibrary";
 
@@ -39,16 +46,6 @@ const HIPFIRE_FOOTPRINT_BYTES = 33_000_000_000;
 // assumes) — matches GpuColumn's un-fallback-guarded read, made explicit
 // here since the builder must always render both columns regardless.
 const DEFAULT_GPU_BYTES = 32_000_000_000;
-
-const EXTRA_PREFIX = "extra.";
-
-function emptyEphemeral(
-  lemonade: LemonadeEphemeral | null,
-  comfyui: ComfyuiEphemeral | null,
-  hipfire: HipfireEphemeral | null,
-) {
-  return { lemonade, comfyui, hipfire };
-}
 
 // Snapshot taken the instant a 409 fires on save: the exact draft + the
 // slug it collided with. Frozen at that moment rather than re-derived from
@@ -132,28 +129,17 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
   }
 
   function populateFromSet(cfgset: ConfigSet, clearName: boolean) {
-    setName(clearName ? "" : cfgset.name);
-    setNotes(cfgset.notes);
-    setDurable(cfgset.durable);
-    setLemonade(cfgset.ephemeral?.lemonade ?? null);
-    setComfyui(cfgset.ephemeral?.comfyui ?? null);
-    // Preserve null through load->save — a set that never mentioned
-    // hipfire must stay "don't touch," never silently gain a "running"
-    // directive on the next save (CRITICAL 2).
-    setHipfire(cfgset.ephemeral?.hipfire ?? null);
+    const f = fieldsFromSet(cfgset, clearName);
+    setName(f.name);
+    setNotes(f.notes);
+    setDurable(f.durable);
+    setLemonade(f.lemonade);
+    setComfyui(f.comfyui);
+    setHipfire(f.hipfire);
+    setPolicyOverrides(f.policyOverrides);
     setCatalogId(cfgset.durable?.activate_model_id ?? "");
     setReserveGb(cfgset.ephemeral?.comfyui?.reserve_gb ?? 24);
-    // Carry policy_overrides through verbatim — not editable in v1, but a
-    // loaded set that carries them must not silently drop them on re-save.
-    setPolicyOverrides(cfgset.policy_overrides ?? null);
-    // Best-effort: only durable.default_route_model with the "extra."
-    // prefix + an active "loaded" ephemeral intent can be traced back to a
-    // library model file. A set that names some other litellm route can't be
-    // — the model chip is left blank and the user re-drops to pin one down.
-    const derived = cfgset.durable?.default_route_model.startsWith(EXTRA_PREFIX)
-      ? cfgset.durable.default_route_model.slice(EXTRA_PREFIX.length)
-      : null;
-    setPlacedModel(cfgset.ephemeral?.lemonade?.state === "loaded" ? derived : null);
+    setPlacedModel(derivePlacedModel(cfgset));
     setSaveError(null);
     setOverwriteSnapshot(null);
     setDeleteArmed(false);
@@ -175,18 +161,11 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
     setSavedSet(null);
   }
 
-  function buildDraft(): ConfigSet {
-    return {
-      name: name.trim(),
-      notes,
-      durable,
-      ephemeral: emptyEphemeral(lemonade, comfyui, hipfire),
-      policy_overrides: policyOverrides,
-    };
-  }
-
-  const draft = buildDraft();
-  const isSavedUnchanged = savedSet !== null && JSON.stringify(draft) === JSON.stringify(savedSet);
+  const draft = buildDraft({
+    name, notes, durable, lemonade, comfyui, hipfire,
+    policyOverrides,
+  });
+  const isSavedUnchanged = savedSet !== null && draftEquals(draft, savedSet);
 
   // overwrite=true always saves the frozen snapshot from the moment the 409
   // fired, never the live `draft` — the form is disabled while a snapshot
