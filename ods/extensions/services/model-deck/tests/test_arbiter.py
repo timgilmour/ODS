@@ -1842,3 +1842,82 @@ def test_load_retriggered_records_loaded_intent(tmp_path):
     assert lemonade.loaded == ["extra.model.gguf"]  # exactly once, not twice
     record = intent.get()["local/lemonade"]
     assert record == {**record, "state": "loaded", "model": "extra.model.gguf"}
+
+
+def test_same_tick_evict_and_reload_pins_single_load_and_final_intent(tmp_path):
+    """The invariant class this whole wave guards: a SINGLE _execute() call
+    that both evicts a currently-loaded non-default-route lemonade model
+    (unload_lemonade, records state=unloaded) AND re-triggers the pending
+    default-route load (records state=loaded) for the SAME intent key. The
+    per-tick actuated-keys set must be idempotent (one key, added twice by
+    the two arms), record() must be last-write-wins (final state='loaded',
+    not the first arm's 'unloaded'), the key must be excluded from this same
+    tick's reconcile pass, and only ONE lemonade.load() call may ever happen
+    for it.
+
+    NOTE on the exclusion specifically: unlike the pure load-retrigger case
+    (test_load_retriggered_records_loaded_intent), reverting the
+    observed.pop(actuated key) in _reconcile_pass does NOT make this test
+    fail. The pre-action snapshot here already shows lemonade LOADED (with
+    the model that is about to be evicted), so even without the pop,
+    derive_status compares intent='loaded'/wanted=the new model against
+    observed='loaded'/actual=the evicted model and derives 'drifted', not
+    'down' — and only 'down' is ever actionable (app.reconcile.
+    ACTIONABLE_STATUS). 'drifted' does not exist for the pure load-retrigger
+    case (there, the pre-action snapshot shows NOTHING loaded, which derives
+    the actionable 'down'). Verified by hand: temporarily commenting out the
+    pop still passes this test. The pop remains correct and is still
+    directly asserted below (the key must be entirely absent from this
+    tick's derived statuses) — it just isn't the ONLY thing standing between
+    this particular scenario and a double-load, whereas it is the only thing
+    for the pure-reload case.
+
+    Driven via _execute()/_reconcile_pass() directly, NOT watcher.tick():
+    Watcher._infer_pending() only ever infers a pending load while lemonade
+    is OBSERVED 'unloaded' (`if world["tenants"]["lemonade"]["state"] !=
+    "unloaded": return None`) — by design, a single-slot engine can't be
+    "pending" a different model while one is already resident. So the real
+    tick() pipeline can never hand decide() a pending load while lemonade
+    is loaded, and the lemonade-eviction branch of _decide_contention (see
+    test_contention_evicts_lemonade_when_not_default_route) is unreachable
+    through tick() alone. The pure decide()/_decide_contention() function
+    has no such restriction — pending_load is just a parameter — so this
+    test supplies one directly and calls _execute()/_reconcile_pass() in
+    the exact sequence tick() uses, to exercise the real combined-actuation
+    code path for this key."""
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    # Mirrors test_contention_evicts_lemonade_when_not_default_route (the
+    # eviction) crossed with test_watcher_tick_heals_contention_then_reloads
+    # (the reload): lemonade holds a non-default model, comfy is busy (not
+    # evictable) so lemonade alone must cover the pending footprint.
+    world = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=29 * GIB)],  # free = 5 GiB
+        lemonade=_lem(state="loaded", model="extra.other.gguf", footprint=25 * GIB, idle_s=10),
+        comfyui=_comfy(state="busy", queue=1, idle_s=0),  # not evictable
+        default_route="extra.model.gguf",
+    )
+    pending = _pending()  # model="extra.model.gguf", footprint=19*GIB, gpu_index=1
+
+    lemonade = FakeLemonade()
+    watcher, _events = _make_watcher(
+        tmp_path, FakeWorld(world), FakeRegistry(), _policy(),
+        lemonade=lemonade, intent_store=intent, auto=True,
+    )
+
+    actions = decide(world, _policy(), pending)
+    # Sanity: both arms are about to fire for the SAME key — the eviction
+    # alone (25 GiB freed) covers the 19 GiB pending footprint given 5 GiB
+    # already free, so comfy (busy anyway) is never a candidate.
+    assert actions == [{"type": "unload_lemonade", "model": "extra.other.gguf"}]
+
+    actuated_keys = watcher._execute(actions, pending)
+    assert actuated_keys == {"local/lemonade"}  # idempotent: one key, added by both arms
+    watcher._reconcile_pass(world, actuated_keys)
+
+    assert lemonade.unloaded == ["extra.other.gguf"]
+    assert lemonade.loaded == ["extra.model.gguf"]  # exactly once — no reconcile double-load
+    record = intent.get()["local/lemonade"]
+    assert record["state"] == "loaded"  # last write wins, not the eviction arm's 'unloaded'
+    assert record["model"] == "extra.model.gguf"
