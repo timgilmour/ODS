@@ -512,8 +512,8 @@ class Watcher:
                         "target": lifecycle["target"],
                     })
                     return
-            self._execute(actions, pending)
-            self._reconcile_pass(world)
+            actuated_keys = self._execute(actions, pending)
+            self._reconcile_pass(world, actuated_keys)
             self._derive_pass()
         except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above
             self._log("tick-error", {"error": str(exc)})
@@ -544,9 +544,14 @@ class Watcher:
 
         return {"model": default_route, "footprint": footprint, "gpu_index": gpu_index}
 
-    def _execute(self, actions: list[dict], pending: dict | None) -> None:
+    def _execute(self, actions: list[dict], pending: dict | None) -> set[str]:
+        """Perform this tick's arbitration actions. Returns the intent-store
+        keys actuated (unloaded or load-retriggered) THIS tick — the caller
+        (tick()) feeds it to _reconcile_pass so a stale, pre-action snapshot
+        can never restore-fight a change this same tick just made."""
         wont_fit = False
         eviction_raced = False
+        actuated: set[str] = set()
 
         for action in actions:
             kind = action["type"]
@@ -558,6 +563,7 @@ class Watcher:
                     self._intent_store.record(
                         LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade")
                 self._lemonade.unload(action["model"])
+                actuated.add(LOCAL_LEMONADE_KEY)
                 # Deck-initiated unload (idle release OR contention eviction):
                 # arm suppression so healing can't immediately revert it.
                 self._heal_suppressor.note_deck_unload()
@@ -591,6 +597,7 @@ class Watcher:
             if self._intent_store is not None:
                 self._intent_store.record(
                     LOCAL_LEMONADE_KEY, state="loaded", model=pending["model"], engine="lemonade")
+            actuated.add(LOCAL_LEMONADE_KEY)
             try:
                 self._lemonade.load(pending["model"])
             except EngineError as exc:
@@ -609,9 +616,11 @@ class Watcher:
                         pending["model"].removeprefix(_EXTRA_PREFIX))
                 self._log("load-retriggered", {"model": pending["model"]})
 
+        return actuated
+
     # --- lifecycle reconciliation ------------------------------------------
 
-    def _reconcile_pass(self, world: dict) -> None:
+    def _reconcile_pass(self, world: dict, actuated_keys: set[str] = frozenset()) -> None:
         """Compare intent against this tick's observation and restore what
         died. Runs AFTER arbitration on the same snapshot: arbitration
         settles VRAM contention happening right now, reconciliation settles
@@ -630,6 +639,16 @@ class Watcher:
             observe_local(world),
             observe_spark(spark_status),
         )
+
+        # A key `_execute` actuated THIS tick predates its own action by
+        # construction: `world` was snapshotted before `_execute` ran, so
+        # observing it now can only see the pre-action state — a successful
+        # load-retrigger still reads as unloaded, deriving 'down' and
+        # restoring (i.e. loading) it a second time in the same tick, a
+        # reconciler fight with the deck's own actuation. Drop it here; the
+        # NEXT tick's fresh snapshot reconciles it cleanly.
+        for key in actuated_keys:
+            observed.pop(key, None)
 
         statuses = {
             key: derive_status(intents.get(key), obs) for key, obs in observed.items()

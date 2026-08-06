@@ -1806,7 +1806,12 @@ def test_idle_release_records_unloaded_intent_and_reconciler_stays_quiet(tmp_pat
 
 def test_load_retriggered_records_loaded_intent(tmp_path):
     """The contention-heal reload is a deck-authored load and must record
-    state=loaded (before this fix it recorded nothing, leaving intent stale)."""
+    state=loaded (before this fix it recorded nothing, leaving intent stale).
+    It must also load EXACTLY once: the same-tick reconcile pass runs on the
+    pre-actuation snapshot, which still reads lemonade as unloaded — without
+    dropping this tick's actuated key from that pass, 'down' derives and the
+    reconciler restores (i.e. loads) it a second time, fighting its own
+    watcher within one tick."""
     from app.intent import IntentStore
 
     intent = IntentStore(tmp_path / "intent.json")
@@ -1829,17 +1834,11 @@ def test_load_retriggered_records_loaded_intent(tmp_path):
         comfy=comfy,
         read_gpus=read_gpus,
         intent_store=intent,
-        # auto=False: isolates the _execute recording under test from the
-        # SAME-tick reconcile pass, which still observes the pre-actuation
-        # snapshot (world.snapshot() is called once per tick, before
-        # execute) and would otherwise derive 'down' for the model this
-        # tick just loaded and fire a second, redundant restore load — a
-        # pre-existing same-tick staleness gap this task does not touch.
-        auto=False,
+        auto=True,
     )
 
     watcher.tick()
 
-    assert lemonade.loaded == ["extra.model.gguf"]
+    assert lemonade.loaded == ["extra.model.gguf"]  # exactly once, not twice
     record = intent.get()["local/lemonade"]
     assert record == {**record, "state": "loaded", "model": "extra.model.gguf"}
