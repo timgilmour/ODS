@@ -37,6 +37,25 @@ def test_lemonade_unloaded_maps_to_not_loaded():
     assert result["local/lemonade"]["reachable"] is True
 
 
+def test_observe_local_lemonade_loading_is_transitioning():
+    """'loading' means a llama-server load is in flight — health reports
+    nothing loaded while weights stream in. Reporting it as plain not-loaded
+    would make the reconciler restart a model that is already coming up."""
+    result = observe_local(_world(lemonade_state="loading"))
+
+    assert result["local/lemonade"]["transitioning"] is True
+    assert result["local/lemonade"]["loaded"] is False
+
+    # ...and the derived status is the inert 'warming', per derive_status.
+    from app.lifecycle import derive_status
+
+    status = derive_status(
+        {"state": "loaded", "model": "extra.m.gguf", "engine": "lemonade"},
+        result["local/lemonade"],
+    )
+    assert status["status"] == "warming"
+
+
 def test_hipfire_running_maps_to_loaded():
     result = observe_local(_world())
 

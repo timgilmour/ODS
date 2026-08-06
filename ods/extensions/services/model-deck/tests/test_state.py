@@ -36,6 +36,9 @@ class StubLemonade:
         self._loaded = loaded
         self._activity = activity
 
+    def load_in_flight(self) -> bool:
+        return False
+
     def status(self) -> dict:
         return {"loaded": self._loaded}
 
@@ -44,6 +47,9 @@ class StubLemonade:
 
 
 class RaisingLemonade:
+    def load_in_flight(self) -> bool:
+        return False
+
     def status(self) -> dict:
         raise EngineError("lemonade unreachable")
 
@@ -236,6 +242,9 @@ def test_snapshot_itself_never_raises_when_all_engines_fail():
 
 def test_bare_keyerror_from_malformed_body_propagates():
     class MalformedLemonade:
+        def load_in_flight(self):
+            return False
+
         def status(self):
             return {}  # missing "loaded" key entirely -> KeyError, not EngineError
 
@@ -287,6 +296,26 @@ def test_lemonade_footprint_none_when_registry_raises_filenotfounderror():
     result = world.snapshot(**_healthy_kwargs(lemonade=lemonade, registry=registry))
 
     assert result["tenants"]["lemonade"]["footprint"] is None
+
+
+def test_snapshot_reports_loading_while_a_load_is_in_flight():
+    class LoadingLemonade:
+        def load_in_flight(self):
+            return True
+
+        def status(self):
+            raise AssertionError("status() must not be consulted mid-load")
+
+        def activity(self):
+            return None
+
+    world = World()
+
+    result = world.snapshot(**_healthy_kwargs(lemonade=LoadingLemonade()))
+
+    assert result["tenants"]["lemonade"] == {
+        "state": "loading", "model": None, "footprint": None, "idle_s": None,
+    }
 
 
 # --- lemonade idle clock ---------------------------------------------------

@@ -135,6 +135,14 @@ class World:
         }
 
     def _snapshot_lemonade(self, lemonade, registry, now: float) -> dict:
+        # A deck-authored load in flight: llama-server health reports nothing
+        # loaded while weights stream in, which upstream must not read as dead
+        # (derive_status turns 'loading' into the inert 'warming'). Idle-clock
+        # bookkeeping is deliberately skipped: the loaded-value transition on
+        # the first post-load snapshot resets the activity clock as usual.
+        if lemonade.load_in_flight():
+            return {"state": "loading", "model": None, "footprint": None, "idle_s": None}
+
         try:
             status = lemonade.status()
         except EngineError:

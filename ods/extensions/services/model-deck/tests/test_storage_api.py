@@ -36,6 +36,9 @@ class FakeLemonade:
         # additive, existing call sites are unaffected.
         self.raise_on_load = raise_on_load
 
+    def load_in_flight(self):
+        return False
+
     def status(self):
         return {"loaded": self._loaded}
 
@@ -64,6 +67,9 @@ class _NeverReadyLemonade:
     def __init__(self):
         self.calls = []
         self._first = True
+
+    def load_in_flight(self):
+        return False
 
     def status(self):
         if self._first:

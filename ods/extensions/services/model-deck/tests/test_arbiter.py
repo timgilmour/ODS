@@ -535,6 +535,9 @@ class FakeLemonade:
         self.loaded = []
         self._raise_on_load = raise_on_load
 
+    def load_in_flight(self):
+        return False
+
     def unload(self, model):
         self.unloaded.append(model)
 

@@ -22,6 +22,8 @@ returns None so callers can disable idle-TTL tracking and log once,
 rather than crash-looping on a Lemonade that's merely unreachable.
 """
 
+import threading
+
 import httpx
 
 from app.engines import EngineError
@@ -56,6 +58,8 @@ class LemonadeClient:
         # (e.g. http://llama-server:8001/metrics). Default keeps the old
         # base-relative path for setups without a separate metrics port.
         self._metrics_url = metrics_url or f"{base_url.rstrip('/')}/metrics"
+        self._loads_in_flight = 0
+        self._load_lock = threading.Lock()
 
     def status(self) -> dict:
         resp = self._request("GET", "/api/v1/health")
@@ -66,12 +70,25 @@ class LemonadeClient:
         # takes ~20-30 s, far beyond the default 5 s client timeout (which
         # abandons the request client-side while the server keeps loading,
         # producing spurious load-failed events). Verified live 2026-07-21.
-        self._request(
-            "POST",
-            "/api/v1/load",
-            json={"model_name": model_name},
-            timeout=httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=5.0),
-        )
+        with self._load_lock:
+            self._loads_in_flight += 1
+        try:
+            self._request(
+                "POST",
+                "/api/v1/load",
+                json={"model_name": model_name},
+                timeout=httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=5.0),
+            )
+        finally:
+            with self._load_lock:
+                self._loads_in_flight -= 1
+
+    def load_in_flight(self) -> bool:
+        """True while any thread is inside load() — router, watcher restore,
+        or retrigger. The world snapshot reads this so a load in flight
+        observes as 'loading', not 'nothing loaded' (2026-08-06)."""
+        with self._load_lock:
+            return self._loads_in_flight > 0
 
     def unload(self, model_name: str) -> None:
         self._request("POST", "/api/v1/unload", json={"model_name": model_name})

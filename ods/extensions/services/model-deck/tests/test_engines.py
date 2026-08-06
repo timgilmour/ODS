@@ -151,6 +151,26 @@ def test_lemonade_unload_raises_engineerror_on_transport_failure():
         client.unload("some-model.gguf")
 
 
+# --- LemonadeClient.load_in_flight() ---
+
+
+def test_load_in_flight_true_during_load_false_after_even_on_error(monkeypatch):
+    client = LemonadeClient("http://lemonade:8000", "testkey")
+    seen = {}
+
+    def fake_request(method, path, **kwargs):
+        seen["in_flight_during"] = client.load_in_flight()
+        raise EngineError("boom")
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    assert client.load_in_flight() is False
+    with pytest.raises(EngineError):
+        client.load("m.gguf")
+    assert seen["in_flight_during"] is True
+    assert client.load_in_flight() is False  # cleared even on the error path
+
+
 # --- LemonadeClient.activity() ---
 
 

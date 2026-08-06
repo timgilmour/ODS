@@ -52,6 +52,10 @@ def observe_local(world: dict) -> dict[str, dict]:
             unknown=lemonade["state"] == "unknown",
             loaded=lemonade["state"] == "loaded",
             model=lemonade.get("model"),
+            # "loading" = a load is in flight (LemonadeClient.load_in_flight,
+            # app/state.py's _snapshot_lemonade). Neither loaded nor dead;
+            # acting on it restarts a model that is already mid-load.
+            transitioning=lemonade["state"] == "loading",
         ),
         f"{_LOCAL_NODE}/hipfire": _record(
             unknown=hipfire["state"] == "unknown",

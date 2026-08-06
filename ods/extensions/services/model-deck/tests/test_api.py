@@ -42,6 +42,9 @@ class FakeLemonade:
         self.raise_on_load = raise_on_load
         self.raise_on_unload = raise_on_unload
 
+    def load_in_flight(self):
+        return False
+
     def status(self):
         return {"loaded": self._loaded}
 
