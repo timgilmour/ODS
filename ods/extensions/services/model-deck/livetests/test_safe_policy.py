@@ -15,7 +15,10 @@ def test_s5_policy_partial_put_roundtrips(deck, policy_guard):
 
 
 @pytest.mark.parametrize("bad", [
-    {"nope": {"priority": 1, "pinned": False, "idle_ttl": 0}},        # unknown tenant
+    # Reserved config key — NOT a tenant. Arbitrary tenant names are ACCEPTED
+    # since 1ee64611 (runtime tenants); the old unknown-tenant case would be
+    # a valid write now, and one policy_guard cannot undo (put() merges).
+    {"_auto": {"priority": 1, "pinned": False, "idle_ttl": 0}},
     {"lemonade": {"priority": True, "pinned": False, "idle_ttl": 0}}, # bool priority
     {"lemonade": {"priority": 1, "pinned": False, "idle_ttl": -5}},   # negative ttl
     {"lemonade": {"priority": 1, "pinned": False}},                   # missing field

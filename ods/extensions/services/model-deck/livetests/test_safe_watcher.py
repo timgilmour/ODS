@@ -33,6 +33,20 @@ def test_s11_watcher_idle_releases_lemonade(deck, lemonade_direct, lemonade_guar
 
 def test_s12_watcher_frees_comfy_once_not_every_tick(deck, policy_guard, events,
                                                      require_comfy_idle):
+    # The arbiter only emits free_comfyui when comfy's attributed VRAM is
+    # nonzero (gpu used − co-resident loaded-lemonade footprint − 1 GiB
+    # slack, arbiter._comfy_reclaimable). With no cache to free the event
+    # CANNOT fire and waiting for it is a guaranteed timeout, not a signal.
+    world = deck.get("/api/state").json()["world"]
+    placement = world.get("placement") or {}
+    gpu = next((g for g in world["gpus"] if g["index"] == placement.get("comfyui")), None)
+    if gpu is not None:
+        lem = world["tenants"]["lemonade"]
+        lem_fp = (lem["footprint"] or 0) if (
+            lem["state"] == "loaded" and placement.get("lemonade") == placement.get("comfyui")
+        ) else 0
+        if gpu["used"] - lem_fp - 1024**3 <= 0:
+            pytest.skip("vacuous: comfy holds no reclaimable VRAM — free_comfyui cannot fire")
     deck.put("/api/policy", json={
         "comfyui": dict(policy_guard["comfyui"], idle_ttl=SHORT_TTL, pinned=False),
     }).raise_for_status()
