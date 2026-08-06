@@ -16,10 +16,15 @@ import { bytesToGB, meterFillClass } from "../api";
 export default function Meter({
   capacity,
   watermarkPct,
+  watermarkTitle,
   tone = "capacity",
 }: {
   capacity: { used: number; total: number } | null;
   watermarkPct?: number;
+  /** Tooltip for the watermark tick — carried over from the old
+   * LocationColumn tick's `title="watermark N GB"`, lost in the Meter
+   * migration until restored here. */
+  watermarkTitle?: string;
   tone?: "capacity" | "neutral";
 }) {
   if (capacity === null) {
@@ -45,7 +50,11 @@ export default function Meter({
           style={{ width: `${Math.min(pct, 100)}%` }}
         />
         {watermarkPct != null && (
-          <div className="ui-meter-tick" style={{ left: `${Math.min(watermarkPct, 100)}%` }} />
+          <div
+            className="ui-meter-tick"
+            style={{ left: `${Math.min(watermarkPct, 100)}%` }}
+            title={watermarkTitle}
+          />
         )}
       </div>
       <span className="ui-meter-label">

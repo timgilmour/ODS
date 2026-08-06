@@ -110,6 +110,9 @@ export default function LocationCard({
               : null
           }
           watermarkPct={watermarkPct ?? undefined}
+          watermarkTitle={
+            location.watermark_gb != null ? `watermark ${location.watermark_gb} GB` : undefined
+          }
         />
 
         <ul className="unit-list">

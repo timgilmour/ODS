@@ -165,20 +165,26 @@ export default function MoveModal({
         <span className="move-route-loc">{unit.location}</span>
         <span className="move-route-arrow" aria-hidden="true">→</span>
         {phase === "confirm" ? (
-          <select
-            aria-label={labels.destination}
-            value={dest ?? ""}
-            onChange={(e) => setDest(e.target.value || null)}
-          >
-            <option value="">{labels.moveTo}</option>
-            {eligible.map((l) => (
-              <option key={l.name} value={l.name}>{l.name}</option>
-            ))}
-          </select>
+          eligible.length > 0 && (
+            <select
+              aria-label={labels.destination}
+              value={dest ?? ""}
+              onChange={(e) => setDest(e.target.value || null)}
+            >
+              <option value="">{labels.moveTo}</option>
+              {eligible.map((l) => (
+                <option key={l.name} value={l.name}>{l.name}</option>
+              ))}
+            </select>
+          )
         ) : (
           <span className="move-route-loc">{dest}</span>
         )}
       </div>
+
+      {phase === "confirm" && eligible.length === 0 && (
+        <Banner message={messages.noEligibleDestination()} />
+      )}
 
       {error && (
         <Banner
@@ -194,6 +200,7 @@ export default function MoveModal({
             capacity={
               job ? { used: job.bytes_done, total: job.bytes_total } : null
             }
+            tone="neutral"
           />
         </>
       )}

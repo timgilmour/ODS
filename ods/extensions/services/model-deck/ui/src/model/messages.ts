@@ -119,6 +119,15 @@ export const messages = {
     body: detail,
   }),
 
+  // MoveModal's confirm phase, when every other location is unregistered or
+  // unavailable — nothing has failed, there is simply nowhere to send this
+  // unit, so this stays neutral rather than danger/warning.
+  noEligibleDestination: (): Message => ({
+    tone: "neutral",
+    title: "No eligible destination",
+    body: "every other location is unregistered or unavailable.",
+  }),
+
   // LocationCard: a location whose mount is missing. Unavailable, not
   // empty — the units it lists are still on disk, just unreachable right
   // now, and that distinction is load-bearing (an operator reading "empty"

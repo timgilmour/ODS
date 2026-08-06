@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { getSets, slugify, PREVIOUS_SLUG, type ConfigSet } from "../api";
+import { messages } from "../model/messages";
+import Banner from "../ui/Banner";
 import ApplyModal from "./ApplyModal";
 
 interface SetStripProps {
@@ -48,7 +50,7 @@ export default function SetStrip({ onModalOpenChange, onChanged }: SetStripProps
   return (
     <div className="panel">
       <h2>Config sets</h2>
-      {listError && <div className="banner-error"><span>{listError}</span></div>}
+      {listError && <Banner message={messages.stateRefreshFailed(listError)} />}
       <div className="set-strip">
         {sets.map((s) => (
           <button key={s.name} onClick={() => openPreview(slugify(s.name), s)}>

@@ -81,6 +81,13 @@ button:disabled {
   opacity: 0.5;
 }
 
+input:disabled,
+textarea:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 button.primary {
   background: var(--accent);
   color: var(--accent-text);
@@ -143,30 +150,6 @@ input[type="password"] {
   font-size: 1rem;
 }
 
-/* ---------------------------------------------------------------- banner */
-
-.banner-error {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.75rem;
-  background: var(--danger-bg);
-  color: var(--danger);
-  border: 1px solid var(--danger);
-  border-radius: 6px;
-  padding: 0.4rem 0.6rem;
-  font-size: 0.8rem;
-  margin: 0.5rem 0;
-}
-
-.banner-error button {
-  background: transparent;
-  border: none;
-  color: inherit;
-  padding: 0 0.25rem;
-  font-weight: bold;
-}
-
 /* ---------------------------------------------------------------- GPUs */
 
 /* .meter-fill + its three colour classes are what `meterFillClass()`
@@ -218,56 +201,6 @@ input[type="password"] {
   text-transform: capitalize;
 }
 
-.chip {
-  display: inline-block;
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  border-radius: 999px;
-  padding: 0.15rem 0.55rem;
-}
-
-.chip-loaded {
-  background: var(--chip-loaded-bg);
-  color: var(--chip-loaded-fg);
-}
-
-.chip-unloaded {
-  background: var(--chip-unloaded-bg);
-  color: var(--chip-unloaded-fg);
-}
-
-.chip-unknown {
-  background: var(--chip-unknown-bg);
-  color: var(--chip-unknown-fg);
-}
-
-.chip-busy {
-  background: var(--chip-busy-bg);
-  color: var(--chip-busy-fg);
-}
-
-.chip-idle {
-  background: var(--chip-idle-bg);
-  color: var(--chip-idle-fg);
-}
-
-.chip-running {
-  background: var(--chip-running-bg);
-  color: var(--chip-running-fg);
-}
-
-.chip-loading {
-  background: var(--chip-loading-bg);
-  color: var(--chip-loading-fg);
-}
-
-.chip-parked {
-  background: var(--chip-parked-bg);
-  color: var(--chip-parked-fg);
-}
-
 .tenant-meta {
   margin-top: 0.4rem;
   font-size: 0.8rem;
@@ -303,69 +236,14 @@ input[type="password"] {
   font-style: italic;
 }
 
-/* ---------------------------------------------------------------- modal */
+/* ---------------------------------------------------------------- apply report */
 
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay-bg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-  z-index: 50;
-}
-
-.modal-box {
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 10px;
-  padding: 1.25rem;
-  max-width: 560px;
-  width: 100%;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.modal-box h3 {
-  margin-top: 0;
-}
-
-.modal-notes {
-  color: var(--text-dim);
-  font-size: 0.85rem;
-  white-space: pre-wrap;
-}
-
-.step-list {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.8rem;
-  background: var(--bg);
-  border: 1px solid var(--panel-border);
-  border-radius: 6px;
-  padding: 0.5rem 0.65rem;
-  margin: 0.5rem 0;
-  max-height: 40vh;
-  overflow-y: auto;
-}
-
-.step-list div {
-  padding: 0.1rem 0;
-}
-
-.modal-actions {
-  margin-top: 1rem;
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-}
-
-.apply-report .warnings {
+/* ApplyModal's warning list. Previously scoped `.apply-report .warnings`,
+ * but no element ever carried `.apply-report` — restored standalone under
+ * the className ApplyModal actually renders. Same intent as the old rule:
+ * amber text, no other treatment. */
+.ui-warnings {
   color: var(--meter-amber);
-}
-
-.apply-report .failed {
-  color: var(--danger);
 }
 
 /* ---------------------------------------------------------------- view tabs */
@@ -787,11 +665,6 @@ input[type="password"] {
   opacity: 1;
 }
 
-.unit-move-select {
-  margin-top: 0.4rem;
-  width: 100%;
-}
-
 .storage-register-form {
   display: flex;
   flex-direction: column;
@@ -830,10 +703,6 @@ input[type="password"] {
 
 .storage-job-row button {
   margin-top: 0.4rem;
-}
-
-.move-progress {
-  margin: 0.75rem 0;
 }
 
 /* Shared by MoveModal's job-error line and the storage jobs panel's —

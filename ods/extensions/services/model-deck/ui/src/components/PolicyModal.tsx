@@ -151,7 +151,7 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
     >
       {error && (
         <Banner
-          message={messages.stateRefreshFailed(error)}
+          message={messages.guardRefused(error)}
           onDismiss={() => setError(null)}
         />
       )}

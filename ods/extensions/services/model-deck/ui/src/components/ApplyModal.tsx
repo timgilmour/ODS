@@ -34,7 +34,12 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
   const [phase, setPhase] = useState<Phase>("preview");
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [report, setReport] = useState<ApplyReport | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Two error slots, not one: the preview fetch (a read) and confirmApply's
+  // catch (a mutation refusal) render under different Message factories —
+  // stateRefreshFailed vs guardRefused — so which one fired has to survive
+  // past the catch block. Only one is ever non-null at a time.
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
   // Armed when the apply 409s off the hipfire conversation-guard, so the
   // retry can offer force=true as one click instead of a curl command.
   const [offerForce, setOfferForce] = useState(false);
@@ -49,7 +54,7 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
       })
       .catch((err) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
+        setPreviewError(err instanceof Error ? err.message : String(err));
       });
     return () => {
       cancelled = true;
@@ -64,7 +69,7 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
       setPhase("result");
       setOfferForce(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setApplyError(err instanceof Error ? err.message : String(err));
       setOfferForce(err instanceof ApiError && err.status === 409);
       setPhase("confirm");
     }
@@ -108,12 +113,19 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
         </>
       }
     >
-      {phase === "preview" && !error && <p>{labels.loadingPreview}</p>}
+      {phase === "preview" && !previewError && <p>{labels.loadingPreview}</p>}
 
-      {error && (
+      {previewError && (
         <Banner
-          message={messages.stateRefreshFailed(error)}
-          onDismiss={() => setError(null)}
+          message={messages.stateRefreshFailed(previewError)}
+          onDismiss={() => setPreviewError(null)}
+        />
+      )}
+
+      {applyError && (
+        <Banner
+          message={messages.guardRefused(applyError)}
+          onDismiss={() => setApplyError(null)}
         />
       )}
 
@@ -136,7 +148,7 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
             <Banner message={messages.guardRefused(report.error)} />
           )}
           {report.warnings.length > 0 && (
-            <ul className="warnings">
+            <ul className="ui-warnings">
               {report.warnings.map((w, i) => (
                 <li key={i}>{w}</li>
               ))}
