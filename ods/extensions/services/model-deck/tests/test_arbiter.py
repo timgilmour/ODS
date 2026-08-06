@@ -1664,3 +1664,61 @@ def test_restore_clears_derive_throttle_so_the_next_tick_derives(tmp_path):
     world._snapshot = _world(hipfire=_hip(state="running", model="gpt-oss"))
     watcher.tick()
     assert len(calls) == 2
+
+
+def test_restore_floor_limits_repeated_per_tick_derives(tmp_path):
+    """A resource that keeps crash-looping can have _restore() succeed at the
+    API level every ~2 s tick (e.g. resume() returns fine) without ever
+    raising, so the failure-budget/quarantine machinery — which only trips
+    on a raise — never engages, and reconcile re-dispatches a restore every
+    tick for as long as the observed world stays down. The first restore of
+    that incident still derives immediately (Tim's ruling); every restore
+    after it, in rapid succession, must NOT also clear the throttle, or the
+    checkpoint scan + spark probe would run on every tick for the whole
+    incident — exactly the pointless I/O the throttle exists to prevent."""
+    store = _intent(tmp_path)  # local/hipfire wants state=loaded
+    hipfire = FakeHipfire(state="running")
+    world = FakeWorld(_world(hipfire=_hip(state="running", model="gpt-oss")))
+    calls = []
+    watcher = _watcher(
+        tmp_path, world=world, hipfire=hipfire, intent_store=store,
+        on_derive=lambda: calls.append(1),
+    )
+
+    watcher.tick()  # healthy -> no restore; first-ever derive fires
+    assert len(calls) == 1
+
+    # Incident starts: hipfire goes down and NEVER comes back up in this
+    # world's observation (the crash loop) for the next 5 ticks.
+    world._snapshot = _world(hipfire=_hip(state="parked"))
+
+    for _ in range(5):
+        watcher.tick()
+
+    assert hipfire.calls.count("resume") == 5   # restored every single tick
+    assert len(calls) == 2                       # but derived only ONCE more
+
+
+def test_restore_triggered_derive_resumes_after_the_floor_elapses(tmp_path):
+    """The floor rate-limits, it does not latch permanently: once it
+    elapses, a restore (a later flap of the same resource, or a fresh
+    incident) triggers an immediate derive again."""
+    clock = _FakeClock()
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="running")
+    world = FakeWorld(_world(hipfire=_hip(state="parked")))
+    calls = []
+    watcher = _watcher(
+        tmp_path, world=world, hipfire=hipfire, intent_store=store,
+        on_derive=lambda: calls.append(1), clock=clock,
+    )
+
+    watcher.tick()  # first restore of the incident -> derives
+    assert len(calls) == 1
+
+    watcher.tick()  # immediately again -> within the floor -> no derive
+    assert len(calls) == 1
+
+    clock.advance(31)  # past the 30 s floor
+    watcher.tick()  # floor elapsed -> derives again
+    assert len(calls) == 2

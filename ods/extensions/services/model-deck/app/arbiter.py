@@ -88,12 +88,18 @@ Design notes that are load-bearing (and tested):
   checkpoints (``gguf_dir``) and live engine surfaces (``spark``). Throttled
   to ``settings.derive_interval_s`` (default 300 s) because the tick loop
   runs every couple of seconds and checkpoint directories do not change that
-  fast — EXCEPT a successful ``_reconcile_pass`` restore clears the throttle
-  (``self._last_derive_at = None`` in ``_execute_restore``, no new I/O in the
-  restore path itself), so a resource that just came back up gets its live
-  facts captured by the very same tick's derive pass instead of waiting up
-  to ``derive_interval_s``. ``characteristics_store=None`` (the default)
-  disables it entirely — same opt-in shape as ``hostagent``/``intent_store``.
+  fast — EXCEPT the first successful ``_reconcile_pass`` restore of an
+  incident clears the throttle (``self._last_derive_at = None`` in
+  ``_execute_restore``, no new I/O in the restore path itself), so a resource
+  that just came back up gets its live facts captured by that same tick's
+  derive pass instead of waiting up to ``derive_interval_s``. That clear is
+  itself floor-limited (``_DERIVE_RESTORE_FLOOR_S``, 30 s): a crash-looping
+  resource can have ``_restore()`` succeed at the API level every ~2 s tick
+  without ever raising, so the failure-budget/quarantine machinery (which
+  only trips on a raise) never bounds it — without the floor every one of
+  those ticks would re-clear the throttle and re-run the scan.
+  ``characteristics_store=None`` (the default) disables the whole pass —
+  same opt-in shape as ``hostagent``/``intent_store``.
 """
 
 import threading
@@ -120,6 +126,21 @@ from app.sets import apply_in_progress
 _SLACK_BYTES = 1024**3  # 1 GiB
 
 _EXTRA_PREFIX = "extra."
+
+# Minimum spacing between restore-triggered characteristics-derive-throttle
+# clears (see Watcher._execute_restore). A crash-looping resource can have
+# _restore() succeed at the API level every ~2 s tick (e.g. resume() returns
+# fine) while the process dies again before the next tick — the failure-
+# budget/quarantine machinery only trips when _restore() RAISES, so it does
+# not bound this case. Without a floor, every one of those ticks would clear
+# the derive throttle and re-run the checkpoint scan + spark probe, exactly
+# the pointless per-tick I/O the throttle exists to prevent, concentrated
+# during an active incident. 30 s bounds that to at most one extra derive per
+# half-minute of crash-looping — well above the ~2 s tick so one flap cycle
+# can't retrigger it, and well below settings.derive_interval_s's default
+# 300 s so a genuinely new incident more than 30 s later still gets its own
+# immediate derive.
+_DERIVE_RESTORE_FLOOR_S = 30.0
 
 
 # ===========================================================================
@@ -411,6 +432,10 @@ class Watcher:
         self._clock = clock
         self._derive_interval_s = settings.derive_interval_s
         self._last_derive_at: float | None = None
+        # Floor between restore-triggered throttle clears (see
+        # _execute_restore) — separate from _last_derive_at so it tracks only
+        # restores, not the regular timed derive passes.
+        self._last_restore_derive_at: float | None = None
         # Test-only seam: when set, called once per non-throttled derive pass
         # INSTEAD of the real checkpoint/engine scan, so the throttle timing
         # itself can be tested without a real gguf_dir or spark client.
@@ -644,8 +669,17 @@ class Watcher:
         # capturing, not up to derive_interval_s later — clear the throttle
         # so this tick's already-scheduled _derive_pass() (called right
         # after _reconcile_pass in tick()) runs instead of being skipped. No
-        # new I/O here: this only resets an in-memory gate.
-        self._last_derive_at = None
+        # new I/O here: this only resets an in-memory gate. Floor-limited
+        # (_DERIVE_RESTORE_FLOOR_S, see its comment) so a crash-looping
+        # resource — _restore() succeeding every ~2 s tick without ever
+        # raising, so the failure-budget/quarantine above never trips —
+        # doesn't turn into a derive on every tick for the whole incident;
+        # only the first restore of a burst clears it.
+        now_mono = self._clock()
+        if (self._last_restore_derive_at is None
+                or now_mono - self._last_restore_derive_at >= _DERIVE_RESTORE_FLOOR_S):
+            self._last_derive_at = None
+            self._last_restore_derive_at = now_mono
         self._log("lifecycle-restore", {"key": key, "model": action["model"]})
 
     def _restore(self, action: dict) -> None:
