@@ -499,9 +499,9 @@ input[type="password"] {
 
 .saved-set-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space);
+  flex-direction: column;
+  align-items: stretch;
+  gap: calc(var(--space) / 2);
   padding: var(--space) 0;
   border-bottom: 1px solid var(--panel-border);
 }
@@ -520,8 +520,8 @@ input[type="password"] {
 
 .saved-set-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: calc(var(--space) / 2);
-  flex-shrink: 0;
 }
 
 /* ---------------------------------------------------------------- policy table */
