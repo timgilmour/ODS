@@ -27,6 +27,12 @@ from app.engines.spark import boot_in_flight
 
 _LOCAL_NODE = "local"
 
+# Public so writers (app.arbiter, app.routers.control) and readers
+# (app.arbiter's reconcile pass) name it from one place instead of
+# re-typing the literal — actuation and observation can never disagree on
+# the key.
+LOCAL_LEMONADE_KEY = f"{_LOCAL_NODE}/lemonade"
+
 # Spark is a single-slot serving node: one resource, always this key. Public
 # so writers (app.routers.spark) and readers (app.arbiter) name it from one
 # place instead of re-typing the literal.

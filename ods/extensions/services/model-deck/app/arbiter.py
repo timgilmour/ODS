@@ -113,6 +113,7 @@ from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.lifecycle import derive_status
 from app.observe import (
+    LOCAL_LEMONADE_KEY,
     SparkObserver,
     merge_observations,
     observe_local,
@@ -550,6 +551,12 @@ class Watcher:
         for action in actions:
             kind = action["type"]
             if kind == "unload_lemonade":
+                # Whoever actuates, records — and records FIRST, so a tick
+                # that lands mid-unload derives 'parked', never 'down'
+                # (2026-08-06).
+                if self._intent_store is not None:
+                    self._intent_store.record(
+                        LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade")
                 self._lemonade.unload(action["model"])
                 # Deck-initiated unload (idle release OR contention eviction):
                 # arm suppression so healing can't immediately revert it.
@@ -577,6 +584,13 @@ class Watcher:
         # fit), re-trigger the default-route load with its FULL name. Skip if
         # the contention can't be healed (wont-fit) or an eviction raced.
         if pending is not None and not wont_fit and not eviction_raced:
+            # Deck-authored load: record BEFORE actuating (same rule as the
+            # unload arm above). A failed load then derives 'down' and the
+            # reconciler retries under the existing FAILURE_BUDGET —
+            # deliberate, not a gap.
+            if self._intent_store is not None:
+                self._intent_store.record(
+                    LOCAL_LEMONADE_KEY, state="loaded", model=pending["model"], engine="lemonade")
             try:
                 self._lemonade.load(pending["model"])
             except EngineError as exc:

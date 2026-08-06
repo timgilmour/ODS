@@ -1766,3 +1766,80 @@ def test_derive_pass_retains_last_known_facts_when_spark_unreachable(tmp_path):
     watcher.tick()  # must not raise
 
     assert store.get()["model/heretic"]["served"]["value"] is True
+
+
+# ===========================================================================
+# WATCHER RECORDS THE INTENT IT AUTHORS — 2026-08-06 reconciler-intent fix
+# ===========================================================================
+
+
+def test_idle_release_records_unloaded_intent_and_reconciler_stays_quiet(tmp_path):
+    """Whoever actuates, records: an idle-release must record state=unloaded
+    BEFORE unloading, so the very next reconcile pass derives 'parked', not
+    'down' — the reconciler must not reload what the watcher just released
+    (live defect 2026-08-06, events 21:37:38 -> 21:37:41)."""
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.m.gguf", engine="lemonade")
+
+    lemonade = FakeLemonade()
+    # lemonade loaded and idle past a 10 s TTL -> decide() emits unload_lemonade
+    snapshot = _world(lemonade=_lem(state="loaded", model="extra.m.gguf", idle_s=1000))
+    policy = _policy(lem_idle=10)
+    watcher, _events = _make_watcher(
+        tmp_path, FakeWorld(snapshot), FakeRegistry(), policy,
+        lemonade=lemonade, intent_store=intent,
+    )
+
+    watcher.tick()
+
+    assert lemonade.unloaded == ["extra.m.gguf"]
+    assert intent.get()["local/lemonade"]["state"] == "unloaded"
+
+    # Next tick observes the unloaded engine; intent now says unloaded too,
+    # so plan_reconcile derives 'parked' and must NOT restore.
+    watcher._world = FakeWorld(_world(lemonade=_lem(state="unloaded")))
+    watcher.tick()
+    assert lemonade.loaded == []
+
+
+def test_load_retriggered_records_loaded_intent(tmp_path):
+    """The contention-heal reload is a deck-authored load and must record
+    state=loaded (before this fix it recorded nothing, leaving intent stale)."""
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    # Mirrors test_watcher_tick_heals_contention_then_reloads's arrangement:
+    # a pending default-route load healed by freeing comfy, then re-triggered.
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],  # free = 12 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    lemonade, comfy = FakeLemonade(), FakeComfy()
+    read_gpus = RecordingReadGpus(result=[{"probe": True}])
+    watcher, _events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        lemonade=lemonade,
+        comfy=comfy,
+        read_gpus=read_gpus,
+        intent_store=intent,
+        # auto=False: isolates the _execute recording under test from the
+        # SAME-tick reconcile pass, which still observes the pre-actuation
+        # snapshot (world.snapshot() is called once per tick, before
+        # execute) and would otherwise derive 'down' for the model this
+        # tick just loaded and fire a second, redundant restore load — a
+        # pre-existing same-tick staleness gap this task does not touch.
+        auto=False,
+    )
+
+    watcher.tick()
+
+    assert lemonade.loaded == ["extra.model.gguf"]
+    record = intent.get()["local/lemonade"]
+    assert record == {**record, "state": "loaded", "model": "extra.model.gguf"}
