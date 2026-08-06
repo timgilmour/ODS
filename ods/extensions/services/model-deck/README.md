@@ -121,6 +121,28 @@ See the **Storage tiering** section below for detailed semantics.
 `{key}` is a resource key and contains a slash (`local/hipfire`), e.g.
 `POST /api/lifecycle/adopt/local/hipfire`.
 
+### `characteristics.json` / `declared.json` — model and engine facts
+
+**Derive, don't duplicate.** Every field has exactly one authoritative
+source. `characteristics.json` is a machine-owned cache of facts read from
+the things that own them (a checkpoint's `config.json`, an engine's
+`/v1/models`), every field stamped with `source` and `derived_ts`.
+`declared.json` is a small human-owned allowlist for what cannot be derived:
+`tools_verified`, `label`, `notes`, `tags`, `engine_preference`.
+
+Resolution is declared-over-derived, with the derived value retained as
+`shadowed_value` so the UI can show that a human overrode a reading.
+
+**A model's identity is its checkpoint directory name, verbatim.** Aliases
+are retired; role names like `fast`/`deep` are `tags`.
+
+**Drift is reported, never corrected.** `GET /api/facts/drift` compares
+facts that should agree — the checkpoint's `quant_method` against the
+profile's `--quantization` (severity `crash`; this is the modelopt loop),
+and served context against both the checkpoint's capability and what the
+gateway advertises. Absence of a fact means "cannot check", never
+"mismatch".
+
 ## Storage tiering (hot/cold model moves)
 
 Model Deck extends GPU memory management one tier down the memory hierarchy: today the deck arbitrates **VRAM ↔ hot disk**; storage tiering adds **hot disk ↔ cold disk** (e.g., SSD cache ↔ external archive drive) with the same design language — policy, watcher, pure planner, pins, priorities, audited actions.
