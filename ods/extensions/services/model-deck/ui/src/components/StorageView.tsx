@@ -20,7 +20,9 @@ interface StorageViewProps {
 
 interface MoveRequest {
   unit: StorageState["units"][number];
-  dest: StorageLocation;
+  /** Preselected destination (a drag onto a specific card) or null (the
+   * per-unit "Move…" path — the operator picks in the modal). */
+  dest: string | null;
 }
 
 const ROLES: StorageLocation["role"][] = ["hot", "cold"];
@@ -37,12 +39,11 @@ export default function StorageView({ storageState, error, onModalOpenChange, on
   const [rescanning, setRescanning] = useState(false);
   const [rescanError, setRescanError] = useState<string | null>(null);
 
-  function requestMove(unitId: string, destName: string) {
+  function requestMove(unitId: string, destName: string | null) {
     if (!storageState) return;
     const unit = storageState.units.find((u) => u.id === unitId);
-    const dest = storageState.locations.find((l) => l.name === destName);
-    if (!unit || !dest || unit.state === "moving") return;
-    setMoveRequest({ unit, dest });
+    if (!unit || unit.state === "moving") return;
+    setMoveRequest({ unit, dest: destName });
   }
 
   async function handleRescan() {
@@ -91,7 +92,6 @@ export default function StorageView({ storageState, error, onModalOpenChange, on
               <LocationColumn
                 key={loc.name}
                 location={loc}
-                locations={storageState.locations}
                 units={storageState.units.filter((u) => u.location === loc.name)}
                 onRequestMove={requestMove}
                 onChanged={onChanged}
@@ -106,7 +106,8 @@ export default function StorageView({ storageState, error, onModalOpenChange, on
       {moveRequest && (
         <MoveModal
           unit={moveRequest.unit}
-          dest={moveRequest.dest}
+          locations={storageState?.locations ?? []}
+          initialDest={moveRequest.dest}
           jobs={storageState?.jobs ?? []}
           onModalOpenChange={onModalOpenChange}
           onClose={() => setMoveRequest(null)}

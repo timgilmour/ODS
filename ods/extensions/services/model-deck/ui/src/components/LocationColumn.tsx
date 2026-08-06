@@ -7,16 +7,17 @@ import {
   type StorageLocation,
   type StorageUnit,
 } from "../api";
+import { labels } from "../model/messages";
 
 interface LocationColumnProps {
   location: StorageLocation;
-  /** Every registered location, so the per-card "Move to…" select can list
-   * every OTHER location — drag is never the only path to a move. */
-  locations: StorageLocation[];
   /** Units already filtered to this location by the parent (StorageView
    * owns the full catalog; a column only renders its own slice). */
   units: StorageUnit[];
-  onRequestMove: (unitId: string, dest: string) => void;
+  /** dest is the preselected destination — a column-drop names itself
+   * (location.name); the per-unit "Move…" button passes null and lets the
+   * modal own eligibility. */
+  onRequestMove: (unitId: string, dest: string | null) => void;
   onChanged: () => void;
 }
 
@@ -27,7 +28,6 @@ interface LocationColumnProps {
  * from another column. */
 export default function LocationColumn({
   location,
-  locations,
   units,
   onRequestMove,
   onChanged,
@@ -47,11 +47,6 @@ export default function LocationColumn({
     location.watermark_gb != null && location.total_bytes
       ? Math.min(((location.watermark_gb * 1e9) / location.total_bytes) * 100, 100)
       : null;
-
-  // Excludes unavailable (mount-missing) destinations too — a move onto a
-  // location that isn't mounted is guaranteed to fail, so it's never
-  // offered as a target, whether via the select or a drop.
-  const otherLocations = locations.filter((l) => l.name !== location.name && l.available);
 
   async function handlePinToggle(unit: StorageUnit) {
     setPinBusy(unit.id);
@@ -76,7 +71,8 @@ export default function LocationColumn({
     // Ignore malformed drops, drops back onto the unit's current column (a
     // no-op move), and drops onto an unavailable (mount-missing) column —
     // mirrors SetBuilder's silent-ignore-on-bad-drop idiom; a doomed move
-    // is never submitted, same as the "Move to…" select excluding it.
+    // is never submitted, same rule the modal applies when listing eligible
+    // destinations for the per-unit "Move…" path.
     if (!unitId || !location.available || units.some((u) => u.id === unitId)) return;
     onRequestMove(unitId, location.name);
   }
@@ -168,26 +164,17 @@ export default function LocationColumn({
                 </div>
               )}
 
-              {/* Drag is never the only path to a move — a per-card select
-                  covers keyboard/touch users. */}
-              <select
-                className="unit-move-select"
-                aria-label={`move ${unit.name} to`}
-                value=""
-                disabled={moving || otherLocations.length === 0}
-                onChange={(e) => {
-                  const dest = e.target.value;
-                  if (dest) onRequestMove(unit.id, dest);
-                  e.target.value = "";
-                }}
+              {/* Drag is never the only path to a move — a per-card button
+                  covers keyboard/touch users. Opens with no destination
+                  preselected; the modal owns eligibility and lets the
+                  operator pick. */}
+              <button
+                type="button"
+                disabled={moving}
+                onClick={() => onRequestMove(unit.id, null)}
               >
-                <option value="">move to…</option>
-                {otherLocations.map((l) => (
-                  <option key={l.name} value={l.name}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
+                {labels.moveTo}
+              </button>
             </li>
           );
         })}

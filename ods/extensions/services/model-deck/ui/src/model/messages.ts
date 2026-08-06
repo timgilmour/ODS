@@ -109,6 +109,15 @@ export const messages = {
     tone: "neutral",
     title: `last seen ${age} ago`,
   }),
+
+  // MoveModal's terminal-phase notices.
+  moveComplete: (): Message => ({ tone: "neutral", title: "Moved." }),
+  moveCancelled: (): Message => ({ tone: "neutral", title: "Move cancelled." }),
+  moveFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Move failed",
+    body: detail,
+  }),
 };
 
 /** Short labels — control text, badges, captions and the `title` tooltips
@@ -207,6 +216,14 @@ export const labels = {
   saving: "Saving…",
   autoTiering: "Auto-tiering: archive to cold on watermark + silent pull-through",
   storageSection: "Storage",
+
+  // MoveModal + the per-unit trigger LocationColumn renders.
+  moveModel: "Move model",
+  moveTo: "Move to…",
+  destination: "destination",
+  startMove: "Move",
+  starting: "Starting…",
+  cancelMove: "Cancel move",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

@@ -2,13 +2,18 @@ import { useEffect, useState } from "react";
 import {
   bytesToGB,
   cancelStorageJob,
-  meterFillClass,
   postStorageMove,
   truncateMiddle,
   type StorageJob,
   type StorageLocation,
   type StorageUnit,
 } from "../api";
+import { moveRail } from "../model/moveRail";
+import { labels, messages } from "../model/messages";
+import Banner from "../ui/Banner";
+import Meter from "../ui/Meter";
+import Modal from "../ui/Modal";
+import StepRail from "../ui/StepRail";
 
 type Phase = "confirm" | "progress" | "done" | "cancelled" | "error";
 
@@ -16,7 +21,14 @@ const NON_TERMINAL: ReadonlySet<StorageJob["state"]> = new Set(["queued", "copyi
 
 interface MoveModalProps {
   unit: StorageUnit;
-  dest: StorageLocation;
+  /** Every registered location; the modal derives eligible destinations
+   * itself: not the unit's own location, and available only — a move onto a
+   * missing mount is guaranteed to fail, so it is never offered (same rule
+   * LocationColumn applied when it owned the select). */
+  locations: StorageLocation[];
+  /** Preselected destination (a drag onto a specific card) or null (the
+   * per-unit Move… path — the operator picks in the modal). */
+  initialDest: string | null;
   /** storageState.jobs, read live via the PARENT's own 3s poll — this modal
    * never polls on its own; it just re-derives its job from whatever the
    * parent last fetched. */
@@ -31,7 +43,17 @@ interface MoveModalProps {
  * onModalOpenChange around mount/unmount), THIS modal drives it itself off
  * `phase` — polling must keep running once the move is submitted so the
  * progress bar can advance, and only the confirm step needs the pause. */
-export default function MoveModal({ unit, dest, jobs, onModalOpenChange, onClose, onChanged }: MoveModalProps) {
+export default function MoveModal({
+  unit,
+  locations,
+  initialDest,
+  jobs,
+  onModalOpenChange,
+  onClose,
+  onChanged,
+}: MoveModalProps) {
+  const eligible = locations.filter((l) => l.name !== unit.location && l.available);
+  const [dest, setDest] = useState<string | null>(initialDest);
   const [phase, setPhase] = useState<Phase>("confirm");
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,10 +83,11 @@ export default function MoveModal({ unit, dest, jobs, onModalOpenChange, onClose
   }, [job]);
 
   async function handleConfirm() {
+    if (!dest) return;
     setBusy(true);
     setError(null);
     try {
-      const { job: created } = await postStorageMove(unit.id, dest.name);
+      const { job: created } = await postStorageMove(unit.id, dest);
       setJobId(created.id);
       setPhase("progress");
     } catch (err) {
@@ -96,69 +119,91 @@ export default function MoveModal({ unit, dest, jobs, onModalOpenChange, onClose
     onClose();
   }
 
-  const pct = job && job.bytes_total > 0 ? Math.min((job.bytes_done / job.bytes_total) * 100, 100) : 0;
+  const rail = job ? moveRail(job.state) : null;
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true">
-      <div className="modal-box">
-        <h3>Move {truncateMiddle(unit.name)}</h3>
-        <p className="modal-notes">
-          {unit.location} → {dest.name} · {bytesToGB(unit.size)} GB
-        </p>
-
-        {error && (
-          <div className="banner-error">
-            <span>{error}</span>
-            <button onClick={() => setError(null)} aria-label="dismiss error">
-              ×
-            </button>
-          </div>
-        )}
-
-        {phase === "progress" && (
-          <div className="move-progress">
-            <div className="meter-track">
-              <div className={meterFillClass(pct)} style={{ width: `${pct}%` }} />
-            </div>
-            <div className="meter-label">
-              {job ? (
-                <>
-                  {bytesToGB(job.bytes_done)} / {bytesToGB(job.bytes_total)} GB — {job.state}
-                </>
-              ) : (
-                "starting…"
-              )}
-            </div>
-          </div>
-        )}
-
-        {phase === "done" && <p>Move complete.</p>}
-        {phase === "cancelled" && <p>Move cancelled.</p>}
-        {phase === "error" && job?.error && <p className="failed">{job.error}</p>}
-
-        <div className="modal-actions">
+    <Modal
+      title={labels.moveModel}
+      subtitle={`${truncateMiddle(unit.name)} · ${bytesToGB(unit.size)} GB`}
+      onClose={phase === "confirm" ? onClose : undefined}
+      footer={
+        <>
           {phase === "confirm" && (
             <>
-              <button onClick={onClose} disabled={busy}>
-                Cancel
+              <button type="button" onClick={onClose} disabled={busy}>
+                {labels.cancel}
               </button>
-              <button className="primary" onClick={handleConfirm} disabled={busy}>
-                {busy ? "Starting…" : "Confirm"}
+              <button
+                type="button"
+                className="primary"
+                onClick={handleConfirm}
+                disabled={busy || !dest}
+              >
+                {busy ? labels.starting : labels.startMove}
               </button>
             </>
           )}
           {phase === "progress" && (
-            <button onClick={handleCancel} disabled={busy || !job || !NON_TERMINAL.has(job.state)}>
-              Cancel move
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={busy || !job || !NON_TERMINAL.has(job.state)}
+            >
+              {labels.cancelMove}
             </button>
           )}
           {(phase === "done" || phase === "cancelled" || phase === "error") && (
-            <button className="primary" onClick={handleClose}>
-              Close
+            <button type="button" className="primary" onClick={handleClose}>
+              {labels.close}
             </button>
           )}
-        </div>
+        </>
+      }
+    >
+      {/* source → destination, the R1 render's route line */}
+      <div className="move-route">
+        <span className="move-route-loc">{unit.location}</span>
+        <span className="move-route-arrow" aria-hidden="true">→</span>
+        {phase === "confirm" ? (
+          <select
+            aria-label={labels.destination}
+            value={dest ?? ""}
+            onChange={(e) => setDest(e.target.value || null)}
+          >
+            <option value="">{labels.moveTo}</option>
+            {eligible.map((l) => (
+              <option key={l.name} value={l.name}>{l.name}</option>
+            ))}
+          </select>
+        ) : (
+          <span className="move-route-loc">{dest}</span>
+        )}
       </div>
-    </div>
+
+      {error && (
+        <Banner
+          message={messages.moveFailed(error)}
+          onDismiss={() => setError(null)}
+        />
+      )}
+
+      {phase === "progress" && (
+        <>
+          {rail && <StepRail stops={rail} />}
+          <Meter
+            capacity={
+              job ? { used: job.bytes_done, total: job.bytes_total } : null
+            }
+          />
+        </>
+      )}
+
+      {phase === "done" && rail && <StepRail stops={rail} />}
+      {phase === "done" && <Banner message={messages.moveComplete()} />}
+      {phase === "cancelled" && <Banner message={messages.moveCancelled()} />}
+      {phase === "error" && job?.error && (
+        <Banner message={messages.moveFailed(job.error)} />
+      )}
+    </Modal>
   );
 }

@@ -1285,3 +1285,19 @@ input[type="password"] {
 .ui-steprail-active .ui-steprail-label { color: var(--accent); }
 .ui-steprail-done .ui-steprail-label { color: var(--chip-loaded-fg); }
 .ui-steprail-label { color: var(--text-dim); font-size: 0.85em; }
+
+/* --- Move modal route line ----------------------------------------------- */
+.move-route {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--space) * 2);
+  margin-bottom: var(--space);
+}
+.move-route-loc {
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: var(--space) calc(var(--space) * 2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.move-route-arrow { color: var(--text-dim); }
