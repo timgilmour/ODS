@@ -156,3 +156,32 @@ def test_parent_dir_created(tmp_path):
     store.record("local/hipfire", state="loaded", model="a", engine="hipfire")
 
     assert path.exists()
+
+
+def test_concurrent_record_and_note_healthy_lose_no_deliberate_write(tmp_path):
+    """Regression for the 2026-08-06 lost-write: a router-thread record()
+    racing watcher-thread note_healthy() calls must never be clobbered by a
+    stale in-memory copy. Hammer both from two threads; after every joined
+    round the deliberately-recorded state must be what record() last wrote."""
+    import threading
+
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("local/lemonade", state="loaded", model="m.gguf", engine="lemonade")
+    store.record("local/hipfire", state="loaded", model=None, engine="hipfire")
+
+    stop = threading.Event()
+
+    def hammer_note_healthy():
+        while not stop.is_set():
+            store.note_healthy("local/hipfire")
+
+    t = threading.Thread(target=hammer_note_healthy, daemon=True)
+    t.start()
+    try:
+        for i in range(1000):
+            state = "unloaded" if i % 2 else "loaded"
+            store.record("local/lemonade", state=state, model=None, engine="lemonade")
+            assert store.get()["local/lemonade"]["state"] == state
+    finally:
+        stop.set()
+        t.join(timeout=5)

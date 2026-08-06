@@ -21,12 +21,13 @@ tick. Deleting a key (``forget``) is the only way to say "no opinion".
 
 Writes are atomic (temp file + ``os.replace``); a missing or corrupt file
 reads as ``{}`` rather than raising, matching ``app.policy``'s self-healing
-quality bar. Single-process, in-process state only — the supervisor is the
-sole owner of intent.json.
+quality bar. Writes are serialized across uvicorn handler threads and the
+watcher daemon thread via an internal lock; callers need not coordinate.
 """
 
 import json
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,6 +47,7 @@ class IntentStore:
 
     def __init__(self, path: Path):
         self._path = path
+        self._lock = threading.Lock()
 
     # --- persistence -------------------------------------------------------
 
@@ -100,56 +102,61 @@ class IntentStore:
         if state not in VALID_STATES:
             raise ValueError(f"state must be one of {VALID_STATES}, got {state!r}")
 
-        data = self._load()
-        previous = data.get(key, {})
-        data[key] = {
-            "state": state,
-            "model": model,
-            "engine": engine,
-            "updated_ts": now or _now_iso(),
-            "last_healthy_ts": previous.get("last_healthy_ts"),
-            "failures": 0,
-            "quarantined": False,
-        }
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            previous = data.get(key, {})
+            data[key] = {
+                "state": state,
+                "model": model,
+                "engine": engine,
+                "updated_ts": now or _now_iso(),
+                "last_healthy_ts": previous.get("last_healthy_ts"),
+                "failures": 0,
+                "quarantined": False,
+            }
+            self._save(data)
 
     def note_healthy(self, key: str, now: str | None = None) -> None:
         """Observation confirmed intent. Stamps last_healthy_ts and clears
         the failure budget — a success is what releases a quarantine."""
-        data = self._load()
-        record = data.get(key)
-        if record is None:
-            return
-        record["last_healthy_ts"] = now or _now_iso()
-        record["failures"] = 0
-        record["quarantined"] = False
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            record = data.get(key)
+            if record is None:
+                return
+            record["last_healthy_ts"] = now or _now_iso()
+            record["failures"] = 0
+            record["quarantined"] = False
+            self._save(data)
 
     def note_failure(self, key: str, now: str | None = None) -> int:
         """A restore attempt failed. Returns the running consecutive count,
         and quarantines the key once it reaches FAILURE_BUDGET."""
-        data = self._load()
-        record = data.get(key)
-        if record is None:
-            return 0
-        record["failures"] = record.get("failures", 0) + 1
-        if record["failures"] >= FAILURE_BUDGET:
-            record["quarantined"] = True
-        self._save(data)
-        return record["failures"]
+        with self._lock:
+            data = self._load()
+            record = data.get(key)
+            if record is None:
+                return 0
+            record["failures"] = record.get("failures", 0) + 1
+            if record["failures"] >= FAILURE_BUDGET:
+                record["quarantined"] = True
+            self._save(data)
+            return record["failures"]
 
     def clear_failures(self, key: str) -> None:
         """Operator-initiated quarantine release (the UI's 'try again')."""
-        data = self._load()
-        record = data.get(key)
-        if record is None:
-            return
-        record["failures"] = 0
-        record["quarantined"] = False
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            record = data.get(key)
+            if record is None:
+                return
+            record["failures"] = 0
+            record["quarantined"] = False
+            self._save(data)
 
     def forget(self, key: str) -> None:
         """Drop all intent for `key` — 'the Deck has no opinion about this'."""
-        data = self._load()
-        if data.pop(key, None) is not None:
-            self._save(data)
+        with self._lock:
+            data = self._load()
+            if data.pop(key, None) is not None:
+                self._save(data)
