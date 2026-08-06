@@ -167,44 +167,13 @@ input[type="password"] {
   font-weight: bold;
 }
 
-/* Sits above the (disabled-while-pending) builder form rather than inside
- * .panel, so it stays visible and interactive regardless of the fieldset
- * state below it. */
-.builder-overwrite-banner {
-  margin-bottom: 1rem;
-}
-
 /* ---------------------------------------------------------------- GPUs */
 
-.gpu-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-}
-
-.gpu-column {
-  flex: 1 1 320px;
-  min-width: 300px;
-}
-
-.gpu-column h2 {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-}
-
-.gpu-meter {
-  margin-bottom: 0.75rem;
-}
-
-.meter-track {
-  position: relative;
-  height: 10px;
-  border-radius: 5px;
-  background: var(--meter-track);
-  overflow: hidden;
-}
-
+/* .meter-fill + its three colour classes are what `meterFillClass()`
+ * returns, so they outlive the hand-rolled bars they were written for —
+ * Meter renders them inside .ui-meter-track. The bespoke .gpu-row /
+ * .gpu-column / .gpu-meter / .meter-track / .meter-label layout that used
+ * to wrap them was the Set Builder's alone and went with its restyle. */
 .meter-fill {
   height: 100%;
   border-radius: 5px;
@@ -220,20 +189,6 @@ input[type="password"] {
 
 .meter-red {
   background: var(--meter-red);
-}
-
-/* Hipfire's meter when the draft's hipfire choice is "don't touch"
- * (null): shows the live footprint rather than a drafted one, so it's
- * styled subdued to read as "current state," not "this draft's plan." */
-.meter-fill-subdued {
-  opacity: 0.45;
-}
-
-.meter-label {
-  margin-top: 0.3rem;
-  font-size: 0.8rem;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 
 .external-row {
@@ -452,10 +407,6 @@ input[type="password"] {
   gap: 1rem;
 }
 
-.model-library {
-  flex: 0 0 260px;
-}
-
 .model-library-list {
   list-style: none;
   margin: 0;
@@ -488,14 +439,6 @@ input[type="password"] {
   font-size: 0.78rem;
   color: var(--text-dim);
   white-space: nowrap;
-}
-
-.builder-load-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
 }
 
 .builder-field {
@@ -604,6 +547,103 @@ input[type="password"] {
   border: 1px solid var(--panel-border);
   border-radius: 999px;
   padding: 0.2rem 0.55rem;
+}
+
+/* A caption that explains the control above it. The class was already in use
+   (ApplyModal, StorageView) with no rule behind it, so it rendered as body
+   copy; the builder's new captions ("current live state", "no saved sets")
+   are only legible as captions, hence the rule lands here. */
+.helper-text {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+/* --- Builder restyle (phase 2) -------------------------------------------
+   The left rail (library above saved sets) is a fixed column so the draft
+   card gets every remaining pixel; the draft card's two GPU columns are a
+   plain 1fr 1fr grid rather than wrapping flex, because they are two halves
+   of ONE node, not a list of cards that may reflow into a stack. Tokens
+   only. */
+
+.builder-side {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 2);
+  width: 320px;
+  flex-shrink: 0;
+}
+
+.builder-gpu-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(var(--space) * 2);
+}
+
+.builder-gpu {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  /* Lets a long model name inside ellipsize instead of widening the track. */
+  min-width: 0;
+}
+
+.builder-gpu h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+/* Hipfire's meter while the draft's hipfire choice is "don't touch" (null):
+   the bar is reporting the LIVE footprint, not a drafted one, so it is
+   dimmed to read as "current state" rather than "this draft's plan". The
+   caption underneath says the same thing in words — dimming alone is never
+   the only carrier of a state. */
+.builder-meter-subdued {
+  opacity: 0.45;
+}
+
+.builder-dropzone {
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  text-align: center;
+}
+
+.saved-sets-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.saved-set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space);
+  padding: var(--space) 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.saved-set-row:last-child {
+  border-bottom: none;
+}
+
+/* The row's actions never shrink; the name is what gives way, so a long set
+   name cannot push Delete off the panel. */
+.saved-set-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-set-actions {
+  display: flex;
+  gap: calc(var(--space) / 2);
+  flex-shrink: 0;
 }
 
 /* ---------------------------------------------------------------- policy table */

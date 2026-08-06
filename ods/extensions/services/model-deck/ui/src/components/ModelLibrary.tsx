@@ -1,4 +1,8 @@
+import { useMemo, useState } from "react";
 import { bytesToGB, truncateMiddle, type ModelFile } from "../api";
+import { labels } from "../model/messages";
+import Panel from "../ui/Panel";
+import Toolbar from "../ui/Toolbar";
 
 interface ModelLibraryProps {
   models: ModelFile[];
@@ -12,16 +16,32 @@ interface ModelLibraryProps {
 /** Left panel of the Set Builder: every model the registry scan found.
  * Each row is HTML5-draggable (drag onto the lemonade/comfyui column in
  * SetBuilder), and also carries a click "Place" button — drag is never the
- * only path to an action, so the flow stays usable by keyboard/touch. */
+ * only path to an action, so the flow stays usable by keyboard/touch.
+ *
+ * The search box filters the rendered list only. It holds no other state and
+ * never touches the draft, so a filtered library and a full one place the
+ * same model; a registry with several dozen GGUFs is simply scannable. */
 export default function ModelLibrary({ models, onPlace, targetGpu }: ModelLibraryProps) {
+  const [search, setSearch] = useState("");
+  const visible = useMemo(() => {
+    const needle = search.toLowerCase();
+    return models.filter((m) => m.file.toLowerCase().includes(needle));
+  }, [models, search]);
+
   return (
-    <div className="panel model-library">
-      <h2>Model library</h2>
-      {models.length === 0 ? (
-        <div>no models found</div>
+    <Panel title={labels.modelLibrary} className="model-library">
+      <Toolbar
+        search={search}
+        onSearch={setSearch}
+        placeholder={labels.searchModels}
+        filters={[]}
+        onToggleFilter={() => {}}
+      />
+      {visible.length === 0 ? (
+        <div className="helper-text">{labels.noModels}</div>
       ) : (
         <ul className="model-library-list">
-          {models.map((m) => (
+          {visible.map((m) => (
             <li
               key={m.file}
               className="model-library-row"
@@ -35,13 +55,17 @@ export default function ModelLibrary({ models, onPlace, targetGpu }: ModelLibrar
                 {truncateMiddle(m.file)}
               </span>
               <span className="model-library-footprint">{bytesToGB(m.footprint)} GB</span>
-              <button onClick={() => onPlace(m.file)} aria-label={`place ${m.file} on GPU ${targetGpu}`}>
-                Place
+              <button
+                type="button"
+                onClick={() => onPlace(m.file)}
+                aria-label={`place ${m.file} on GPU ${targetGpu}`}
+              >
+                {labels.place}
               </button>
             </li>
           ))}
         </ul>
       )}
-    </div>
+    </Panel>
   );
 }

@@ -4,7 +4,6 @@ import {
   bytesToGB,
   deleteSet,
   getSets,
-  meterFillClass,
   saveSet,
   slugify,
   truncateMiddle,
@@ -18,6 +17,7 @@ import {
   type TenantPolicy,
   type World,
 } from "../api";
+import { labels, messages } from "../model/messages";
 import {
   buildDraft,
   derivePlacedModel,
@@ -25,13 +25,22 @@ import {
   EXTRA_PREFIX,
   fieldsFromSet,
 } from "../model/setDraft";
+import Banner from "../ui/Banner";
+import Meter from "../ui/Meter";
+import Panel from "../ui/Panel";
 import ApplyModal from "./ApplyModal";
 import ModelLibrary from "./ModelLibrary";
+import SavedSets from "./SavedSets";
 
 interface SetBuilderProps {
   models: ModelFile[];
   gpus: Gpu[];
   world: World;
+  /** Display name of the box serving this UI (App passes
+   * `state.node.label`, from app/routers/status.py's `node` block) — the
+   * draft card is a draft OF THAT NODE, so it is titled with the same name
+   * the board's local node card carries rather than a generic "draft". */
+  nodeLabel: string;
   onModalOpenChange: (open: boolean) => void;
 }
 
@@ -47,6 +56,11 @@ const HIPFIRE_FOOTPRINT_BYTES = 33_000_000_000;
 // here since the builder must always render both columns regardless.
 const DEFAULT_GPU_BYTES = 32_000_000_000;
 
+// Above this share of a card's VRAM the drafted footprint is called over
+// budget. A threshold, not a colour: Meter's own amber/red thresholds say
+// how full the bar looks, this says whether the operator gets a banner.
+const OVER_BUDGET_PCT = 90;
+
 // Snapshot taken the instant a 409 fires on save: the exact draft + the
 // slug it collided with. Frozen at that moment rather than re-derived from
 // live state later, so Overwrite can never act on a draft edited (or a
@@ -57,18 +71,30 @@ interface OverwriteSnapshot {
   slug: string;
 }
 
-/** Drag-and-drop set editor: the hipfire column (a toggle, not a drop
- * target) and the lemonade/comfyui column (a drop target) mirror
- * GpuColumn's tenant grouping, but render bespoke controls per tenant
- * rather than TenantCard's live-status view — this is a *draft* of desired
- * state, not a live status card. Column indices (which physical GPU each
- * one is) come from the world snapshot's placement map, not a hardcoded
- * layout — GpuColumn no longer hardcodes it either. */
-export default function SetBuilder({ models, gpus, world, onModalOpenChange }: SetBuilderProps) {
-  // Existing sets, for the load/duplicate/delete select.
+/** Drag-and-drop set editor: one dashed DRAFT card standing for the local
+ * node, holding the hipfire column (a toggle, not a drop target) and the
+ * lemonade/comfyui column (a drop target). Both mirror GpuColumn's tenant
+ * grouping but render bespoke controls per tenant rather than TenantCard's
+ * live-status view — this is a *draft* of desired state, not a live status
+ * card, which is what the dashed border and the DRAFT pill say out loud.
+ * Column indices (which physical GPU each one is) come from the world
+ * snapshot's placement map, not a hardcoded layout — GpuColumn no longer
+ * hardcodes it either.
+ *
+ * Scope: `ConfigSet` (see api.ts `Ephemeral`) has legs for lemonade,
+ * comfyui and hipfire only — there is no spark leg — so the builder drafts
+ * the local node and nothing else. A second node card here would be a
+ * control for a set field that does not exist. */
+export default function SetBuilder({
+  models,
+  gpus,
+  world,
+  nodeLabel,
+  onModalOpenChange,
+}: SetBuilderProps) {
+  // Existing sets, listed by SavedSets (load/duplicate/delete per row).
   const [sets, setSets] = useState<ConfigSet[]>([]);
   const [listError, setListError] = useState<string | null>(null);
-  const [selectedSlug, setSelectedSlug] = useState("");
 
   // Draft fields.
   const [name, setName] = useState("");
@@ -93,9 +119,6 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
   const [overwriteSnapshot, setOverwriteSnapshot] = useState<OverwriteSnapshot | null>(null);
   const [savedSlug, setSavedSlug] = useState<string | null>(null);
   const [savedSet, setSavedSet] = useState<ConfigSet | null>(null);
-
-  // Delete flow (two-click, no window.confirm).
-  const [deleteArmed, setDeleteArmed] = useState(false);
 
   // Preview (reuses ApplyModal — only reachable once the current draft is
   // saved and unchanged, since preview/apply both act on a slug on disk).
@@ -125,7 +148,6 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
     setPolicyOverrides(null);
     setSaveError(null);
     setOverwriteSnapshot(null);
-    setDeleteArmed(false);
   }
 
   function populateFromSet(cfgset: ConfigSet, clearName: boolean) {
@@ -142,19 +164,18 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
     setPlacedModel(derivePlacedModel(cfgset));
     setSaveError(null);
     setOverwriteSnapshot(null);
-    setDeleteArmed(false);
   }
 
-  function handleLoad() {
-    const cfgset = sets.find((s) => slugify(s.name) === selectedSlug);
+  function handleLoad(slug: string) {
+    const cfgset = sets.find((s) => slugify(s.name) === slug);
     if (!cfgset) return;
     populateFromSet(cfgset, false);
-    setSavedSlug(selectedSlug);
+    setSavedSlug(slug);
     setSavedSet(cfgset);
   }
 
-  function handleDuplicate() {
-    const cfgset = sets.find((s) => slugify(s.name) === selectedSlug);
+  function handleDuplicate(slug: string) {
+    const cfgset = sets.find((s) => slugify(s.name) === slug);
     if (!cfgset) return;
     populateFromSet(cfgset, true);
     setSavedSlug(null);
@@ -172,6 +193,11 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
   // is pending (see the fieldset below), but this keeps the save call
   // itself provably safe even if that ever changes. See CRITICAL 1.
   async function handleSave(overwrite: boolean) {
+    // Re-entry guard: the confirm banner's Overwrite button lives in a
+    // Banner (which takes no `disabled`), so the "no second save while one
+    // is in flight" rule the old inline banner got from `disabled={saving}`
+    // is enforced here instead.
+    if (saving) return;
     const target = overwrite ? overwriteSnapshot?.draft : draft;
     if (!target || !target.name) return;
     setSaving(true);
@@ -197,18 +223,21 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
     setOverwriteSnapshot(null);
   }
 
-  async function confirmDelete() {
-    if (!savedSlug) return;
+  // Delete is armed per row inside SavedSets (two-click, no window.confirm);
+  // by the time this runs the operator has already confirmed. Only deleting
+  // the set the draft was loaded FROM touches the draft — deleting some
+  // other row must not throw away work in progress.
+  async function handleDelete(slug: string) {
     try {
-      await deleteSet(savedSlug);
-      setDeleteArmed(false);
-      setSavedSlug(null);
-      setSavedSet(null);
-      resetDraft();
+      await deleteSet(slug);
+      if (slug === savedSlug) {
+        setSavedSlug(null);
+        setSavedSet(null);
+        resetDraft();
+      }
       refreshSets();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
-      setDeleteArmed(false);
     }
   }
 
@@ -319,58 +348,46 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
 
   return (
     <>
+      {/* Permanent, and outside the fieldset: what this whole screen is.
+          Nothing below it deploys anything. */}
+      <Banner message={messages.draftNothingDeployed()} />
+
       {/* Rendered OUTSIDE the disabled fieldset below so Overwrite/Cancel
           stay clickable while every draft-mutating control is locked — the
           target name is read from the frozen snapshot, never the
-          (now-disabled, but belt-and-suspenders-safe) live draft. */}
+          (now-disabled, but belt-and-suspenders-safe) live draft. Banner's
+          dismiss × is the cancel path. */}
       {overwriteSnapshot && (
-        <div className="banner-error builder-overwrite-banner">
-          <span>Overwrite set '{overwriteSnapshot.slug}'?</span>
-          <button className="primary" onClick={() => handleSave(true)} disabled={saving}>
-            Overwrite
-          </button>
-          <button onClick={cancelOverwrite} disabled={saving}>
-            Cancel
-          </button>
-        </div>
+        <Banner
+          message={messages.overwriteSet(overwriteSnapshot.slug)}
+          onAction={() => handleSave(true)}
+          onDismiss={cancelOverwrite}
+        />
       )}
 
       <div className="builder-layout">
         {/* Disabled as a whole (native fieldset cascade covers every
-            input/textarea/select/button inside, including ModelLibrary's
-            Place buttons) whenever an overwrite confirmation is pending —
-            see CRITICAL 1. The lemonade/comfyui drop target isn't a form control, so
-            handleDrop also short-circuits explicitly while a snapshot is
-            pending. */}
+            input/textarea/select/button inside, across component
+            boundaries: ModelLibrary's search and Place buttons, SavedSets'
+            per-row Load/Duplicate/Delete, and every control in the draft
+            card) whenever an overwrite confirmation is pending — see
+            CRITICAL 1. The lemonade/comfyui drop target isn't a form
+            control, so handleDrop also short-circuits explicitly while a
+            snapshot is pending. */}
         <fieldset className="builder-fieldset" disabled={overwriteSnapshot !== null}>
-          <ModelLibrary models={models} onPlace={placeModel} targetGpu={sharedGpu} />
+          <div className="builder-side">
+            <ModelLibrary models={models} onPlace={placeModel} targetGpu={sharedGpu} />
+            <SavedSets
+              sets={sets}
+              listError={listError}
+              onLoad={handleLoad}
+              onDuplicate={handleDuplicate}
+              onDelete={handleDelete}
+            />
+          </div>
 
           <div className="builder-main">
-            <div className="panel">
-              <h2>Set Builder</h2>
-
-              <div className="builder-load-row">
-                <select
-                  aria-label="load an existing set"
-                  value={selectedSlug}
-                  onChange={(e) => setSelectedSlug(e.target.value)}
-                >
-                  <option value="">select a saved set…</option>
-                  {sets.map((s) => (
-                    <option key={s.name} value={slugify(s.name)}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-                <button onClick={handleLoad} disabled={!selectedSlug}>
-                  Load
-                </button>
-                <button onClick={handleDuplicate} disabled={!selectedSlug}>
-                  Duplicate
-                </button>
-              </div>
-              {listError && <div className="banner-error"><span>{listError}</span></div>}
-
+            <Panel className="builder-meta">
               <label className="builder-field">
                 name
                 <input
@@ -398,41 +415,24 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
               )}
 
               {saveError && (
-                <div className="banner-error">
-                  <span>{saveError}</span>
-                  <button onClick={() => setSaveError(null)} aria-label="dismiss error">
-                    ×
-                  </button>
-                </div>
+                <Banner
+                  message={messages.guardRefused(saveError)}
+                  onDismiss={() => setSaveError(null)}
+                />
               )}
 
               <div className="builder-actions">
                 <button
+                  type="button"
                   className="primary"
                   onClick={() => handleSave(false)}
                   disabled={saving || !draft.name}
                 >
-                  {saving ? "Saving…" : "Save"}
+                  {saving ? labels.saving : labels.saveDraft}
                 </button>
 
-                {!deleteArmed ? (
-                  <button
-                    onClick={() => setDeleteArmed(true)}
-                    disabled={!savedSlug}
-                    title={!savedSlug ? "load or save a set first" : undefined}
-                  >
-                    Delete
-                  </button>
-                ) : (
-                  <>
-                    <button className="primary" onClick={confirmDelete}>
-                      Really delete?
-                    </button>
-                    <button onClick={() => setDeleteArmed(false)}>Cancel</button>
-                  </>
-                )}
-
                 <button
+                  type="button"
                   onClick={() => {
                     setPreviewOpen(true);
                     onModalOpenChange(true);
@@ -446,166 +446,164 @@ export default function SetBuilder({ models, gpus, world, onModalOpenChange }: S
                         : undefined
                   }
                 >
-                  Preview steps
+                  {labels.previewSteps}
+                </button>
+
+                <button type="button" onClick={resetDraft}>
+                  {labels.cancel}
                 </button>
               </div>
-            </div>
+            </Panel>
 
-            <div className="gpu-row">
-              <div className="gpu-column">
-                <h2>GPU {hipfireGpu}</h2>
-                {gpu0Pct > 90 && (
-                  <div className="banner-error">
-                    <span>Over budget — loads may fail</span>
+            <Panel
+              draft
+              className="builder-node"
+              title={nodeLabel}
+              actions={<span className="ui-pill ui-pill-busy">{labels.draftPill}</span>}
+            >
+              <div className="builder-gpu-row">
+                <div className="builder-gpu">
+                  <h3>GPU {hipfireGpu}</h3>
+                  {gpu0Pct > OVER_BUDGET_PCT && <Banner message={messages.overBudget()} />}
+                  {/* Subdued only while hipfire is "don't touch": the bar is
+                      then reporting the LIVE footprint, not a drafted one,
+                      and the caption underneath says so in words. */}
+                  <div className={hipfire === null ? "builder-meter-subdued" : undefined}>
+                    <Meter capacity={{ used: gpu0Bytes, total: gpu0Total }} />
                   </div>
-                )}
-                <div className="gpu-meter">
-                  <div className="meter-track">
-                    <div
-                      className={
-                        hipfire === null
-                          ? "meter-fill meter-fill-subdued"
-                          : meterFillClass(gpu0Pct)
-                      }
-                      style={{ width: `${Math.min(gpu0Pct, 100)}%` }}
-                    />
-                  </div>
-                  <div className="meter-label">
-                    {bytesToGB(gpu0Bytes)} / {bytesToGB(gpu0Total)} GB ({gpu0Pct.toFixed(0)}%)
-                    {hipfire === null && " · current live state"}
-                  </div>
-                </div>
+                  {hipfire === null && <p className="helper-text">current live state</p>}
 
-                <div className="tenant-card">
-                  <div className="tenant-card-head">
-                    <span className="tenant-name">hipfire</span>
-                  </div>
-                  <div className="tenant-actions">
-                    <button
-                      className={hipfireChoice === "none" ? "primary" : undefined}
-                      onClick={() => setHipfireChoice("none")}
-                    >
-                      don't touch
-                    </button>
-                    <button
-                      className={hipfireChoice === "running" ? "primary" : undefined}
-                      onClick={() => setHipfireChoice("running")}
-                    >
-                      Running
-                    </button>
-                    <button
-                      className={hipfireChoice === "parked" ? "primary" : undefined}
-                      onClick={() => setHipfireChoice("parked")}
-                    >
-                      Parked
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div
-                className="gpu-column set-builder-drop"
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={handleDrop}
-              >
-                <h2>GPU {sharedGpu}</h2>
-                {gpu1Pct > 90 && (
-                  <div className="banner-error">
-                    <span>Over budget — loads may fail</span>
-                  </div>
-                )}
-                <div className="gpu-meter">
-                  <div className="meter-track">
-                    <div
-                      className={meterFillClass(gpu1Pct)}
-                      style={{ width: `${Math.min(gpu1Pct, 100)}%` }}
-                    />
-                  </div>
-                  <div className="meter-label">
-                    {bytesToGB(gpu1Bytes)} / {bytesToGB(gpu1Total)} GB ({gpu1Pct.toFixed(0)}%)
-                  </div>
-                </div>
-
-                <div className="tenant-card">
-                  <div className="tenant-card-head">
-                    <span className="tenant-name">lemonade</span>
-                  </div>
-                  {placedModel ? (
-                    <>
-                      <div className="tenant-meta">
-                        <span title={placedModel}>{truncateMiddle(placedModel)}</span>
-                        <span>{bytesToGB(placedFootprint)} GB</span>
-                      </div>
-                      <p className="helper-text">Placed model becomes the default chat route.</p>
-                      <input
-                        type="text"
-                        className="builder-catalog-id"
-                        placeholder="catalog id (optional, enables durable revert)"
-                        value={catalogId}
-                        onChange={(e) => updateCatalogId(e.target.value)}
-                      />
-                      <div className="tenant-actions">
-                        <button onClick={removeModel}>remove model</button>
-                      </div>
-                    </>
-                  ) : durable ? (
-                    // durable persists even though no placedModel could be
-                    // derived from it (e.g. default_route_model without the
-                    // "extra." prefix) — surfaced explicitly so it can
-                    // never silently ride along on save. See IMPORTANT 4.
-                    <div className="durable-chip">
-                      <span>durable route: {durable.default_route_model}</span>
-                      <button onClick={() => setDurable(null)} aria-label="clear durable route">
-                        ✕
+                  <div className="tenant-card">
+                    <div className="tenant-card-head">
+                      <span className="tenant-name">hipfire</span>
+                    </div>
+                    <div className="tenant-actions">
+                      <button
+                        type="button"
+                        className={hipfireChoice === "none" ? "primary" : undefined}
+                        onClick={() => setHipfireChoice("none")}
+                      >
+                        don't touch
+                      </button>
+                      <button
+                        type="button"
+                        className={hipfireChoice === "running" ? "primary" : undefined}
+                        onClick={() => setHipfireChoice("running")}
+                      >
+                        Running
+                      </button>
+                      <button
+                        type="button"
+                        className={hipfireChoice === "parked" ? "primary" : undefined}
+                        onClick={() => setHipfireChoice("parked")}
+                      >
+                        Parked
                       </button>
                     </div>
-                  ) : (
-                    <div className="dropzone-empty">
-                      Drag a model here from the library, or use its Place button.
-                      {lemonade?.state === "unloaded" && " (currently set to unload)"}
-                    </div>
-                  )}
+                  </div>
                 </div>
 
-                <div className="tenant-card">
-                  <div className="tenant-card-head">
-                    <span className="tenant-name">comfyui</span>
+                <div
+                  className="builder-gpu set-builder-drop"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={handleDrop}
+                >
+                  <h3>GPU {sharedGpu}</h3>
+                  {gpu1Pct > OVER_BUDGET_PCT && <Banner message={messages.overBudget()} />}
+                  <Meter capacity={{ used: gpu1Bytes, total: gpu1Total }} />
+
+                  <div className="tenant-card">
+                    <div className="tenant-card-head">
+                      <span className="tenant-name">lemonade</span>
+                    </div>
+                    {placedModel ? (
+                      <>
+                        <div className="tenant-meta">
+                          <span title={placedModel}>{truncateMiddle(placedModel)}</span>
+                          <span>{bytesToGB(placedFootprint)} GB</span>
+                        </div>
+                        <p className="helper-text">Placed model becomes the default chat route.</p>
+                        <input
+                          type="text"
+                          className="builder-catalog-id"
+                          placeholder="catalog id (optional, enables durable revert)"
+                          value={catalogId}
+                          onChange={(e) => updateCatalogId(e.target.value)}
+                        />
+                        <div className="tenant-actions">
+                          <button type="button" onClick={removeModel}>
+                            remove model
+                          </button>
+                        </div>
+                      </>
+                    ) : durable ? (
+                      // durable persists even though no placedModel could be
+                      // derived from it (e.g. default_route_model without the
+                      // "extra." prefix) — surfaced explicitly so it can
+                      // never silently ride along on save. See IMPORTANT 4.
+                      <div className="durable-chip">
+                        <span>durable route: {durable.default_route_model}</span>
+                        <button
+                          type="button"
+                          onClick={() => setDurable(null)}
+                          aria-label="clear durable route"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="builder-dropzone">{labels.dropToAssign}</div>
+                        {lemonade?.state === "unloaded" && (
+                          <p className="helper-text">currently set to unload</p>
+                        )}
+                      </>
+                    )}
                   </div>
-                  <div className="tenant-actions">
-                    <button
-                      className={comfyChoice === "none" ? "primary" : undefined}
-                      onClick={() => setComfyChoice("none")}
-                    >
-                      don't touch
-                    </button>
-                    <button
-                      className={comfyChoice === "leave" ? "primary" : undefined}
-                      onClick={() => setComfyChoice("leave")}
-                    >
-                      leave (reserve)
-                    </button>
-                    <button
-                      className={comfyChoice === "free" ? "primary" : undefined}
-                      onClick={() => setComfyChoice("free")}
-                    >
-                      free
-                    </button>
+
+                  <div className="tenant-card">
+                    <div className="tenant-card-head">
+                      <span className="tenant-name">comfyui</span>
+                    </div>
+                    <div className="tenant-actions">
+                      <button
+                        type="button"
+                        className={comfyChoice === "none" ? "primary" : undefined}
+                        onClick={() => setComfyChoice("none")}
+                      >
+                        don't touch
+                      </button>
+                      <button
+                        type="button"
+                        className={comfyChoice === "leave" ? "primary" : undefined}
+                        onClick={() => setComfyChoice("leave")}
+                      >
+                        leave (reserve)
+                      </button>
+                      <button
+                        type="button"
+                        className={comfyChoice === "free" ? "primary" : undefined}
+                        onClick={() => setComfyChoice("free")}
+                      >
+                        free
+                      </button>
+                    </div>
+                    {comfyChoice === "leave" && (
+                      <label className="builder-field builder-field-inline">
+                        reserve GB
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={reserveGb}
+                          onChange={(e) => updateReserveGb(Number(e.target.value))}
+                        />
+                      </label>
+                    )}
                   </div>
-                  {comfyChoice === "leave" && (
-                    <label className="builder-field builder-field-inline">
-                      reserve GB
-                      <input
-                        type="number"
-                        min={1}
-                        step={1}
-                        value={reserveGb}
-                        onChange={(e) => updateReserveGb(Number(e.target.value))}
-                      />
-                    </label>
-                  )}
                 </div>
               </div>
-            </div>
+            </Panel>
           </div>
         </fieldset>
       </div>

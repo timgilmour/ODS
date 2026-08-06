@@ -178,6 +178,7 @@ export default function App() {
             models={state.models}
             gpus={state.world.gpus}
             world={state.world}
+            nodeLabel={state.node.label}
             onModalOpenChange={setModalOpen}
           />
         ) : (

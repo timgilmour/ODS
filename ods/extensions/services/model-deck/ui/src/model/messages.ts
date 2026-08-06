@@ -134,6 +134,34 @@ export const messages = {
     title: "Storage state failed",
     body: detail,
   }),
+
+  // Set Builder. Neutral, and permanent: this screen composes a *draft*, and
+  // the one place a draft becomes a deployment is Activate, which does not
+  // live here. Deliberately not amber — nothing is asking for a decision, it
+  // is stating what the screen is.
+  draftNothingDeployed: (): Message => ({
+    tone: "neutral",
+    title: "DRAFT — nothing is deployed",
+    body: "composition happens here; Activate is the only deploy verb.",
+  }),
+
+  // Amber, which is decision 5's exact meaning for amber: a save collided
+  // with an existing slug and the operator has to say whether to replace it.
+  // Banner's dismiss × is the cancel path.
+  overwriteSet: (slug: string): Message => ({
+    tone: "warning",
+    title: `Overwrite set '${slug}'?`,
+    action: { label: "Overwrite" },
+  }),
+
+  // Also amber, also a decision: the drafted footprint will not fit, so the
+  // operator is asked to reconsider the draft. Nothing has failed — nothing
+  // has even been attempted yet — so this is not danger.
+  overBudget: (): Message => ({
+    tone: "warning",
+    title: "Over budget",
+    body: "loads may fail.",
+  }),
 };
 
 /** Short labels — control text, badges, captions and the `title` tooltips
@@ -252,6 +280,22 @@ export const labels = {
   pinTitlePinned: "pinned — click to unpin",
   pinTitleUnpinned: "click to pin (exempt from tiering)",
   readonly: "read-only",
+
+  // Set Builder: the model library, the saved-sets list that replaced the
+  // load dropdown, and the draft node card's own vocabulary.
+  modelLibrary: "Model library",
+  searchModels: "Search models…",
+  savedSets: "Saved Sets",
+  noSavedSets: "no saved sets",
+  loadSet: "Load",
+  duplicateSet: "Duplicate",
+  deleteSet: "Delete",
+  reallyDelete: "Really delete?",
+  dropToAssign: "Drop to assign",
+  draftPill: "DRAFT",
+  saveDraft: "Save draft",
+  previewSteps: "Preview steps",
+  place: "Place",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is
