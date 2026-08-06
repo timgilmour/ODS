@@ -278,7 +278,15 @@ function JobsPanel({ jobs, onChanged }: { jobs: StorageJob[]; onChanged: () => v
                 <div className="storage-job-route">
                   {job.from} → {job.to}
                 </div>
-                <Meter capacity={{ used: job.bytes_done, total: job.bytes_total }} />
+                {/* tone="neutral": this is a job PROGRESS fraction, not a
+                    capacity reading — decision 5 says jobs stay
+                    blue/in-progress regardless of how close to done they
+                    are; the state chip beside it already carries
+                    failed/cancelled. */}
+                <Meter
+                  capacity={{ used: job.bytes_done, total: job.bytes_total }}
+                  tone="neutral"
+                />
                 {job.error && <div className="failed">{job.error}</div>}
                 {rowError && rowError.id === job.id && (
                   <Banner
