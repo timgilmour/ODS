@@ -1405,13 +1405,24 @@ def test_tick_stamps_last_healthy_when_serving(tmp_path):
 
 
 def test_two_failed_restores_quarantine_and_stop_retrying(tmp_path):
-    """The crash-loop guard: after FAILURE_BUDGET attempts, stop."""
+    """The crash-loop guard: after FAILURE_BUDGET attempts, stop.
+
+    Clock advances past _RESTORE_COOLDOWN_S between ticks: this test's
+    invariant is the failure budget, not the Task 5 per-key cooldown, so the
+    cooldown must not itself suppress the second (budget-exhausting) attempt.
+    Ticks 3-4 stay at the same time on purpose — once quarantined, status is
+    'quarantined' not 'down' (app.lifecycle.derive_status), so plan_reconcile
+    emits nothing for them regardless of cooldown state."""
     store = _intent(tmp_path)
     hipfire = FakeHipfire(state="parked")
     hipfire.fail = EngineError("boom")
-    watcher, events_path = _reconcile_watcher(tmp_path, store, hipfire=hipfire)
+    clock = _FakeClock()
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, hipfire=hipfire, clock=clock,
+    )
 
     watcher.tick()
+    clock.advance(31)
     watcher.tick()
     watcher.tick()
     watcher.tick()
@@ -1684,12 +1695,15 @@ def test_restore_floor_limits_repeated_per_tick_derives(tmp_path):
     """A resource that keeps crash-looping can have _restore() succeed at the
     API level every ~2 s tick (e.g. resume() returns fine) without ever
     raising, so the failure-budget/quarantine machinery — which only trips
-    on a raise — never engages, and reconcile re-dispatches a restore every
-    tick for as long as the observed world stays down. The first restore of
-    that incident still derives immediately (Tim's ruling); every restore
-    after it, in rapid succession, must NOT also clear the throttle, or the
-    checkpoint scan + spark probe would run on every tick for the whole
-    incident — exactly the pointless I/O the throttle exists to prevent."""
+    on a raise — never engages. Before the Task 5 per-key restore cooldown,
+    reconcile re-dispatched a restore every tick for as long as the observed
+    world stayed down; now the cooldown itself bounds that to one real
+    restore attempt per _RESTORE_COOLDOWN_S (both constants are 30 s), so a
+    5-tick rapid-succession crash loop produces exactly ONE restore, not
+    five. The first (only) restore of the incident still derives immediately
+    (Tim's ruling) and, because no further restore fires within the window,
+    the derive-restore floor never gets a second attempt to suppress either —
+    it and the cooldown converge on the same one-extra-derive outcome here."""
     store = _intent(tmp_path)  # local/hipfire wants state=loaded
     hipfire = FakeHipfire(state="running")
     world = FakeWorld(_world(hipfire=_hip(state="running", model="gpt-oss")))
@@ -1709,8 +1723,8 @@ def test_restore_floor_limits_repeated_per_tick_derives(tmp_path):
     for _ in range(5):
         watcher.tick()
 
-    assert hipfire.calls.count("resume") == 5   # restored every single tick
-    assert len(calls) == 2                       # but derived only ONCE more
+    assert hipfire.calls.count("resume") == 1   # cooldown: one attempt, not five
+    assert len(calls) == 2                       # and still only ONE extra derive
 
 
 def test_restore_triggered_derive_resumes_after_the_floor_elapses(tmp_path):
@@ -1924,3 +1938,31 @@ def test_same_tick_evict_and_reload_pins_single_load_and_final_intent(tmp_path):
     record = intent.get()["local/lemonade"]
     assert record["state"] == "loaded"  # last write wins, not the eviction arm's 'unloaded'
     assert record["model"] == "extra.model.gguf"
+
+
+def test_reconciler_restores_a_key_at_most_once_per_cooldown(tmp_path):
+    """An externally-dead engine with intent=loaded derives 'down' every
+    tick; without a cooldown that is one restore attempt per 2 s tick.
+    Bound it: one attempt per key per _RESTORE_COOLDOWN_S."""
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.m.gguf", engine="lemonade")
+
+    clock = _FakeClock()
+    lemonade = FakeLemonade()
+    # world permanently shows nothing loaded (the fake load has no effect on
+    # the snapshot) -> 'down' derives on every tick.
+    watcher, _events = _make_watcher(
+        tmp_path, FakeWorld(_world(lemonade=_lem(state="unloaded"))),
+        FakeRegistry(), _policy(), lemonade=lemonade, intent_store=intent,
+        clock=clock,
+    )
+
+    watcher.tick()
+    watcher.tick()
+    assert lemonade.loaded == ["extra.m.gguf"]  # second tick suppressed
+
+    clock.advance(31)
+    watcher.tick()
+    assert lemonade.loaded == ["extra.m.gguf", "extra.m.gguf"]  # cooldown expired

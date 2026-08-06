@@ -143,6 +143,18 @@ _EXTRA_PREFIX = "extra."
 # immediate derive.
 _DERIVE_RESTORE_FLOOR_S = 30.0
 
+# Minimum spacing between restore attempts FOR THE SAME KEY (storm limiter,
+# defense-in-depth for observation windows the earlier tasks don't cover —
+# deck-invisible lazy loads, hipfire/spark record-last windows). The failure
+# budget (app.intent.FAILURE_BUDGET) quarantines repeat FAILURES, but a
+# restore that "succeeds" at the API level and dies out-of-band before the
+# next tick never raises, so it never charges the budget — without this
+# floor, reconcile re-dispatches a real restore every ~2 s tick for as long
+# as the resource keeps flapping (observed live: three restores in 10 s,
+# 2026-08-06). A skipped restore is a non-action: no event, no failure
+# charged.
+_RESTORE_COOLDOWN_S = 30.0
+
 
 # ===========================================================================
 # Heal suppression — shared flag guarding deliberate unloads
@@ -437,6 +449,10 @@ class Watcher:
         # _execute_restore) — separate from _last_derive_at so it tracks only
         # restores, not the regular timed derive passes.
         self._last_restore_derive_at: float | None = None
+        # Per-key restore cooldown (storm limiter, see _RESTORE_COOLDOWN_S):
+        # last monotonic time a restore was ATTEMPTED for this key, success
+        # or failure. Only intent-store callers ever populate it.
+        self._restore_last_attempt_at: dict[str, float] = {}
         # Test-only seam: when set, called once per non-throttled derive pass
         # INSTEAD of the real checkpoint/engine scan, so the throttle timing
         # itself can be tested without a real gguf_dir or spark client.
@@ -665,6 +681,12 @@ class Watcher:
         )
 
         for action in actions:
+            key = action["key"]
+            last = self._restore_last_attempt_at.get(key)
+            now_mono = self._clock()
+            if last is not None and now_mono - last < _RESTORE_COOLDOWN_S:
+                continue  # a skip is a non-action: no event, no failure charged
+            self._restore_last_attempt_at[key] = now_mono
             self._execute_restore(action)
 
     def _spark_status(self) -> dict | None:
