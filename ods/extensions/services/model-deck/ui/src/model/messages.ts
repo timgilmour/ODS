@@ -118,6 +118,22 @@ export const messages = {
     title: "Move failed",
     body: detail,
   }),
+
+  // LocationCard: a location whose mount is missing. Unavailable, not
+  // empty — the units it lists are still on disk, just unreachable right
+  // now, and that distinction is load-bearing (an operator reading "empty"
+  // could conclude the data is gone).
+  mountMissing: (): Message => ({
+    tone: "danger",
+    title: "Mount missing",
+    body: "files retained — the location is unavailable, not empty.",
+  }),
+
+  storageFetchFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Storage state failed",
+    body: detail,
+  }),
 };
 
 /** Short labels — control text, badges, captions and the `title` tooltips
@@ -217,13 +233,25 @@ export const labels = {
   autoTiering: "Auto-tiering: archive to cold on watermark + silent pull-through",
   storageSection: "Storage",
 
-  // MoveModal + the per-unit trigger LocationColumn renders.
+  // MoveModal + the per-unit trigger LocationCard renders.
   moveModel: "Move model",
   moveTo: "Move to…",
   destination: "destination",
   startMove: "Move",
   starting: "Starting…",
   cancelMove: "Cancel move",
+
+  // StorageView's role bands + LocationCard/JobsPanel/OnboardingPanel.
+  hotBand: "HOT",
+  coldBand: "COLD",
+  rescan: "Rescan",
+  rescanning: "Rescanning…",
+  jobsPanel: "Moves",
+  noActiveMoves: "no active moves",
+  noUnits: "no units",
+  pinTitlePinned: "pinned — click to unpin",
+  pinTitleUnpinned: "click to pin (exempt from tiering)",
+  readonly: "read-only",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

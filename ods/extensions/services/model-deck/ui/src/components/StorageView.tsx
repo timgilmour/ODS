@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  bytesToGB,
   cancelStorageJob,
   postStorageRescan,
   registerLocation,
@@ -8,7 +7,11 @@ import {
   type StorageLocation,
   type StorageState,
 } from "../api";
-import LocationColumn from "./LocationColumn";
+import { labels, messages } from "../model/messages";
+import Banner from "../ui/Banner";
+import Meter from "../ui/Meter";
+import Panel from "../ui/Panel";
+import LocationCard from "./LocationCard";
 import MoveModal from "./MoveModal";
 
 interface StorageViewProps {
@@ -30,10 +33,12 @@ const STORE_TYPES: StorageLocation["store_type"][] = ["gguf", "hf", "comfy", "pl
 const ENGINES: StorageLocation["engine"][] = ["lemonade", "comfyui", "none"];
 
 /** Storage tab root: onboarding when no locations are registered yet,
- * otherwise a row of LocationColumns + a jobs panel + Rescan. Owns the
+ * otherwise a HOT band above a COLD band of LocationCards (build-design
+ * decision 3 — hot-above-cold is visible structure, and each band scales to
+ * any number of locations) + a jobs panel + Rescan. Owns the
  * move-confirmation flow (which unit/dest opens MoveModal) since that's
- * the one piece of state shared across columns (a drag from column A can
- * be dropped on column B). */
+ * the one piece of state shared across cards (a drag from card A can be
+ * dropped on card B). */
 export default function StorageView({ storageState, error, onModalOpenChange, onChanged }: StorageViewProps) {
   const [moveRequest, setMoveRequest] = useState<MoveRequest | null>(null);
   const [rescanning, setRescanning] = useState(false);
@@ -59,45 +64,52 @@ export default function StorageView({ storageState, error, onModalOpenChange, on
     }
   }
 
+  const hot = storageState?.locations.filter((l) => l.role === "hot") ?? [];
+  const cold = storageState?.locations.filter((l) => l.role === "cold") ?? [];
+
   return (
     <div className="storage-view">
-      {error && (
-        <div className="banner-error">
-          <span>storage state failed: {error}</span>
-        </div>
-      )}
+      {error && <Banner message={messages.storageFetchFailed(error)} />}
 
       {!storageState ? (
-        <div className="panel">loading…</div>
+        <div className="panel">{labels.loading}</div>
       ) : storageState.locations.length === 0 ? (
         <OnboardingPanel onChanged={onChanged} />
       ) : (
         <>
           <div className="storage-toolbar">
-            <button onClick={handleRescan} disabled={rescanning}>
-              {rescanning ? "Rescanning…" : "Rescan"}
+            <button type="button" onClick={handleRescan} disabled={rescanning}>
+              {rescanning ? labels.rescanning : labels.rescan}
             </button>
             {rescanError && (
-              <div className="banner-error">
-                <span>{rescanError}</span>
-                <button onClick={() => setRescanError(null)} aria-label="dismiss error">
-                  ×
-                </button>
-              </div>
+              <Banner
+                message={messages.guardRefused(rescanError)}
+                onDismiss={() => setRescanError(null)}
+              />
             )}
           </div>
 
-          <div className="storage-row">
-            {storageState.locations.map((loc) => (
-              <LocationColumn
-                key={loc.name}
-                location={loc}
-                units={storageState.units.filter((u) => u.location === loc.name)}
-                onRequestMove={requestMove}
-                onChanged={onChanged}
-              />
+          {[
+            { key: "hot", title: labels.hotBand, locations: hot },
+            { key: "cold", title: labels.coldBand, locations: cold },
+          ]
+            .filter((band) => band.locations.length > 0)
+            .map((band) => (
+              <section key={band.key} className="storage-band">
+                <div className="storage-band-title">{band.title}</div>
+                <div className="storage-grid">
+                  {band.locations.map((loc) => (
+                    <LocationCard
+                      key={loc.name}
+                      location={loc}
+                      units={storageState.units.filter((u) => u.location === loc.name)}
+                      onRequestMove={requestMove}
+                      onChanged={onChanged}
+                    />
+                  ))}
+                </div>
+              </section>
             ))}
-          </div>
 
           <JobsPanel jobs={storageState.jobs} onChanged={onChanged} />
         </>
@@ -152,19 +164,16 @@ function OnboardingPanel({ onChanged }: { onChanged: () => void }) {
   }
 
   return (
-    <div className="panel">
-      <h2>No storage locations yet</h2>
+    <Panel title="No storage locations yet">
       <p className="helper-text">
         1) Bind-mount a drive into the model-deck container in compose. 2) Register it here.
       </p>
 
       {registerError && (
-        <div className="banner-error">
-          <span>{registerError}</span>
-          <button onClick={() => setRegisterError(null)} aria-label="dismiss error">
-            ×
-          </button>
-        </div>
+        <Banner
+          message={messages.guardRefused(registerError)}
+          onDismiss={() => setRegisterError(null)}
+        />
       )}
 
       <div className="storage-register-form">
@@ -220,6 +229,7 @@ function OnboardingPanel({ onChanged }: { onChanged: () => void }) {
           </select>
         </label>
         <button
+          type="button"
           className="primary"
           onClick={handleRegister}
           disabled={registering || !name.trim() || !path.trim()}
@@ -227,7 +237,7 @@ function OnboardingPanel({ onChanged }: { onChanged: () => void }) {
           {registering ? "Registering…" : "Register"}
         </button>
       </div>
-    </div>
+    </Panel>
   );
 }
 
@@ -250,44 +260,35 @@ function JobsPanel({ jobs, onChanged }: { jobs: StorageJob[]; onChanged: () => v
   }
 
   return (
-    <div className="panel storage-jobs">
-      <h2>Moves</h2>
+    <Panel title={labels.jobsPanel} className="storage-jobs">
       {active.length === 0 ? (
-        <div>no active moves</div>
+        <div>{labels.noActiveMoves}</div>
       ) : (
         <ul className="storage-jobs-list">
           {active.map((job) => {
-            const pct = job.bytes_total > 0 ? Math.min((job.bytes_done / job.bytes_total) * 100, 100) : 0;
             const cancellable = job.state === "queued" || job.state === "copying" || job.state === "verifying";
+            const stateClass =
+              job.state === "failed" ? "ui-pill-bad" : job.state === "cancelled" ? "ui-pill-off" : "ui-pill-busy";
             return (
               <li key={job.id} className="storage-job-row">
                 <div className="storage-job-head">
                   <span>{job.label}</span>
-                  <span className={`chip chip-${job.state === "failed" ? "unknown" : job.state === "cancelled" ? "unloaded" : "busy"}`}>
-                    {job.state}
-                  </span>
+                  <span className={`ui-pill ${stateClass}`}>{job.state}</span>
                 </div>
                 <div className="storage-job-route">
                   {job.from} → {job.to}
                 </div>
-                <div className="meter-track">
-                  <div className="meter-fill meter-neutral" style={{ width: `${pct}%` }} />
-                </div>
-                <div className="meter-label">
-                  {bytesToGB(job.bytes_done)} / {bytesToGB(job.bytes_total)} GB
-                </div>
+                <Meter capacity={{ used: job.bytes_done, total: job.bytes_total }} />
                 {job.error && <div className="failed">{job.error}</div>}
                 {rowError && rowError.id === job.id && (
-                  <div className="banner-error">
-                    <span>{rowError.message}</span>
-                    <button onClick={() => setRowError(null)} aria-label="dismiss error">
-                      ×
-                    </button>
-                  </div>
+                  <Banner
+                    message={messages.guardRefused(rowError.message)}
+                    onDismiss={() => setRowError(null)}
+                  />
                 )}
                 {cancellable && (
-                  <button onClick={() => handleCancel(job.id)} disabled={busyId === job.id}>
-                    Cancel
+                  <button type="button" onClick={() => handleCancel(job.id)} disabled={busyId === job.id}>
+                    {labels.cancel}
                   </button>
                 )}
               </li>
@@ -295,6 +296,6 @@ function JobsPanel({ jobs, onChanged }: { jobs: StorageJob[]; onChanged: () => v
           })}
         </ul>
       )}
-    </div>
+    </Panel>
   );
 }

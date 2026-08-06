@@ -24,7 +24,7 @@ interface MoveModalProps {
   /** Every registered location; the modal derives eligible destinations
    * itself: not the unit's own location, and available only — a move onto a
    * missing mount is guaranteed to fail, so it is never offered (same rule
-   * LocationColumn applied when it owned the select). */
+   * LocationCard applied when it owned the select). */
   locations: StorageLocation[];
   /** Preselected destination (a drag onto a specific card) or null (the
    * per-unit Move… path — the operator picks in the modal). */

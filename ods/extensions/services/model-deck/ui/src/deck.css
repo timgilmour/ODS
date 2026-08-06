@@ -652,30 +652,25 @@ input[type="password"] {
   flex-wrap: wrap;
 }
 
-.storage-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
+/* --- Storage bands (phase 2, decision 3) --------------------------------- */
+.storage-band { margin-bottom: calc(var(--space) * 2); }
+.storage-band-title {
+  color: var(--text-dim);
+  font-size: 0.8em;
+  letter-spacing: 0.1em;
+  margin-bottom: var(--space);
+}
+.storage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: calc(var(--space) * 2);
 }
 
-.location-column {
-  flex: 1 1 300px;
-  min-width: 280px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 10px;
-  padding: 0.85rem;
-}
-
-.location-column.location-unavailable {
+/* Desaturates the whole card — name, meta, meter, units together — when its
+ * mount is missing. Standalone (not `.location-card.location-unavailable`)
+ * because it lands on a Panel whose own box styling comes from `.ui-panel`. */
+.location-unavailable {
   opacity: 0.6;
-}
-
-.location-column-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
 }
 
 .location-name {
@@ -689,26 +684,6 @@ input[type="password"] {
   margin-top: 0.15rem;
   font-size: 0.8rem;
   color: var(--text-dim);
-}
-
-.location-unavailable-banner {
-  margin: 0.5rem 0;
-}
-
-.location-meter {
-  margin: 0.65rem 0;
-}
-
-/* Vertical tick over the capacity meter marking watermark_gb — a plain
- * high-contrast bar rather than a new color token, so it reads on both the
- * neutral/amber/red fill states. */
-.meter-watermark {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--text);
-  opacity: 0.75;
 }
 
 .unit-list {
@@ -811,10 +786,6 @@ input[type="password"] {
   font-size: 0.78rem;
   color: var(--text-dim);
   margin: 0.25rem 0 0.4rem;
-}
-
-.storage-job-row .meter-label {
-  margin-bottom: 0.3rem;
 }
 
 .storage-job-row button {
