@@ -89,8 +89,11 @@ class Settings(BaseSettings):
 
     # Characteristics refresh cadence. The watcher ticks every ~2 s;
     # re-reading every checkpoint that often is pointless I/O, so derivation
-    # is throttled to this interval (and runs immediately after a restore,
-    # when live facts are freshly available).
+    # is throttled to this interval — except a successful lifecycle restore
+    # clears the throttle (no new I/O in the restore path itself; see
+    # Watcher._execute_restore), so the very next derive pass captures live
+    # facts while they're freshest instead of waiting up to this many
+    # seconds.
     derive_interval_s: float = 300.0
 
     # Seconds a deliberate lemonade unload (manual, set-apply, or the

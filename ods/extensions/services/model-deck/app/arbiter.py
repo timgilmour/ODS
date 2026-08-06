@@ -88,8 +88,12 @@ Design notes that are load-bearing (and tested):
   checkpoints (``gguf_dir``) and live engine surfaces (``spark``). Throttled
   to ``settings.derive_interval_s`` (default 300 s) because the tick loop
   runs every couple of seconds and checkpoint directories do not change that
-  fast. ``characteristics_store=None`` (the default) disables it entirely —
-  same opt-in shape as ``hostagent``/``intent_store``.
+  fast — EXCEPT a successful ``_reconcile_pass`` restore clears the throttle
+  (``self._last_derive_at = None`` in ``_execute_restore``, no new I/O in the
+  restore path itself), so a resource that just came back up gets its live
+  facts captured by the very same tick's derive pass instead of waiting up
+  to ``derive_interval_s``. ``characteristics_store=None`` (the default)
+  disables it entirely — same opt-in shape as ``hostagent``/``intent_store``.
 """
 
 import threading
@@ -636,6 +640,12 @@ class Watcher:
             if self._intent_store.get().get(key, {}).get("quarantined"):
                 self._log("lifecycle-quarantined", {"key": key})
             return
+        # A resource that just came back up has fresh live facts worth
+        # capturing, not up to derive_interval_s later — clear the throttle
+        # so this tick's already-scheduled _derive_pass() (called right
+        # after _reconcile_pass in tick()) runs instead of being skipped. No
+        # new I/O here: this only resets an in-memory gate.
+        self._last_derive_at = None
         self._log("lifecycle-restore", {"key": key, "model": action["model"]})
 
     def _restore(self, action: dict) -> None:

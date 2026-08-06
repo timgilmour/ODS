@@ -1631,3 +1631,36 @@ def test_derive_failure_does_not_break_the_tick(tmp_path, monkeypatch):
     watcher = _watcher(tmp_path=tmp_path, on_derive=_raises(OSError("disk")))
 
     watcher.tick()   # must not raise
+
+
+def test_restore_clears_derive_throttle_so_the_next_tick_derives(tmp_path):
+    """A resource that just came back up has fresh live facts worth
+    capturing — that must not wait up to derive_interval_s later. Tick 1
+    matches intent (nothing to restore), so derive fires and arms the
+    throttle. Tick 2 finds the resource down and restores it, well within
+    the interval; the restore must clear the throttle so THIS tick's
+    (already-scheduled) derive pass runs again instead of being skipped."""
+    store = _intent(tmp_path)  # local/hipfire wants state=loaded
+    hipfire = FakeHipfire(state="running")
+    world = FakeWorld(_world(hipfire=_hip(state="running", model="gpt-oss")))
+    calls = []
+    watcher = _watcher(
+        tmp_path, world=world, hipfire=hipfire, intent_store=store,
+        on_derive=lambda: calls.append(1),
+    )
+
+    watcher.tick()  # matches intent -> no restore; first-ever derive fires
+    assert len(calls) == 1
+
+    # hipfire goes down -- well within derive_interval_s (default 300 s) of
+    # the first derive, so an un-reset throttle would skip this tick's pass.
+    world._snapshot = _world(hipfire=_hip(state="parked"))
+
+    watcher.tick()  # restore -> must clear the throttle -> derives again
+    assert "resume" in hipfire.calls
+    assert len(calls) == 2
+
+    # Control: nothing left to restore -> the throttle is back in force.
+    world._snapshot = _world(hipfire=_hip(state="running", model="gpt-oss"))
+    watcher.tick()
+    assert len(calls) == 2
