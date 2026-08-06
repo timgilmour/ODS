@@ -7,6 +7,9 @@ import {
   type StorageState,
   type TenantName,
 } from "../api";
+import { labels, messages } from "../model/messages";
+import Banner from "../ui/Banner";
+import Modal from "../ui/Modal";
 
 interface PolicyModalProps {
   policy: PolicyMap;
@@ -132,153 +135,153 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
   }
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true">
-      <div className="modal-box">
-        <h3>Tenant policy</h3>
+    <Modal
+      title={labels.policyTitle}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" onClick={onClose} disabled={saving}>
+            {labels.cancel}
+          </button>
+          <button type="button" className="primary" onClick={handleSave} disabled={saving}>
+            {saving ? labels.saving : labels.save}
+          </button>
+        </>
+      }
+    >
+      {error && (
+        <Banner
+          message={messages.stateRefreshFailed(error)}
+          onDismiss={() => setError(null)}
+        />
+      )}
 
-        {error && (
-          <div className="banner-error">
-            <span>{error}</span>
-            <button onClick={() => setError(null)} aria-label="dismiss error">
-              ×
-            </button>
-          </div>
-        )}
-
-        <table className="policy-table">
-          <thead>
-            <tr>
-              <th>rank</th>
-              <th>tenant</th>
-              <th>pinned</th>
-              <th>idle TTL (s)</th>
-              <th>reorder</th>
+      <table className="policy-table">
+        <thead>
+          <tr>
+            <th>rank</th>
+            <th>tenant</th>
+            <th>pinned</th>
+            <th>idle TTL (s)</th>
+            <th>reorder</th>
+          </tr>
+        </thead>
+        <tbody>
+          {order.map((tenant, i) => (
+            <tr key={tenant}>
+              <td>P{RANKS[i]}</td>
+              <td className="tenant-name">{tenant}</td>
+              <td>
+                <input
+                  type="checkbox"
+                  aria-label={`${tenant} pinned`}
+                  checked={pinned[tenant]}
+                  onChange={(e) =>
+                    setPinned((p) => ({ ...p, [tenant]: e.target.checked }))
+                  }
+                />
+              </td>
+              <td>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  aria-label={`${tenant} idle ttl seconds`}
+                  value={idleTtl[tenant]}
+                  onChange={(e) =>
+                    setIdleTtl((p) => ({
+                      ...p,
+                      // Whole seconds only — fractional input causes an
+                      // avoidable server 422.
+                      [tenant]: Math.max(0, Math.round(Number(e.target.value) || 0)),
+                    }))
+                  }
+                />
+              </td>
+              <td className="policy-reorder">
+                <button
+                  type="button"
+                  aria-label={`move ${tenant} up`}
+                  onClick={() => moveUp(i)}
+                  disabled={i === 0}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  aria-label={`move ${tenant} down`}
+                  onClick={() => moveDown(i)}
+                  disabled={i === order.length - 1}
+                >
+                  ↓
+                </button>
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            {order.map((tenant, i) => (
-              <tr key={tenant}>
-                <td>P{RANKS[i]}</td>
-                <td className="tenant-name">{tenant}</td>
-                <td>
-                  <input
-                    type="checkbox"
-                    aria-label={`${tenant} pinned`}
-                    checked={pinned[tenant]}
-                    onChange={(e) =>
-                      setPinned((p) => ({ ...p, [tenant]: e.target.checked }))
-                    }
-                  />
-                </td>
-                <td>
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    aria-label={`${tenant} idle ttl seconds`}
-                    value={idleTtl[tenant]}
-                    onChange={(e) =>
-                      setIdleTtl((p) => ({
-                        ...p,
-                        // Whole seconds only — fractional input causes an
-                        // avoidable server 422.
-                        [tenant]: Math.max(0, Math.round(Number(e.target.value) || 0)),
-                      }))
-                    }
-                  />
-                </td>
-                <td className="policy-reorder">
-                  <button
-                    aria-label={`move ${tenant} up`}
-                    onClick={() => moveUp(i)}
-                    disabled={i === 0}
-                  >
-                    ↑
-                  </button>
-                  <button
-                    aria-label={`move ${tenant} down`}
-                    onClick={() => moveDown(i)}
-                    disabled={i === order.length - 1}
-                  >
-                    ↓
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+          ))}
+        </tbody>
+      </table>
 
-        {storageState && (
-          <div className="policy-storage-section">
-            <h4>Storage</h4>
-            <label>
-              <input
-                type="checkbox"
-                checked={autoTiering}
-                onChange={(e) => setAutoTiering(e.target.checked)}
-              />{" "}
-              Auto-tiering: archive to cold on watermark + silent pull-through
-            </label>
+      {storageState && (
+        <div className="policy-storage-section">
+          <h4>{labels.storageSection}</h4>
+          <label>
+            <input
+              type="checkbox"
+              checked={autoTiering}
+              onChange={(e) => setAutoTiering(e.target.checked)}
+            />{" "}
+            {labels.autoTiering}
+          </label>
 
-            {hotLocations.length > 0 && (
-              <table className="policy-table">
-                <thead>
-                  <tr>
-                    <th>hot location</th>
-                    <th>watermark (GB)</th>
-                    <th>archive to</th>
+          {hotLocations.length > 0 && (
+            <table className="policy-table">
+              <thead>
+                <tr>
+                  <th>hot location</th>
+                  <th>watermark (GB)</th>
+                  <th>archive to</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hotLocations.map((loc) => (
+                  <tr key={loc.name}>
+                    <td className="tenant-name">{loc.name}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        placeholder="disabled"
+                        aria-label={`${loc.name} watermark GB`}
+                        value={watermarkInputs[loc.name] ?? ""}
+                        onChange={(e) =>
+                          setWatermarkInputs((w) => ({ ...w, [loc.name]: e.target.value }))
+                        }
+                      />
+                    </td>
+                    <td>
+                      <select
+                        aria-label={`${loc.name} archive to`}
+                        value={archiveInputs[loc.name] ?? ""}
+                        onChange={(e) =>
+                          setArchiveInputs((a) => ({ ...a, [loc.name]: e.target.value }))
+                        }
+                      >
+                        <option value="">—</option>
+                        {coldLocations.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {hotLocations.map((loc) => (
-                    <tr key={loc.name}>
-                      <td className="tenant-name">{loc.name}</td>
-                      <td>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          placeholder="disabled"
-                          aria-label={`${loc.name} watermark GB`}
-                          value={watermarkInputs[loc.name] ?? ""}
-                          onChange={(e) =>
-                            setWatermarkInputs((w) => ({ ...w, [loc.name]: e.target.value }))
-                          }
-                        />
-                      </td>
-                      <td>
-                        <select
-                          aria-label={`${loc.name} archive to`}
-                          value={archiveInputs[loc.name] ?? ""}
-                          onChange={(e) =>
-                            setArchiveInputs((a) => ({ ...a, [loc.name]: e.target.value }))
-                          }
-                        >
-                          <option value="">—</option>
-                          {coldLocations.map((c) => (
-                            <option key={c.name} value={c.name}>
-                              {c.name}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        <div className="modal-actions">
-          <button onClick={onClose} disabled={saving}>
-            Cancel
-          </button>
-          <button className="primary" onClick={handleSave} disabled={saving}>
-            {saving ? "Saving…" : "Save"}
-          </button>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
-      </div>
-    </div>
+      )}
+    </Modal>
   );
 }

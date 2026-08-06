@@ -200,6 +200,13 @@ export const labels = {
   estimate: (s: number) => `about ${s}s`,
   noChanges: "no changes — already matches this set",
   stepsCompleted: (n: number) => `${n} step(s) completed`,
+
+  // PolicyModal.
+  policyTitle: "Policy",
+  save: "Save",
+  saving: "Saving…",
+  autoTiering: "Auto-tiering: archive to cold on watermark + silent pull-through",
+  storageSection: "Storage",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is
