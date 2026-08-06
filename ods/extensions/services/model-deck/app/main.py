@@ -87,6 +87,8 @@ def _build_deck(settings: Settings) -> dict:
 
     from app.arbiter import HealSuppressor
     from app.catalog import Catalog
+    from app.characteristics import CharacteristicsStore
+    from app.declared import DeclaredStore
     from app.engines.comfyui import ComfyClient
     from app.engines.docker_ctl import DockerCtl
     from app.engines.hipfire import HipfireClient
@@ -161,6 +163,9 @@ def _build_deck(settings: Settings) -> dict:
         "spark": spark_client,
         "litellm": litellm,
         "registry": Registry(data_dir / "registry.json", _GGUF_DIR),
+        "characteristics_store": CharacteristicsStore(data_dir / "characteristics.json"),
+        "declared_store": DeclaredStore(data_dir / "declared.json"),
+        "gguf_dir": _GGUF_DIR,
         "policy_store": PolicyStore(data_dir / "policy.json"),
         # Durable desired state. Shared, like policy_store, between the HTTP
         # routers (which write it on every deliberate action) and — once the
@@ -230,6 +235,10 @@ def _build_watcher(settings: Settings):
         # paths: status() costs two node-agent requests and an absent sparky
         # burns a 5 s timeout on each.
         spark_observer=deck["spark_observer"],
+        # Characteristics derive pass: same shared store the HTTP routers
+        # will read from, and the read-only GGUF mount to scan.
+        characteristics_store=deck["characteristics_store"],
+        gguf_dir=deck["gguf_dir"],
     )
 
 

@@ -175,6 +175,19 @@ class SparkClient:
             "serving": serving,
         }
 
+    def models(self) -> dict:
+        """The serving endpoint's OpenAI-style /v1/models body — the deck's
+        one source of truth for a remote model's live facts (context length,
+        etc.), consumed by the characteristics derive pass
+        (app.arbiter.Watcher._derive_pass / app.derive_live)."""
+        try:
+            resp = self._serving.get("/v1/models")
+        except httpx.TransportError as exc:
+            raise EngineError(str(exc)) from exc
+        if not resp.is_success:
+            raise EngineError(resp.text)
+        return resp.json()
+
     def swap_in_progress(self) -> bool:
         """True while a previous swap is still booting. Same judgement the
         boot-window guard in swap() makes, exposed for the deck's lifecycle

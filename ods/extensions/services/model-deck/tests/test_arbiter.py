@@ -15,10 +15,12 @@ thread needed for behavior coverage); a single thread test proves
 start()/stop() runs at least one tick and joins promptly.
 """
 
+import json
 import threading
 import time
 
 from app.arbiter import HealSuppressor, Watcher, decide
+from app.characteristics import CharacteristicsStore
 from app.engines import EngineError, GuardError
 from app.events import tail_events
 
@@ -574,7 +576,8 @@ def _settings(**overrides):
 def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
     heal_suppressor=None, hostagent=None, catalog=None, hipfire=None,
-    intent_store=None, spark=None, auto=True, **sett,
+    intent_store=None, spark=None, auto=True, characteristics_store=None,
+    gguf_dir=None, clock=None, on_derive=None, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -593,8 +596,62 @@ def _make_watcher(
         catalog=catalog,
         intent_store=intent_store,
         spark=spark,
+        characteristics_store=characteristics_store,
+        gguf_dir=gguf_dir,
+        clock=clock if clock is not None else time.monotonic,
+        on_derive=on_derive,
     )
     return watcher, events_path
+
+
+def _watcher(tmp_path, world=None, registry=None, policy=None, **kwargs):
+    """Thin wrapper around ``_make_watcher`` for tests (the characteristics
+    derive-pass tests below) that don't care about arbitration/reconciliation
+    setup and just want a watcher with sane defaults, returning the watcher
+    alone rather than the ``(watcher, events_path)`` pair."""
+    watcher, _events_path = _make_watcher(
+        tmp_path,
+        world if world is not None else FakeWorld(_world()),
+        registry if registry is not None else FakeRegistry(),
+        policy if policy is not None else _policy(),
+        **kwargs,
+    )
+    return watcher
+
+
+class _FakeClock:
+    """A monotonic()-alike callable clock, advanceable without sleeping —
+    distinct from FakeClock above (HealSuppressor's clock) so the derive-pass
+    throttle tests don't entangle with heal-suppression tests."""
+
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+def _checkpoint_tree(tmp_path):
+    """One checkpoint directory with a minimal config.json, for
+    Watcher._derive_pass's gguf_dir scan."""
+    gguf_dir = tmp_path / "checkpoints"
+    model_dir = gguf_dir / "some-model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text(json.dumps({"architectures": ["SomeArch"]}))
+    return gguf_dir
+
+
+def _raises(exc):
+    """A zero-arg callable that raises `exc` when invoked — for injecting a
+    derive-pass failure without a real unreadable checkpoint or engine."""
+
+    def _fn():
+        raise exc
+
+    return _fn
 
 
 def test_watcher_tick_heals_contention_then_reloads(tmp_path):
@@ -1524,3 +1581,53 @@ def test_no_spark_configured_emits_no_phantom_key(tmp_path):
     kinds = [e["kind"] for e in tail_events(events_path)]
     assert "lifecycle-restore" not in kinds
     assert "lifecycle-restore-failed" not in kinds
+
+
+# ===========================================================================
+# CHARACTERISTICS DERIVE PASS (task 6) — throttled by settings.derive_interval_s
+# ===========================================================================
+
+
+def test_derive_pass_runs_on_first_tick(tmp_path, monkeypatch):
+    store = CharacteristicsStore(tmp_path / "c.json")
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       gguf_dir=_checkpoint_tree(tmp_path))
+
+    watcher.tick()
+
+    assert store.get(), "expected at least one derived entry"
+
+
+def test_derive_pass_is_throttled(tmp_path, monkeypatch):
+    """The watcher ticks every 2 s. Scanning every checkpoint that often is
+    pointless I/O, and the reason someone would turn this off."""
+    calls = []
+    watcher = _watcher(tmp_path=tmp_path, derive_interval_s=300.0,
+                       on_derive=lambda: calls.append(1))
+
+    watcher.tick()
+    watcher.tick()
+    watcher.tick()
+
+    assert len(calls) == 1
+
+
+def test_derive_pass_reruns_after_the_interval(tmp_path, monkeypatch):
+    clock = _FakeClock()
+    calls = []
+    watcher = _watcher(tmp_path=tmp_path, derive_interval_s=300.0,
+                       on_derive=lambda: calls.append(1), clock=clock)
+
+    watcher.tick()
+    clock.advance(301)
+    watcher.tick()
+
+    assert len(calls) == 2
+
+
+def test_derive_failure_does_not_break_the_tick(tmp_path, monkeypatch):
+    """Supervisor rule again: a bad checkpoint must not stop arbitration or
+    reconciliation."""
+    watcher = _watcher(tmp_path=tmp_path, on_derive=_raises(OSError("disk")))
+
+    watcher.tick()   # must not raise

@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     )
     watch_interval: float = 2.0
 
+    # Characteristics refresh cadence. The watcher ticks every ~2 s;
+    # re-reading every checkpoint that often is pointless I/O, so derivation
+    # is throttled to this interval (and runs immediately after a restore,
+    # when live facts are freshly available).
+    derive_interval_s: float = 300.0
+
     # Seconds a deliberate lemonade unload (manual, set-apply, or the
     # watcher's own idle release) suppresses contention healing's pending-load
     # inference, so healing can't immediately revert it. A subsequent load

@@ -160,6 +160,37 @@ def test_status_raises_engineerror_on_node_transport_failure():
         client.status()
 
 
+# --- models (characteristics derive pass) ---
+
+def _models_handler(body):
+    def handler(request):
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json=body, request=request)
+    return handler
+
+
+def test_models_returns_the_serving_v1_models_body():
+    body = {"data": [{"id": "heretic", "max_model_len": 131072}]}
+    client = _client(_node_handler(), metrics_handler=_models_handler(body))
+    assert client.models() == body
+
+
+def test_models_raises_engineerror_on_serving_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("serving down")
+    client = _client(_node_handler(), metrics_handler=handler)
+    with pytest.raises(EngineError):
+        client.models()
+
+
+def test_models_raises_engineerror_on_non_2xx():
+    def handler(request):
+        return httpx.Response(500, text="boom", request=request)
+    client = _client(_node_handler(), metrics_handler=handler)
+    with pytest.raises(EngineError):
+        client.models()
+
+
 # --- swap guards ---
 
 def test_swap_posts_profile_and_returns_request_id():

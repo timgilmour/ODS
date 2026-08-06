@@ -82,12 +82,24 @@ Design notes that are load-bearing (and tested):
   stops ods-hipfire sitting Exited(0) for 26 hours looking exactly like a
   deliberate park (2026-08-03). ``intent_store=None`` (the default) disables
   it entirely — same opt-in shape as ``hostagent``.
+
+* CHARACTERISTICS DERIVE PASS (``_derive_pass``) is a third, independent pass
+  at the very end of every tick, refreshing app.characteristics from local
+  checkpoints (``gguf_dir``) and live engine surfaces (``spark``). Throttled
+  to ``settings.derive_interval_s`` (default 300 s) because the tick loop
+  runs every couple of seconds and checkpoint directories do not change that
+  fast. ``characteristics_store=None`` (the default) disables it entirely —
+  same opt-in shape as ``hostagent``/``intent_store``.
 """
 
 import threading
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
-from app.engines import EngineError, GuardError
+from app.derive_checkpoint import derive_checkpoint
+from app.derive_live import derive_live_models
+from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.lifecycle import derive_status
 from app.observe import (
@@ -341,6 +353,10 @@ class Watcher:
         intent_store=None,
         spark=None,
         spark_observer=None,
+        characteristics_store=None,
+        gguf_dir=None,
+        clock=time.monotonic,
+        on_derive=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -380,6 +396,22 @@ class Watcher:
             else SparkObserver(lambda: self._spark)
         )
         self._interval = settings.watch_interval
+
+        # Characteristics derive pass: refreshes app.characteristics from
+        # local checkpoints (gguf_dir) and live engine surfaces (spark),
+        # throttled to settings.derive_interval_s. characteristics_store=None
+        # (the default) disables it entirely — same opt-in shape as
+        # hostagent/intent_store above.
+        self._characteristics_store = characteristics_store
+        self._gguf_dir = gguf_dir
+        self._clock = clock
+        self._derive_interval_s = settings.derive_interval_s
+        self._last_derive_at: float | None = None
+        # Test-only seam: when set, called once per non-throttled derive pass
+        # INSTEAD of the real checkpoint/engine scan, so the throttle timing
+        # itself can be tested without a real gguf_dir or spark client.
+        # Always None in production (app.main never passes it).
+        self._on_derive = on_derive
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -452,6 +484,7 @@ class Watcher:
                     return
             self._execute(actions, pending)
             self._reconcile_pass(world)
+            self._derive_pass()
         except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above
             self._log("tick-error", {"error": str(exc)})
 
@@ -638,6 +671,61 @@ class Watcher:
             return
 
         raise EngineError(f"no restore handler for engine {engine!r}")
+
+    # --- characteristics derivation ----------------------------------------
+
+    def _derive_pass(self) -> None:
+        """Refresh derived facts, at most every settings.derive_interval_s.
+
+        Throttled because the tick loop runs every couple of seconds and
+        checkpoint directories do not change that fast. Deliberately
+        best-effort: one unreadable checkpoint or one unreachable engine
+        degrades to fewer facts, never to a failed tick (a raise here is
+        still caught by tick()'s own broad supervisor catch, same as every
+        other pass).
+        """
+        now_mono = self._clock()
+        if (self._last_derive_at is not None
+                and now_mono - self._last_derive_at < self._derive_interval_s):
+            return
+        self._last_derive_at = now_mono
+
+        if self._on_derive is not None:
+            # Test-only seam (see __init__): replaces the real scan below so
+            # the throttle timing can be exercised without a real gguf_dir or
+            # spark client.
+            self._on_derive()
+            return
+
+        if self._characteristics_store is None:
+            return
+
+        now = datetime.now(UTC).isoformat()
+
+        if self._gguf_dir is not None:
+            for child in sorted(Path(self._gguf_dir).iterdir()):
+                if not child.is_dir():
+                    continue
+                fields = derive_checkpoint(child, now)
+                if fields:
+                    self._characteristics_store.put_fields(f"model/{child.name}", fields)
+
+        for engine_name, client in self._live_fact_sources().items():
+            try:
+                body = client.models()
+            except (EngineError, BusyError):
+                continue   # unreachable: retain last-known facts
+            for model_id, fields in derive_live_models(body, now).items():
+                self._characteristics_store.put_fields(f"model/{model_id}", fields)
+
+    def _live_fact_sources(self) -> dict:
+        """Engine clients exposing an OpenAI-style /v1/models surface.
+        Spark is the one that matters — it is the only source of truth for
+        remote model facts until a node-agent increment lands."""
+        sources = {}
+        if self._spark is not None:
+            sources["spark"] = self._spark
+        return sources
 
     # Event kinds whose consecutive identical repeats are collapsed to a
     # single log line, so a persistent state (a stuck 'wont-fit', a crashing
