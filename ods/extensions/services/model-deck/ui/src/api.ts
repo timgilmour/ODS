@@ -26,7 +26,9 @@ export interface ExternalProc {
 }
 
 export interface LemonadeTenant {
-  state: "loaded" | "unloaded" | "unknown";
+  // "loading" = a load is in flight; health reports nothing loaded while
+  // weights stream in (World._snapshot_lemonade, app/state.py:143-144).
+  state: "loaded" | "unloaded" | "loading" | "unknown";
   model: string | null;
   footprint: number | null;
   idle_s: number | null;

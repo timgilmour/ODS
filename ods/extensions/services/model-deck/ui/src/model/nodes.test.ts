@@ -68,6 +68,16 @@ describe("buildNodes", () => {
     expect(gpu1.placements.some((p) => p.engine === "lemonade")).toBe(false);
   });
 
+  it("omits a lemonade load in flight the same as unloaded (no chip mid-load)", () => {
+    // tenantPlacement's `t.state !== "loaded"` guard also covers "loading" —
+    // deliberate: the PlacementActions pill (STATE_TONE) is where a load in
+    // flight shows up today; a dedicated chip treatment is deferred.
+    const s = state();
+    s.world.tenants.lemonade = { state: "loading", model: null, footprint: null, idle_s: null };
+    const [local] = buildNodes(s, null);
+    expect(local.resources[1].placements.some((p) => p.engine === "lemonade")).toBe(false);
+  });
+
   it("keeps an unloaded tenant's controls on its resource", () => {
     // The empty-slot case: no chip, but lemonade's Load dropdown still has
     // to render somewhere, so the resource carries the control list.
