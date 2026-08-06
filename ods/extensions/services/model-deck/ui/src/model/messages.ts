@@ -119,6 +119,7 @@ export const messages = {
  * they format a fact, they do not decide anything. */
 export const labels = {
   dismiss: "Dismiss",
+  close: "Close",
   forcePark: "Force park",
   forceSwap: "Force swap",
   filterEvents: "Filter events…",

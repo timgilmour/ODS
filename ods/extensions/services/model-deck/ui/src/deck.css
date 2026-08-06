@@ -1165,3 +1165,42 @@ input[type="password"] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* --- Modal primitive (phase 2) ------------------------------------------ */
+.ui-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.ui-modal {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  min-width: 420px;
+  max-width: 640px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+.ui-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: calc(var(--space) * 2);
+  padding: calc(var(--space) * 2);
+  border-bottom: 1px solid var(--panel-border);
+}
+.ui-modal-title { margin: 0; }
+.ui-modal-subtitle { color: var(--text-dim); margin-top: calc(var(--space) / 2); }
+.ui-modal-body { padding: calc(var(--space) * 2); overflow-y: auto; }
+.ui-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space);
+  padding: calc(var(--space) * 2);
+  border-top: 1px solid var(--panel-border);
+}
