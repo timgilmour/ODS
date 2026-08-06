@@ -191,6 +191,17 @@ def test_models_raises_engineerror_on_non_2xx():
         client.models()
 
 
+def test_models_raises_engineerror_on_garbage_200_body():
+    """A 200 with a non-JSON body (misconfigured proxy, HTML error page,
+    truncated response, ...) must not escape as a raw JSONDecodeError — the
+    derive pass's ``except (EngineError, BusyError)`` catch wouldn't see it."""
+    def handler(request):
+        return httpx.Response(200, text="not json", request=request)
+    client = _client(_node_handler(), metrics_handler=handler)
+    with pytest.raises(EngineError):
+        client.models()
+
+
 # --- swap guards ---
 
 def test_swap_posts_profile_and_returns_request_id():

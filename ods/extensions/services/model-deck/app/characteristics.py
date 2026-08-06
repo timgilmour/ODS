@@ -66,6 +66,15 @@ class CharacteristicsStore:
         nothing about each other's fields.
         """
         for name, field in fields.items():
+            if not isinstance(field, dict):
+                # `k not in field` below does substring matching on a str
+                # (e.g. "value" in "source,value,derived_ts" is True), which
+                # can pass the provenance check on a caller's typo instead of
+                # rejecting it. Guard the type explicitly.
+                raise ValueError(
+                    f"field {name!r} of {key!r} must be a dict with "
+                    f"{_REQUIRED_FIELD_KEYS}, got {type(field).__name__}"
+                )
             missing = [k for k in _REQUIRED_FIELD_KEYS if k not in field]
             if missing:
                 raise ValueError(

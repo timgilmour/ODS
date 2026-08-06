@@ -42,6 +42,7 @@ The node-agent's own 409 (pending request / helper mid-swap) surfaces as
 BusyError; its 4xx validation answers surface as EngineError.
 """
 
+import json
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -186,7 +187,14 @@ class SparkClient:
             raise EngineError(str(exc)) from exc
         if not resp.is_success:
             raise EngineError(resp.text)
-        return resp.json()
+        try:
+            return resp.json()
+        except json.JSONDecodeError as exc:
+            # A 200 with a non-JSON body (misconfigured proxy, HTML error
+            # page, truncated response, ...) must not escape as a raw
+            # JSONDecodeError — the derive pass's
+            # ``except (EngineError, BusyError)`` catch wouldn't see it.
+            raise EngineError(f"non-JSON response from /v1/models: {exc}") from exc
 
     def swap_in_progress(self) -> bool:
         """True while a previous swap is still booting. Same judgement the

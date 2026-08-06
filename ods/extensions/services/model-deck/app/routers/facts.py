@@ -4,6 +4,10 @@
 ``PUT /facts/declared/{key}`` is the only write, and the DeclaredStore
 allowlist is what keeps it from becoming a way to duplicate a derivable
 fact (a rejected field raises ValueError -> 422 via the app-level handler).
+The key itself is validated too — it must start with "model/" or "engine/"
+with a non-empty, non-trailing-slash remainder, and the fields body must be
+non-empty — so an empty key, "model/m/", "junk/x", or {} can never durably
+materialize a phantom entry.
 
 ``GET /facts/drift`` compares facts that should agree, per key. What fires
 in THIS increment, and why:
@@ -38,6 +42,24 @@ router = APIRouter(tags=["facts"])
 # "openai/<resolved id>" in the real /model/info response.
 _OPENAI_PREFIX = "openai/"
 
+# A declared key's kind — mirrors app.characteristics' "<kind>/<id>" shape.
+# Engine keys legitimately contain a second slash (e.g. "engine/sparky/vllm"
+# — node/engine), so only an EMPTY remainder or a trailing slash is rejected,
+# never an interior one.
+_KEY_PREFIXES = ("model/", "engine/")
+
+
+def _validate_declared_key(key: str) -> None:
+    """Reject a key shape that would durably materialize a phantom entry:
+    empty, unprefixed junk, or a trailing slash. Raises ValueError, which
+    the app-level handler turns into 422 (see the module docstring)."""
+    if not key or key.endswith("/"):
+        raise ValueError(
+            f"declared key {key!r} must not be empty or end with a slash")
+    if not key.startswith(_KEY_PREFIXES):
+        raise ValueError(
+            f"declared key {key!r} must start with 'model/' or 'engine/'")
+
 
 @router.get("/facts")
 def get_facts(request: Request) -> dict:
@@ -51,6 +73,9 @@ def get_facts(request: Request) -> dict:
 
 @router.put("/facts/declared/{key:path}")
 def put_declared(key: str, fields: dict, request: Request) -> dict:
+    _validate_declared_key(key)
+    if not fields:
+        raise ValueError("PUT /facts/declared requires a non-empty fields body")
     deck = request.app.state.deck
     deck["declared_store"].put(key, fields)
     return {"key": key, "declared": deck["declared_store"].entry(key)}

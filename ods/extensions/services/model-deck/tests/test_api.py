@@ -1382,6 +1382,76 @@ def test_put_declared_accepts_tools_verified(tmp_path, monkeypatch):
     assert store.entry("model/m")["tools_verified"] is True
 
 
+def test_put_declared_rejects_empty_key(tmp_path, monkeypatch):
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = DeclaredStore(tmp_path / "d.json")
+    deck["declared_store"] = store
+
+    resp = TestClient(app).put("/api/facts/declared/", json={"label": "x"})
+
+    assert resp.status_code == 422
+    assert store.get() == {}
+
+
+def test_put_declared_rejects_trailing_slash_key(tmp_path, monkeypatch):
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = DeclaredStore(tmp_path / "d.json")
+    deck["declared_store"] = store
+
+    resp = TestClient(app).put("/api/facts/declared/model/m/", json={"label": "x"})
+
+    assert resp.status_code == 422
+    assert store.get() == {}
+
+
+def test_put_declared_rejects_unprefixed_key(tmp_path, monkeypatch):
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = DeclaredStore(tmp_path / "d.json")
+    deck["declared_store"] = store
+
+    resp = TestClient(app).put("/api/facts/declared/junk/x", json={"label": "x"})
+
+    assert resp.status_code == 422
+    assert store.get() == {}
+
+
+def test_put_declared_rejects_empty_fields_body(tmp_path, monkeypatch):
+    """An empty body materializes an empty entry today — reject it before it
+    ever reaches the store."""
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = DeclaredStore(tmp_path / "d.json")
+    deck["declared_store"] = store
+
+    resp = TestClient(app).put("/api/facts/declared/model/m", json={})
+
+    assert resp.status_code == 422
+    assert store.get() == {}
+
+
+def test_put_declared_accepts_engine_key_with_interior_slash(tmp_path, monkeypatch):
+    """Engine keys legitimately contain a second slash ('engine/sparky/vllm')
+    — only an empty remainder or a trailing slash is rejected."""
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = DeclaredStore(tmp_path / "d.json")
+    deck["declared_store"] = store
+
+    resp = TestClient(app).put("/api/facts/declared/engine/sparky/vllm",
+                               json={"label": "x"})
+
+    assert resp.status_code == 200
+    assert store.entry("engine/sparky/vllm")["label"] == "x"
+
+
 def test_drift_endpoint_reports_context_mismatch(tmp_path, monkeypatch):
     """The gateway route ALIAS ("default") is never a checkpoint id — only
     the route's RESOLVED model (litellm_params.model, "m" here once the

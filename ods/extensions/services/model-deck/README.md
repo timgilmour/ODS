@@ -123,6 +123,12 @@ See the **Storage tiering** section below for detailed semantics.
 
 ### `characteristics.json` / `declared.json` — model and engine facts
 
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/facts` | Every known key's resolved facts (declared-over-derived, provenance intact) |
+| `PUT` | `/api/facts/declared/{key}` | Set declared fields for `{key}` (allowlist only; 422 on a derivable field, a malformed key, or an empty body) |
+| `GET` | `/api/facts/drift` | Per-key drift report — facts that should agree but don't (see below) |
+
 **Derive, don't duplicate.** Every field has exactly one authoritative
 source. `characteristics.json` is a machine-owned cache of facts read from
 the things that own them (a checkpoint's `config.json`, an engine's

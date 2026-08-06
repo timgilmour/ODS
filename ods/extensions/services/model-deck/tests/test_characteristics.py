@@ -8,6 +8,8 @@ asserted by a human, because those three have very different reliability.
 
 import json
 
+import pytest
+
 from app.characteristics import CharacteristicsStore
 
 
@@ -93,6 +95,17 @@ def test_rejects_a_field_missing_provenance(tmp_path):
         assert "source" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_rejects_a_non_dict_field(tmp_path):
+    """``k not in field`` does substring matching on a str, so a caller that
+    passes a string instead of a field record can slip past the provenance
+    check entirely (e.g. "value" in "source,value,derived_ts" is True). Guard
+    the type explicitly rather than relying on `in`'s duck typing."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+
+    with pytest.raises(ValueError, match="a"):
+        store.put_fields("model/m", {"a": "source,value,derived_ts"})
 
 
 def test_stored_json_is_human_readable(tmp_path):

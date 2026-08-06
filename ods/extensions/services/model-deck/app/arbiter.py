@@ -746,7 +746,11 @@ class Watcher:
 
         now = datetime.now(UTC).isoformat()
 
-        if self._gguf_dir is not None:
+        # is_dir() guards a missing/unmounted /gguf-store: Path.iterdir() on a
+        # nonexistent directory raises FileNotFoundError, which would escape
+        # this pass into tick()'s supervisor catch every settings.watch_interval
+        # seconds instead of degrading to "no local facts" once, here.
+        if self._gguf_dir is not None and Path(self._gguf_dir).is_dir():
             for child in sorted(Path(self._gguf_dir).iterdir()):
                 if not child.is_dir():
                     continue
@@ -754,7 +758,7 @@ class Watcher:
                 if fields:
                     self._characteristics_store.put_fields(f"model/{child.name}", fields)
 
-        for engine_name, client in self._live_fact_sources().items():
+        for client in self._live_fact_sources().values():
             try:
                 body = client.models()
             except (EngineError, BusyError):

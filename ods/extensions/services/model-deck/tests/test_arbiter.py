@@ -1287,14 +1287,19 @@ def test_watcher_failed_heal_load_does_not_note_last_used(tmp_path):
 class FakeSpark:
     """Mirrors SparkClient's real surface: status() returns the NODE payload
     shape ({"profiles", "swap_status", "serving"}) — not the observation
-    shape — and swap() takes a profile name. The watcher does the translation,
-    so faking the node payload is what actually exercises it."""
+    shape — and swap() takes a profile name. models() returns the /v1/models
+    body consumed by the characteristics derive pass. The watcher does the
+    translation, so faking the node payload is what actually exercises it."""
 
     def __init__(self, profile="heretic", serving_model=None, endpoint_ok=False,
-                 swap_state="error", swap_ts=None, raises=None):
+                 swap_state="error", swap_ts=None, raises=None,
+                 models_body=None, models_raises=None):
         self.calls = []
         self.raises = raises
         self.swap_fail = None
+        self.models_raises = models_raises
+        self.models_calls = 0
+        self._models_body = models_body if models_body is not None else {"data": []}
         self._payload = {
             "profiles": [{"name": profile, "engine": "vllm"}],
             "swap_status": {"state": swap_state, "profile": profile,
@@ -1313,6 +1318,12 @@ class FakeSpark:
         if self.swap_fail is not None:
             raise self.swap_fail
         return {"id": "u1", "profile": profile}
+
+    def models(self):
+        self.models_calls += 1
+        if self.models_raises is not None:
+            raise self.models_raises
+        return self._models_body
 
 
 def _intent(tmp_path, key="local/hipfire", state="loaded", model=None, engine="hipfire"):
@@ -1722,3 +1733,36 @@ def test_restore_triggered_derive_resumes_after_the_floor_elapses(tmp_path):
     clock.advance(31)  # past the 30 s floor
     watcher.tick()  # floor elapsed -> derives again
     assert len(calls) == 2
+
+
+def test_derive_pass_survives_missing_gguf_dir(tmp_path):
+    """A missing /gguf-store mount (host misconfigured, or a container
+    started before the volume attached) must degrade to 'no local facts',
+    not raise FileNotFoundError into tick()'s supervisor catch every
+    settings.derive_interval_s. The gguf scan being skippable must not
+    also skip the rest of the pass — live derivation still runs."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    spark = FakeSpark()  # models() -> {"data": []}, but proves it was called
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       gguf_dir=tmp_path / "does-not-exist", spark=spark)
+
+    watcher.tick()  # must not raise
+
+    assert store.get() == {}  # nothing readable: no gguf mount, no live models
+    assert spark.models_calls == 1  # live derivation still ran past the guard
+
+
+def test_derive_pass_retains_last_known_facts_when_spark_unreachable(tmp_path):
+    """Watcher-level counterpart to test_models_raises_engineerror_on_non_2xx
+    (app.engines.spark): when spark.models() raises EngineError mid-tick, the
+    derive pass must retain whatever facts are already on disk rather than
+    losing them or crashing the tick."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    store.put_fields("model/heretic", {
+        "served": {"value": True, "source": "/v1/models", "derived_ts": "t0"}})
+    spark = FakeSpark(models_raises=EngineError("connection refused"))
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, spark=spark)
+
+    watcher.tick()  # must not raise
+
+    assert store.get()["model/heretic"]["served"]["value"] is True
