@@ -137,7 +137,7 @@ export const labels = {
   // next author copies whichever neighbour they happened to read first.
   appTitle: "Model Deck",
   appSubtitle: "GPU/VRAM control for lemonade, ComfyUI, hipfire",
-  deck: "Deck",
+  deck: "On Deck",
   setBuilder: "Set Builder",
   storage: "Storage",
   events: "Events",
@@ -177,6 +177,22 @@ export const labels = {
   queueTitle: "jobs waiting on this engine",
   idle: (seconds: number) => `idle ${Math.round(seconds)} s`,
   idleTitle: "time since last activity — counts towards the idle-TTL eviction",
+
+  // Set-apply step vocabulary — one label per "step" kind app/sets.py's
+  // plan_apply() emits: unload_lemonade (sets.py:237), free_comfyui (:244),
+  // warn (:246,:265,:296), park_hipfire (:258), activate (:263),
+  // resume_hipfire (:288), load_lemonade (:298), policy_patch (:302).
+  stepUnload: "Unload",
+  stepLoad: "Load",
+  stepFreeComfyui: "Free ComfyUI VRAM",
+  stepParkHipfire: "Park hipfire",
+  stepResumeHipfire: "Resume hipfire",
+  stepActivate: "Activate catalog model",
+  stepPolicyPatch: "Apply policy overrides",
+  stepWarn: "Warning",
+  estimate: (s: number) => `about ${s}s`,
+  noChanges: "no changes — already matches this set",
+  stepsCompleted: (n: number) => `${n} step(s) completed`,
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

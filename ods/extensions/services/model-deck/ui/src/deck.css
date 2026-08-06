@@ -1204,3 +1204,84 @@ input[type="password"] {
   padding: calc(var(--space) * 2);
   border-top: 1px solid var(--panel-border);
 }
+
+/* --- Step list (vertical, Activate) -------------------------------------- */
+.ui-steplist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ui-step {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space);
+  padding: var(--space) 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+.ui-step:last-child { border-bottom: none; }
+.ui-step-marker {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--text-dim);
+  flex-shrink: 0;
+  align-self: center;
+}
+.ui-step-done .ui-step-marker {
+  background: var(--chip-loaded-fg);
+  border-color: var(--chip-loaded-fg);
+}
+.ui-step-failed .ui-step-marker {
+  background: var(--meter-red);
+  border-color: var(--meter-red);
+}
+.ui-step-failed .ui-step-label { color: var(--danger); }
+.ui-step-detail {
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  margin-left: auto;
+}
+
+/* --- Step rail (horizontal, Move) ---------------------------------------- */
+.ui-steprail {
+  display: flex;
+  align-items: flex-start;
+  margin: calc(var(--space) * 2) 0;
+}
+.ui-steprail-stop {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--space) / 2);
+  position: relative;
+}
+.ui-steprail-stop:not(:first-child)::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 50%;
+  width: 100%;
+  height: 2px;
+  background: var(--meter-track);
+  z-index: 0;
+}
+.ui-steprail-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--text-dim);
+  background: var(--panel);
+  z-index: 1;
+}
+.ui-steprail-done .ui-steprail-dot {
+  background: var(--chip-loaded-fg);
+  border-color: var(--chip-loaded-fg);
+}
+.ui-steprail-active .ui-steprail-dot { border-color: var(--accent); }
+.ui-steprail-active .ui-steprail-label { color: var(--accent); }
+.ui-steprail-done .ui-steprail-label { color: var(--chip-loaded-fg); }
+.ui-steprail-label { color: var(--text-dim); font-size: 0.85em; }
