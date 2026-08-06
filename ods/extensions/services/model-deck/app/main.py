@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.engines import BusyError, EngineError, GuardError
 from app.gateway import detect_default_gateway
-from app.routers import control, lifecycle, policy, sets, spark, status, storage
+from app.routers import control, facts, lifecycle, policy, sets, spark, status, storage
 from app.settings import Settings
 
 # The GGUF store is bound read-only into the container at this path (see
@@ -315,6 +315,7 @@ def create_app() -> FastAPI:
     app.include_router(spark.router, prefix="/api")
     app.include_router(lifecycle.router, prefix="/api")
     app.include_router(storage.router, prefix="/api")
+    app.include_router(facts.router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when
     # present so the API keeps working standalone until then. Mounted LAST:

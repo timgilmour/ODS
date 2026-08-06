@@ -116,9 +116,16 @@ class FakeLiteLLM:
             self._routes["default"] = default
         if hipfire is not None:
             self._routes["hipfire"] = hipfire
+        self.max_input_tokens = {}  # model_name -> max_input_tokens, for model_info()
 
     def route_table(self):
         return dict(self._routes)
+
+    def model_info(self):
+        return [
+            {"model_name": name, "model_info": {"max_input_tokens": tokens}}
+            for name, tokens in self.max_input_tokens.items()
+        ]
 
 
 class FakeHostAgent:
@@ -1308,3 +1315,76 @@ def test_node_label_empty_env_var_falls_through_to_default(monkeypatch):
 
     monkeypatch.setenv("MODEL_DECK_NODE_LABEL", "")
     assert Settings().node_label == "local"
+
+
+# ===========================================================================
+# /api/facts, /api/facts/drift, /api/facts/declared/{key}
+# ===========================================================================
+
+
+def test_facts_endpoint_resolves_declared_over_derived(tmp_path, monkeypatch):
+    from app.characteristics import CharacteristicsStore
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("model/m", {
+        "label": {"value": "auto", "source": "config.json", "derived_ts": "t"}})
+    declared = DeclaredStore(tmp_path / "d.json")
+    declared.put("model/m", {"label": "human"})
+    deck["characteristics_store"] = characteristics
+    deck["declared_store"] = declared
+
+    body = TestClient(app).get("/api/facts").json()
+
+    assert body["model/m"]["label"]["value"] == "human"
+    assert body["model/m"]["label"]["origin"] == "declared"
+    assert body["model/m"]["label"]["shadowed_value"] == "auto"
+
+
+def test_put_declared_rejects_a_derivable_field(tmp_path, monkeypatch):
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["declared_store"] = DeclaredStore(tmp_path / "d.json")
+
+    resp = TestClient(app).put("/api/facts/declared/model/m",
+                               json={"max_model_len": 262144})
+
+    assert resp.status_code == 422
+
+
+def test_put_declared_accepts_tools_verified(tmp_path, monkeypatch):
+    from app.declared import DeclaredStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = DeclaredStore(tmp_path / "d.json")
+    deck["declared_store"] = store
+
+    resp = TestClient(app).put("/api/facts/declared/model/m",
+                               json={"tools_verified": True})
+
+    assert resp.status_code == 200
+    assert store.entry("model/m")["tools_verified"] is True
+
+
+def test_drift_endpoint_reports_context_mismatch(tmp_path, monkeypatch):
+    from app.characteristics import CharacteristicsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("model/m", {
+        "max_model_len_live": {"value": 262144, "source": "/v1/models", "derived_ts": "t"}})
+    deck["characteristics_store"] = characteristics
+    deck["litellm"] = FakeLiteLLM(default="extra.model.gguf")
+    deck["litellm"].max_input_tokens = {"m": 131072}   # add this attr to FakeLiteLLM
+
+    body = TestClient(app).get("/api/facts/drift").json()
+
+    assert body["model/m"][0]["field"] == "max_input_tokens"
+
+
+def test_drift_endpoint_is_empty_when_nothing_disagrees(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    assert TestClient(app).get("/api/facts/drift").json() == {}
