@@ -116,16 +116,30 @@ class FakeLiteLLM:
             self._routes["default"] = default
         if hipfire is not None:
             self._routes["hipfire"] = hipfire
-        self.max_input_tokens = {}  # model_name -> max_input_tokens, for model_info()
+        # Keyed by RESOLVED model id (never the route alias), for model_info().
+        self.max_input_tokens = {}
 
     def route_table(self):
         return dict(self._routes)
 
     def model_info(self):
-        return [
-            {"model_name": name, "model_info": {"max_input_tokens": tokens}}
-            for name, tokens in self.max_input_tokens.items()
-        ]
+        """Mirrors the real /model/info shape (see app/engines/litellm.py):
+        each entry's `model_name` is a route ALIAS ("default", "hipfire",
+        ...), and `litellm_params.model` is the "openai/"-prefixed
+        RESOLVED model id that alias actually points at — the two are
+        deliberately different so a join keyed by alias fails loudly
+        instead of an accidental match hiding the bug."""
+        entries = []
+        for alias, resolved in self._routes.items():
+            entry = {
+                "model_name": alias,
+                "litellm_params": {"model": f"openai/{resolved}"},
+            }
+            tokens = self.max_input_tokens.get(resolved)
+            if tokens is not None:
+                entry["model_info"] = {"max_input_tokens": tokens}
+            entries.append(entry)
+        return entries
 
 
 class FakeHostAgent:
@@ -1369,6 +1383,10 @@ def test_put_declared_accepts_tools_verified(tmp_path, monkeypatch):
 
 
 def test_drift_endpoint_reports_context_mismatch(tmp_path, monkeypatch):
+    """The gateway route ALIAS ("default") is never a checkpoint id — only
+    the route's RESOLVED model (litellm_params.model, "m" here once the
+    "openai/" prefix is stripped) can join against a facts key ("model/m").
+    A join keyed by alias would silently find nothing."""
     from app.characteristics import CharacteristicsStore
 
     app, deck = make_app(tmp_path, monkeypatch)
@@ -1376,12 +1394,46 @@ def test_drift_endpoint_reports_context_mismatch(tmp_path, monkeypatch):
     characteristics.put_fields("model/m", {
         "max_model_len_live": {"value": 262144, "source": "/v1/models", "derived_ts": "t"}})
     deck["characteristics_store"] = characteristics
-    deck["litellm"] = FakeLiteLLM(default="extra.model.gguf")
-    deck["litellm"].max_input_tokens = {"m": 131072}   # add this attr to FakeLiteLLM
+    deck["litellm"] = FakeLiteLLM(default="m")   # alias "default" resolves to model id "m"
+    deck["litellm"].max_input_tokens = {"m": 131072}   # keyed by RESOLVED id, not alias
 
     body = TestClient(app).get("/api/facts/drift").json()
 
     assert body["model/m"][0]["field"] == "max_input_tokens"
+
+
+def test_drift_endpoint_reports_live_context_exceeding_checkpoint_max(tmp_path, monkeypatch):
+    """max_model_len needs no gateway I/O: it's a live-vs-checkpoint check
+    within the SAME key's own already-derived facts (max_model_len_live
+    from /v1/models, max_position_embeddings from config.json)."""
+    from app.characteristics import CharacteristicsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("model/m", {
+        "max_position_embeddings": {"value": 131072, "source": "config.json", "derived_ts": "t"},
+        "max_model_len_live": {"value": 262144, "source": "/v1/models", "derived_ts": "t"},
+    })
+    deck["characteristics_store"] = characteristics
+
+    body = TestClient(app).get("/api/facts/drift").json()
+
+    assert body["model/m"][0]["field"] == "max_model_len"
+    assert body["model/m"][0]["severity"] == "mismatch"
+
+
+def test_drift_endpoint_no_drift_when_live_context_within_checkpoint_max(tmp_path, monkeypatch):
+    from app.characteristics import CharacteristicsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("model/m", {
+        "max_position_embeddings": {"value": 262144, "source": "config.json", "derived_ts": "t"},
+        "max_model_len_live": {"value": 131072, "source": "/v1/models", "derived_ts": "t"},
+    })
+    deck["characteristics_store"] = characteristics
+
+    assert TestClient(app).get("/api/facts/drift").json() == {}
 
 
 def test_drift_endpoint_is_empty_when_nothing_disagrees(tmp_path, monkeypatch):

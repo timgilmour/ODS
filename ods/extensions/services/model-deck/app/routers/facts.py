@@ -5,12 +5,24 @@
 allowlist is what keeps it from becoming a way to duplicate a derivable
 fact (a rejected field raises ValueError -> 422 via the app-level handler).
 
-``GET /facts/drift`` compares facts that should agree. In THIS increment its
-inputs are the gateway route table and the live /v1/models surface, so the
-context rules fire and the `quantization` rule does not — profile flags
-only become readable in Plan C1, when settings land. The rule is
-implemented and unit-tested now so that C1 turns it on rather than
-inventing it.
+``GET /facts/drift`` compares facts that should agree, per key. What fires
+in THIS increment, and why:
+
+* ``max_model_len`` (live-served context vs. the checkpoint's
+  ``max_position_embeddings``) fires now, with no gateway I/O at all — its
+  runtime side is this SAME key's own already-derived ``max_model_len_live``
+  fact (characteristics.json, populated by the watcher's live-derive pass
+  from /v1/models), fed straight back into `detect_drift`.
+* ``max_input_tokens`` (what the gateway advertises vs. what the engine
+  actually serves) fires now, sourced from LiteLLM's ``/model/info``. The
+  join is on the route's RESOLVED model (``litellm_params.model``, with the
+  "openai/" prefix stripped — mirrors ``app.state``'s handling of the same
+  field) — never ``model_name``, which is a route ALIAS ("default",
+  "hipfire", "*") and will never match a checkpoint-shaped facts key.
+* ``quantization`` (severity ``crash``) does NOT fire through this endpoint
+  yet — it is implemented and unit-tested in ``app.facts``, but needs
+  profile flags, which only become readable starting Plan C1. The rule
+  exists now so C1 turns it on rather than inventing it.
 
 Keys contain a slash (``model/Qwen3.6-...``), hence the ``:path`` converter.
 """
@@ -21,6 +33,10 @@ from app.engines import EngineError
 from app.facts import detect_drift, resolve_facts
 
 router = APIRouter(tags=["facts"])
+
+# Mirrors app.state._OPENAI_PREFIX: litellm_params.model is always
+# "openai/<resolved id>" in the real /model/info response.
+_OPENAI_PREFIX = "openai/"
 
 
 @router.get("/facts")
@@ -42,7 +58,11 @@ def put_declared(key: str, fields: dict, request: Request) -> dict:
 
 @router.get("/facts/drift")
 def get_drift(request: Request) -> dict:
-    """Per-key drift. Absent facts mean 'cannot check', never 'mismatch'."""
+    """Per-key drift. Absent facts mean 'cannot check', never 'mismatch'.
+
+    See the module docstring for exactly which rules fire in this
+    increment and why.
+    """
     deck = request.app.state.deck
     derived = deck["characteristics_store"].get()
     declared = deck["declared_store"].get()
@@ -53,24 +73,42 @@ def get_drift(request: Request) -> dict:
     for key in sorted(set(derived) | set(declared)):
         facts = resolve_facts(derived.get(key, {}), declared.get(key, {}))
         model_id = key.split("/", 1)[-1]
-        drift = detect_drift(facts, runtime_by_model.get(model_id, {}))
+        runtime = dict(runtime_by_model.get(model_id, {}))
+
+        # max_model_len needs no gateway I/O: it's a live-vs-checkpoint
+        # check within this SAME key's own already-derived facts.
+        live_len = facts.get("max_model_len_live")
+        if live_len is not None:
+            runtime["max_model_len"] = live_len["value"]
+
+        drift = detect_drift(facts, runtime)
         if drift:
             report[key] = drift
     return report
 
 
 def _gateway_runtime(deck: dict) -> dict[str, dict]:
-    """What the gateway advertises per model, or {} when litellm is down —
-    an unreachable gateway is not evidence of a mismatch."""
+    """What the gateway advertises per RESOLVED model id, or {} when
+    litellm is down — an unreachable gateway is not evidence of a
+    mismatch.
+
+    Joined on ``litellm_params.model`` (the "openai/"-prefixed model a
+    route actually resolves to), NEVER ``model_name`` — that field is the
+    route ALIAS ("default", "hipfire", "*"), not a checkpoint id, and a
+    join keyed by it would silently match nothing in production.
+    """
     try:
         entries = deck["litellm"].model_info()
     except EngineError:
         return {}
 
-    runtime = {}
+    runtime: dict[str, dict] = {}
     for entry in entries:
-        name = entry.get("model_name")
+        resolved = (entry.get("litellm_params") or {}).get("model")
+        if not resolved:
+            continue
+        model_id = resolved.removeprefix(_OPENAI_PREFIX)
         info = entry.get("model_info") or {}
-        if name and info.get("max_input_tokens") is not None:
-            runtime[name] = {"max_input_tokens": info["max_input_tokens"]}
+        if info.get("max_input_tokens") is not None:
+            runtime[model_id] = {"max_input_tokens": info["max_input_tokens"]}
     return runtime
