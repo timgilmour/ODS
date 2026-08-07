@@ -16,16 +16,19 @@ A JSON blob (``--speculative-config '{"method":"dflash",...}'``) is just a
 scalar whose text contains spaces and quotes — it survives because
 rendering goes through shlex.quote and parsing through shlex.split.
 
-A one-element list (``--served-model-name`` takes a single value in some
-profiles, six in others) is lexically identical to a scalar once rendered —
-``--flag v`` gives a parser no signal that ``v`` came from a ``list`` rather
-than a ``str``. Losing that distinction would silently change the value's
-type on the next edit, so a singleton list is rendered with one extra
-trailing empty-string token (``shlex.quote("")`` == ``''``) that scalars
-never emit, and parsing strips it back off. The accepted, narrow trade-off:
-a flag typed by a human with a genuine trailing empty argument (``--tag foo
-''`` meaning two values, the second blank) parses the same way. No case in
-this module's tests, or in a live sparky profile, does that.
+A one-element list and a scalar render IDENTICALLY — ``render({"x": ["v"]})
+== render({"x": "v"})`` — and a single trailing token always parses to a
+scalar. This is a deliberate normalization, not a gap: ``--flag v`` gives a
+parser no signal that ``v`` came from a ``list`` rather than a ``str``, and
+the engine draws no distinction either (one ``--served-model-name`` value is
+one argument, list or not). RULING 2026-08-07: an earlier draft disambiguated
+with an invented trailing empty-string token. Rejected — this text is also a
+real engine command line, and a token a human never typed (an empty-string
+CLI argument) is as much a correctness bug as dropping one would be. So the
+MAP-level round trip is exact modulo this one normalization (a singleton
+list collapses to its scalar through text); the TEXT-level round trip stays
+exact, byte for byte, for every line this module can produce — no invented
+tokens, ever.
 
 Positional tokens (``serve /model`` leads every vLLM command array) are
 preserved under the reserved key ``_positional``. Dropping them would
@@ -61,9 +64,6 @@ def render_argline(settings: dict) -> str:
         elif isinstance(value, list):
             parts.append(flag)
             parts.extend(shlex.quote(str(v)) for v in value)
-            if len(value) == 1:
-                # Disambiguate from a scalar — see module docstring.
-                parts.append(shlex.quote(""))
         else:
             parts.append(flag)
             parts.append(shlex.quote(str(value)))
@@ -93,9 +93,6 @@ def parse_argline(text: str) -> dict:
             return
         if not values:
             settings[current] = True
-        elif len(values) == 2 and values[1] == "":
-            # render_argline's singleton-list marker — see module docstring.
-            _assign_many(settings, current, values[:1])
         elif len(values) == 1:
             _assign(settings, current, values[0])
         else:
