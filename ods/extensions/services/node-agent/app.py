@@ -12,6 +12,7 @@ from fastapi.responses import Response
 
 import nodeconfig
 import serving
+import settings_store
 import swapctl
 from gpu_collect import collect_detailed_gpus
 
@@ -133,3 +134,46 @@ def node_swap(body: SwapBody):
     except swapctl.SwapInProgress as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {"id": req_id, "profile": body.profile}
+
+
+@app.exception_handler(settings_store.SettingsDisabled)
+async def _settings_disabled(request: Request, exc: settings_store.SettingsDisabled):
+    return JSONResponse(status_code=503,
+                        content={"detail": "settings are not configured"})
+
+
+@app.exception_handler(swapctl.InvalidProfile)
+async def _invalid_profile(request: Request, exc: swapctl.InvalidProfile):
+    return JSONResponse(status_code=400, content={"detail": "invalid profile name"})
+
+
+@app.exception_handler(ValueError)
+async def _settings_value_error(request: Request, exc: ValueError):
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.get("/v1/node/profile/{profile}/settings", dependencies=[Depends(verify_key)])
+def get_settings(profile: str):
+    return settings_store.read_settings(profile)
+
+
+@app.put("/v1/node/profile/{profile}/settings", dependencies=[Depends(verify_key)])
+def put_settings(profile: str, document: dict):
+    settings_store.write_settings(profile, document)
+    return document
+
+
+@app.get("/v1/node/profile/{profile}/compose", dependencies=[Depends(verify_key)])
+def get_compose(profile: str):
+    if not swapctl._NAME_RE.match(profile or ""):
+        raise swapctl.InvalidProfile(profile)
+    vllm, _ = swapctl._dirs()
+    path = vllm / f"compose-{profile}.yaml"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="unknown profile")
+    return {"profile": profile, "text": path.read_text()}
+
+
+@app.get("/v1/node/catalog", dependencies=[Depends(verify_key)])
+def get_catalog():
+    return {"catalog": settings_store.read_newest_catalog()}

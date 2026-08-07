@@ -28,6 +28,7 @@ isn't present).
 | `NODE_GPU_CACHE_TTL` | `2.0` | TTL in seconds for the short-lived GPU sample cache used by `/v1/node/gpu`. |
 | `NODE_VLLM_DIR` | *(unset)* | Read-only mount of the vLLM profile directory (`compose-<profile>.yaml` set, plus an optional `profiles.json` metadata sidecar). Both this and `NODE_SWAP_CTL_DIR` must be set to enable `/v1/node/profiles` and `/v1/node/swap`; either unset and both answer `503`. |
 | `NODE_SWAP_CTL_DIR` | *(unset)* | Shared file-protocol directory this agent writes `request.json` into and reads the host-side swap-helper's `status.json` from. See [`POST /v1/node/swap`](#post-v1nodeswap). |
+| `NODE_SETTINGS_DIR` | *(unset)* | Shared file-protocol directory holding per-profile settings documents (`<profile>.json`, written by this agent's settings routes) and harvested catalog files (`catalog-<profile>.json`, written by the host-side swap-helper). Unset disables `/v1/node/profile/{profile}/settings` and `/v1/node/catalog`, which answer `503`. |
 
 ## Deploy
 
