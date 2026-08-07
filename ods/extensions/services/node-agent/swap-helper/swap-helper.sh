@@ -35,6 +35,11 @@ write_status() { # state profile id message
   mv "$tmp" "$STATUS"
 }
 
+# Which branch _launch took. Read only by the failure message: on the
+# settings-owned branch swap.sh is never invoked, so "swap.sh failed" points
+# the operator at a script that did not run.
+LAUNCH_BRANCH=swap.sh
+
 # Launch: settings-owned when a valid document exists, else swap.sh verbatim.
 # A missing or unparseable document MUST reproduce today's exact behaviour.
 _launch() { # profile
@@ -42,8 +47,10 @@ _launch() { # profile
   # NEVER compose-<p>.override.yaml: swapctl.list_profiles globs compose-*.yaml
   # and would list the override as a ghost profile the node cannot serve.
   local doc="" override="$VLLM/settings-$profile.override.yaml"
+  LAUNCH_BRANCH=swap.sh
   [ -n "$SETTINGS" ] && doc="$SETTINGS/$profile.json"
   if [ -n "$doc" ] && [ -f "$doc" ] && _write_override "$doc" "$override"; then
+    LAUNCH_BRANCH=settings
     _teardown_all
     docker compose -f "$VLLM/compose-$profile.yaml" -f "$override" up -d \
       >> "$CTL/swap.log" 2>&1
@@ -180,7 +187,10 @@ _harvest() { # profile
   # probe reads EOF. The fake-docker test asserts the flag is present.
   # python3, not python: the engine image has no `python` on PATH
   # (app.harvest.PROBE_INTERPRETER).
-  if docker exec -i "$container" python3 - < "$probe" > "$out" 2>/dev/null; then
+  # Probe stderr goes to swap.log, never /dev/null: the FIRST harvest of a
+  # new engine image is exactly where a probe fails, and its reason (no
+  # python3, an argparse shape the probe cannot walk) lives only there.
+  if docker exec -i "$container" python3 - < "$probe" > "$out" 2>> "$CTL/swap.log"; then
     _write_catalog "$SETTINGS/catalog-$profile.json" "$image" "$out"
   else
     echo "harvest: probe failed for $profile" >&2
@@ -268,6 +278,8 @@ EOF
   if _launch "$profile"; then
     write_status done "$profile" "$id" "swap launched"
     _harvest "$profile"   # guarded; never affects the swap outcome
+  elif [ "$LAUNCH_BRANCH" = settings ]; then
+    write_status error "$profile" "$id" "settings launch failed (see swap.log)"
   else
     write_status error "$profile" "$id" "swap.sh failed (see swap.log)"
   fi

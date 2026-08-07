@@ -91,6 +91,11 @@ class Docker:
         return [ln for ln in self.lines() if ln.split(" ")[0] == verb]
 
 
+# What the fake `docker exec` writes to STDERR when it is set to fail —
+# stands in for the real probe's traceback, whose only home is swap.log.
+FAKE_PROBE_STDERR = "ModuleNotFoundError: No module named 'vllm'"
+
+
 def _mk_docker(tmp_path, exec_exit=0, inspect_exit=0, image="sha256:fake"):
     """A fake `docker` on PATH.
 
@@ -104,6 +109,10 @@ def _mk_docker(tmp_path, exec_exit=0, inspect_exit=0, image="sha256:fake"):
     exec_stdin = tmp_path / "docker-exec-stdin.txt"
     witness = tmp_path / "status-at-compose.json"
     docker = bindir / "docker"
+    # A failing probe writes its reason to stderr, exactly as the real one
+    # does; a passing probe stays quiet, so no test can pass on noise.
+    exec_stderr = ("" if exec_exit == 0 else
+                   f'printf "%s\\n" {shlex.quote(FAKE_PROBE_STDERR)} >&2; ')
     docker.write_text(
         "#!/bin/bash\n"
         f'printf "%s\\n" "$*" >> {shlex.quote(str(log))}\n'
@@ -113,7 +122,7 @@ def _mk_docker(tmp_path, exec_exit=0, inspect_exit=0, image="sha256:fake"):
         f'  compose) cp {shlex.quote(str(tmp_path / "ctl" / "status.json"))} '
         f'{shlex.quote(str(witness))} 2>/dev/null ;;\n'
         f'  inspect) printf "%s\\n" {shlex.quote(image)}; exit {inspect_exit} ;;\n'
-        f'  exec) cat > {shlex.quote(str(exec_stdin))}; '
+        f'  exec) cat > {shlex.quote(str(exec_stdin))}; {exec_stderr}'
         f'printf "%s\\n" {shlex.quote(FAKE_PROBE_STDOUT)}; exit {exec_exit} ;;\n'
         'esac\n'
         'exit 0\n'
@@ -141,6 +150,25 @@ def _run_once4(ctl, vllm, settings, bindir):
 
 def _status(ctl):
     return json.loads((ctl / "status.json").read_text())
+
+
+def _await_status(ctl, req_id, timeout_s=20):
+    """status.json once it reports `req_id`, for --daemon tests. The
+    daemon's own loop sleeps 2s between requests, so pickup takes a couple
+    of seconds; write_status is tmp+mv, so a read here never sees a partial
+    file."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            status = _status(ctl)
+            if status["id"] == req_id:
+                return status
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.2)
+    raise AssertionError(f"daemon never reported {req_id}")
 
 
 def test_valid_profile_runs_swap_and_reports_done(tmp_path):
@@ -202,6 +230,10 @@ def test_swap_failure_reported_as_error(tmp_path):
     s = _status(ctl)
     assert s["state"] == "error"
     assert s["profile"] == "mm27b"
+    # The delegated branch DID run swap.sh, so it names swap.sh — the
+    # settings-owned branch must not (test_settings_launch_failure_names_
+    # the_settings_branch).
+    assert s["message"] == "swap.sh failed (see swap.log)"
 
 
 def test_malformed_request_json_reports_error(tmp_path):
@@ -554,7 +586,12 @@ def test_non_vllm_profile_is_not_probed(tmp_path):
 
 def test_probe_failure_leaves_status_done(tmp_path):
     """fake docker exits 1 on exec -> status.json is still 'done'; the swap
-    outcome is untouched."""
+    outcome is untouched, and the probe's own reason lands in swap.log.
+
+    The reason matters most on a NEW engine image's first harvest, which is
+    exactly where a probe fails; sending probe stderr to /dev/null left
+    "probe failed" as the only record, with nothing saying why.
+    """
     vllm, _ = _mk_vllm(tmp_path, containers=True)
     settings = _mk_settings(tmp_path, "laguna", DOC)
     docker = _mk_docker(tmp_path, exec_exit=1)
@@ -568,6 +605,7 @@ def test_probe_failure_leaves_status_done(tmp_path):
     assert s["message"] == "swap launched"
     assert not (settings / "catalog-laguna.json").exists()  # no half catalog
     assert "harvest: probe failed for laguna" in r.stderr
+    assert FAKE_PROBE_STDERR in (ctl / "swap.log").read_text()
 
 
 def test_probe_skipped_when_image_id_is_unavailable(tmp_path):
@@ -616,6 +654,66 @@ def test_absent_docker_reports_error_and_survives(tmp_path):
     assert "command not found" in (ctl / "swap.log").read_text()
 
 
+def test_settings_launch_failure_names_the_settings_branch(tmp_path):
+    """swap.sh is NOT invoked on the settings-owned branch, so reporting
+    "swap.sh failed" sends the operator to a script that never ran. The
+    STATE stays `error` either way — only the message distinguishes them."""
+    vllm, calls = _mk_vllm(tmp_path, containers=True)
+    settings = _mk_settings(tmp_path, "laguna", DOC)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    docker = bindir / "docker"
+    # `up -d` fails, everything else succeeds: the compose launch itself is
+    # what failed, not teardown.
+    docker.write_text('#!/bin/bash\n[ "$1" = compose ] && { echo boom >&2; exit 1; }\n'
+                      'exit 0\n')
+    docker.chmod(0o755)
+    ctl = _mk_ctl(tmp_path, "laguna")
+
+    r = _run_once4(ctl, vllm, settings, bindir)
+
+    assert r.returncode == 0, r.stderr
+    s = _status(ctl)
+    assert s["state"] == "error"
+    assert s["message"] == "settings launch failed (see swap.log)"
+    assert not calls.exists()                   # swap.sh really did not run
+
+
+def test_daemon_resets_the_branch_marker_between_requests(tmp_path):
+    """--daemon processes every request in ONE long-lived shell, so the
+    branch marker is process state: set it only when the settings branch is
+    taken and a later DELEGATED failure inherits "settings launch failed"
+    forever. Two failing swaps in one daemon, opposite branches."""
+    vllm, _ = _mk_vllm(tmp_path, containers=True)
+    settings = _mk_settings(tmp_path, "laguna", DOC)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    docker = bindir / "docker"
+    docker.write_text('#!/bin/bash\n[ "$1" = compose ] && exit 1\nexit 0\n')
+    docker.chmod(0o755)
+    (vllm / "swap.sh").write_text("#!/bin/bash\nexit 1\n")
+    (vllm / "swap.sh").chmod(0o755)
+    ctl = _mk_ctl(tmp_path, "laguna")
+
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.Popen(
+        ["bash", str(HELPER), "--daemon", str(ctl), str(vllm), str(settings)],
+        env=env)
+    try:
+        assert _await_status(ctl, "req-1")["message"] == \
+            "settings launch failed (see swap.log)"
+
+        (settings / "laguna.json").unlink()   # next launch delegates
+        (ctl / "request.json").write_text(
+            json.dumps({"id": "req-2", "profile": "laguna"}))
+
+        assert _await_status(ctl, "req-2")["message"] == \
+            "swap.sh failed (see swap.log)"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 def test_settings_status_states_match_todays(tmp_path):
     """The settings-owned launch writes swapping -> done, same as the
     delegated path."""
@@ -630,8 +728,14 @@ def test_settings_status_states_match_todays(tmp_path):
     assert _status(ctl)["state"] == "done"
     owned = _status(ctl)
 
-    # Same profile, same request shape, delegated path: identical states and
-    # identical messages, so nothing downstream can tell the branches apart.
+    # Same profile, same request shape, delegated path: identical STATES,
+    # so nothing downstream that reads state can tell the branches apart.
+    # Messages are deliberately NOT pinned equal any more: a failed launch
+    # names the branch that failed (test_settings_launch_failure_names_the_
+    # settings_branch), because "swap.sh failed" on the settings-owned
+    # branch points the operator at a script that never ran. State is the
+    # machine-readable half and stays identical; the message is the human
+    # half and must not be.
     witness = tmp_path / "status-at-swap.json"
     swap = vllm / "swap.sh"
     swap.write_text(f"#!/bin/bash\ncp {ctl}/status.json {witness} 2>/dev/null\n"
@@ -646,4 +750,3 @@ def test_settings_status_states_match_todays(tmp_path):
     delegated = _status(ctl)
 
     assert owned["state"] == delegated["state"] == "done"
-    assert owned["message"] == delegated["message"]

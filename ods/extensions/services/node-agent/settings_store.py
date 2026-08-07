@@ -89,9 +89,16 @@ def read_newest_catalog() -> dict | None:
     """Newest catalog-*.json by harvested_ts, or None before any harvest.
 
     harvested_ts is ISO-8601 with a Z suffix, which sorts correctly as a
-    plain string -- no datetime parsing needed. A corrupt or short-written
-    file (the helper writes these too, non-atomically on its side) is
-    skipped rather than failing the whole read.
+    plain string -- no datetime parsing needed.
+
+    A corrupt or unreadable file is SKIPPED rather than failing the whole
+    read: these files come from a process this module does not control
+    (swap-helper.sh's _write_catalog, host-side, running as another user),
+    so their shape is an input to trust-but-verify, not an invariant this
+    module can assert. The helper does write them atomically (tmp +
+    os.replace), so a half-written file is not the expected case -- a
+    catalog from an older schema, or a permissions failure on one file, is.
+    One such file must not take the newest good catalog down with it.
     """
     directory = _dir()
     newest = None
