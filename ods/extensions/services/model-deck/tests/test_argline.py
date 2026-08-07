@@ -13,6 +13,13 @@ correctness bug as dropping one. render() must contain only tokens the map
 semantics require, so a singleton list now normalizes to its scalar
 through text; see test_singleton_list_normalizes_to_a_scalar_on_round_trip
 and the two regression pins at the bottom of this file.
+
+RULING 2026-08-07 (review): a dash-shaped value corrupts the round trip —
+CRITICAL, see test_dash_shaped_scalar_value_is_not_reparsed_as_a_new_flag
+and test_dash_shaped_list_element_does_not_reassign_neighbouring_values.
+Fixed render-side with equals-form. Numeric scalars are IMPORTANT-tier the
+same normalization class as the singleton list (text cannot encode `int`
+vs `str` either) — see test_int_value_normalizes_to_a_string_on_round_trip.
 """
 
 import shlex
@@ -31,6 +38,37 @@ ROUND_TRIP_CASES = [
      "reasoning-parser": "qwen3", "tool-call-parser": "qwen3_coder"},
     {"some-unknown-flag": "value"},
 ]
+
+# Dash-shaped values: lexically identical to a new flag once space-
+# separated. CRITICAL fix, render-side; see module docstring.
+DASH_SHAPED_CASES = [
+    {"stop-token": "--foo"},
+    {"served-model-name": ["a", "-basemodel", "c"]},
+    {"stop-token": "-x"},
+    {"served-model-name": ["-solo"]},
+    {"tags": ["-a", "-b"]},
+    {"neg": "-5"},
+]
+
+
+def _normalized(settings: dict) -> dict:
+    """The two documented normalization axes (singleton list -> scalar,
+    numeric -> string), applied by hand for the property test below. Not
+    part of the module's public surface — a test-only mirror of the two
+    RULING 2026-08-07 docstring paragraphs."""
+    result = {}
+    for key, value in settings.items():
+        if key == "_positional":
+            result[key] = list(value)
+        elif isinstance(value, list) and len(value) == 1:
+            result[key] = str(value[0])
+        elif isinstance(value, list):
+            result[key] = [str(v) for v in value]
+        elif value is True:
+            result[key] = True
+        else:
+            result[key] = str(value)
+    return result
 
 
 @pytest.mark.parametrize("settings", ROUND_TRIP_CASES)
@@ -133,3 +171,49 @@ def test_render_of_singleton_list_matches_render_of_the_equivalent_scalar():
     """The normalization stated at module scope, pinned: text cannot and
     need not tell these two apart."""
     assert render_argline({"x": ["v"]}) == render_argline({"x": "v"})
+
+
+def test_dash_shaped_scalar_value_is_not_reparsed_as_a_new_flag():
+    """CRITICAL, review 2026-08-07: ``--stop-token --foo`` is
+    indistinguishable from two separate bare flags once whitespace is the
+    only boundary the parser has — it used to come back as
+    ``{"stop-token": True, "foo": True}``. Fixed render-side (the renderer
+    knows what's a value; the parser fundamentally can't): a dash-shaped
+    scalar renders in equals-form, keeping flag and value in one token."""
+    settings = {"stop-token": "--foo"}
+
+    assert render_argline(settings) == "--stop-token=--foo"
+    assert parse_argline(render_argline(settings)) == settings
+
+
+def test_dash_shaped_list_element_does_not_reassign_neighbouring_values():
+    """CRITICAL, review 2026-08-07: ``{"served-model-name": ["a",
+    "-basemodel", "c"]}`` used to come back as ``{"served-model-name":
+    "a", "basemodel": "c"}`` — "c" silently reassigned to a flag nobody
+    wrote, and two of the three served names vanished. Fixed per-LIST:
+    once any element is dash-shaped, the whole list renders as repeated
+    equals-form occurrences, so no element is ever whitespace-adjacent to
+    the flag it could be mistaken for."""
+    settings = {"served-model-name": ["a", "-basemodel", "c"]}
+
+    assert parse_argline(render_argline(settings)) == settings
+
+
+@pytest.mark.parametrize("settings", DASH_SHAPED_CASES)
+def test_dash_shaped_values_round_trip_modulo_normalization(settings):
+    """Property assertion, review 2026-08-07: every dash-shaped case above
+    must survive render -> parse exactly, modulo the two documented
+    normalization axes (a negative number like "-5" is not dash-shaped to
+    the parser — see _is_negative_number — so it never needed the fix and
+    is included here as a control)."""
+    assert parse_argline(render_argline(settings)) == _normalized(settings)
+
+
+def test_int_value_normalizes_to_a_string_on_round_trip():
+    """IMPORTANT, review 2026-08-07: text cannot encode a value's Python
+    type any more than it can encode list-of-one vs scalar — same
+    normalization pattern, same reason. parse_argline always yields str
+    (or True); render_argline accepts int/float and stringifies them."""
+    assert parse_argline(render_argline({"max-model-len": 262144})) == {
+        "max-model-len": "262144"
+    }
