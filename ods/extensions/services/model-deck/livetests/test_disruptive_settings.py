@@ -94,6 +94,22 @@ def _wait_serving(deck, profile: str, timeout_s: float = SWAP_TIMEOUT) -> dict:
     pytest.fail(f"{profile} not serving within {timeout_s}s: {_status(deck)}")
 
 
+def _swap_with_patience(deck, profile: str, attempts: int = 6, pause_s: float = 5.0):
+    """Swap, tolerating a TRANSIENT busy 409.
+
+    ds4 is a _STRICT_BUSY_ENGINES member and counts EVERY http request as
+    in-flight, including the deck's own 300s derive pass probing /v1/models
+    (proven live 2026-08-07: first D11 run collided with it and 409'd on
+    attempt one). The guard is correct — the drill retries briefly rather
+    than forcing through it; a PERSISTENT 409 still fails the drill."""
+    for remaining in range(attempts - 1, -1, -1):
+        resp = deck.post("/api/spark/swap", json={"profile": profile})
+        if resp.status_code != 409 or remaining == 0:
+            resp.raise_for_status()
+            return resp
+        time.sleep(pause_s)
+
+
 @pytest.fixture()
 def settings_window(deck, litellm_direct, spark_serving):
     """Skip D11 rather than force through a guard that exists to protect
@@ -177,7 +193,7 @@ def test_d11_save_flags_drift_reload_applies(deck, spark_serving, settings_windo
     """The whole C2 spine: save -> drift (nothing restarts) -> reload ->
     the engine serves the new value -> drift clears -> unset + reload
     again, so neither the Deck NOR the node keeps the drill's override."""
-    deck.post("/api/spark/swap", json={"profile": VLLM_PROFILE}).raise_for_status()
+    _swap_with_patience(deck, VLLM_PROFILE)
     _wait_serving(deck, VLLM_PROFILE)
 
     deck.put(
