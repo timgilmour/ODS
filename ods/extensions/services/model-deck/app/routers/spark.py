@@ -18,15 +18,18 @@ profile so the shipped settings actually launch. The re-swap's intent
 record is what clears settings_drift — the drift flag's baseline IS the
 intent's updated_ts (see app.routers._settings_drift), so re-recording it
 is the entire "clearing" mechanism; nothing here touches settings_drift
-directly. _swap_and_record is the tail /swap and /reload share (swap ->
-intent record -> observer invalidate -> response) so the two routes can
-never drift apart on what "a swap happened" means to the rest of the deck.
+directly. Two guards refuse a launch-breaking document before anything is
+shipped — see spark_reload's own docstring. _swap_and_record is the tail
+/swap and /reload share (swap -> intent record -> observer invalidate ->
+response) so the two routes can never drift apart on what "a swap happened"
+means to the rest of the deck.
 """
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.argline import render_argv
+from app.argline import POSITIONAL_KEY, render_argv
+from app.compose_import import import_compose
 from app.configure import apply_settings
 from app.observe import SPARK_SLOT_KEY, spark_node_id
 from app.routers.settings import _declared_only, _resolve, _resolve_env
@@ -93,6 +96,37 @@ def spark_swap(body: SwapBody, request: Request) -> dict:
 
 @router.post("/reload")
 def spark_reload(body: ReloadBody, request: Request) -> dict:
+    """Ship the resolved declared settings for a profile, then re-swap it.
+
+    Two pre-ship guards exist because the helper's settings-owned branch
+    TEARS DOWN every profile container BEFORE `docker compose up` reads the
+    override (node-agent/swap-helper/swap-helper.sh `_launch`): a document
+    compose or the engine rejects leaves the node serving nothing, and the
+    Deck is the only place that can still refuse.
+
+    * SERVICE MISMATCH — the shipped `service` key is the one adopt saw. If
+      the compose service has been renamed since, the override introduces a
+      second service with no image and compose config validation fails
+      after teardown. Re-adopt is the remedy. ``force`` does NOT bypass
+      this: a wrong service name can never launch, so there is nothing for
+      force to assert.
+    * SPARSE ARGV — a pre-C2 `kept` scope can hold args without the
+      ``serve /model`` positionals. That argv is non-empty, so the helper
+      owns the launch with it and the engine never gets its subcommand. An
+      EMPTY declared set is refused by the same guard: it ships an empty
+      argv, which the helper reads as "asserts nothing" and delegates to
+      swap.sh, so the document's env would silently never apply either.
+      ``force`` DOES bypass this one — it is the operator asserting the
+      image's entrypoint supplies the subcommand, a claim only they can
+      make.
+
+    The service check costs one extra node round-trip per reload
+    (``get_compose``); reload is a human click, not a loop, and the
+    alternative is trusting an adopt-time snapshot with the whole slot at
+    stake. A node that cannot serve the compose (EngineError -> 502) or
+    serves an unparseable one (ValueError -> 422) fails the reload here
+    rather than mid-teardown.
+    """
     deck = request.app.state.deck
     spark = _spark(request)
 
@@ -113,11 +147,28 @@ def spark_reload(body: ReloadBody, request: Request) -> dict:
             f"POST /api/settings/adopt/{node}/vllm first"))
     info = identities[profile]
 
+    # Fetched FRESH, not read from the identity map: the map is an
+    # adopt-time snapshot, and a stale service name is precisely what this
+    # check exists to catch (see the docstring).
+    service = import_compose(spark.get_compose(profile))["service"]
+    if service != info["service"]:
+        raise HTTPException(status_code=409, detail=(
+            f"profile {profile!r} compose service is {service!r} but the "
+            f"adopted identity says {info['service']!r}; "
+            f"POST /api/settings/adopt/{node}/vllm to re-adopt"))
+
     # Declared-only (design decision 3): what ships to the node is exactly
     # what the argline would show — engine_defaults/checkpoint_recommendations
     # are the engine's own applied behavior, never re-asserted back at it.
     resolved = _resolve(deck, node, "vllm", info["identity"])
     declared = _declared_only(resolved)
+    if POSITIONAL_KEY not in declared and not body.force:
+        raise HTTPException(status_code=409, detail=(
+            f"declared settings for {profile!r} are not launch-shaped "
+            f"(no {POSITIONAL_KEY}, e.g. ['serve', '/model']); "
+            f"POST /api/settings/adopt/{node}/vllm first, "
+            f"or force to launch on the image entrypoint alone"))
+
     env = _resolve_env(deck, node, "vllm", info["identity"])
     outcome = apply_settings(
         "node-settings", engine_client=spark, resolved=declared,

@@ -12,7 +12,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.engines import BusyError, EngineError, GuardError
-from tests.test_api import make_app
+from tests.test_api import HERETIC_COMPOSE, make_app
 
 
 class FakeSpark:
@@ -22,6 +22,12 @@ class FakeSpark:
         self.fail = None
         self.settings_sent = None  # (profile, document), last put_settings call
         self.settings_fail = None
+        # Reload re-fetches the profile's compose before shipping (final
+        # branch review: a stale service name in the identity map would
+        # introduce an imageless service AFTER teardown killed everything),
+        # so every reload test needs real compose text behind get_compose.
+        self.compose = {}          # {profile: text}; default = the fixture
+        self.compose_fail = None
         self._status = {
             "profiles": [
                 {"name": "laguna", "engine": "vllm", "health_url": None,
@@ -48,6 +54,11 @@ class FakeSpark:
         if self.settings_fail:
             raise self.settings_fail
         self.settings_sent = (profile, document)
+
+    def get_compose(self, profile):
+        if self.compose_fail:
+            raise self.compose_fail
+        return self.compose.get(profile, HERETIC_COMPOSE)
 
 
 def _spark_app(tmp_path, monkeypatch, spark="default"):
@@ -286,6 +297,13 @@ def test_reload_ships_env_most_specific_wins(tmp_path, monkeypatch):
         "state": "done", "profile": "heretic", "id": "u0",
         "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
 
+    # Launch-shaped args are a reload PRECONDITION (the positional guard
+    # below): an env-only document ships an empty argv, which the helper
+    # treats as "asserts nothing" and falls back to swap.sh — the env would
+    # silently never apply.
+    deck["settings_store"].put(
+        "engine_models", f"sparky/vllm|{_IDENTITY}", "args",
+        {"_positional": ["serve", "/model"]})
     deck["settings_store"].put("engines", "sparky/vllm", "env", {
         "VLLM_USE_FLASHINFER_SAMPLER": "1",   # unique to 'engines'
         "VLLM_LOGGING_LEVEL": "engine-level",  # overridden by engine_models
@@ -346,7 +364,7 @@ def test_reload_explicit_profile_overrides_serving(tmp_path, monkeypatch):
         "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
     deck["settings_store"].put(
         "engine_models", f"sparky/vllm|{_IDENTITY}", "args",
-        {"max-model-len": "131072"})
+        {"max-model-len": "131072", "_positional": ["serve", "/model"]})
 
     resp = TestClient(app).post("/api/spark/reload", json={"profile": "heretic"})
 
@@ -354,3 +372,101 @@ def test_reload_explicit_profile_overrides_serving(tmp_path, monkeypatch):
     assert resp.json()["profile"] == "heretic"
     assert deck["spark"].settings_sent[0] == "heretic"
     assert deck["spark"].calls == [("swap", "heretic", False)]
+
+
+# --- pre-ship guards on the shipped document (final branch review) ---------
+
+_HERETIC_IDENTITIES = {"heretic": {"identity": _IDENTITY, "service": "aeon-vllm",
+                                   "container_name": "aeon-vllm"}}
+
+
+def _reload_ready(tmp_path, monkeypatch, args=None, identities=None):
+    """A deck whose heretic reload would succeed: identity map, serving
+    profile, and launch-shaped declared args unless a test says otherwise."""
+    app, deck = _reload_app(tmp_path, monkeypatch,
+                            identities=identities or _HERETIC_IDENTITIES)
+    deck["spark"]._status["swap_status"] = {
+        "state": "done", "profile": "heretic", "id": "u0",
+        "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
+    deck["settings_store"].put(
+        "engine_models", f"sparky/vllm|{_IDENTITY}", "args",
+        {"max-model-len": "131072", "_positional": ["serve", "/model"]}
+        if args is None else args)
+    return app, deck
+
+
+def test_reload_409s_when_the_compose_service_was_renamed(tmp_path, monkeypatch):
+    """A compose service renamed since adopt makes the identity map's
+    service name stale. Shipping it introduces a service with no image, so
+    compose config validation fails AFTER the helper's _teardown_all has
+    already killed everything — the node is left serving nothing. Refuse
+    before shipping, and name re-adopt as the remedy."""
+    app, deck = _reload_ready(tmp_path, monkeypatch)
+    deck["spark"].compose = {
+        "heretic": HERETIC_COMPOSE.replace("aeon-vllm:", "aeon-vllm-v2:", 1)}
+
+    resp = TestClient(app).post("/api/spark/reload", json={})
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "aeon-vllm-v2" in detail and "aeon-vllm" in detail
+    assert "adopt" in detail.lower()
+    assert deck["spark"].settings_sent is None
+    assert deck["spark"].calls == []
+
+
+def test_force_does_not_bypass_the_service_mismatch_guard(tmp_path, monkeypatch):
+    """A wrong service name can never launch, so there is nothing for force
+    to mean here — unlike the positional guard below."""
+    app, deck = _reload_ready(tmp_path, monkeypatch)
+    deck["spark"].compose = {
+        "heretic": HERETIC_COMPOSE.replace("aeon-vllm:", "aeon-vllm-v2:", 1)}
+
+    resp = TestClient(app).post("/api/spark/reload",
+                                json={"profile": "heretic", "force": True})
+
+    assert resp.status_code == 409
+    assert deck["spark"].settings_sent is None
+    assert deck["spark"].calls == []
+
+
+def test_reload_409s_when_declared_args_have_no_positionals(tmp_path, monkeypatch):
+    """A pre-C2 'kept' scope holds args but no `serve /model` positionals.
+    That argv is non-empty, so the helper OWNS the launch with it — and the
+    engine never gets its subcommand. Refuse, naming adopt."""
+    app, deck = _reload_ready(tmp_path, monkeypatch,
+                              args={"max-model-len": "131072"})
+
+    resp = TestClient(app).post("/api/spark/reload", json={})
+
+    assert resp.status_code == 409
+    assert "adopt" in resp.json()["detail"].lower()
+    assert deck["spark"].settings_sent is None
+    assert deck["spark"].calls == []
+
+
+def test_force_bypasses_the_positional_guard(tmp_path, monkeypatch):
+    """Documented in spark_reload's docstring: force is the operator saying
+    the entrypoint supplies the subcommand. It ships and swaps."""
+    app, deck = _reload_ready(tmp_path, monkeypatch,
+                              args={"max-model-len": "131072"})
+
+    resp = TestClient(app).post("/api/spark/reload",
+                                json={"profile": "heretic", "force": True})
+
+    assert resp.status_code == 200
+    assert deck["spark"].settings_sent[0] == "heretic"
+    assert deck["spark"].calls == [("swap", "heretic", True)]
+
+
+def test_reload_with_no_declared_args_at_all_is_also_409(tmp_path, monkeypatch):
+    """An empty declared set ships an empty argv, which the helper reads as
+    'asserts nothing' and delegates to swap.sh — the env in the same
+    document then silently never applies. Same guard, same remedy."""
+    app, deck = _reload_ready(tmp_path, monkeypatch, args={})
+    deck["settings_store"].put("engines", "sparky/vllm", "env", {"K": "v"})
+
+    resp = TestClient(app).post("/api/spark/reload", json={})
+
+    assert resp.status_code == 409
+    assert deck["spark"].settings_sent is None

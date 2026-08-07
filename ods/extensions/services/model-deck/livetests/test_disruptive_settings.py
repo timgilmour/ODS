@@ -1,25 +1,44 @@
 """D11 + D12: remote settings apply and adopt-then-own, against sparky.
 
-Disruptive: D11 performs REAL swaps (a vLLM profile in, the pre-test
-profile back — ds4 today; ~5m17s warm each, same SWAP_TIMEOUT budget
-test_spark_ds4.py and test_spark_comfyui.py both use). The restore fixture
-swaps back UNCONDITIONALLY, force=True: a live test that leaves sparky
-misconfigured would recreate the outage class this project exists to
-remove (same posture as test_spark_ds4.restore_ds4 and
+Disruptive: D11 performs FOUR REAL swaps (~5m17s warm each, same
+SWAP_TIMEOUT budget test_spark_ds4.py and test_spark_comfyui.py both use),
+so budget ~25 min for this module end to end:
+
+  1. swap the vLLM profile in,
+  2. reload — ships the drill's override, re-swaps, engine serves it,
+  3. reload again after the unset — ships the CLEANED argv (see
+     "Leaving no residue" below),
+  4. the restore fixture swaps the pre-test profile (ds4 today) back.
+
+The restore fixture swaps back UNCONDITIONALLY, force=True: a live test
+that leaves sparky misconfigured would recreate the outage class this
+project exists to remove (same posture as test_spark_ds4.restore_ds4 and
 conftest.restore_hipfire).
+
+Leaving no residue takes TWO writes, not one (final branch review,
+2026-08-07). Unsetting the override in the Deck's settings store cleans the
+DECK only; the NODE keeps the document step 2 shipped, and
+swap-helper.sh reads that document on EVERY subsequent swap of the
+profile. Without step 3 sparky would serve half its compose context
+indefinitely — and invisibly, since step 2's re-swap already re-recorded
+intent and cleared settings_drift. Step 3 must also run BEFORE the restore
+fixture's swap-back, which is why it lives at the end of the test body
+rather than in a fixture of its own.
 
 D12 (adopt) is defined FIRST and therefore runs first (pytest's default
 order is file order; this suite has no randomization plugin — see
 livetests/requirements.txt): app.routers.spark.spark_reload requires an
 adopted ``profile_identities`` entry for the profile it is reloading
-(app/routers/spark.py:107-113, 409 "has no adopted identity" otherwise),
+(app/routers/spark.py:142-146, 409 "has no adopted identity" otherwise),
 and — more importantly — D11's reload ships an argv built ONLY from
 DECLARED settings-store layers (app/routers/settings.py's
 ``_declared_only`` / design decision 3). Without D12 having imported
 heretic's full compose command into that same scope first, D11's PUT would
 be the ONLY key in it, and reload would ship an argv containing nothing but
-``--max-model-len 131072`` — not the fifteen-odd flags heretic's real
-launch needs. The two cases are one spine, not two independent drills.
+``--max-model-len 131072`` — which reload now refuses outright (the
+positional guard, 409 naming adopt) rather than shipping a launch the
+engine cannot boot. The two cases are one spine, not two independent
+drills.
 """
 
 import os
@@ -156,7 +175,8 @@ def test_d12_adopt_imports_without_touching_the_node(deck):
 def test_d11_save_flags_drift_reload_applies(deck, spark_serving, settings_window,
                                              restore_spark_profile):
     """The whole C2 spine: save -> drift (nothing restarts) -> reload ->
-    the engine serves the new value -> drift clears."""
+    the engine serves the new value -> drift clears -> unset + reload
+    again, so neither the Deck NOR the node keeps the drill's override."""
     deck.post("/api/spark/swap", json={"profile": VLLM_PROFILE}).raise_for_status()
     _wait_serving(deck, VLLM_PROFILE)
 
@@ -194,12 +214,30 @@ def test_d11_save_flags_drift_reload_applies(deck, spark_serving, settings_windo
     # 'clearing' mechanism."
     assert entry["settings_drift"] is None, "reload re-records intent; drift clears"
 
-    # D11 leaves no residue: unset the override (None unsets at the ladder
-    # -- app/ladder.py:14-18, "None at a higher layer unsets a lower one")
-    # so a FUTURE reload of this profile no longer ships this drill's
-    # 131072 override; the profile's own compose default (262144) or the
-    # engine's own default takes over again for anyone who reloads it next.
+    # D11 leaves no residue, part 1 of 2 -- the DECK store: unset the
+    # override (None unsets at the ladder -- app/ladder.py:14-18, "None at a
+    # higher layer unsets a lower one") so a FUTURE reload of this profile
+    # no longer ships this drill's 131072 override; the engine's own default
+    # takes over again for anyone who reloads it next.
     deck.put(
         f"/api/settings/engine_models/{ENGINE_MODEL_KEY}",
         json={"namespace": "args", "values": {SETTING_KEY: None}},
     ).raise_for_status()
+
+    # Part 2 of 2 -- the NODE document (see this module's docstring,
+    # "Leaving no residue"). The PUT above touched nothing on sparky:
+    # node-agent still holds the document the reload above shipped, and
+    # swap-helper.sh renders it into the compose override on EVERY swap of
+    # this profile. One more reload ships the cleaned argv and is the only
+    # thing that retires the override; it must happen BEFORE
+    # restore_spark_profile's teardown swap, so it lives here, not in a
+    # fixture. End state: the node holds heretic's ADOPTED argv minus this
+    # one flag (the override replaces compose's command outright, so the
+    # engine's own default covers it, not compose's 262144) -- asserted as
+    # "not the drill's value" rather than a guessed replacement.
+    deck.post("/api/spark/reload",
+              json={"profile": VLLM_PROFILE}).raise_for_status()
+    _wait_serving(deck, VLLM_PROFILE)
+    _wait_for(lambda: spark_serving.max_model_len() != int(SETTING_VALUE),
+              SWAP_TIMEOUT,
+              "the node's document still carries the drill's max-model-len")
