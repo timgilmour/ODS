@@ -2466,3 +2466,119 @@ def test_adopt_isolates_a_compose_fetch_failure_and_continues_the_sweep(tmp_path
     assert bad_skip["engine"] == "vllm"
     assert "EngineError" in bad_skip["reason"]
     assert "node down" in bad_skip["reason"]
+
+
+def test_adopt_isolates_an_unsupported_environment_shape(tmp_path, monkeypatch):
+    """A profile whose `environment:` is neither mapping nor list is a
+    ValueError (app.compose_import._import_env), so it isolates into
+    'skipped' exactly like malformed YAML. The LIST form is not this case —
+    it imports (tests/test_compose_import.py) — and before that fix it
+    raised AttributeError, which escapes adopt's (ValueError, EngineError)
+    catch and 500s the sweep after earlier profiles' writes committed."""
+    junk = HERETIC_COMPOSE.replace(
+        '    environment:\n      VLLM_USE_FLASHINFER_SAMPLER: "1"\n',
+        "    environment: VLLM_LOGGING_LEVEL=DEBUG\n")
+    assert "environment: VLLM" in junk, "fixture's environment block moved"
+    fake = FakeSparkForAdoptWithFailure(compose_overrides={"heretic": junk})
+    app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
+
+    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "sparky/vllm|Qwen3.6-27B-AEON-MM-MTP" in body["adopted"]
+    bad_skip = next(s for s in body["skipped"] if s["profile"] == "heretic")
+    assert "ValueError" in bad_skip["reason"]
+
+
+# --- re-adopt must not evict a previously-adopted profile (final review) ---
+
+
+def test_readopt_keeps_the_identity_of_a_transiently_failing_profile(
+        tmp_path, monkeypatch):
+    """A profile that adopted cleanly once and whose fetch fails on a LATER
+    sweep keeps its identity-map entry.
+
+    put_fields REPLACES the field it is given, and `identities` is built
+    from the current sweep alone — so a rebuild-from-scratch dropped the
+    failing profile out of the map, which silently reverts its drift
+    translation to verbatim scopes (drift goes dark, the failure Decision 9
+    exists to prevent) and 409s its reload.
+    """
+    from app.engines import EngineError
+    from app.observe import SPARK_SLOT_KEY
+    from app.routers import _settings_drift
+
+    fake = FakeSparkForAdoptWithFailure()
+    app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
+    client = TestClient(app)
+    client.post("/api/settings/adopt/sparky/vllm")
+    first = deck["characteristics_store"].entry(
+        "engine/sparky/vllm")["profile_identities"]["value"]
+    assert "heretic" in first
+
+    fake._raise_for = {"heretic": EngineError("node down")}
+    resp = client.post("/api/settings/adopt/sparky/vllm")
+
+    assert resp.status_code == 200
+    assert any(s["profile"] == "heretic" for s in resp.json()["skipped"])
+    field = deck["characteristics_store"].entry(
+        "engine/sparky/vllm")["profile_identities"]["value"]
+    assert field["heretic"] == first["heretic"]
+    assert "mm27b" in field
+
+    # The consequence, not just the storage: drift for the spark slot is
+    # only visible THROUGH this map (app/routers/__init__.py's spark-slot
+    # translation), so an evicted entry is drift going dark.
+    deck["intent_store"].record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+                                engine="spark", now="2020-01-01T00:00:00+00:00")
+    intent = deck["intent_store"].get()[SPARK_SLOT_KEY]
+    settings_data = deck["settings_store"].get()
+    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent,
+                           identity_map=field) is not None
+    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent,
+                           identity_map={k: v for k, v in field.items()
+                                         if k != "heretic"}) is None
+
+
+def test_readopt_drops_a_profile_that_left_the_node(tmp_path, monkeypatch):
+    """Merging must not make the map immortal: a profile absent from
+    status() entirely is gone from the node, so its entry is dropped —
+    only a profile that IS still there but failed this sweep is kept."""
+    fake = FakeSparkForAdoptWithFailure()
+    app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
+    client = TestClient(app)
+    client.post("/api/settings/adopt/sparky/vllm")
+    assert "heretic" in deck["characteristics_store"].entry(
+        "engine/sparky/vllm")["profile_identities"]["value"]
+
+    fake.status = lambda: {"profiles": [
+        {"name": "mm27b", "engine": "vllm", "health_url": None, "container": None},
+    ], "swap_status": None, "serving": None}
+    client.post("/api/settings/adopt/sparky/vllm")
+
+    field = deck["characteristics_store"].entry(
+        "engine/sparky/vllm")["profile_identities"]["value"]
+    assert set(field) == {"mm27b"}
+
+
+def test_readopt_with_every_profile_failing_keeps_the_whole_map(
+        tmp_path, monkeypatch):
+    """The `if identities:` write guard is not enough on its own: with the
+    merge in place a sweep where EVERY still-present profile fails must
+    leave the previously-adopted map intact, not merely unwritten."""
+    from app.engines import EngineError
+
+    fake = FakeSparkForAdoptWithFailure()
+    app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
+    client = TestClient(app)
+    client.post("/api/settings/adopt/sparky/vllm")
+    before = deck["characteristics_store"].entry(
+        "engine/sparky/vllm")["profile_identities"]["value"]
+
+    fake._raise_for = {"heretic": EngineError("down"), "mm27b": EngineError("down")}
+    client.post("/api/settings/adopt/sparky/vllm")
+
+    after = deck["characteristics_store"].entry(
+        "engine/sparky/vllm")["profile_identities"]["value"]
+    assert after == before

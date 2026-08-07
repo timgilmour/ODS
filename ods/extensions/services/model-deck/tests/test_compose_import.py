@@ -73,6 +73,69 @@ def test_environment_imported():
     assert imported["env"]["VLLM_USE_FLASHINFER_SAMPLER"] == "1"
 
 
+def _with_environment(profile: str, block: str) -> str:
+    """A real fixture with ONLY its `environment:` block swapped — the rest
+    of the file (command block, mounts, comment) stays live truth, so a
+    variant test still exercises the whole import, not a hand-shaped stub.
+
+    compose-heretic.yaml's block is two lines (10-11): the header and its
+    single mapping entry.
+    """
+    text = _profile(profile)
+    old = "    environment:\n      VLLM_USE_FLASHINFER_SAMPLER: \"1\"\n"
+    assert old in text, "fixture's environment block moved; update this helper"
+    return text.replace(old, block)
+
+
+def test_list_form_environment_imports():
+    """`environment:` as a LIST (`["FOO=bar"]`) is the other half of
+    compose's own schema and is at least as common as the mapping form.
+    Before the fix, `.items()` raised AttributeError — NOT a ValueError, so
+    it escaped adopt's `(ValueError, EngineError)` isolation and 500'd the
+    sweep after earlier profiles' writes had committed."""
+    imported = import_compose(_with_environment("heretic", (
+        "    environment:\n"
+        "      - VLLM_USE_FLASHINFER_SAMPLER=1\n"
+        "      - VLLM_LOGGING_LEVEL=DEBUG\n"
+    )))
+
+    assert imported["env"] == {"VLLM_USE_FLASHINFER_SAMPLER": "1",
+                               "VLLM_LOGGING_LEVEL": "DEBUG"}
+    # The rest of the import is unaffected by the environment encoding.
+    assert imported["args"]["kv-cache-dtype"] == "fp8_e4m3"
+
+
+def test_list_form_environment_splits_on_the_first_equals_only():
+    """A value containing `=` (a JSON blob, a base64 token) must survive
+    whole: splitting on every `=` would truncate it silently."""
+    imported = import_compose(_with_environment("heretic", (
+        "    environment:\n"
+        '      - VLLM_ATTENTION_CONFIG={"a":1,"b":"x=y"}\n'
+    )))
+
+    assert imported["env"]["VLLM_ATTENTION_CONFIG"] == '{"a":1,"b":"x=y"}'
+
+
+def test_list_form_entry_without_equals_imports_as_empty():
+    """`- FOO` is host-passthrough in compose; the Deck has no host
+    environment to resolve it from at import time, so it imports as the
+    empty value rather than being dropped (dropping it would lose the
+    operator's only record that the variable is meant to be set)."""
+    imported = import_compose(_with_environment("heretic",
+                                                "    environment:\n      - FOO\n"))
+
+    assert imported["env"] == {"FOO": ""}
+
+
+def test_environment_of_an_unsupported_shape_raises_value_error():
+    """Neither mapping nor list -> ValueError naming the type, NOT an
+    AttributeError: adopt isolates ValueError per profile, and any other
+    exception class escapes that isolation."""
+    with pytest.raises(ValueError, match="str"):
+        import_compose(_with_environment("heretic",
+                                         "    environment: VLLM_LOGGING_LEVEL=DEBUG\n"))
+
+
 def test_container_allowlist_fields_only():
     imported = import_compose(_profile("heretic"))
 

@@ -177,6 +177,18 @@ def adopt(node: str, engine: str, request: Request) -> dict:
     (drift translation, reload) can go from a profile name to the
     engine_models scope key without re-parsing compose themselves.
 
+    Re-adopt is ADDITIVE (final branch review, 2026-08-07):
+    ``put_fields`` REPLACES the field it is handed, so building
+    ``identities`` from the current sweep alone evicted every profile whose
+    fetch/parse happened to fail this time — a transient node hiccup, and
+    that profile's drift silently reverts to verbatim scopes (drift goes
+    dark, the failure Decision 9 exists to prevent) and its reload 409s
+    "has no adopted identity". The map is therefore merged over the
+    previous one: a profile that IS still on the node but was unreadable
+    keeps its old entry. Nothing else is carried forward — a profile the
+    sweep read successfully is authoritative about itself, and one absent
+    from ``status()`` is gone from the node.
+
     Per-profile isolation (review round 1 fix, 2026-08-07): fetching
     (``SparkClient.get_compose``, ``EngineError`` on transport/HTTP failure)
     and parsing (``import_compose``, ``ValueError`` on malformed YAML /
@@ -200,7 +212,11 @@ def adopt(node: str, engine: str, request: Request) -> dict:
         raise HTTPException(status_code=503, detail="spark engine is not configured")
 
     store = deck["settings_store"]
+    characteristics = deck["characteristics_store"]
+    previous = (characteristics.entry(f"engine/{node}/{engine}")
+                .get("profile_identities") or {}).get("value") or {}
     adopted, kept, skipped, identities = [], [], [], {}
+    unreadable: set[str] = set()
     for meta in spark.status()["profiles"]:
         if meta["engine"] != "vllm":
             skipped.append({"profile": meta["name"], "engine": meta["engine"]})
@@ -213,6 +229,7 @@ def adopt(node: str, engine: str, request: Request) -> dict:
             # isolation") — report it and keep going.
             skipped.append({"profile": meta["name"], "engine": "vllm",
                             "reason": f"{type(exc).__name__}: {exc}"})
+            unreadable.add(meta["name"])
             continue
         identity = imported["identity"]
         if identity is None:
@@ -235,10 +252,17 @@ def adopt(node: str, engine: str, request: Request) -> dict:
             store.put("engine_models", key, "container", imported["container"], note=note)
         adopted.append(key)
 
-    if identities:
-        deck["characteristics_store"].put_fields(
+    # Merge, never replace — see this function's docstring, "Re-adopt is
+    # additive". `unreadable` is the ONLY carry-forward set: a profile this
+    # sweep read successfully is authoritative about itself (dropped its
+    # /model mount, stopped being vllm), and a profile absent from status()
+    # is gone from the node.
+    merged = {name: previous[name] for name in unreadable if name in previous}
+    merged.update(identities)
+    if merged or previous:
+        characteristics.put_fields(
             f"engine/{node}/{engine}",
-            {"profile_identities": {"value": identities,
+            {"profile_identities": {"value": merged,
                                     "source": "compose import",
                                     "derived_ts": _now_iso()}})
     return {"adopted": adopted, "kept": kept, "skipped": skipped}

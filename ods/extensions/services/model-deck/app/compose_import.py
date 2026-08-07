@@ -112,9 +112,34 @@ def _import_args(command) -> dict:
 
 
 def _import_env(environment) -> dict:
+    """Compose allows BOTH encodings of `environment:` — a mapping and a
+    `KEY=value` list — and nothing constrains this fleet's files to one.
+
+    A shape that is neither raises ValueError, never AttributeError: the
+    adopt sweep isolates per-profile failures on ``(ValueError,
+    EngineError)`` (app.routers.settings.adopt), and any other exception
+    class escapes that isolation into a 500 with earlier profiles' writes
+    already committed.
+
+    A list entry with no ``=`` is compose's host-passthrough form. There is
+    no host environment to resolve it from at import time, so it imports as
+    the empty value rather than being dropped — dropping it would lose the
+    operator's only record that the variable is meant to be set at all.
+    """
     if not environment:
         return {}
-    return {str(key): str(value) for key, value in environment.items()}
+    if isinstance(environment, dict):
+        return {str(key): str(value) for key, value in environment.items()}
+    if isinstance(environment, list):
+        env = {}
+        for entry in environment:
+            key, sep, value = str(entry).partition("=")
+            env[key] = value if sep else ""
+        return env
+    raise ValueError(
+        f"'environment' must be a mapping or a list, "
+        f"found {type(environment).__name__}"
+    )
 
 
 def _import_container(service: dict) -> dict:
