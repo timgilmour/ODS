@@ -10,10 +10,27 @@ from app.validate_settings import validate_settings
 CATALOG = {
     "options": {
         "max-model-len": {"type": "int", "choices": None, "nargs": None,
-                          "widget": "number", "aliases": [], "default": "None", "help": ""},
+                          "widget": "number", "aliases": [], "default": "None", "help": "",
+                          "repeatable": False},
         "quantization": {"type": "str", "choices": ["modelopt", "compressed-tensors"],
                          "nargs": None, "widget": "select", "aliases": ["-q"],
-                         "default": "None", "help": ""},
+                         "default": "None", "help": "", "repeatable": False},
+        # BooleanOptionalAction pair: the ONLY spelling of the negative
+        # sense is the --no-* alias, and it takes no value (nargs 0).
+        "enable-prefix-caching": {"type": None, "choices": None, "nargs": 0,
+                                  "widget": "toggle",
+                                  "aliases": ["--no-enable-prefix-caching"],
+                                  "default": "False", "help": "", "repeatable": False},
+        # Append-action repeatable flag: a list of any length is legal,
+        # each element validated on its own.
+        "served-model-name": {"type": "str", "choices": None, "nargs": None,
+                              "widget": "list", "aliases": [], "default": "None",
+                              "help": "", "repeatable": True},
+        "gpu-ids": {"type": "int", "choices": None, "nargs": None, "widget": "list",
+                    "aliases": [], "default": "None", "help": "", "repeatable": True},
+        # nargs +/*: also a legal list shape without being "repeatable".
+        "stop": {"type": "str", "choices": None, "nargs": "+", "widget": "list",
+                 "aliases": [], "default": "None", "help": "", "repeatable": False},
     },
     "engine_version": "0.26.0",
 }
@@ -116,3 +133,119 @@ def test_every_warning_names_its_key():
 def test_warnings_never_raise_regardless_of_input_shape():
     validate_settings({}, None, {})
     validate_settings(_resolved(a=True), CATALOG, {})
+    # F5 regression: entry missing "value" entirely.
+    assert isinstance(validate_settings({"foo": {}}, CATALOG, {}), list)
+    # F5 regression: entry isn't a dict at all.
+    assert isinstance(validate_settings({"foo": "bar"}, CATALOG, {}), list)
+    # F5 regression: raw int value leaking through the normalization
+    # invariant (resolved values are supposed to be str/True/list[str]).
+    assert isinstance(
+        validate_settings(
+            {"max-model-len": {"value": 5, "origin": "declared", "layer": "engine"}},
+            CATALOG, {},
+        ),
+        list,
+    )
+
+
+# --- F1: catalog aliases (BooleanOptionalAction --no-* halves, short forms) ---
+
+def test_negative_alias_of_a_boolean_optional_flag_is_not_unknown():
+    """`--no-enable-prefix-caching` is the ONLY spelling of the negative
+    sense — it must resolve through the catalog's aliases, not miss and
+    read as unknown."""
+    warnings = validate_settings(
+        _resolved(**{"no-enable-prefix-caching": True}), CATALOG, {})
+
+    assert warnings == []
+
+
+def test_toggle_option_given_a_value_warns():
+    """nargs 0 means the engine takes no value for this flag — the catalog
+    carries nargs, so this is now catchable (M2)."""
+    warnings = validate_settings(
+        _resolved(**{"enable-prefix-caching": "yes"}), CATALOG, {})
+
+    assert warnings[0]["class"] == "type"
+
+
+def test_short_alias_resolves_to_the_canonical_option_for_type_checking():
+    """`-q` is quantization's short form. It must resolve to the
+    canonical option entry for type/choices checking, and the warning
+    must still be keyed by the settings key the caller actually used."""
+    warnings = validate_settings(_resolved(q="banana"), CATALOG, {})
+
+    assert warnings[0]["class"] == "type"
+    assert warnings[0]["key"] == "q"
+    assert "modelopt" in warnings[0]["message"]
+
+
+# --- F4: list-valued settings ---
+
+def test_list_on_a_repeatable_option_with_valid_elements_is_silent():
+    warnings = validate_settings(
+        _resolved(**{"served-model-name": ["a", "b", "c"]}), CATALOG, {})
+
+    assert warnings == []
+
+
+def test_list_on_a_repeatable_option_flags_the_bad_element():
+    warnings = validate_settings(
+        _resolved(**{"gpu-ids": ["0", "not-a-number", "2"]}), CATALOG, {})
+
+    assert len(warnings) == 1
+    assert warnings[0]["class"] == "type"
+    assert warnings[0]["key"] == "gpu-ids"
+
+
+def test_list_on_a_non_repeatable_single_value_option_warns():
+    """max-model-len takes exactly one value; a list is illegal for it
+    regardless of what the elements look like."""
+    warnings = validate_settings(
+        _resolved(**{"max-model-len": ["131072", "262144"]}), CATALOG, {})
+
+    assert len(warnings) == 1
+    assert warnings[0]["class"] == "type"
+    assert warnings[0]["key"] == "max-model-len"
+
+
+def test_list_on_an_nargs_plus_option_is_legal():
+    warnings = validate_settings(_resolved(**{"stop": ["a", "b"]}), CATALOG, {})
+
+    assert warnings == []
+
+
+# --- F2/F3: the dash<->underscore conflict bridge ---
+
+def test_bridged_conflict_is_keyed_by_the_dash_form_settings_key():
+    """detect_drift speaks fact-field vocabulary (underscored); settings
+    are always dash-form. THE regression: the bridge must be mechanical
+    and reversible, not a hand-listed special case, and the warning must
+    come back keyed the way every settings-key consumer looks it up."""
+    warnings = validate_settings(
+        _resolved(**{"max-model-len": "200000"}),
+        CATALOG,
+        _facts(max_position_embeddings=131072),
+    )
+
+    conflicts = [w for w in warnings if w["class"] == "conflict"]
+    assert len(conflicts) == 1
+    assert conflicts[0]["key"] == "max-model-len"
+    assert conflicts[0]["severity"] == "mismatch"
+
+
+def test_max_input_tokens_conflict_is_reachable_from_settings():
+    """max_input_tokens is a real DRIFT_RULES field that the original
+    hand-added bridge (quantization, max-model-len only) could never
+    reach. The mechanical bridge must reach it without a new special
+    case."""
+    warnings = validate_settings(
+        _resolved(**{"max-input-tokens": "200000"}),
+        CATALOG,
+        _facts(max_model_len_live="131072"),
+    )
+
+    conflicts = [w for w in warnings if w["class"] == "conflict"]
+    assert len(conflicts) == 1
+    assert conflicts[0]["key"] == "max-input-tokens"
+    assert conflicts[0]["severity"] == "mismatch"
