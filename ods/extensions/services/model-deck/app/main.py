@@ -219,9 +219,30 @@ def _build_watcher(settings: Settings):
     hands the HTTP routers (see the cache comment above) — real clients +
     stores + World, wired from Settings."""
     from app.arbiter import Watcher
-    from app.engines.docker_ctl import DockerEngineExec
+    from app.engines.docker_ctl import EngineExecRouter
+    from app.engines.spark import SparkCatalogExec
+    from app.observe import spark_node_id
 
     deck = _build_deck(settings)
+
+    # Catalog harvest (app.arbiter.Watcher._harvest_catalogs): routes maps
+    # each configurable (node, engine) pair to the one adapter that can
+    # actually produce a catalog for it. Spark is this box's one real
+    # vLLM-backed target (live-verified 2026-08-07 — see
+    # Watcher._configurable_engines's docstring: hipfire is confirmed a
+    # Bun daemon, not vLLM, so no local docker-exec route belongs here).
+    # DockerEngineExec (app.engines.docker_ctl) stays defined for a future
+    # local vLLM engine but is deliberately not constructed below — there
+    # is nothing local to route it to today. routes stays {} (engine_exec
+    # None, harvest disabled entirely, same as every pre-C2 build) on a
+    # box with no spark configured — the node half of the pair always
+    # comes from spark_node_id(), never settings.node_label or
+    # settings.spark_node_name (see _configurable_engines' docstring for
+    # the historical bug that rule guards against).
+    routes = {}
+    if deck["spark"] is not None:
+        routes[(spark_node_id(), "vllm")] = SparkCatalogExec(deck["spark"])
+
     return Watcher(
         settings=deck["settings"],
         world=deck["world"],
@@ -249,16 +270,10 @@ def _build_watcher(settings: Settings):
         # will read from, and the read-only GGUF mount to scan.
         characteristics_store=deck["characteristics_store"],
         gguf_dir=deck["gguf_dir"],
-        # Catalog harvest (app.arbiter.Watcher._harvest_catalogs): the exec
-        # path stays built and allowlisted (same dockerctl/allowlist the
-        # park path already uses, over the socket-proxy sidecar's exec
-        # endpoints — see compose.yaml's docker-ctl -allowPOST lines and
-        # app.engines.docker_ctl's module docstring) even though hipfire is
-        # confirmed NOT vLLM-backed (live-verified 2026-08-07 — see
-        # Watcher._configurable_engines's docstring) and so C1 has no valid
-        # local harvest target; C2 (spark/remote vLLM via node-agent +
-        # engine capability descriptors) is what actually calls this again.
-        engine_exec=DockerEngineExec(deck["dockerctl"], deck["settings"].hipfire_container),
+        # See the routes comment above: None (harvest fully disabled) on a
+        # box with no spark configured, otherwise the router built from it.
+        engine_exec=EngineExecRouter(routes) if routes else None,
+        configurable_engines=sorted(routes),
     )
 
 

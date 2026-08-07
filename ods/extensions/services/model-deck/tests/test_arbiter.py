@@ -23,6 +23,12 @@ from app.arbiter import HealSuppressor, Watcher, decide
 from app.characteristics import CharacteristicsStore
 from app.engines import EngineError, GuardError
 from app.events import tail_events
+# app.harvest's real sentinel, for the C2 remote-pair end-to-end tests below
+# (task 8): a hand-seeded option_catalog shape would bypass
+# parse_probe_output entirely and could never catch a real parsing bug --
+# exactly the masking bug C1's final review caught (see this section's C2
+# subsection comment).
+from app.harvest import _SENTINEL
 # The node id the settings API reads catalogs under (app/observe.py:28) —
 # harvest-scoped tests inject engine names via `configurable_engines` and
 # must key their assertions off THIS constant, never a hand-typed "local"
@@ -2030,13 +2036,16 @@ def test_reconciler_skips_a_lemonade_restore_while_a_deck_load_is_in_flight(tmp_
 # CATALOG HARVEST (task 8) — _derive_pass harvests each configurable
 # engine's option catalog, once per observed engine version.
 #
-# Watcher._configurable_engines returns [] in production (F2, 2026-08-07:
-# hipfire is confirmed not vLLM-backed, so C1 has no valid local harvest
-# target — see its docstring in app/arbiter.py). Every test below injects
-# `configurable_engines=["hipfire"]` (engine names only — Watcher pairs each
-# with `_LOCAL_NODE` internally, never `settings.node_label`) purely to keep
-# exercising _harvest_catalogs's machinery; it is not a claim that hipfire
-# is a real harvest target.
+# Watcher._configurable_engines returns its constructor pairs VERBATIM as of
+# task 8 (C2) — no internal pairing with _LOCAL_NODE happens inside Watcher
+# anymore; app.main builds the one real production pair with
+# `(spark_node_id(), "vllm")`. Every test below (except the C2 remote-pair
+# tests at the end of this section) injects
+# `configurable_engines=[(_LOCAL_NODE, "hipfire")]` purely to keep exercising
+# _harvest_catalogs's machinery against a local engine_exec double; it is not
+# a claim that hipfire is a real harvest target (F2, 2026-08-07: hipfire is
+# confirmed not vLLM-backed, so C1/C2 both have no valid LOCAL harvest
+# target — see Watcher._configurable_engines' docstring in app/arbiter.py).
 # ===========================================================================
 
 
@@ -2062,7 +2071,7 @@ def test_harvest_runs_once_and_caches_by_version(tmp_path, monkeypatch):
     execs = []
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
                        engine_exec=_recording_exec(execs, version="0.26.0"),
-                       configurable_engines=["hipfire"])
+                       configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
@@ -2077,7 +2086,7 @@ def test_harvest_reruns_when_the_engine_version_changes(tmp_path, monkeypatch):
     execs = []
     exec_fn = _recording_exec(execs, version="0.26.0")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=exec_fn,
-                       configurable_engines=["hipfire"])
+                       configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()
     exec_fn.version = "0.27.0"
@@ -2092,7 +2101,7 @@ def test_harvest_failure_leaves_no_catalog_and_does_not_raise(tmp_path, monkeypa
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
                        engine_exec=_raises(EngineError("not running")),
-                       configurable_engines=["hipfire"])
+                       configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()
 
@@ -2113,7 +2122,7 @@ def test_harvest_exec_failure_logs_a_deduped_harvest_failed_event(tmp_path):
         tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
         characteristics_store=store,
         engine_exec=_raises(EngineError("403 Forbidden")),
-        configurable_engines=["hipfire"])
+        configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
@@ -2135,7 +2144,7 @@ def test_harvest_failed_dedup_resets_when_the_failure_kind_changes(tmp_path):
         tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
         characteristics_store=store,
         engine_exec=_raises(EngineError("403 Forbidden")),
-        configurable_engines=["hipfire"])
+        configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()  # EngineError -> logged
     watcher._last_derive_at = None
@@ -2162,7 +2171,7 @@ def test_harvest_survives_guarderror_when_the_engine_is_not_allowlisted(tmp_path
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
                        engine_exec=_raises(GuardError("container 'ods-hipfire' is not in the park allowlist")),
-                       configurable_engines=["hipfire"])
+                       configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()  # must not raise
 
@@ -2193,7 +2202,7 @@ def test_harvest_bare_engine_exec_without_version_peek_still_writes_once(tmp_pat
         return "0.26.0", PROBE_OUTPUT
 
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=bare_exec,
-                       configurable_engines=["hipfire"])
+                       configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
@@ -2238,7 +2247,7 @@ def test_harvest_reruns_against_the_real_dockerengineexec_when_the_image_id_chan
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
                        engine_exec=DockerEngineExec(dockerctl, "ods-hipfire"),
-                       configurable_engines=["hipfire"])
+                       configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
@@ -2265,20 +2274,36 @@ def test_harvest_reruns_against_the_real_dockerengineexec_when_the_image_id_chan
 # routers/settings.py:78-82). Unit tests never caught it because
 # node_label's default ("local") happens to equal the node id, making
 # label == id in every test that never overrode node_label.
+#
+# Task 8 (C2) moved pair CONSTRUCTION out of Watcher entirely --
+# _configurable_engines returns whatever pair it's handed, verbatim, so
+# there is no internal "pair with X" step left for node_label to leak into.
+# That half of the original bug is now covered where the construction
+# actually happens: tests.test_engines.
+# test_build_watcher_routes_spark_catalog_by_node_id_not_label (app.main's
+# real wiring, asserting it uses spark_node_id(), never node_label). This
+# test keeps its ORIGINAL regression duty at the Watcher layer: even with
+# node_label set away from "local" and handed a real node-id pair, the
+# harvest path must consume that pair as given and never consult
+# settings.node_label at all -- a future Watcher change that reintroduced a
+# node_label fallback (e.g. "use the pair's node, falling back to
+# node_label") would still be caught here.
 
 
 def test_harvest_key_uses_node_id_not_node_label(tmp_path):
-    """Regression for the live-deploy defect above: even with
-    settings.node_label set away from its "local" default, the harvested
-    catalog must land under the node id (`engine/local/hipfire`, what the
-    settings API actually reads) -- never under the label
-    (`engine/autarch/hipfire`, a key no API path reads)."""
+    """Regression for the live-deploy defect above, at the Watcher layer:
+    even with settings.node_label set away from its "local" default, a
+    pair built from the node id must land the catalog under that node id
+    (`engine/local/hipfire`, what the settings API actually reads) --
+    never under the label (`engine/autarch/hipfire`, a key no API path
+    reads) -- proving Watcher's harvest path never substitutes node_label
+    for the pair it was actually given."""
     store = CharacteristicsStore(tmp_path / "c.json")
     execs = []
     watcher = _watcher(
         tmp_path=tmp_path, characteristics_store=store,
         engine_exec=_recording_exec(execs, version="0.26.0"),
-        configurable_engines=["hipfire"],
+        configurable_engines=[(_LOCAL_NODE, "hipfire")],
         node_label="autarch",
     )
 
@@ -2286,3 +2311,92 @@ def test_harvest_key_uses_node_id_not_node_label(tmp_path):
 
     assert store.entry(f"engine/{_LOCAL_NODE}/hipfire")["option_catalog"] is not None
     assert store.entry("engine/autarch/hipfire") == {}
+
+
+# --- C2: remote (node, engine) pairs, returned verbatim (task 8) ------------
+#
+# _configurable_engines() no longer pairs anything with _LOCAL_NODE itself —
+# it returns whatever the constructor was handed, verbatim (see its
+# docstring). These two exercise that seam with a pair a real production
+# wiring would build (`(spark_node_id(), "vllm")`, app.main), and — unlike
+# every test above, which reuses tests.test_harvest's PROBE_OUTPUT fixture —
+# build the probe text by hand from app.harvest's REAL `_SENTINEL` wrapped
+# around a real one-option payload, so `parse_probe_output` does the actual
+# parsing. A hand-seeded `option_catalog` dict would exercise none of that
+# and could hide exactly the kind of parsing regression C1's final branch
+# review caught (see _harvest_catalogs' and parse_probe_output's docstrings).
+
+
+def _sentinel_probe_output():
+    """One-option probe text, real-shaped: _SENTINEL-bracketed JSON exactly
+    as PROBE_SOURCE prints it (app/harvest.py), so parse_probe_output parses
+    it for real rather than a fixture standing in for that parse."""
+    payload = json.dumps({"options": [
+        {"flags": ["--max-model-len"], "type": "int", "choices": None,
+         "default": "None", "nargs": None, "cls": "_StoreAction",
+         "help": "Model context length."},
+    ]})
+    return f"{_SENTINEL}\n{payload}\n{_SENTINEL}\n"
+
+
+def test_watcher_harvests_a_remote_pair_end_to_end(tmp_path):
+    """Watcher with configurable_engines=[('sparky', 'vllm')] and an
+    engine_exec returning (image_id, REAL-SHAPED probe output) stores
+    option_catalog under key 'engine/sparky/vllm' — build the probe output
+    with app.harvest's real sentinel + a one-option payload so
+    parse_probe_output does the parsing (no hand-seeded shapes; that
+    masking bug is exactly what C1's final review caught)."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    probe_output = _sentinel_probe_output()
+
+    def exec_fn(node, engine, interpreter, source):
+        return "sha256:remote", probe_output
+
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       engine_exec=exec_fn,
+                       configurable_engines=[("sparky", "vllm")])
+
+    watcher._derive_pass()
+
+    catalog = store.entry("engine/sparky/vllm")["option_catalog"]
+    assert catalog["value"]["engine_version"] == "sha256:remote"
+    assert "max-model-len" in catalog["value"]["options"]
+    # The pair form is consumed verbatim -- no _LOCAL_NODE re-pairing landed
+    # a copy under the local-node key too.
+    assert store.entry(f"engine/{_LOCAL_NODE}/vllm") == {}
+
+
+def test_watcher_version_skip_prevents_refetch_after_store(tmp_path):
+    """Second derive pass with the same image_id -> exec called, put_fields
+    NOT called again (arbiter.py:934-935). engine_exec here is a bare
+    function with no `.version` peek -- SparkCatalogExec's real shape (see
+    its docstring: the node-agent has no cheap peek, so the exec runs every
+    non-throttled pass) -- so this exercises the POST-call version compare,
+    not the peek-based early skip test_harvest_runs_once_and_caches_by_
+    version already covers."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    writes = []
+    real_put_fields = store.put_fields
+
+    def _counting_put_fields(key, fields):
+        writes.append((key, fields))
+        return real_put_fields(key, fields)
+
+    store.put_fields = _counting_put_fields
+
+    probe_output = _sentinel_probe_output()
+    calls = []
+
+    def exec_fn(node, engine, interpreter, source):
+        calls.append(1)
+        return "sha256:remote", probe_output
+
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=exec_fn,
+                       configurable_engines=[("sparky", "vllm")])
+
+    watcher._derive_pass()
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+
+    assert len(calls) == 2   # no .version peek -> the exec runs every pass
+    assert len(writes) == 1  # ...but the post-call compare stops the 2nd write

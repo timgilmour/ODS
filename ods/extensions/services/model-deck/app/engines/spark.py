@@ -196,6 +196,18 @@ class SparkClient:
             # ``except (EngineError, BusyError)`` catch wouldn't see it.
             raise EngineError(f"non-JSON response from /v1/models: {exc}") from exc
 
+    def get_catalog(self) -> dict:
+        """The node-agent's cached option-catalog probe (GET
+        /v1/node/catalog) — the WHOLE body, ``{"catalog": {"image_id",
+        "harvested_ts", "engine", "probe_output"} | None}``. Written by the
+        swap helper's post-launch probe, not run on demand here: the
+        node-agent has no docker access of its own (see this module's
+        docstring), so this is a read of a file-protocol cache, not a live
+        exec. A null ``catalog`` (nothing harvested yet) is returned as-is
+        — SparkCatalogExec below, not this client, decides what that means
+        for a caller."""
+        return self._node_get("/v1/node/catalog")
+
     def get_compose(self, profile: str) -> str:
         """The raw compose YAML text node-agent holds for `profile` (GET
         /v1/node/profile/{profile}/compose) — the adopt sweep's one source
@@ -332,3 +344,46 @@ class SparkClient:
             raise EngineError(resp.text)
         body = resp.json()
         return {"id": body.get("id"), "profile": profile}
+
+
+class SparkCatalogExec:
+    """Adapts SparkClient to Watcher's harvest contract —
+    ``engine_exec(node, engine, interpreter, source) -> (version, output)``
+    (see app.arbiter.Watcher._harvest_catalogs and _configurable_engines) —
+    for the spark node's option-catalog cache.
+
+    ``interpreter``/``source`` are accepted (the contract is positional)
+    and ignored: the node-agent has no docker access at all (see this
+    module's docstring), so nothing here ever runs PROBE_SOURCE. The swap
+    helper already ran it after the node's last launch and wrote the
+    result to the file-protocol cache GET /v1/node/catalog reads — this
+    call is just that cache read, through SparkClient.get_catalog.
+
+    Deliberately has NO ``.version`` attribute, unlike DockerEngineExec:
+    that adapter's peek is a free `docker inspect`; there is no equivalent
+    free read here — asking "has the catalog changed" costs the same GET
+    as reading the catalog itself, so a peek would just be a second,
+    redundant HTTP call, not an optimization. Its absence means
+    _harvest_catalogs' peek-based early-skip (the `getattr(..., "version",
+    None)` check) never fires for this adapter, so the accepted cost is
+    one HTTP GET to the node-agent per non-throttled derive pass — passes
+    are already throttled to `settings.derive_interval_s` (>= 300 s), and
+    the post-call version comparison in _harvest_catalogs still stops a
+    redundant characteristics WRITE, so the real cost is one cheap GET
+    every >=300 s, not a repeated exec+parse.
+
+    Raises EngineError when the node hasn't harvested a catalog yet
+    (``catalog`` is null) — _harvest_catalogs already treats EngineError as
+    a supported no-catalog state for every other engine (an engine that
+    has never run has no catalog), not a crash; this is that same state,
+    reached over the network instead of a local docker exec.
+    """
+
+    def __init__(self, client: SparkClient) -> None:
+        self._client = client
+
+    def __call__(self, node: str, engine: str, interpreter: str, source: str) -> tuple[str, str]:
+        catalog = self._client.get_catalog().get("catalog")
+        if catalog is None:
+            raise EngineError("no harvested catalog on the node yet")
+        return catalog["image_id"], catalog["probe_output"]

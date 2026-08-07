@@ -276,3 +276,53 @@ class DockerEngineExec:
         version = self._dockerctl.image_ref(self._container)
         output = self._dockerctl.exec_run(self._container, interpreter, source)
         return version, output
+
+
+class EngineExecRouter:
+    """Dispatches Watcher's harvest contract call
+    ``(node, engine, interpreter, source) -> (version, output)`` to one of
+    several per-(node, engine) engine_exec adapters (see
+    app.arbiter.Watcher._harvest_catalogs and app.main's wiring), so
+    ``_configurable_engines`` can return real, distinct (node, engine)
+    pairs — a local container's DockerEngineExec, a remote node's
+    SparkCatalogExec, ... — behind the one callable Watcher holds.
+
+    ``routes`` is consumed verbatim (stored as a plain dict, keyed by the
+    exact (node, engine) pair each adapter serves) — this class does no
+    node-vocabulary translation of its own; that discipline lives entirely
+    in whoever BUILDS `routes` (app.main: ``(spark_node_id(), "vllm")``,
+    never ``settings.node_label``/``settings.spark_node_name`` — see
+    Watcher._configurable_engines' docstring for the historical bug that
+    rule guards against).
+
+    An unrouted pair is EngineError, not KeyError: _harvest_catalogs'
+    ``except (EngineError, BusyError, GuardError)`` already treats an
+    engine_exec failure as the supported no-catalog state (logged, deduped,
+    never raised past the derive pass) — a stray/misconfigured pair should
+    degrade the same way a genuinely unreachable engine does, not crash the
+    watcher thread with an exception type nothing there catches.
+
+    Deliberately has NO ``.version`` attribute of its own: a router
+    covering several adapters has no single answer to "has the version
+    changed" without first knowing which adapter a given (node, engine)
+    call would even reach, and _harvest_catalogs peeks once per Watcher,
+    not once per pair — routing the peek itself is a bigger seam change
+    than this class's job. Its absence just means the peek-based early-skip
+    never fires for routed calls; each routed adapter's own post-call
+    version comparison (in _harvest_catalogs) still prevents a redundant
+    write, exactly as for an adapter with no peek used directly.
+    """
+
+    def __init__(self, routes: dict) -> None:
+        self._routes = dict(routes)
+
+    @property
+    def pairs(self) -> list:
+        return list(self._routes)
+
+    def __call__(self, node: str, engine: str, interpreter: str, source: str) -> tuple[str, str]:
+        try:
+            exec_fn = self._routes[(node, engine)]
+        except KeyError:
+            raise EngineError(f"no engine_exec route for ({node!r}, {engine!r})")
+        return exec_fn(node, engine, interpreter, source)

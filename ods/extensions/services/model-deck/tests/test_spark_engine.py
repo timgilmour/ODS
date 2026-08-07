@@ -584,3 +584,43 @@ def test_swap_in_progress_reads_the_live_node():
 
 def test_swap_in_progress_false_while_serving():
     assert _client(_node_handler(swap_status=_swap_status("done"))).swap_in_progress() is False
+
+
+# --- get_catalog (remote harvest, Plan C2 Task 8) ---
+#
+# The node-agent's cached probe result (Task 3's GET /v1/node/catalog,
+# Task 4's post-launch write) -- a thin `_node_get` wrapper like
+# get_settings above, returning the WHOLE body (including a possibly-null
+# "catalog") rather than unwrapping it: SparkCatalogExec is the one that
+# knows what a null catalog means (app/engines/spark.py).
+
+
+def test_get_catalog_returns_the_whole_body():
+    body = {"catalog": {"image_id": "sha256:abc", "harvested_ts": "2026-08-07T02:00:00Z",
+                        "engine": "vllm", "probe_output": "..."}}
+
+    def handler(request):
+        assert request.url.path == "/v1/node/catalog"
+        assert request.method == "GET"
+        return httpx.Response(200, json=body, request=request)
+
+    assert _client(handler).get_catalog() == body
+
+
+def test_get_catalog_returns_the_body_when_catalog_is_null():
+    """Not yet harvested is a supported node-agent state, not an error --
+    SparkCatalogExec, not this client, decides what a null catalog means."""
+    body = {"catalog": None}
+
+    def handler(request):
+        return httpx.Response(200, json=body, request=request)
+
+    assert _client(handler).get_catalog() == body
+
+
+def test_get_catalog_raises_engineerror_on_500():
+    def handler(request):
+        return httpx.Response(500, text="boom", request=request)
+
+    with pytest.raises(EngineError):
+        _client(handler).get_catalog()

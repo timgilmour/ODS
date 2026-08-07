@@ -1395,3 +1395,60 @@ def test_build_deck_wires_hipfire_stats_url_and_activity_window(tmp_path, monkey
     assert settings.hipfire_activity_window_s == 123.5
     assert deck["hipfire"]._activity_window_s == 123.5
     assert deck["hipfire"]._stats_url == "http://ods-hipfire:11435/stats"
+
+
+# --- _build_watcher wiring: remote catalog harvest routes (task 8, C2) -----
+#
+# Watcher._configurable_engines does no pairing of its own anymore (see its
+# docstring) -- the vocabulary decision moved here, into app.main. These
+# prove the actual production wiring, not just the seam: a spark-configured
+# box's one route keys off spark_node_id(), never settings.node_label
+# (the C1 live-deploy bug's original vocabulary), and a box with no spark
+# leaves harvest fully disabled, same as every pre-C2 build.
+
+
+def _spark_env(monkeypatch, node_key="k"):
+    monkeypatch.setenv("MODEL_DECK_SPARK_NODE_URL", "http://sparky:7720")
+    monkeypatch.setenv("MODEL_DECK_SPARK_SERVING_URL", "http://sparky:8000")
+    monkeypatch.setenv("ODS_REMOTE_NODE_KEYS", json.dumps({"sparky": node_key}))
+
+
+def test_build_watcher_routes_spark_catalog_by_node_id_not_label(tmp_path, monkeypatch):
+    from app.engines.docker_ctl import EngineExecRouter
+    from app.engines.spark import SparkCatalogExec
+    from app.main import _build_watcher
+    from app.observe import spark_node_id
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    # A node_label set away from its "local" default -- exactly the live
+    # deploy configuration ("autarch") the original vocabulary bug needed
+    # to actually show up (see Watcher._configurable_engines' docstring).
+    monkeypatch.setenv("MODEL_DECK_NODE_LABEL", "autarch")
+    _spark_env(monkeypatch)
+    settings = Settings()
+
+    watcher = _build_watcher(settings)
+
+    assert watcher._configurable_engines() == [(spark_node_id(), "vllm")]
+    assert isinstance(watcher._engine_exec, EngineExecRouter)
+    assert watcher._engine_exec.pairs == [(spark_node_id(), "vllm")]
+    assert isinstance(watcher._engine_exec._routes[(spark_node_id(), "vllm")], SparkCatalogExec)
+    # Never the label, and never under the label's own value either.
+    assert ("autarch", "vllm") not in watcher._engine_exec.pairs
+
+
+def test_build_watcher_leaves_harvest_disabled_without_spark(tmp_path, monkeypatch):
+    """No spark configured -> routes stays {} -> engine_exec is None and
+    _harvest_catalogs' `if self._engine_exec is None: return` short-circuits
+    -- harvest fully off, same posture as every pre-C2 build."""
+    from app.main import _build_watcher
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    settings = Settings()
+
+    watcher = _build_watcher(settings)
+
+    assert watcher._configurable_engines() == []
+    assert watcher._engine_exec is None
