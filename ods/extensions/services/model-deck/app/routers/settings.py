@@ -1,11 +1,27 @@
 """Settings router — the two surfaces over one store.
 
 ``GET/PUT /settings/{kind}/{key}`` is the store. ``GET
-/settings/effective/...`` resolves the ladder and renders the SAME map as a
-command line, so the chip panel and the text field can never disagree —
-they are literally the same data rendered twice. ``POST /settings/preview``
-parses typed text without saving, which is what makes the text field feel
-live.
+/settings/effective/...`` resolves the ladder and returns TWO views of it,
+not one, as of Plan C2 Task 7 (design decision 3): ``resolved`` is the full,
+five-layer structured view — every key, both derived layers
+(``engine_defaults``, ``checkpoint_recommendations``) included, each with
+its ``{value, origin, layer}`` provenance — and ``argline`` is that same
+resolution's DECLARED-ONLY subset (``origin == "declared"``, i.e. the
+``engine``/``model``/``engine_model`` layers) rendered as a command line.
+The two are no longer "the same data rendered twice": a harvested engine
+default or a checkpoint's recommended sampling value shows up in
+``resolved`` for the UI to display with its provenance, but never as a flag
+on ``argline`` — an engine's own applied behavior is not something the Deck
+re-asserts back at it, and this is also the exact set of layers
+``app.routers.spark.spark_reload`` ships to the node (see
+``_declared_only`` below; the two call sites share one filter so they can
+never disagree). The optional ``?layers=`` query param (comma-separated,
+validated against ``app.ladder.LAYERS``, unknown name -> 422) filters
+``resolved`` ALONE, for a UI that wants to show one layer at a time;
+``argline`` and ``warnings`` are always computed from the full resolution
+regardless of this filter, so it can never change what would actually
+ship. ``POST /settings/preview`` parses typed text without saving, which is
+what makes the text field feel live.
 
 Nothing here applies settings to a running engine: a save changes intent,
 and reload stays a human click.

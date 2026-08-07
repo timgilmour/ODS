@@ -268,6 +268,45 @@ def test_reload_resolves_ships_and_swaps_the_serving_profile(tmp_path, monkeypat
                            identity_map=identities) is None
 
 
+def test_reload_ships_env_most_specific_wins(tmp_path, monkeypatch):
+    """Review fix round 1, IMPORTANT 1: _resolve_env had zero coverage
+    anywhere in the suite — every other reload test seeds args only, and
+    test_configure.py's env test passes env= straight into the mech (pins
+    the mech, not the resolution). A copy-paste slip in _resolve_env (the
+    wrong namespace, or a wrong scope key) would ship the wrong environment
+    to a live vLLM launch with the rest of the suite green. Seeds a
+    conflicting key at two scopes plus one key unique to each, and asserts
+    document['env'] is exactly the per-key, most-specific-wins merge — the
+    same ladder app.ladder.resolve_settings gives args, reused for env with
+    both derived layers empty (app.routers.settings._resolve_env)."""
+    identities = {"heretic": {"identity": _IDENTITY, "service": "aeon-vllm",
+                              "container_name": "aeon-vllm"}}
+    app, deck = _reload_app(tmp_path, monkeypatch, identities=identities)
+    deck["spark"]._status["swap_status"] = {
+        "state": "done", "profile": "heretic", "id": "u0",
+        "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
+
+    deck["settings_store"].put("engines", "sparky/vllm", "env", {
+        "VLLM_USE_FLASHINFER_SAMPLER": "1",   # unique to 'engines'
+        "VLLM_LOGGING_LEVEL": "engine-level",  # overridden by engine_models
+    })
+    deck["settings_store"].put(
+        "engine_models", f"sparky/vllm|{_IDENTITY}", "env", {
+            "VLLM_LOGGING_LEVEL": "engine-model-level",  # most specific wins
+            "CUDA_VISIBLE_DEVICES": "0",  # unique to 'engine_models'
+        })
+
+    resp = TestClient(app).post("/api/spark/reload", json={})
+
+    assert resp.status_code == 200
+    _, document = deck["spark"].settings_sent
+    assert document["env"] == {
+        "VLLM_USE_FLASHINFER_SAMPLER": "1",
+        "VLLM_LOGGING_LEVEL": "engine-model-level",
+        "CUDA_VISIBLE_DEVICES": "0",
+    }
+
+
 def test_reload_on_unadopted_profile_is_409(tmp_path, monkeypatch):
     """No identity-map entry for the requested profile -> 409 telling the
     operator to adopt first; put_settings must not have been called."""
