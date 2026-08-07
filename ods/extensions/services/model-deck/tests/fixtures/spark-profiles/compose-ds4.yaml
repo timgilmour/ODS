@@ -1,0 +1,109 @@
+# ds4 profile #7: DeepSeek-V4-Flash (DwarfStar 4) — swap tenant, NOT a vLLM model.
+# Engine metadata (profiles.json) is Task 4; the swap.sh entry is Task 3. This task only
+# creates the compose file; nothing on sparky is started by it.
+#
+# Image: ds4-spark:v0.5.3, built locally on sparky by Task 1 from ~/vllm/ds4/Dockerfile
+# (2.73 GB, no registry — see that Dockerfile's header for the source pin: Entrpi/ds4.git
+# @ v0.5.3 / commit 4ad370b4, SHA hard-asserted at build time). Local image, so no
+# tag@digest pin here — there is no registry copy to move under us.
+#
+# GPU access is mandatory, not optional: every ds4 binary links libcuda.so.1, which the
+# NVIDIA container runtime injects only when the container requests GPUs — even `--version`
+# fails without it (verified 2026-08-04: `docker run --rm --gpus all ds4-spark:v0.5.3
+# --version` -> `ds4-server v0.5.3`). Hence the same `deploy.resources.reservations.devices`
+# block the vLLM profiles and comfyui use below.
+#
+# Command line: reproduced verbatim from the live trial process on sparky (tmux session
+# `serve`, verified 2026-08-04 via `ps eww` + `/proc/<pid>/environ`), with only the model
+# paths adapted from the wrapper's ~/models/ds4 host paths to this container's /models
+# mount:
+#   argv:  ds4-server --cuda -m <base.gguf> -c 32768 --port 8000 --host 0.0.0.0 --no-update-check
+#   env:   DS4_CONT_MTP_MODE=2 DS4_CONT_DSPARK=1 DS4_DSPARK_MODEL=<drafter.gguf>
+# --cuda and --no-update-check are already baked into the image's ENTRYPOINT (see
+# Dockerfile), so command: below carries only the rest. The DSpark drafter is armed via the
+# same three env vars the live process actually has set, not the documented `--dspark FILE`
+# CLI flag: `--help` states `--dspark` is "same as DS4_DSPARK_MODEL" but says nothing about
+# an equivalent for DS4_CONT_MTP_MODE, and the ds4-serve wrapper script (~/.local/bin on
+# sparky) deliberately sets all three together for its DSpark launch path ("v0.2.4: no
+# --mtp — the server drops the MTP head when a drafter is armed"). Mirroring the exact env
+# the live trial proved out is lower-risk than assuming CLI-flag equivalence for a knob
+# that's undocumented outside the wrapper's own comments.
+#
+# ctx 131072 is MEASURED (Task 7, 2026-08-05 — evidence: task-7-report.md "Part B"). Probes at
+# 32768/65536/131072/196608/262144/393216 all booted; this box degrades before it refuses.
+# 262144 makes the server shave concurrency ("max_seq 31 (requested 32) ... reduced from
+# requested to fit memory") and 393216 falls back to managed KV with its own "may degrade
+# performance" warning, so both are out. 196608 is the largest clean value but leaves only
+# ~3.4 GiB available under a 45.7k-token request with the page cache halved; 131072 answers
+# the identical request at the same ~1055 tok/s prefill with ~5.7 GiB still available and the
+# cache intact — same speed, 2.3 GiB more headroom, two steps below the first degradation.
+# The model is not the constraint (GGUF: context_length 1048576, YaRN x16 over a native
+# 65536); memory is. Must stay equal to `max_input_tokens` for spark-ds4-v4flash in
+# ~/ods/config/litellm/{extra-routes.json,lemonade.yaml} — a route advertising more than the
+# engine accepts fails at request time, not at boot. Slated to become a per-engine `launch`
+# settings key under Plan C1 rather than a hand-rolled control here.
+#
+# Served model id is `deepseek-v4-flash`, fixed by the server itself (confirmed via
+# `curl http://127.0.0.1:8000/v1/models` on the live trial 2026-08-04) — there is no
+# --served-model-name-equivalent flag to set, unlike the vLLM profiles.
+#
+# Weights: /home/tim/models/ds4 on the host holds both GGUFs the trial uses (base model
+# ~86.7 GB IQ2XXS quant + DSpark drafter ~7 GB) — mounted read-only as one directory since
+# both files must sit together for the drafter to be loadable at all.
+#
+# Disk KV checkpoints: DEFERRED to v2 (Tim, 2026-08-04). --kv-disk-dir is a real ds4-server
+# flag (verified in --help) but is deliberately NOT passed here, and no checkpoint directory
+# is mounted. This is a decision, not an oversight — v1 ships without it.
+#
+# restart: "no" — the Deck (autarch) owns restoration, not Docker (Tim, 2026-08-04:
+# "ideally it would just restore previous state, not go to a pinned version"). A Docker
+# restart policy can only ever re-arm whichever container happened to be running when it was
+# set — that's a *pinned* profile, exactly what Tim rejected, and it already misfired once:
+# heretic came back on the 2026-08-04 power-on purely because an earlier `docker start` had
+# re-armed its `unless-stopped`, and had to be displaced. The Model Deck lifecycle spine
+# (shipped + live 2026-08-04) is the intended single restorer: intent.json records the last
+# deliberate state and the reconciler restores it. Two restorers with different opinions can
+# fight over :8000 after a reboot, so ds4 gets restart: "no" and the Deck decides. Tradeoff:
+# with no docker restart policy, a sparky reboot leaves it serving nothing until the Deck (on
+# autarch) notices and restores — if autarch is down, sparky stays empty, unlike heretic's
+# old independent-comeback behaviour. If Tim prefers that autonomy back, the fallback is
+# `unless-stopped` on exactly one designated profile, chosen in the UI (Open Items). The
+# quotes on "no" are load-bearing: bare `no` parses as YAML boolean false, not the string
+# Docker Compose expects for this key.
+#
+# network_mode/ipc/shm_size/ulimits: matched to compose-comfyui.yaml's Grace-Blackwell
+# settings (the other non-vLLM profile on this box) rather than the vLLM profiles' smaller
+# shm_size, per the task brief.
+services:
+  ds4:
+    image: ds4-spark:v0.5.3
+    container_name: spark-ds4
+    restart: "no"
+    network_mode: host
+    ipc: host
+    shm_size: "32g"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      DS4_CONT_MTP_MODE: "2"
+      DS4_CONT_DSPARK: "1"
+      DS4_DSPARK_MODEL: /models/DSpark-drafter-Q2K-Q8-0731.gguf
+    volumes:
+      - /home/tim/models/ds4:/models:ro
+    command:
+      - -m
+      - /models/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf
+      - -c
+      - "131072"
+      - --port
+      - "8000"
+      - --host
+      - "0.0.0.0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,56 @@
+# ComfyUI profile — swap tenant, NOT a vLLM model. Engine metadata: profiles.json.
+#
+# Image vetted 2026-07-31 from https://github.com/AEON-7/comfyui-aeon-spark (AEON-7 org —
+# same publisher as aeon-vllm-ultimate, already trusted on this host). Verified directly
+# against the repo's Dockerfile/entrypoint.sh/docker-compose.yml and the GHCR registry API
+# (not just the README):
+#   - ComfyUI (bleeding-edge master), ComfyUI-Manager (bundled node + --enable-manager pip
+#     pkg), ComfyUI-LTXVideo (LTX-2 nodes) and 11 other custom-node packs are baked into
+#     /opt/bundled_custom_nodes and seeded into the workspace volume on first boot.
+#   - GHCR tags (ghcr.io/v2 tags/list + manifest digests, verified 2026-07-31):
+#       latest / full / bf16-flux2-ltx2.3 / cu130-sm121a -> one digest (code + auto-downloader,
+#         needs HF_TOKEN, pulls ~285 GB of Flux2/LTX/AceStep weights on first start)
+#       base / slim -> a second digest (code only, no auto-download; SKIP_MODEL_DOWNLOAD=1
+#         baked in)
+#     No date-pinned tag scheme exists on this image (unlike aeon-vllm-ultimate) — pinned
+#     here by tag+digest instead for immutability.
+#   - Using `slim`: this task ships EMPTY models/user/custom_nodes dirs on purpose — Task 6
+#     populates models. The `full`/`latest` auto-downloader is out of scope here.
+#   - Real in-container layout (from Dockerfile + entrypoint.sh, NOT /opt/ComfyUI/... as in
+#     the generic task-brief skeleton): ComfyUI lives at /opt/ComfyUI; entrypoint.sh
+#     bootstraps a persistent /workspace/ComfyUI tree and symlinks
+#     /opt/ComfyUI/{models,custom_nodes,output,input,user,temp} -> /workspace/ComfyUI/{...}.
+#     Volumes below mount our three host dirs at their REAL destinations under
+#     /workspace/ComfyUI.
+#   - Port: COMFYUI_PORT env (default 8188, matches brief) confirmed in entrypoint.sh; health
+#     endpoint /system_stats confirmed as upstream's own compose healthcheck.
+#   - shm_size bumped 8g -> 32g and ulimits added (memlock unlimited, stack 64 MiB): matches
+#     upstream's own compose-recommended values for Grace-Blackwell unified memory +
+#     SageAttention/diffusion workloads (8g in the generic brief skeleton was a placeholder).
+services:
+  comfyui:
+    image: ghcr.io/aeon-7/comfyui-aeon-spark:slim@sha256:7fda74d7af1d86455bfa58df5d36e761964017c7bce6f5d2f3564ba0b2deee3a
+    container_name: spark-comfyui
+    restart: unless-stopped
+    network_mode: host
+    ipc: host
+    shm_size: "32g"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      COMFYUI_PORT: "8188"
+      # slim already bakes SKIP_MODEL_DOWNLOAD=1; set explicitly too since this task
+      # deliberately ships empty dirs (Task 6 populates models).
+      SKIP_MODEL_DOWNLOAD: "1"
+    volumes:
+      - /home/tim/comfyui-models:/workspace/ComfyUI/models
+      - /home/tim/comfyui-user:/workspace/ComfyUI/user
+      - /home/tim/comfyui-custom-nodes:/workspace/ComfyUI/custom_nodes
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
