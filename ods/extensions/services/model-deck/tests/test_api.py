@@ -1590,6 +1590,39 @@ def test_put_and_get_settings_round_trip(tmp_path, monkeypatch):
     assert body["args"]["generation-config"] == "auto"
 
 
+def test_settings_responses_do_not_leak_the_internal_updated_ts_bookkeeping(tmp_path, monkeypatch):
+    """updated_ts is app.routers._settings_drift's write-tracking clock, not
+    a documented field of this response shape (review round finding: fix if
+    cheap). Both GET and the PUT's own return value must omit it."""
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
+
+    put_body = client.put(
+        "/api/settings/engines/sparky/vllm",
+        json={"namespace": "args", "values": {"generation-config": "auto"}}).json()
+    get_body = client.get("/api/settings/engines/sparky/vllm").json()
+
+    assert "updated_ts" not in put_body
+    assert "updated_ts" not in get_body
+
+
+def test_put_settings_missing_body_fields_is_422_not_500(tmp_path, monkeypatch):
+    """A malformed body (missing namespace/values) must fail the same way
+    the container allowlist does — a ValueError the global handler turns
+    into 422 — not subscript straight into a KeyError and 500."""
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+
+    resp = TestClient(app).put("/api/settings/engines/sparky/vllm", json={"namespace": "args"})
+
+    assert resp.status_code == 422
+
+
 def test_put_settings_rejects_deck_managed_container_field(tmp_path, monkeypatch):
     from app.settings_store import SettingsStore
 
@@ -1616,6 +1649,99 @@ def test_effective_settings_include_argline_and_warnings(tmp_path, monkeypatch):
 
     assert "--brand-new-flag 1" in body["argline"]
     assert body["warnings"][0]["class"] == "unknown"
+
+
+def test_effective_settings_resolves_five_layers_against_a_real_catalog(tmp_path, monkeypatch):
+    """Review-round finding: the whole catalog-present path of /effective
+    was untested — engine defaults extracted from a real option_catalog
+    (including the `default not in (None, "None")` filter), checkpoint
+    recommendations from recommended_sampling (raw int -> normalized str,
+    proving BOTH app.argline.normalize_args_map wrappers in _resolve), the
+    models/engine_models store layers, five-layer per-key precedence (a
+    store layer beating a derived one), and a catalog-driven non-'unknown'
+    warning actually firing.
+    """
+    from app.characteristics import CharacteristicsStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("engine/sparky/vllm", {
+        "option_catalog": {
+            "value": {
+                "engine_version": "test",
+                "options": {
+                    # default=4096 (int): must survive the `default not in
+                    # (None, "None")` filter and normalize_args_map's
+                    # int->str axis to become an engine_defaults entry.
+                    "max-model-len": {
+                        "aliases": [], "type": "int", "choices": None,
+                        "default": 4096, "nargs": None, "repeatable": False,
+                        "help": "", "widget": "number",
+                    },
+                    # default=None: must NOT become an engine_defaults entry.
+                    "quantization": {
+                        "aliases": [], "type": "str", "choices": ["awq", "gptq"],
+                        "default": None, "nargs": None, "repeatable": False,
+                        "help": "", "widget": "select",
+                    },
+                },
+            },
+            "source": "test", "derived_ts": "t",
+        },
+    })
+    characteristics.put_fields("model/TestModel-7B", {
+        # Raw int, straight from generation_config.json shape — proves the
+        # checkpoint_recommendations normalize_args_map wrapper.
+        "recommended_sampling": {
+            "value": {"top-k": 40},
+            "source": "generation_config.json", "derived_ts": "t",
+        },
+    })
+    deck["characteristics_store"] = characteristics
+
+    store = SettingsStore(tmp_path / "s.json")
+    # Engine layer: overrides the catalog default for the SAME key (proves
+    # a store layer beats a derived layer), and sets an out-of-choices
+    # value for a real catalog option (proves a catalog-driven "type"
+    # warning, not just "unknown", can fire).
+    store.put("engines", "sparky/vllm", "args",
+             {"max-model-len": "8192", "quantization": "bogus-quant"})
+    # models vs engine_models: engine_models is more specific and must win.
+    store.put("models", "TestModel-7B", "args", {"model-layer-flag": "from-model"})
+    store.put("engine_models", "sparky/vllm|TestModel-7B", "args",
+             {"model-layer-flag": "from-engine-model"})
+    deck["settings_store"] = store
+
+    body = TestClient(app).get(
+        "/api/settings/effective/sparky/vllm/TestModel-7B").json()
+    resolved = body["resolved"]
+
+    # Store layer (engine) beats derived layer (engine_defaults) for the
+    # same key.
+    assert resolved["max-model-len"]["value"] == "8192"
+    assert resolved["max-model-len"]["origin"] == "declared"
+    assert resolved["max-model-len"]["layer"] == "engine"
+    assert "--max-model-len 8192" in body["argline"]
+
+    # checkpoint_recommendations: raw int normalized to str.
+    assert resolved["top-k"]["value"] == "40"
+    assert isinstance(resolved["top-k"]["value"], str)
+    assert resolved["top-k"]["origin"] == "derived"
+    assert resolved["top-k"]["layer"] == "checkpoint_recommendations"
+
+    # engine_models (most specific) beats models for the same key.
+    assert resolved["model-layer-flag"]["value"] == "from-engine-model"
+    assert resolved["model-layer-flag"]["layer"] == "engine_model"
+
+    # A catalog-driven, non-'unknown' warning fires for the out-of-choices
+    # quantization value.
+    quant_warnings = [w for w in body["warnings"] if w["key"] == "quantization"]
+    assert quant_warnings
+    assert quant_warnings[0]["class"] == "type"
+    # max-model-len IS in the catalog — must not also read as unknown.
+    assert not any(w["key"] == "max-model-len" for w in body["warnings"])
 
 
 def test_preview_parses_text_and_returns_warnings(tmp_path, monkeypatch):
@@ -1651,6 +1777,10 @@ def test_catalog_absent_is_null_not_an_error(tmp_path, monkeypatch):
 
 
 def test_settings_change_flags_drift_on_a_loaded_placement(tmp_path, monkeypatch):
+    """``changed`` entries are namespace-qualified ("env:KEY", not a bare
+    "KEY") — review-round RULING: an unqualified key would make
+    args:max-model-len and env:MAX_MODEL_LEN indistinguishable and let
+    same-named keys in different namespaces dedupe into one."""
     from app.intent import IntentStore
     from app.settings_store import SettingsStore
 
@@ -1665,18 +1795,157 @@ def test_settings_change_flags_drift_on_a_loaded_placement(tmp_path, monkeypatch
                json={"namespace": "env", "values": {"HIPFIRE_MAX_SEQ": "131072"}})
 
     entry = client.get("/api/state").json()["lifecycle"]["local/hipfire"]
-    assert entry["settings_drift"]["changed"] == ["HIPFIRE_MAX_SEQ"]
+    assert entry["settings_drift"]["changed"] == ["env:HIPFIRE_MAX_SEQ"]
+
+
+def test_settings_drift_baseline_is_intent_updated_ts_not_last_healthy_ts(tmp_path, monkeypatch):
+    """CRITICAL fix, review round 2026-08-07: app.arbiter.Watcher._reconcile_pass
+    calls note_healthy(key) on every tick a placement is observed serving,
+    and note_healthy unconditionally re-stamps last_healthy_ts to now — so
+    comparing drift against last_healthy_ts made the flag self-erase within
+    one arbiter tick of a placement actually serving (drift visible only
+    while NOT serving — backwards). intent["updated_ts"] is the stable
+    baseline: IntentStore.record() stamps it on every deliberate
+    load/unload/park and note_healthy never touches it. This is the "after"
+    side of the boundary: settings written strictly after the intent's
+    updated_ts ARE drift, with a real (not None) baseline in play."""
+    from app.intent import IntentStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    intent = IntentStore(tmp_path / "intent.json")
+    # A fixed PAST baseline — settings written "now" (real wall clock, via
+    # the PUT below) are unambiguously after it.
+    intent.record("local/hipfire", state="loaded", model=None, engine="hipfire",
+                  now="2020-01-01T00:00:00+00:00")
+    deck["intent_store"] = intent
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
+
+    client.put("/api/settings/engines/local/hipfire",
+               json={"namespace": "env", "values": {"HIPFIRE_MAX_SEQ": "131072"}})
+
+    entry = client.get("/api/state").json()["lifecycle"]["local/hipfire"]
+    assert entry["settings_drift"]["changed"] == ["env:HIPFIRE_MAX_SEQ"]
+
+
+def test_settings_drift_survives_repeated_note_healthy_reconcile_ticks(tmp_path, monkeypatch):
+    """The most direct proof of the Finding-1 fix: simulates the exact
+    sequence that self-erased the flag under the old (last_healthy_ts)
+    comparison — a placement already healthy for a while (note_healthy
+    called before the edit), a settings edit, then several MORE note_healthy
+    calls (what app.arbiter.Watcher._reconcile_pass does on every tick it
+    observes the placement serving, BEFORE plan_reconcile ever runs). Under
+    the old baseline this would push last_healthy_ts past the settings
+    write and erase the flag; intent["updated_ts"] is untouched by
+    note_healthy, so drift must still be present after all of it."""
+    from app.intent import IntentStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/hipfire", state="loaded", model=None, engine="hipfire",
+                  now="2020-01-01T00:00:00+00:00")
+    intent.note_healthy("local/hipfire", now="2021-01-01T00:00:00+00:00")
+    deck["intent_store"] = intent
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
+
+    client.put("/api/settings/engines/local/hipfire",
+               json={"namespace": "env", "values": {"HIPFIRE_MAX_SEQ": "131072"}})
+
+    # Several more simulated reconcile ticks observing it still serving.
+    intent.note_healthy("local/hipfire")
+    intent.note_healthy("local/hipfire")
+
+    entry = client.get("/api/state").json()["lifecycle"]["local/hipfire"]
+    assert entry["settings_drift"]["changed"] == ["env:HIPFIRE_MAX_SEQ"]
+
+
+def test_settings_drift_is_none_when_settings_predate_the_intent_baseline(tmp_path, monkeypatch):
+    """The other side of the boundary: settings written BEFORE intent's
+    updated_ts are what the placement is already running with, not drift."""
+    from app.intent import IntentStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = SettingsStore(tmp_path / "s.json")
+    # Written at real "now" — earlier than the future baseline below.
+    store.put("engines", "local/hipfire", "env", {"HIPFIRE_MAX_SEQ": "131072"})
+    deck["settings_store"] = store
+
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/hipfire", state="loaded", model=None, engine="hipfire",
+                  now="2030-01-01T00:00:00+00:00")
+    deck["intent_store"] = intent
+
+    entry = TestClient(app).get("/api/state").json()["lifecycle"]["local/hipfire"]
+    assert entry["settings_drift"] is None
+
+
+def test_settings_drift_is_none_with_no_intent_recorded(tmp_path, monkeypatch):
+    """No intent at all means nothing is running deliberately, so there is
+    nothing a settings write could be drift 'since' — None, not a guess."""
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engines", "local/hipfire", "env", {"HIPFIRE_MAX_SEQ": "131072"})
+    deck["settings_store"] = store
+
+    entry = TestClient(app).get("/api/state").json()["lifecycle"]["local/hipfire"]
+    assert entry["settings_drift"] is None
 
 
 def test_settings_drift_never_triggers_a_restart(tmp_path, monkeypatch):
     """Distinct from placement drift, which DOES auto-restore. Conflating
-    the two would restart a serving model because someone typed in a box."""
+    the two would restart a serving model because someone typed in a box.
+
+    Review-round strengthening: the original version of this test hand-built
+    statuses/intents and called plan_reconcile directly without ever writing
+    a setting or building the lifecycle view — it would have passed
+    unchanged even if build_lifecycle_view fed settings_drift straight into
+    the reconciler. This version does a REAL settings write against a REAL,
+    serving placement (drift genuinely fires through build_lifecycle_view),
+    then builds the reconciler's own status input the way
+    app.arbiter.Watcher._reconcile_pass builds it — derive_status over
+    intent x observation, never from build_lifecycle_view — and proves that
+    input carries no settings_drift key at all (the view and the
+    reconciler's input are different objects) and that plan_reconcile still
+    plans nothing.
+    """
     from app.intent import IntentStore
+    from app.lifecycle import derive_status
     from app.reconcile import plan_reconcile
+    from app.routers import build_observations, build_world_snapshot
+    from app.settings_store import SettingsStore
 
-    statuses = {"local/hipfire": {"status": "serving", "reason": "r"}}
-    intents = {"local/hipfire": {"state": "loaded", "model": None, "engine": "hipfire",
-                                 "updated_ts": "t", "last_healthy_ts": None,
-                                 "failures": 0, "quarantined": False}}
+    app, deck = make_app(tmp_path, monkeypatch)
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/hipfire", state="loaded", model=None, engine="hipfire",
+                  now="2020-01-01T00:00:00+00:00")
+    deck["intent_store"] = intent
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
 
+    client.put("/api/settings/engines/local/hipfire",
+               json={"namespace": "env", "values": {"HIPFIRE_MAX_SEQ": "131072"}})
+
+    # Drift genuinely fires through the real lifecycle view (FakeHipfire
+    # defaults to state="running" -> observed loaded, matching intent's
+    # model=None -> status "serving").
+    entry = client.get("/api/state").json()["lifecycle"]["local/hipfire"]
+    assert entry["status"] == "serving"
+    assert entry["settings_drift"] is not None
+
+    # The reconciler's OWN inputs, built exactly the way
+    # app.arbiter.Watcher._reconcile_pass builds them — never from
+    # build_lifecycle_view, which is a read-only display derivation with no
+    # relationship to what the reconciler consumes.
+    world = build_world_snapshot(deck)
+    observed = build_observations(deck, world)
+    intents = intent.get()
+    statuses = {key: derive_status(intents.get(key), obs) for key, obs in observed.items()}
+
+    assert "settings_drift" not in statuses["local/hipfire"]
     assert plan_reconcile(statuses, intents, auto_enabled=True) == []

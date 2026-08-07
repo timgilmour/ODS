@@ -27,7 +27,15 @@ app.validate_settings. The one save-time rejection that exists,
 and is deliberately NOT caught here: app.main installs a global
 ``ValueError`` -> 422 handler (settings-shape rejection, same family as
 app.routers.facts' declared-key validation), so this router does not
-duplicate that mapping.
+duplicate that mapping. A ``PUT`` body missing ``namespace``/``values``
+raises the same ``ValueError`` -> 422 rather than subscripting the body
+and letting a ``KeyError`` 500 — same error family, not a special case.
+
+``GET``/``PUT /settings/{kind}/{key}`` strip ``updated_ts`` out of the
+returned scope before it reaches a caller: it is write-tracking bookkeeping
+for ``app.routers._settings_drift``'s comparison, stamped by
+``SettingsStore.put``, not a documented field of this response shape — and
+leaking it would make it part of the API's contract by accident.
 """
 
 from fastapi import APIRouter, Request
@@ -78,16 +86,29 @@ def preview(body: dict, request: Request) -> dict:
 
 @router.get("/settings/{kind}/{key:path}")
 def get_settings(kind: str, key: str, request: Request) -> dict:
-    return request.app.state.deck["settings_store"].scope(kind, key)
+    return _public_scope(request.app.state.deck, kind, key)
 
 
 @router.put("/settings/{kind}/{key:path}")
 def put_settings(kind: str, key: str, body: dict, request: Request) -> dict:
     deck = request.app.state.deck
-    deck["settings_store"].put(
-        kind, key, body["namespace"], body["values"], note=body.get("note")
-    )
-    return deck["settings_store"].scope(kind, key)
+    namespace, values = body.get("namespace"), body.get("values")
+    if namespace is None or values is None:
+        raise ValueError("PUT /settings requires both 'namespace' and 'values'")
+    deck["settings_store"].put(kind, key, namespace, values, note=body.get("note"))
+    return _public_scope(deck, kind, key)
+
+
+def _public_scope(deck: dict, kind: str, key: str) -> dict:
+    """``scope()`` minus ``updated_ts`` — internal write-tracking bookkeeping
+    (see module docstring), never part of this response's contract. A
+    fresh dict: ``scope()`` already returns a freshly-loaded object (not a
+    live store reference), but popping from a copy here keeps that
+    non-aliasing an explicit property of THIS function too, not an
+    accident inherited from the store."""
+    scope = dict(deck["settings_store"].scope(kind, key))
+    scope.pop("updated_ts", None)
+    return scope
 
 
 def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:

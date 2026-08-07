@@ -30,11 +30,19 @@ imports those comments here instead of discarding them, which is one of the
 reasons the Deck ships settings documents rather than regenerating compose
 files.
 
-Every ``put()`` stamps the scope entry with an ``updated_ts`` (entry-level,
-not per-namespace or per-key — this store keeps no history to diff a single
-key's change against). Task 7's settings-drift flag compares this against a
-placement's ``intent.last_healthy_ts`` to say "settings were touched since
-this was last known healthy" — a display flag only; it never feeds
+Every ``put()`` stamps the touched namespace with an ``updated_ts`` — a
+dict ``{namespace: iso}`` on the scope entry, one clock per namespace, not
+one per entry and not one per key (this store keeps no history to diff a
+single key's change against). PER-NAMESPACE, not entry-level, as of the
+Task 7 review round 2026-08-07: an entry-level clock made a settings_drift
+"changed" list report keys from namespaces that were never written,
+whenever ANY namespace of the same entry was touched later. Task 7's
+settings-drift flag compares each namespace's stamp against a placement's
+``intent.updated_ts`` (NOT ``last_healthy_ts`` — the latter is re-stamped
+on every serving reconcile tick by ``app.arbiter``'s ``note_healthy``,
+which would make the flag self-erase within one tick of a placement
+actually serving) to say "this namespace was written since the placement's
+settings were last (re)recorded" — a display flag only; it never feeds
 app.reconcile.
 
 Human/UI-owned. Missing/corrupt reads as empty; writes are atomic; a
@@ -146,8 +154,13 @@ class SettingsStore:
         is included because put(note=...) subscript-assigns into it
         (`entry.setdefault("notes", {})[namespace] = note`), which raises
         an uncaught TypeError against any corrupt present value exactly
-        like the namespaces did before this guard existed. Any other key
-        is out of this scope and passes through untouched."""
+        like the namespaces did before this guard existed. ``updated_ts``
+        gets the same guard for the same reason (put() subscript-assigns
+        into it per namespace) — also covers a pre-migration entry that
+        still carries the old entry-level string form (Task 7 review round
+        2026-08-07), which would otherwise crash ``_settings_drift``'s
+        ``.get(namespace)`` on a str. Any other key is out of this scope
+        and passes through untouched."""
         if not isinstance(entry, dict):
             return {}
         healed = dict(entry)
@@ -156,6 +169,8 @@ class SettingsStore:
                 healed[namespace] = {}
         if "notes" in healed and not isinstance(healed["notes"], dict):
             healed["notes"] = {}
+        if "updated_ts" in healed and not isinstance(healed["updated_ts"], dict):
+            healed["updated_ts"] = {}
         return healed
 
     def _save(self, data: dict) -> None:
@@ -200,14 +215,16 @@ class SettingsStore:
             entry.setdefault(namespace, {}).update(values)
             if note is not None:
                 entry.setdefault("notes", {})[namespace] = note
-            # Entry-level (not per-namespace/per-key) write timestamp — Task 7
-            # compares this against a placement's intent.last_healthy_ts to
-            # flag settings_drift. One clock per scope entry, bumped on every
-            # put() regardless of which namespace changed, matches "changed"
-            # meaning "this scope entry has settings written since the
-            # baseline", not a value-level diff (this store keeps no history
-            # to diff against).
-            entry["updated_ts"] = _now_iso()
+            # PER-NAMESPACE write timestamp (Task 7 review round,
+            # 2026-08-07 — an earlier entry-level version made
+            # settings_drift's "changed" list report namespaces that were
+            # never written whenever any OTHER namespace of the same entry
+            # was touched later). Still not per-key: this store keeps no
+            # history to diff a single key's change against, so
+            # settings_drift's "changed" is "every key of a namespace
+            # written since the baseline," an accepted C1 approximation —
+            # see app.routers._settings_drift.
+            entry.setdefault("updated_ts", {})[namespace] = _now_iso()
             self._save(data)
 
     def forget(self, kind: str, key: str) -> None:

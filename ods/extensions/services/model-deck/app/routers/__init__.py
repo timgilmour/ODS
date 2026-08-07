@@ -27,11 +27,13 @@ adopt route can never disagree about what is running.
 
 ``build_lifecycle_view`` also stamps each entry with ``settings_drift``
 (Task 7): a placement whose settings-store scopes were touched more
-recently than its intent's ``last_healthy_ts``. This is a DISPLAY flag
-only. ``app.reconcile.plan_reconcile`` takes ``statuses``/``intents``
-directly — never this view — so a settings edit can never, by construction,
-make the reconciler restart anything; conflating the two would restart a
-serving model because someone typed in a settings box.
+recently than its intent's ``updated_ts`` (NOT ``last_healthy_ts`` — see
+``_settings_drift``'s docstring for why that comparison self-erases). This
+is a DISPLAY flag only. ``app.reconcile.plan_reconcile`` takes
+``statuses``/``intents`` directly — never this view — so a settings edit can
+never, by construction, make the reconciler restart anything; conflating
+the two would restart a serving model because someone typed in a settings
+box.
 """
 
 
@@ -76,6 +78,15 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
         return {}
 
     intents = store.get()
+    # One load of settings.json for the whole view build (Task 7 review
+    # round, 2026-08-07), not one per resource per scope: _settings_drift
+    # used to call SettingsStore.scope() up to 3x per lifecycle entry, each
+    # a fresh file read. `.get()` already returns the same healed shape
+    # `.scope()` slices from, so this is a pure hoist, not a behavior
+    # change.
+    settings_store = deck.get("settings_store")
+    settings_data = settings_store.get() if settings_store is not None else None
+
     view = {}
     for key, obs in build_observations(deck, world).items():
         intent = intents.get(key)
@@ -84,15 +95,32 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
             "intent": intent,
             "observed": obs,
             "last_healthy_ts": (intent or {}).get("last_healthy_ts"),
-            "settings_drift": _settings_drift(deck, key, intent),
+            "settings_drift": _settings_drift(settings_data, key, intent),
         }
     return view
 
 
-def _settings_drift(deck: dict, key: str, intent: dict | None) -> dict | None:
-    """``{"changed": [keys], "since": iso}`` when settings recorded for this
-    placement were written more recently than its intent's
-    ``last_healthy_ts``, else ``None``.
+def _settings_drift(settings_data: dict | None, key: str, intent: dict | None) -> dict | None:
+    """``{"changed": ["namespace:key", ...], "since": iso}`` when settings
+    recorded for this placement were written more recently than its
+    intent's ``updated_ts``, else ``None``.
+
+    Baseline is ``intent["updated_ts"]``, NOT ``last_healthy_ts`` — CRITICAL
+    fix, Task 7 review round 2026-08-07. ``app.arbiter.Watcher._reconcile_pass``
+    calls ``note_healthy(key)`` on every tick a placement is observed
+    ``serving`` (app/arbiter.py, the loop right before ``plan_reconcile``),
+    and ``note_healthy`` unconditionally re-stamps ``last_healthy_ts`` to
+    now — so comparing against it made the flag self-erase within one
+    arbiter tick of the placement actually serving, i.e. drift was visible
+    only while NOT serving, backwards from the feature's purpose.
+    ``updated_ts`` is stable while serving: ``IntentStore.record()`` stamps
+    it at every DELIBERATE load/unload/park (operator action, set-apply, or
+    the arbiter's own contention-driven load/unload — "whoever actuates,
+    records", app/arbiter.py:_execute), which is exactly the moment a
+    process (re)launches and starts consuming its settings; neither
+    ``note_healthy`` nor a plain reconciler restore (``_execute_restore`` /
+    ``_restore``, which calls the engine directly without re-recording,
+    since intent already agreed) touches it.
 
     ``key`` is the lifecycle key (``<node>/<resource>``, e.g.
     ``local/hipfire``); the settings-store scope key is ``<node>/<engine>``
@@ -101,20 +129,27 @@ def _settings_drift(deck: dict, key: str, intent: dict | None) -> dict | None:
     ``spark``), so this rebuilds the scope key from ``intent["engine"]``
     rather than assuming `key` itself is the settings key.
 
-    ``last_healthy_ts`` is None for a placement that has never been
-    confirmed healthy — there is no known-good baseline to compare against,
-    so ANY settings recorded for it are treated as unconfirmed drift rather
-    than silently swallowed: they might be exactly what should run, or might
-    be why it never came up, and either way an operator should see them.
+    No intent at all (``intent`` is ``None``) means nothing is running
+    deliberately, so there is nothing a settings write could be "since" —
+    ``None`` is the honest answer, not a suppressed positive.
+
+    Each namespace of a scope entry carries its OWN ``updated_ts`` (Task 7
+    review round — an entry-level clock made a written env value light up
+    a same-tick-untouched args key too). ``changed`` entries are qualified
+    ``"namespace:key"`` (e.g. ``"args:max-model-len"``, never a bare
+    ``"max-model-len"``) so same-named keys in different namespaces stay
+    distinguishable and never dedupe into one. Within a namespace whose
+    stamp postdates the baseline, every CURRENT key of that namespace is
+    reported — not just the key(s) a single put() actually touched, since
+    this store keeps no per-key write history to diff against. Accepted
+    approximation for C1; C2's set snapshots are expected to make this
+    exact.
 
     A pure read: never writes, never consulted by app.reconcile.plan_reconcile
     (which takes `statuses`/`intents` directly, not this view) — settings
     drift is a flag, never a restart trigger.
     """
-    if not intent:
-        return None
-    store = deck.get("settings_store")
-    if store is None:
+    if not intent or settings_data is None:
         return None
     engine = intent.get("engine")
     if not engine:
@@ -123,7 +158,7 @@ def _settings_drift(deck: dict, key: str, intent: dict | None) -> dict | None:
     node = key.split("/", 1)[0]
     engine_key = f"{node}/{engine}"
     model = intent.get("model")
-    baseline = intent.get("last_healthy_ts")
+    baseline = intent.get("updated_ts")
 
     scopes = [("engines", engine_key)]
     if model:
@@ -133,18 +168,22 @@ def _settings_drift(deck: dict, key: str, intent: dict | None) -> dict | None:
     changed: list[str] = []
     since: str | None = None
     for kind, scope_key in scopes:
-        entry = store.scope(kind, scope_key)
-        updated_ts = entry.get("updated_ts")
-        if updated_ts is None:
-            continue
-        if baseline is not None and updated_ts <= baseline:
+        entry = settings_data.get(kind, {}).get(scope_key, {})
+        namespace_ts = entry.get("updated_ts")
+        if not isinstance(namespace_ts, dict):
             continue
         for namespace in ("args", "env", "container"):
-            for name in entry.get(namespace, {}):
-                if name not in changed:
-                    changed.append(name)
-        if since is None or updated_ts > since:
-            since = updated_ts
+            ts = namespace_ts.get(namespace)
+            if ts is None:
+                continue
+            if baseline is not None and ts <= baseline:
+                continue
+            for name in entry.get(namespace, {}) or {}:
+                qualified = f"{namespace}:{name}"
+                if qualified not in changed:
+                    changed.append(qualified)
+            if since is None or ts > since:
+                since = ts
 
     if not changed:
         return None
