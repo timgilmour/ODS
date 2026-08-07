@@ -32,10 +32,14 @@ files.
 
 Human/UI-owned. Missing/corrupt reads as empty; writes are atomic; a
 rejected put leaves the file untouched. Self-healing is recursive: a
-corrupt top-level kind, a corrupt scope entry, or a corrupt namespace
-within an entry each independently reset to ``{}`` rather than raising or
-leaking a non-dict value out through ``get()``/``scope()`` — the same
-posture app.policy applies per-kind, carried one and two levels deeper.
+corrupt top-level kind, a corrupt scope entry, or a corrupt namespace or
+``notes`` field within an entry each independently reset to ``{}`` rather
+than raising or leaking a non-dict value out through ``get()``/``scope()``
+— the same posture app.policy applies per-kind, carried one and two levels
+deeper. ``notes`` is healed alongside args/env/container rather than left
+as an exception: ``put(note=...)`` subscript-assigns into it exactly the
+way a put into a namespace does, so a corrupt ``notes`` field is the same
+crash vector, not a narrower one.
 
 This is single-process, in-process state only: the Deck runs uvicorn with
 its default single worker (see Dockerfile CMD — no ``--workers`` flag), so
@@ -152,15 +156,21 @@ class SettingsStore:
     def _heal_entry(entry) -> dict:
         """A scope entry that is not a dict resets to {} (one level below
         the per-kind reset above). Within a dict entry, args/env/container
-        are each individually guarded the same way, so one corrupt
-        namespace doesn't take a healthy sibling down with it. `notes` and
-        any other key are out of this scope and pass through untouched."""
+        and notes are each individually guarded the same way, so one
+        corrupt field doesn't take a healthy sibling down with it — notes
+        is included because put(note=...) subscript-assigns into it
+        (`entry.setdefault("notes", {})[namespace] = note`), which raises
+        an uncaught TypeError against any corrupt present value exactly
+        like the namespaces did before this guard existed. Any other key
+        is out of this scope and passes through untouched."""
         if not isinstance(entry, dict):
             return {}
         healed = dict(entry)
         for namespace in NAMESPACES:
             if namespace in healed and not isinstance(healed[namespace], dict):
                 healed[namespace] = {}
+        if "notes" in healed and not isinstance(healed["notes"], dict):
+            healed["notes"] = {}
         return healed
 
     def _save(self, data: dict) -> None:

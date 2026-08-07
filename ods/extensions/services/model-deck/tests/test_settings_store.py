@@ -267,6 +267,40 @@ def test_put_succeeds_after_a_corrupt_namespace_heals(tmp_path):
     assert store.scope("engines", "sparky/vllm")["args"] == {"a": "1"}
 
 
+CORRUPT_NOTES_SHAPES = ["oops-a-string", ["x", "y"], 42]
+
+
+@pytest.mark.parametrize("corrupt_notes", CORRUPT_NOTES_SHAPES)
+def test_corrupt_notes_field_heals_to_empty_dict(tmp_path, corrupt_notes):
+    """Same posture as the namespace heal above, applied to `notes`: a
+    scope entry's notes field that is not a dict resets to {} instead of
+    leaking a bare value out of get()/scope()."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({
+        "engines": {"sparky/vllm": {"args": {"a": "1"}, "notes": corrupt_notes}}
+    }))
+    store = SettingsStore(path)
+
+    scope = store.scope("engines", "sparky/vllm")
+    assert scope["notes"] == {}
+    assert scope["args"] == {"a": "1"}
+
+
+@pytest.mark.parametrize("corrupt_notes", CORRUPT_NOTES_SHAPES)
+def test_put_with_note_succeeds_after_corrupt_notes_heals(tmp_path, corrupt_notes):
+    """note= is a first-party exercised parameter of put() — a corrupt
+    notes field must not crash it with an uncaught TypeError (setdefault()
+    returning the corrupt present value, subscript-assigned into: a str,
+    list, or int none support item assignment)."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"engines": {"sparky/vllm": {"notes": corrupt_notes}}}))
+    store = SettingsStore(path)
+
+    store.put("engines", "sparky/vllm", "args", {"a": "1"}, note="keep me")
+
+    assert store.scope("engines", "sparky/vllm")["notes"]["args"] == "keep me"
+
+
 def test_normalization_is_scoped_to_the_args_namespace(tmp_path):
     """env and container are not argv — an int env value has nothing to do
     with app.argline's rules and is stored as given, unnormalized."""
