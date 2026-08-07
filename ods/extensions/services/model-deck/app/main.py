@@ -219,6 +219,7 @@ def _build_watcher(settings: Settings):
     hands the HTTP routers (see the cache comment above) — real clients +
     stores + World, wired from Settings."""
     from app.arbiter import Watcher
+    from app.engines.docker_ctl import DockerEngineExec
 
     deck = _build_deck(settings)
     return Watcher(
@@ -248,6 +249,13 @@ def _build_watcher(settings: Settings):
         # will read from, and the read-only GGUF mount to scan.
         characteristics_store=deck["characteristics_store"],
         gguf_dir=deck["gguf_dir"],
+        # Catalog harvest (app.arbiter.Watcher._harvest_catalogs): hipfire is
+        # the sole app.harvest.PROBE_SOURCE-understood (vLLM-backed) local
+        # containerised engine in C1 (Watcher._configurable_engines) — same
+        # dockerctl/allowlist the park path already uses, over the socket-
+        # proxy sidecar's exec endpoints (see compose.yaml's docker-ctl
+        # -allowPOST lines and app.engines.docker_ctl's module docstring).
+        engine_exec=DockerEngineExec(deck["dockerctl"], deck["settings"].hipfire_container),
     )
 
 

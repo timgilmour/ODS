@@ -594,6 +594,192 @@ def test_dockerctl_running_not_gated_by_allowlist():
     assert ctl.running("ods-comfyui") is True
 
 
+# --- DockerCtl.image_ref() ---
+
+
+def test_dockerctl_image_ref_returns_config_image():
+    handler = _json_handler(200, {"Config": {"Image": "aeon-vllm@sha256:abc123"}})
+    ctl = _dockerctl(handler)
+
+    assert ctl.image_ref("ods-hipfire") == "aeon-vllm@sha256:abc123"
+
+
+def test_dockerctl_image_ref_hits_the_same_inspect_path_as_running():
+    handler = _recording_handler(200, {"Config": {"Image": "x"}})
+    ctl = _dockerctl(handler)
+
+    ctl.image_ref("ods-hipfire")
+
+    req = handler.calls[0]
+    assert req.method == "GET"
+    assert req.url.path == "/containers/ods-hipfire/json"
+
+
+def test_dockerctl_image_ref_not_gated_by_allowlist():
+    """A read, same posture as running() — see its own test."""
+    handler = _json_handler(200, {"Config": {"Image": "x"}})
+    ctl = _dockerctl(handler)
+
+    assert ctl.image_ref("ods-comfyui") == "x"
+
+
+def test_dockerctl_image_ref_raises_engineerror_on_404():
+    def handler(request):
+        return httpx.Response(404, text="no such container", request=request)
+
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError, match="no such container"):
+        ctl.image_ref("ods-hipfire")
+
+
+# --- DockerCtl.exec_run() ---
+
+
+def _docker_stream_frame(stream_type: int, payload: bytes) -> bytes:
+    """One frame of Docker's exec/start multiplexed stream: a stream-type
+    byte + 3 reserved zero bytes + a 4-byte big-endian length, then that
+    many bytes of payload."""
+    return bytes([stream_type, 0, 0, 0]) + len(payload).to_bytes(4, "big") + payload
+
+
+def _exec_transport(exec_id="exec-1", stream=b"", create_status=201, start_status=200):
+    """A handler that plays the two-call POST .../exec -> POST
+    /exec/{id}/start sequence, recording both requests."""
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.url.path == "/containers/ods-hipfire/exec":
+            return httpx.Response(create_status, json={"Id": exec_id}, request=request)
+        if request.url.path == f"/exec/{exec_id}/start":
+            return httpx.Response(start_status, content=stream, request=request)
+        raise AssertionError(f"unexpected path {request.url.path!r}")
+
+    handler.calls = calls
+    return handler
+
+
+def test_dockerctl_exec_run_raises_guarderror_when_not_allowlisted():
+    handler = _exec_transport()
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(GuardError, match="ods-comfyui"):
+        ctl.exec_run("ods-comfyui", "python3", "print(1)")
+
+    assert handler.calls == []  # no HTTP call made
+
+
+def test_dockerctl_exec_run_creates_then_starts_with_the_given_command():
+    handler = _exec_transport(stream=_docker_stream_frame(1, b"ok"))
+    ctl = _dockerctl(handler)
+
+    ctl.exec_run("ods-hipfire", "python3", "print(1)")
+
+    assert len(handler.calls) == 2
+    create, start = handler.calls
+    assert create.url.path == "/containers/ods-hipfire/exec"
+    assert json.loads(create.content)["Cmd"] == ["python3", "-c", "print(1)"]
+    assert json.loads(create.content)["Tty"] is False
+    assert start.url.path == "/exec/exec-1/start"
+    assert json.loads(start.content) == {"Detach": False, "Tty": False}
+
+
+def test_dockerctl_exec_run_keeps_only_stdout_frames():
+    stream = (
+        _docker_stream_frame(1, b"hello ")
+        + _docker_stream_frame(2, b"stderr-noise-should-be-dropped")
+        + _docker_stream_frame(1, b"world")
+    )
+    handler = _exec_transport(stream=stream)
+    ctl = _dockerctl(handler)
+
+    assert ctl.exec_run("ods-hipfire", "python3", "print(1)") == "hello world"
+
+
+def test_dockerctl_exec_run_raises_engineerror_when_create_fails():
+    handler = _exec_transport(create_status=409)
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError):
+        ctl.exec_run("ods-hipfire", "python3", "print(1)")
+
+
+def test_dockerctl_exec_run_raises_engineerror_when_start_fails():
+    handler = _exec_transport(start_status=500)
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError):
+        ctl.exec_run("ods-hipfire", "python3", "print(1)")
+
+
+def test_dockerctl_exec_run_raises_engineerror_on_transport_failure():
+    handler = _raising_handler(httpx.ConnectError("connection refused"))
+    ctl = _dockerctl(handler)
+
+    with pytest.raises(EngineError):
+        ctl.exec_run("ods-hipfire", "python3", "print(1)")
+
+
+def test_demux_stdout_stops_cleanly_on_a_truncated_trailing_frame():
+    """A frame whose declared length overruns what's actually present must
+    not raise -- matches this module's degrade-not-crash posture."""
+    from app.engines.docker_ctl import _demux_stdout
+
+    good = _docker_stream_frame(1, b"complete")
+    truncated_header = bytes([1, 0, 0, 0]) + (999).to_bytes(4, "big") + b"short"
+
+    assert _demux_stdout(good + truncated_header) == "complete"
+
+
+# --- DockerEngineExec ---
+
+
+def test_dockerengineexec_call_returns_image_ref_and_exec_stdout():
+    from app.engines.docker_ctl import DockerEngineExec
+
+    def handler(request):
+        if request.url.path == "/containers/ods-hipfire/json":
+            return httpx.Response(200, json={"Config": {"Image": "aeon-vllm@sha256:v1"}}, request=request)
+        if request.url.path == "/containers/ods-hipfire/exec":
+            return httpx.Response(201, json={"Id": "e1"}, request=request)
+        if request.url.path == "/exec/e1/start":
+            return httpx.Response(200, content=_docker_stream_frame(1, b"catalog"), request=request)
+        raise AssertionError(request.url.path)
+
+    ctl = _dockerctl(handler)
+    exec_fn = DockerEngineExec(ctl, "ods-hipfire")
+
+    version, output = exec_fn("local", "hipfire", "python3", "print(1)")
+
+    assert version == "aeon-vllm@sha256:v1"
+    assert output == "catalog"
+
+
+def test_dockerengineexec_version_property_reads_image_ref_without_exec():
+    from app.engines.docker_ctl import DockerEngineExec
+
+    handler = _recording_handler(200, {"Config": {"Image": "aeon-vllm@sha256:v1"}})
+    ctl = _dockerctl(handler)
+    exec_fn = DockerEngineExec(ctl, "ods-hipfire")
+
+    assert exec_fn.version == "aeon-vllm@sha256:v1"
+    assert len(handler.calls) == 1
+    assert handler.calls[0].url.path == "/containers/ods-hipfire/json"
+
+
+def test_dockerengineexec_version_degrades_to_none_on_engineerror():
+    from app.engines.docker_ctl import DockerEngineExec
+
+    def handler(request):
+        return httpx.Response(404, text="no such container", request=request)
+
+    ctl = _dockerctl(handler)
+    exec_fn = DockerEngineExec(ctl, "ods-hipfire")
+
+    assert exec_fn.version is None
+
+
 # --- HipfireClient ---
 
 

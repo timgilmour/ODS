@@ -29,6 +29,10 @@ from app.events import tail_events
 # pass. Reuse test_api's rather than growing a second, subtly different one.
 from tests.test_api import FakeHipfire
 
+# Catalog-harvest tests (task 8) reuse test_harvest's captured probe output
+# rather than growing a second, subtly different fixture.
+from tests.test_harvest import PROBE_OUTPUT
+
 GIB = 1024**3
 
 
@@ -581,7 +585,7 @@ def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
     heal_suppressor=None, hostagent=None, catalog=None, hipfire=None,
     intent_store=None, spark=None, auto=True, characteristics_store=None,
-    gguf_dir=None, clock=None, on_derive=None, **sett,
+    gguf_dir=None, clock=None, on_derive=None, engine_exec=None, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -604,6 +608,7 @@ def _make_watcher(
         gguf_dir=gguf_dir,
         clock=clock if clock is not None else time.monotonic,
         on_derive=on_derive,
+        engine_exec=engine_exec,
     )
     return watcher, events_path
 
@@ -649,10 +654,13 @@ def _checkpoint_tree(tmp_path):
 
 
 def _raises(exc):
-    """A zero-arg callable that raises `exc` when invoked — for injecting a
-    derive-pass failure without a real unreadable checkpoint or engine."""
+    """A callable that raises `exc` when invoked, any arguments accepted —
+    for injecting a derive-pass failure without a real unreadable checkpoint
+    or engine. Accepts args/kwargs so the same helper covers both
+    `on_derive` (called with none) and `engine_exec` (called with
+    node/engine/interpreter/source)."""
 
-    def _fn():
+    def _fn(*args, **kwargs):
         raise exc
 
     return _fn
@@ -2007,3 +2015,65 @@ def test_reconciler_skips_a_lemonade_restore_while_a_deck_load_is_in_flight(tmp_
     watcher.tick()
 
     assert lemonade.loaded == ["extra.m.gguf"]
+
+
+# ===========================================================================
+# CATALOG HARVEST (task 8) — _derive_pass harvests each configurable
+# engine's option catalog, once per observed engine version.
+# ===========================================================================
+
+
+def _recording_exec(calls, version):
+    """A fake ``engine_exec``: a callable with a mutable ``.version`` that
+    records every ``(node, engine, interpreter, source)`` call it receives
+    and returns ``(self.version, PROBE_OUTPUT)`` — mutable so a test can
+    simulate an engine upgrade between derive passes."""
+
+    class _Exec:
+        def __init__(self) -> None:
+            self.version = version
+
+        def __call__(self, node, engine, interpreter, source):
+            calls.append((node, engine, interpreter, source))
+            return self.version, PROBE_OUTPUT
+
+    return _Exec()
+
+
+def test_harvest_runs_once_and_caches_by_version(tmp_path, monkeypatch):
+    store = CharacteristicsStore(tmp_path / "c.json")
+    execs = []
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       engine_exec=_recording_exec(execs, version="0.26.0"))
+
+    watcher._derive_pass()
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+
+    assert len(execs) == 1
+    assert store.entry("engine/local/hipfire")["option_catalog"]["value"]["engine_version"] == "0.26.0"
+
+
+def test_harvest_reruns_when_the_engine_version_changes(tmp_path, monkeypatch):
+    store = CharacteristicsStore(tmp_path / "c.json")
+    execs = []
+    exec_fn = _recording_exec(execs, version="0.26.0")
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=exec_fn)
+
+    watcher._derive_pass()
+    exec_fn.version = "0.27.0"
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+
+    assert len(execs) == 2
+
+
+def test_harvest_failure_leaves_no_catalog_and_does_not_raise(tmp_path, monkeypatch):
+    """An engine that is down has no catalog. Supported state, not an error."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       engine_exec=_raises(EngineError("not running")))
+
+    watcher._derive_pass()
+
+    assert "option_catalog" not in store.entry("engine/local/hipfire")

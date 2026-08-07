@@ -111,6 +111,7 @@ from app.derive_checkpoint import derive_checkpoint
 from app.derive_live import derive_live_models
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
+from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
 from app.lifecycle import derive_status
 from app.observe import (
     LOCAL_LEMONADE_KEY,
@@ -395,6 +396,7 @@ class Watcher:
         gguf_dir=None,
         clock=time.monotonic,
         on_derive=None,
+        engine_exec=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -458,6 +460,12 @@ class Watcher:
         # itself can be tested without a real gguf_dir or spark client.
         # Always None in production (app.main never passes it).
         self._on_derive = on_derive
+        # Catalog harvest (see _harvest_catalogs): runs `(node, engine,
+        # interpreter, source) -> (version, stdout)` inside the running
+        # engine container. None disables harvest entirely — same opt-in
+        # shape as characteristics_store/hostagent/intent_store above (and
+        # every unit test except the harvest-scoped ones gets it).
+        self._engine_exec = engine_exec
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -842,6 +850,65 @@ class Watcher:
                 continue   # unreachable: retain last-known facts
             for model_id, fields in derive_live_models(body, now).items():
                 self._characteristics_store.put_fields(f"model/{model_id}", fields)
+
+        self._harvest_catalogs(now)
+
+    def _harvest_catalogs(self, now: str) -> None:
+        """Harvest each running engine's option catalog, once per version.
+
+        Costs a docker exec and a vLLM import, so calling `_engine_exec` AT
+        ALL must be avoidable once a version is already cached and nothing
+        has changed -- comparing versions AFTER paying for the exec would
+        defeat the whole point (every derive pass would still pay the cost
+        it exists to avoid). `_engine_exec` may expose the engine's
+        currently observed version as a plain `.version` attribute -- a
+        cheap peek (a `docker inspect`, not an exec, in the real
+        DockerCtl-backed implementation) read WITHOUT invoking it -- and
+        when that peek is available and matches what's cached, the exec is
+        skipped entirely. `_engine_exec` without a `.version` attribute
+        (or any other caller) still works correctly, just without the
+        early-skip optimization: the post-call version comparison below
+        is the fallback, so a redundant exec never produces a redundant
+        write. An engine that is not running simply yields no catalog --
+        a supported state, since validation warns rather than blocks
+        (app.validate_settings).
+        """
+        if self._engine_exec is None:
+            return
+
+        for node, engine in self._configurable_engines():
+            key = f"engine/{node}/{engine}"
+            cached = self._characteristics_store.entry(key).get("option_catalog")
+            cached_version = cached["value"].get("engine_version") if cached else None
+
+            peeked_version = getattr(self._engine_exec, "version", None)
+            if cached_version is not None and peeked_version == cached_version:
+                continue
+
+            try:
+                version, output = self._engine_exec(node, engine, PROBE_INTERPRETER, PROBE_SOURCE)
+            except (EngineError, BusyError):
+                continue
+
+            if cached_version is not None and cached_version == version:
+                continue
+
+            field = parse_probe_output(output, engine_version=version, now=now)
+            if field:
+                self._characteristics_store.put_fields(key, {"option_catalog": field})
+
+    def _configurable_engines(self) -> list[tuple[str, str]]:
+        """(node, engine) pairs the Deck can harvest an option catalog from
+        -- in C1, the local containerised engines the argparse-introspection
+        probe (app.harvest.PROBE_SOURCE) actually understands. That probe
+        imports vLLM's own arg parser, so it is meaningful for hipfire (the
+        vLLM-backed engine) only; lemonade (llama-server) and comfyui are
+        local containerised engines the Deck ALSO controls, but are not
+        vLLM, so probing them would import-fail every derive pass forever --
+        never caching, since a failed probe yields no catalog to cache
+        against -- for no benefit. Remote/spark harvesting is out of scope
+        here (a later increment, C2)."""
+        return [(self._settings.node_label, "hipfire")]
 
     def _live_fact_sources(self) -> dict:
         """Engine clients exposing an OpenAI-style /v1/models surface.

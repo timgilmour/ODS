@@ -58,6 +58,14 @@ services:
       # wollomatic auto-anchors patterns — no explicit ^…$ here.
       - -allowGET=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/json
       - -allowPOST=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(start|stop)
+      # Catalog harvest (app.engines.docker_ctl.DockerCtl.exec_run, task 8):
+      # runs app.harvest's introspection probe inside the running engine
+      # container. Two calls, both needed — POST .../exec creates the exec
+      # instance, POST /exec/{id}/start actually runs it and returns its
+      # output. -allowPOST is cumulative (wollomatic docs), so these ADD to
+      # the (start|stop) line above rather than replacing it.
+      - -allowPOST=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/exec
+      - -allowPOST=/(v[0-9.]+/)?exec/[a-zA-Z0-9_.-]+/start
       - -watchdoginterval=300
       - -shutdowngracetime=5
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
