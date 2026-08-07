@@ -149,6 +149,33 @@ and served context against both the checkpoint's capability and what the
 gateway advertises. Absence of a fact means "cannot check", never
 "mismatch".
 
+### `settings.json` — what things are launched and served with
+
+Three scopes (`engines` keyed `<node>/<engine>`, `models` keyed by identity,
+`engine_models` keyed `<node>/<engine>|<model>`) × three namespaces (`args`,
+`env`, `container`). Resolution is a five-layer ladder — engine defaults →
+checkpoint recommendations → engine → model → engine×model — merged **per
+key**, most specific winning. `None` at a higher layer unsets a lower one
+(the absence of `--quantization` is a real, correct configuration).
+
+The chip panel and the free-text field are **two views of one store**;
+`app/argline.py` guarantees the round trip, and unknown tokens survive it.
+
+**Validation warns and never blocks** — unknown flag, type/choice violation,
+or conflict with a derived fact (`--quantization modelopt` against a
+`compressed-tensors` checkpoint: severity `crash`).
+
+**Saving changes intent only.** A loaded placement gains `settings_drift`
+with the changed keys; the reconciler never restarts on it. Reload is a
+human click.
+
+Option catalogs are harvested by **argparse introspection inside the running
+engine container** (`vllm serve --help` crashes without a GPU, and its text
+carries no types or choices). No catalog is a supported state.
+
+`container` settings are an allowlist: `image`, `shm_size`, `ulimits`.
+Volumes stay Deck-managed — the model mount *is* the placement.
+
 ## Storage tiering (hot/cold model moves)
 
 Model Deck extends GPU memory management one tier down the memory hierarchy: today the deck arbitrates **VRAM ↔ hot disk**; storage tiering adds **hot disk ↔ cold disk** (e.g., SSD cache ↔ external archive drive) with the same design language — policy, watcher, pure planner, pins, priorities, audited actions.
