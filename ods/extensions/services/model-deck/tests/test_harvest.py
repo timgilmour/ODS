@@ -74,6 +74,20 @@ def test_malformed_probe_output_yields_no_catalog():
     assert parse_probe_output("not json", "0.26.0", "t") == {}
 
 
+def test_shipped_probe_file_equals_the_constant():
+    """node-agent/swap-helper/harvest_probe.py is executed on sparky;
+    app.harvest.PROBE_SOURCE is what parse_probe_output was built against.
+    They are the same string or the harvest silently rots."""
+    from pathlib import Path
+
+    from app.harvest import PROBE_SOURCE
+
+    shipped = (Path(__file__).resolve().parents[2]
+               / "node-agent" / "swap-helper" / "harvest_probe.py").read_text()
+
+    assert shipped == PROBE_SOURCE
+
+
 def test_widget_toggle_for_bare_boolean():
     assert widget_for({"nargs": 0, "type": None, "choices": None}) == "toggle"
 

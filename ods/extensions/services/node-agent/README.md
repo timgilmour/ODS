@@ -251,8 +251,35 @@ that profile becomes current — see above.
 Requests a profile swap. The agent never touches Docker itself: this only
 writes `request.json` into `NODE_SWAP_CTL_DIR` for the host-side
 swap-helper (`swap-helper/swap-helper.sh`) to pick up, validate again, and
-run `swap.sh`. Poll `/v1/node/profiles`' `swap_status` for progress. Answers
+launch. Poll `/v1/node/profiles`' `swap_status` for progress. Answers
 `503` unless both `NODE_VLLM_DIR` and `NODE_SWAP_CTL_DIR` are configured.
+
+How the helper launches depends on its OPTIONAL 4th argument
+(`swap-helper.sh --daemon <ctl-dir> <vllm-dir> [<settings-dir>]`, the same
+directory as `NODE_SETTINGS_DIR`):
+
+* **Without it** — and whenever `<settings-dir>/<profile>.json` is missing
+  or unusable — the helper shells out to `<vllm-dir>/swap.sh` exactly as it
+  always has, and deletes any stale override it had left behind. A settings
+  fault can therefore never break a swap.
+* **With a valid document**, the helper renders it to
+  `<vllm-dir>/settings-<profile>.override.yaml` (`command` and
+  `environment` only; never a `compose-*.yaml` name, which
+  `/v1/node/profiles` would then list as a ghost profile), tears down every
+  container named across `compose-*.yaml`, and runs `docker compose -f
+  compose-<profile>.yaml -f settings-<profile>.override.yaml up -d`.
+  Compose replaces `command` outright and merges `environment` over the base
+  file's, so image/volumes/devices stay the node operator's.
+
+After a successful launch of a profile whose `profiles.json` engine is
+`vllm` (the default), the helper runs `swap-helper/harvest_probe.py` inside
+the new container over `docker exec -i` and writes
+`<settings-dir>/catalog-<profile>.json` —
+`{image_id, harvested_ts, engine, probe_output}`, served by
+`GET /v1/node/catalog`. The probe is best-effort: any failure is logged and
+the swap outcome stands. `harvest_probe.py` is generated from
+`model-deck`'s `app.harvest.PROBE_SOURCE` and pinned byte-identical to it by
+a test — edit the constant, not this copy.
 
 ```bash
 curl -X POST -H "Authorization: Bearer $NODE_AGENT_KEY" \
