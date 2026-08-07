@@ -52,23 +52,16 @@ DASH_SHAPED_CASES = [
 
 
 def _normalized(settings: dict) -> dict:
-    """The two documented normalization axes (singleton list -> scalar,
-    numeric -> string), applied by hand for the property test below. Not
-    part of the module's public surface — a test-only mirror of the two
-    RULING 2026-08-07 docstring paragraphs."""
-    result = {}
-    for key, value in settings.items():
-        if key == "_positional":
-            result[key] = list(value)
-        elif isinstance(value, list) and len(value) == 1:
-            result[key] = str(value[0])
-        elif isinstance(value, list):
-            result[key] = [str(v) for v in value]
-        elif value is True:
-            result[key] = True
-        else:
-            result[key] = str(value)
-    return result
+    """Delegates to the production function (F1 fix round, 2026-08-07
+    review). This used to be a hand-rolled mirror of the two RULING
+    2026-08-07 normalization axes, with its OWN ``_positional`` exemption
+    that ``normalize_args_map`` never got — the divergence hid the F1
+    production bug (a singleton ``_positional`` list silently collapsing
+    to a scalar) from this very property test. Now that
+    ``normalize_args_map`` carries the same exemption, mirroring it here
+    would just be re-implementing the thing under test; delegating removes
+    the divergence at the root instead of patching this copy again."""
+    return normalize_args_map(settings)
 
 
 @pytest.mark.parametrize("settings", ROUND_TRIP_CASES)
@@ -267,3 +260,60 @@ def test_normalize_args_map_drop_does_not_disturb_sibling_keys():
         result = normalize_args_map({"a": "1", "tags": []})
 
     assert result == {"a": "1"}
+
+
+# --- F1, CRITICAL (final branch review, 2026-08-07): POSITIONAL_KEY must
+# be exempt from the singleton-list -> scalar axis. Unfixed, a one-token
+# positional list (the common case: `serve /model`'s "serve" alone, or a
+# bare `serve` with no model arg yet typed) collapsed to a bare string on
+# the way through normalize_args_map, and render_argline then iterated
+# that string character by character -- persisted corruption of typed
+# input, silently, the next time the argline was rendered from the store.
+
+
+def test_normalize_args_map_keeps_a_singleton_positional_list_as_a_list():
+    assert normalize_args_map({"_positional": ["serve"]}) == {"_positional": ["serve"]}
+
+
+def test_normalize_args_map_stringifies_numeric_positional_elements():
+    """The OTHER RULING 2026-08-07 axis (numeric -> string) still applies
+    to positional elements -- only the singleton-collapse axis is
+    exempted for POSITIONAL_KEY."""
+    assert normalize_args_map({"_positional": [1, "two"]}) == {"_positional": ["1", "two"]}
+
+
+def test_normalize_args_map_drops_an_empty_positional_list_with_a_warning():
+    """The empty-list-drop rule still applies to POSITIONAL_KEY -- only
+    the singleton-collapse axis is exempted."""
+    with pytest.warns(UserWarning, match="empty list"):
+        result = normalize_args_map({"_positional": []})
+
+    assert "_positional" not in result
+
+
+def test_normalize_args_map_keeps_a_multi_token_positional_list_as_a_list():
+    assert normalize_args_map({"_positional": ["serve", "/model"]}) == {
+        "_positional": ["serve", "/model"]
+    }
+
+
+def test_one_positional_token_round_trips_through_the_real_store_byte_exact(tmp_path):
+    """F1's actual blast radius: not normalize_args_map in isolation, but
+    SettingsStore.put (which calls it on every args write) -> a later read
+    -> render_argline. Before the fix this produced
+    's e r v e --max-model-len 100' -- because the one-token `_positional`
+    list collapsed to the bare string 'serve' and render_argline iterated
+    it character by character. Byte-exact round trip through the REAL
+    store, not a hand-built map, so a regression here fails the same way
+    the review finding did."""
+    from app.settings_store import SettingsStore
+
+    line = "serve --max-model-len 100"
+    parsed = parse_argline(line)
+    assert parsed["_positional"] == ["serve"]  # sanity: exactly one token
+
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engines", "sparky/vllm", "args", parsed)
+    stored = store.scope("engines", "sparky/vllm")["args"]
+
+    assert render_argline(stored) == line

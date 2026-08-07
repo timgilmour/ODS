@@ -56,6 +56,24 @@ passed through ``normalize_args_map`` before it enters
 (see app.ladder module docstring) and will resolve and serve whatever
 shape it is handed, normalized or not.
 
+``POSITIONAL_KEY`` is EXEMPT from the singleton-list axis — CRITICAL, fixed
+2026-08-07 (final branch review, finding F1). The singleton-collapse axis
+exists because, for a NAMED flag, ``render_argline``/``parse_argline``
+cannot round-trip list-of-one vs scalar through space-separated text at
+all — ``--flag v`` has one spelling regardless of which shape produced it.
+A positional token carries no such ambiguity: it is always one element of
+an ordered sequence, whether that sequence has length one or six.
+Collapsing it anyway silently turns a ``list[str]`` into a bare ``str``,
+and ``render_argline`` iterates a bare string character by character —
+``parse_argline("serve --max-model-len 100")`` through
+``normalize_args_map`` used to come back as ``{"_positional": "serve",
+...}``, which rendered as ``'s e r v e --max-model-len 100'``. Persisted
+corruption of typed input, the plan's one unacceptable failure mode.
+``normalize_args_map`` keeps ``POSITIONAL_KEY``'s value ``list[str]``
+shaped always — one element or many — while still applying the numeric ->
+string axis per element and the empty-list-drop rule to the list as a
+whole.
+
 Dash-shaped values — CRITICAL, fixed 2026-08-07: a value that itself starts
 with ``-`` (``--stop-token --foo``, or a ``--served-model-name`` list with
 ``-basemodel`` as one element) is, once space-separated, indistinguishable
@@ -257,14 +275,31 @@ def _normalize_args_value(value):
     return _normalize_args_scalar(value)
 
 
+def _normalize_positional_value(value):
+    """POSITIONAL_KEY's normalization, exempt from the singleton-list ->
+    scalar axis -- see module docstring, "POSITIONAL_KEY is EXEMPT...".
+    Always returns a ``list[str]`` (or ``_DROP`` for an empty list): a
+    positional token has no scalar/list ambiguity to collapse, unlike a
+    named flag's value. The numeric -> string axis still applies per
+    element; a non-list input is wrapped into a one-element list first, so
+    a caller handing a bare positional value still gets the canonical
+    shape back.
+    """
+    items = value if isinstance(value, list) else [value]
+    if not items:
+        return _DROP
+    return [_normalize_args_scalar(v) for v in items]
+
+
 def normalize_args_map(values: dict) -> dict:
     """Normalize an args-shaped map to argline's post-round-trip shape --
     THE canonical enforcement of both RULING 2026-08-07 axes (singleton
     list -> scalar, numeric -> string) plus the empty-list-drop rule (see
-    module docstring). A key whose value is an empty list carries no
-    argline opinion and is dropped from the result with a ``UserWarning``,
-    not returned -- matching app.settings_store's pre-hoist posture byte
-    for byte.
+    module docstring), MINUS the singleton-list axis for ``POSITIONAL_KEY``
+    (F1, 2026-08-07 review -- see module docstring). A key whose value is
+    an empty list carries no argline opinion and is dropped from the
+    result with a ``UserWarning``, not returned -- matching
+    app.settings_store's pre-hoist posture byte for byte.
 
     Any caller assembling an args-shaped layer outside app.settings_store
     (code-baked defaults, a live-harvested line through parse_argline,
@@ -273,7 +308,10 @@ def normalize_args_map(values: dict) -> dict:
     """
     normalized = {}
     for key, value in values.items():
-        n = _normalize_args_value(value)
+        if key == POSITIONAL_KEY:
+            n = _normalize_positional_value(value)
+        else:
+            n = _normalize_args_value(value)
         if n is _DROP:
             warnings.warn(
                 f"app.argline: empty list for args key {key!r} carries no "
