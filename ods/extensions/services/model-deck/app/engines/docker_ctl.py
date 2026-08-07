@@ -15,7 +15,7 @@ running() always had.
 
 Real wire shapes this is coded against:
   GET  /containers/{name}/json       -> 200 {"State": {"Running": bool, ...},
-                                              "Config": {"Image": str, ...}}
+                                              "Image": "sha256:...", ...}
                                          404 if the container doesn't exist
   POST /containers/{name}/stop?t=5   -> 204 (stopped) or 304 (already stopped)
   POST /containers/{name}/start      -> 204 (started) or 304 (already running)
@@ -50,8 +50,13 @@ exec_run() needs `POST .../containers/{name}/exec` and
 `POST /exec/{id}/start` allowed in addition to the existing GET .../json and
 POST .../{start,stop} — a proxy still running the older allowlist will 403
 every exec_run()/probe() call (image_ref() needs nothing new: it's the same
-GET .../json running() already uses). See compose.yaml's docker-ctl service
-for the two added -allowPOST lines.
+GET .../json running() already uses). The create-exec rule is pinned to the
+one container harvested in C1 (`ods-hipfire`), NOT wildcarded like the
+other rules — exec runs an arbitrary command as root inside whatever
+container it names, so a wildcard there would make this client's in-process
+`_guard` the only thing standing between a deck bug and host-wide RCE. See
+compose.yaml's docker-ctl service for the two added -allowPOST lines and
+its comment for the full reasoning.
 """
 
 import httpx
@@ -92,14 +97,30 @@ class DockerCtl:
         return self._inspect(name)["State"]["Running"]
 
     def image_ref(self, name: str) -> str:
-        """The image reference (tag, or digest for a digest-pinned image)
-        container `name` is currently running — a cheap proxy for "engine
+        """The RESOLVED image content ID (`"Image"`, e.g. `"sha256:..."`)
+        container `name` was created from — a cheap proxy for "engine
         version" via the same GET .../json read running() uses (no exec,
-        no new proxy allowlist entry). Changes exactly when the image
-        backing the container changes, which is what
-        Watcher._harvest_catalogs treats as a new engine version worth
-        re-harvesting."""
-        return self._inspect(name)["Config"]["Image"]
+        no new proxy allowlist entry).
+
+        Deliberately the top-level `Image` field, NOT `Config.Image`:
+        `Config.Image` is the reference the container was CREATED WITH —
+        for hipfire that's the floating tag `ods-hipfire:latest`
+        (ods/extensions/services/hipfire/compose.amd.yaml), which is the
+        SAME STRING before and after an image rebuild + container recreate.
+        Keying "engine version" on it means a rebuilt vLLM behind the same
+        tag would read as unchanged forever, silently skipping every
+        re-harvest (caught in review before this ever shipped — see
+        app.arbiter.Watcher._harvest_catalogs' docstring). The top-level
+        `Image` is Docker's own resolved content ID for whatever is
+        actually running right now, so it changes on every rebuild, for a
+        floating tag exactly as much as a digest pin.
+
+        This is an opaque identity for change detection, not a
+        human-readable version string — see
+        Watcher._harvest_catalogs' docstring and app.harvest's
+        `engine_version` field.
+        """
+        return self._inspect(name)["Image"]
 
     def _inspect(self, name: str) -> dict:
         try:
@@ -226,9 +247,11 @@ class DockerEngineExec:
     fresh ``image_ref`` (a GET, not an exec) so the watcher can cheaply
     check whether the running image has changed before paying for the
     exec + probe that ``__call__`` performs. A failed peek (engine down,
-    proxy unreachable) degrades to None rather than raising — the watcher
-    then falls through to the real, still-safe call/compare path instead
-    of crashing the derive pass over an optimization.
+    proxy unreachable — EngineError; or an inspect body missing the
+    expected shape — KeyError) degrades to None rather than raising: the
+    peek is billed best-effort, and the watcher falls through to the
+    real, still-safe call/compare path instead of crashing the derive
+    pass over an optimization.
 
     One instance per engine, bound to that engine's container name at
     construction — Watcher._configurable_engines() names exactly one
@@ -246,7 +269,7 @@ class DockerEngineExec:
     def version(self) -> str | None:
         try:
             return self._dockerctl.image_ref(self._container)
-        except EngineError:
+        except (EngineError, KeyError):
             return None
 
     def __call__(self, node: str, engine: str, interpreter: str, source: str) -> tuple[str, str]:

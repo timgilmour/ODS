@@ -869,9 +869,20 @@ class Watcher:
         (or any other caller) still works correctly, just without the
         early-skip optimization: the post-call version comparison below
         is the fallback, so a redundant exec never produces a redundant
-        write. An engine that is not running simply yields no catalog --
-        a supported state, since validation warns rather than blocks
-        (app.validate_settings).
+        write. `engine_version` (both the peek and the post-call value) is
+        an OPAQUE identity used only for change detection -- the real
+        DockerCtl-backed adapter feeds it the container's resolved image
+        content ID, not a human-readable engine version string; a UI or
+        log line rendering it as "the vLLM version" would be wrong.
+
+        An engine that is not running (EngineError/BusyError) or whose
+        container isn't in the deck's own park allowlist (GuardError --
+        deliberately not an EngineError subclass, see app.engines) simply
+        yields no catalog -- a supported state, since validation warns
+        rather than blocks (app.validate_settings). This pass must never
+        raise past this method: tick()'s broad supervisor catch is not a
+        substitute for handling foreseeable failures here (see this
+        module's own design notes on that at the top of the file).
         """
         if self._engine_exec is None:
             return
@@ -887,15 +898,26 @@ class Watcher:
 
             try:
                 version, output = self._engine_exec(node, engine, PROBE_INTERPRETER, PROBE_SOURCE)
-            except (EngineError, BusyError):
+            except (EngineError, BusyError, GuardError):
                 continue
 
             if cached_version is not None and cached_version == version:
                 continue
 
             field = parse_probe_output(output, engine_version=version, now=now)
-            if field:
-                self._characteristics_store.put_fields(key, {"option_catalog": field})
+            if not field:
+                # The exec ran (engine reachable, allowlisted) but produced
+                # no parseable catalog -- e.g. a probe crash inside the
+                # container. Without this, "never harvested" and "harvest
+                # is broken" look identical from the outside: no catalog,
+                # no error, forever. Deduped (_DEDUP_KINDS) since a
+                # persistently broken probe would otherwise re-log every
+                # derive_interval_s.
+                self._log("harvest-empty", {"key": key})
+                continue
+
+            self._characteristics_store.put_fields(key, {"option_catalog": field})
+            self._log("catalog-harvested", {"key": key, "engine_version": version})
 
     def _configurable_engines(self) -> list[tuple[str, str]]:
         """(node, engine) pairs the Deck can harvest an option catalog from
@@ -926,7 +948,7 @@ class Watcher:
     # between resets the suppression. Real one-shot actions (unloads, frees,
     # loads) are NEVER deduped and always logged.
     _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced", "host-agent-busy",
-                          "lifecycle-spark-unreachable"})
+                          "lifecycle-spark-unreachable", "harvest-empty"})
 
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))

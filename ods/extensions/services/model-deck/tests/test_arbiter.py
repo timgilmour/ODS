@@ -2077,3 +2077,105 @@ def test_harvest_failure_leaves_no_catalog_and_does_not_raise(tmp_path, monkeypa
     watcher._derive_pass()
 
     assert "option_catalog" not in store.entry("engine/local/hipfire")
+
+
+# --- fix round 1 (2026-08-07) ------------------------------------------------
+
+
+def test_harvest_survives_guarderror_when_the_engine_is_not_allowlisted(tmp_path):
+    """GuardError (a non-allowlisted container) is deliberately NOT an
+    EngineError subclass (app.engines' module docstring) -- an operator who
+    narrows park_allowlist must not turn every derive pass into a raised
+    GuardError. Same supported-no-catalog posture as an EngineError/
+    BusyError failure."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       engine_exec=_raises(GuardError("container 'ods-hipfire' is not in the park allowlist")))
+
+    watcher._derive_pass()  # must not raise
+
+    assert "option_catalog" not in store.entry("engine/local/hipfire")
+
+
+def test_harvest_bare_engine_exec_without_version_peek_still_writes_once(tmp_path):
+    """`engine_exec` without a `.version` attribute (e.g. a bare function,
+    as opposed to `_recording_exec`'s object) has no cheap peek to skip the
+    exec on, so the exec runs on every non-throttled pass -- but the
+    post-call version comparison still stops a redundant WRITE when the
+    freshly observed version matches what's already cached. Covers the
+    fallback-compare branch the peek-based tests above don't exercise."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    writes = []
+    real_put_fields = store.put_fields
+
+    def _counting_put_fields(key, fields):
+        writes.append((key, fields))
+        return real_put_fields(key, fields)
+
+    store.put_fields = _counting_put_fields
+
+    calls = []
+
+    def bare_exec(node, engine, interpreter, source):
+        calls.append(1)
+        return "0.26.0", PROBE_OUTPUT
+
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=bare_exec)
+
+    watcher._derive_pass()
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+
+    assert len(calls) == 2   # no peek available -> the exec runs every pass
+    assert len(writes) == 1  # ...but the post-call compare stops the 2nd write
+
+
+def test_harvest_reruns_against_the_real_dockerengineexec_when_the_image_id_changes(tmp_path):
+    """The dictated re-harvest test above (test_harvest_reruns_when_the_
+    engine_version_changes) passes only because its double's `.version` is
+    hand-mutated by the test -- it cannot catch a real bug like keying
+    "version" on the wrong Docker inspect field (Config.Image, a floating
+    tag that stays IDENTICAL across an image rebuild + container recreate,
+    instead of the resolved Image content ID -- see
+    app.engines.docker_ctl.DockerCtl.image_ref's docstring for the exact
+    failure this was). This wires the REAL DockerCtl + DockerEngineExec
+    through a mocked Docker Engine API and proves the property against
+    them, not a hand-rolled double."""
+    import httpx
+
+    from app.engines.docker_ctl import DockerCtl, DockerEngineExec
+
+    image_id = {"value": "sha256:old"}
+    exec_creates = []
+
+    def handler(request):
+        if request.url.path == "/containers/ods-hipfire/json":
+            return httpx.Response(200, json={"Image": image_id["value"]}, request=request)
+        if request.url.path == "/containers/ods-hipfire/exec":
+            exec_creates.append(1)
+            return httpx.Response(201, json={"Id": "e1"}, request=request)
+        if request.url.path == "/exec/e1/start":
+            frame = (bytes([1, 0, 0, 0]) + len(PROBE_OUTPUT).to_bytes(4, "big")
+                     + PROBE_OUTPUT.encode())
+            return httpx.Response(200, content=frame, request=request)
+        raise AssertionError(f"unexpected path {request.url.path!r}")
+
+    dockerctl = DockerCtl("http://docker-ctl:2375", ["ods-hipfire"],
+                           transport=httpx.MockTransport(handler))
+    store = CharacteristicsStore(tmp_path / "c.json")
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       engine_exec=DockerEngineExec(dockerctl, "ods-hipfire"))
+
+    watcher._derive_pass()
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+
+    assert len(exec_creates) == 1  # unchanged image id -> peek skips the 2nd exec
+
+    image_id["value"] = "sha256:new"
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+
+    assert len(exec_creates) == 2  # changed image id -> re-harvested
+    assert (store.entry("engine/local/hipfire")["option_catalog"]["value"]["engine_version"]
+            == "sha256:new")

@@ -597,15 +597,33 @@ def test_dockerctl_running_not_gated_by_allowlist():
 # --- DockerCtl.image_ref() ---
 
 
-def test_dockerctl_image_ref_returns_config_image():
-    handler = _json_handler(200, {"Config": {"Image": "aeon-vllm@sha256:abc123"}})
+def test_dockerctl_image_ref_returns_the_resolved_image_content_id():
+    """The top-level `Image` field (Docker's resolved content ID for
+    whatever is actually running), NOT `Config.Image` (the reference the
+    container was CREATED WITH — a floating tag for hipfire, unchanged by
+    a rebuild+recreate behind the same tag). See image_ref's docstring."""
+    handler = _json_handler(
+        200, {"Image": "sha256:abc123", "Config": {"Image": "ods-hipfire:latest"}})
     ctl = _dockerctl(handler)
 
-    assert ctl.image_ref("ods-hipfire") == "aeon-vllm@sha256:abc123"
+    assert ctl.image_ref("ods-hipfire") == "sha256:abc123"
+
+
+def test_dockerctl_image_ref_changes_when_the_running_image_is_rebuilt_behind_the_same_tag():
+    """The exact scenario image_ref exists to detect: Config.Image (the
+    floating tag) stays identical across a rebuild + recreate, but the
+    resolved Image content ID changes."""
+    before = _json_handler(
+        200, {"Image": "sha256:old", "Config": {"Image": "ods-hipfire:latest"}})
+    after = _json_handler(
+        200, {"Image": "sha256:new", "Config": {"Image": "ods-hipfire:latest"}})
+
+    assert _dockerctl(before).image_ref("ods-hipfire") == "sha256:old"
+    assert _dockerctl(after).image_ref("ods-hipfire") == "sha256:new"
 
 
 def test_dockerctl_image_ref_hits_the_same_inspect_path_as_running():
-    handler = _recording_handler(200, {"Config": {"Image": "x"}})
+    handler = _recording_handler(200, {"Image": "sha256:x"})
     ctl = _dockerctl(handler)
 
     ctl.image_ref("ods-hipfire")
@@ -617,10 +635,10 @@ def test_dockerctl_image_ref_hits_the_same_inspect_path_as_running():
 
 def test_dockerctl_image_ref_not_gated_by_allowlist():
     """A read, same posture as running() — see its own test."""
-    handler = _json_handler(200, {"Config": {"Image": "x"}})
+    handler = _json_handler(200, {"Image": "sha256:x"})
     ctl = _dockerctl(handler)
 
-    assert ctl.image_ref("ods-comfyui") == "x"
+    assert ctl.image_ref("ods-comfyui") == "sha256:x"
 
 
 def test_dockerctl_image_ref_raises_engineerror_on_404():
@@ -740,7 +758,7 @@ def test_dockerengineexec_call_returns_image_ref_and_exec_stdout():
 
     def handler(request):
         if request.url.path == "/containers/ods-hipfire/json":
-            return httpx.Response(200, json={"Config": {"Image": "aeon-vllm@sha256:v1"}}, request=request)
+            return httpx.Response(200, json={"Image": "sha256:v1"}, request=request)
         if request.url.path == "/containers/ods-hipfire/exec":
             return httpx.Response(201, json={"Id": "e1"}, request=request)
         if request.url.path == "/exec/e1/start":
@@ -752,18 +770,18 @@ def test_dockerengineexec_call_returns_image_ref_and_exec_stdout():
 
     version, output = exec_fn("local", "hipfire", "python3", "print(1)")
 
-    assert version == "aeon-vllm@sha256:v1"
+    assert version == "sha256:v1"
     assert output == "catalog"
 
 
 def test_dockerengineexec_version_property_reads_image_ref_without_exec():
     from app.engines.docker_ctl import DockerEngineExec
 
-    handler = _recording_handler(200, {"Config": {"Image": "aeon-vllm@sha256:v1"}})
+    handler = _recording_handler(200, {"Image": "sha256:v1"})
     ctl = _dockerctl(handler)
     exec_fn = DockerEngineExec(ctl, "ods-hipfire")
 
-    assert exec_fn.version == "aeon-vllm@sha256:v1"
+    assert exec_fn.version == "sha256:v1"
     assert len(handler.calls) == 1
     assert handler.calls[0].url.path == "/containers/ods-hipfire/json"
 
@@ -778,6 +796,50 @@ def test_dockerengineexec_version_degrades_to_none_on_engineerror():
     exec_fn = DockerEngineExec(ctl, "ods-hipfire")
 
     assert exec_fn.version is None
+
+
+def test_dockerengineexec_version_degrades_to_none_on_malformed_inspect_body():
+    """image_ref() raises KeyError (not EngineError) on a 2xx body missing
+    the expected "Image" key -- the peek is billed best-effort and must
+    degrade the same way, not propagate."""
+    from app.engines.docker_ctl import DockerEngineExec
+
+    handler = _json_handler(200, {"unexpected": "shape"})
+    ctl = _dockerctl(handler)
+    exec_fn = DockerEngineExec(ctl, "ods-hipfire")
+
+    assert exec_fn.version is None
+
+
+# --- exec_run -> parse_probe_output integration (realistic interleaving) ---
+
+
+def test_exec_run_output_survives_interleaved_stderr_frames_into_parse_probe_output():
+    """The shape production actually sees: vLLM's own logging noise on
+    stderr frames interleaved with the probe's sentinel-wrapped JSON split
+    across stdout frames. exec_run's demux must hand parse_probe_output
+    exactly the stdout text, with stderr chatter never in the mix, and the
+    result must still parse into a real catalog end-to-end."""
+    from app.harvest import _SENTINEL, parse_probe_output
+
+    from tests.test_harvest import PROBE_OUTPUT
+
+    stream = (
+        _docker_stream_frame(2, b"INFO 08-04 12:00:00 [vllm] platform banner\n")
+        + _docker_stream_frame(1, (_SENTINEL + "\n").encode())
+        + _docker_stream_frame(2, b"WARNING more stderr chatter mid-probe\n")
+        + _docker_stream_frame(1, PROBE_OUTPUT.encode())
+        + _docker_stream_frame(2, b"WARNING trailing stderr noise\n")
+        + _docker_stream_frame(1, ("\n" + _SENTINEL + "\n").encode())
+    )
+    handler = _exec_transport(stream=stream)
+    ctl = _dockerctl(handler)
+
+    output = ctl.exec_run("ods-hipfire", "python3", "print(1)")
+    catalog = parse_probe_output(output, engine_version="0.26.0", now="t")
+
+    assert "max-model-len" in catalog["value"]["options"]
+    assert "WARNING" not in output  # stderr frames never reached stdout
 
 
 # --- HipfireClient ---

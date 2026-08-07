@@ -113,6 +113,17 @@ def parse_probe_output(text: str, engine_version: str, now: str) -> dict:
 
     Returns ``{}`` for unparseable output: a probe that failed must produce
     nothing rather than a half catalog that looks authoritative.
+
+    ``engine_version`` is caller-supplied, not parsed from the probe: this
+    module has no opinion on what it is beyond "changes when the engine
+    that produced this catalog changes, and only then". The real caller
+    (app.arbiter.Watcher._harvest_catalogs, over
+    app.engines.docker_ctl.DockerCtl.image_ref) feeds it the container's
+    resolved Docker image content ID (e.g. ``"sha256:..."``) for exactly
+    that reason -- it is an OPAQUE change-detection identity, not a
+    human-readable engine/package version string. A caller that wants the
+    latter (e.g. vLLM's own ``__version__``) would need PROBE_SOURCE to
+    emit it explicitly; nothing here does that today.
     """
     try:
         payload = json.loads(_extract_sentinel_payload(text))

@@ -64,7 +64,19 @@ services:
       # instance, POST /exec/{id}/start actually runs it and returns its
       # output. -allowPOST is cumulative (wollomatic docs), so these ADD to
       # the (start|stop) line above rather than replacing it.
-      - -allowPOST=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/exec
+      #
+      # The create-exec rule is pinned to ods-hipfire specifically, NOT the
+      # wildcard [a-zA-Z0-9_.-]+ the other rules use: unlike start/stop
+      # (park/resume, harmless to any allowlisted container), exec runs an
+      # ARBITRARY command as root inside whatever container it names — a
+      # wildcard here would let a deck bug (or a compromised deck) run code
+      # in every container on the host, with only this client's in-process
+      # `_guard`/allowlist standing between a bug and host-wide RCE. Exactly
+      # one container is ever harvested in C1 (Watcher._configurable_engines
+      # -> hipfire only); widen this ONLY alongside that list, never ahead
+      # of it. /exec/{id}/start stays wildcarded — the exec id is Docker-
+      # generated per call, there is no container name in that path to pin.
+      - -allowPOST=/(v[0-9.]+/)?containers/ods-hipfire/exec
       - -allowPOST=/(v[0-9.]+/)?exec/[a-zA-Z0-9_.-]+/start
       - -watchdoginterval=300
       - -shutdowngracetime=5
