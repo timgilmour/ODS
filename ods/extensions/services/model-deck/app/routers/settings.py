@@ -69,6 +69,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.argline import normalize_args_map, parse_argline, render_argline
 from app.compose_import import import_compose
+from app.engines import EngineError
 from app.facts import resolve_facts
 from app.ladder import resolve_settings
 from app.observe import spark_node_id
@@ -136,6 +137,21 @@ def adopt(node: str, engine: str, request: Request) -> dict:
     container each profile is) as a characteristics field, so Tasks 6+7
     (drift translation, reload) can go from a profile name to the
     engine_models scope key without re-parsing compose themselves.
+
+    Per-profile isolation (review round 1 fix, 2026-08-07): fetching
+    (``SparkClient.get_compose``, ``EngineError`` on transport/HTTP failure)
+    and parsing (``import_compose``, ``ValueError`` on malformed YAML /
+    multi-service / non-list ``command:``) run PER PROFILE inside the loop,
+    not around the whole route. One bad profile must not fail the entire
+    request with a bare 422/502 after earlier profiles' ``store.put()``
+    calls have already committed — that would leave scopes written that the
+    identity map below never records, with no partial-success indication
+    to the caller at all. A profile whose fetch or parse fails is reported
+    under ``skipped`` with a reason naming the exception, exactly like the
+    "no /model mount" and non-vllm skip reasons, and the sweep continues.
+    The route-level guards (unknown node/engine -> 422, no spark client ->
+    503, ``spark.status()`` itself failing) are unaffected — those are
+    whole-request preconditions, not per-profile outcomes.
     """
     deck = request.app.state.deck
     if (node, engine) != (spark_node_id(), "vllm"):
@@ -150,7 +166,15 @@ def adopt(node: str, engine: str, request: Request) -> dict:
         if meta["engine"] != "vllm":
             skipped.append({"profile": meta["name"], "engine": meta["engine"]})
             continue
-        imported = import_compose(spark.get_compose(meta["name"]))
+        try:
+            imported = import_compose(spark.get_compose(meta["name"]))
+        except (ValueError, EngineError) as exc:
+            # One unreadable/malformed profile must not fail the whole
+            # sweep (see this function's docstring, "Per-profile
+            # isolation") — report it and keep going.
+            skipped.append({"profile": meta["name"], "engine": "vllm",
+                            "reason": f"{type(exc).__name__}: {exc}"})
+            continue
         identity = imported["identity"]
         if identity is None:
             skipped.append({"profile": meta["name"], "engine": "vllm",

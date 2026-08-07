@@ -2016,6 +2016,8 @@ HERETIC_COMPOSE = (Path(__file__).parent / "fixtures" / "spark-profiles"
                    / "compose-heretic.yaml").read_text()
 DS4_COMPOSE = (Path(__file__).parent / "fixtures" / "spark-profiles"
                / "compose-ds4.yaml").read_text()
+MM27B_COMPOSE = (Path(__file__).parent / "fixtures" / "spark-profiles"
+                 / "compose-mm27b.yaml").read_text()
 
 
 class FakeSparkForAdopt:
@@ -2139,3 +2141,82 @@ def test_adopt_with_no_spark_configured_is_503(tmp_path, monkeypatch):
     resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
 
     assert resp.status_code == 503
+
+
+class FakeSparkForAdoptWithFailure:
+    """Two real vllm profiles (heretic, mm27b) plus ds4 — lets a test swap
+    in a bad compose string or an exception for exactly ONE profile's
+    get_compose(), to prove the sweep isolates a single bad profile rather
+    than failing the whole request (review round 1 fix, Task 5)."""
+
+    def __init__(self, compose_overrides=None, raise_for=None):
+        self.compose = {"heretic": HERETIC_COMPOSE, "mm27b": MM27B_COMPOSE,
+                        "ds4": DS4_COMPOSE}
+        self.compose.update(compose_overrides or {})
+        self._raise_for = raise_for or {}  # {profile: exception instance}
+
+    def status(self):
+        return {"profiles": [
+            {"name": "heretic", "engine": "vllm", "health_url": None, "container": None},
+            {"name": "mm27b", "engine": "vllm", "health_url": None, "container": None},
+            {"name": "ds4", "engine": "ds4",
+             "health_url": "http://127.0.0.1:8000/metrics", "container": "spark-ds4"},
+        ], "swap_status": None, "serving": None}
+
+    def get_compose(self, profile):
+        if profile in self._raise_for:
+            raise self._raise_for[profile]
+        return self.compose[profile]
+
+
+def test_adopt_isolates_a_malformed_profile_and_continues_the_sweep(tmp_path, monkeypatch):
+    """One profile's compose is malformed YAML (import_compose raises
+    ValueError) -> it lands in 'skipped' with a reason naming the error;
+    the OTHER real vllm profile still adopts, and the identity map still
+    gets written for it. Review round 1 fix: a per-profile failure must not
+    fail the whole request after earlier profiles' writes already
+    committed, and must not suppress the profile_identities write for the
+    profiles that DID import cleanly."""
+    fake = FakeSparkForAdoptWithFailure(compose_overrides={"heretic": "services: [unclosed"})
+    app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
+    good_key = "sparky/vllm|Qwen3.6-27B-AEON-MM-MTP"
+
+    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert good_key in body["adopted"]
+    bad_skip = next(s for s in body["skipped"] if s["profile"] == "heretic")
+    assert bad_skip["engine"] == "vllm"
+    assert "ValueError" in bad_skip["reason"]
+
+    # The good profile's scope was actually written, not just reported.
+    assert deck["settings_store"].scope("engine_models", good_key)["args"]
+
+    # The identity map covers the good profile despite the other's failure;
+    # the failed one never got far enough to have an identity to record.
+    field = deck["characteristics_store"].entry("engine/sparky/vllm")["profile_identities"]
+    assert "mm27b" in field["value"]
+    assert "heretic" not in field["value"]
+
+
+def test_adopt_isolates_a_compose_fetch_failure_and_continues_the_sweep(tmp_path, monkeypatch):
+    """get_compose() itself raises EngineError (a node-agent transport/HTTP
+    failure) for one profile -> same isolation as a malformed-YAML import
+    failure: that profile lands in 'skipped' with a reason, and the sweep
+    still completes for the rest."""
+    from app.engines import EngineError
+
+    fake = FakeSparkForAdoptWithFailure(raise_for={"heretic": EngineError("node down")})
+    app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
+    good_key = "sparky/vllm|Qwen3.6-27B-AEON-MM-MTP"
+
+    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert good_key in body["adopted"]
+    bad_skip = next(s for s in body["skipped"] if s["profile"] == "heretic")
+    assert bad_skip["engine"] == "vllm"
+    assert "EngineError" in bad_skip["reason"]
+    assert "node down" in bad_skip["reason"]
