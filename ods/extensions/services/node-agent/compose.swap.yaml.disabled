@@ -15,6 +15,13 @@ services:
     environment:
       NODE_VLLM_DIR: /vllm
       NODE_SWAP_CTL_DIR: /swap-ctl
+      # Settings documents + harvested catalogs (Plan C2). Needs rw: the
+      # agent WRITES <profile>.json here (PUT /settings) — the /vllm mount
+      # is deliberately ro, which is why this is a separate dir. The
+      # host-side swap-helper reads the documents and writes catalog-*.json
+      # into the same dir (its 4th positional arg names the host path).
+      NODE_SETTINGS_DIR: /settings
     volumes:
       - ${HOST_VLLM_DIR:-/home/tim/vllm}:/vllm:ro
       - ${HOST_SWAP_CTL_DIR:-/home/tim/vllm/swap-ctl}:/swap-ctl:rw
+      - ${HOST_SETTINGS_DIR:-/home/tim/vllm/settings}:/settings:rw
