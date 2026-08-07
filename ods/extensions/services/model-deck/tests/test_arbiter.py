@@ -530,13 +530,14 @@ class FakePolicyStore:
 
 
 class FakeLemonade:
-    def __init__(self, raise_on_load=None):
+    def __init__(self, raise_on_load=None, in_flight=False):
         self.unloaded = []
         self.loaded = []
         self._raise_on_load = raise_on_load
+        self._in_flight = in_flight
 
     def load_in_flight(self):
-        return False
+        return self._in_flight
 
     def unload(self, model):
         self.unloaded.append(model)
@@ -1966,3 +1967,43 @@ def test_reconciler_restores_a_key_at_most_once_per_cooldown(tmp_path):
     clock.advance(31)
     watcher.tick()
     assert lemonade.loaded == ["extra.m.gguf", "extra.m.gguf"]  # cooldown expired
+
+
+def test_reconciler_skips_a_lemonade_restore_while_a_deck_load_is_in_flight(tmp_path):
+    """The race this guards (whole-branch review, finding 1): a ROUTER-
+    authored load records intent=loaded and starts the engine load while a
+    watcher tick is already in flight. That tick's world snapshot predates
+    the load (lemonade observed unloaded at snapshot time), so its fresh
+    intent read still derives 'down' and would restore — i.e. load the SAME
+    model a second time from the watcher thread, racing the deck's own
+    in-flight load. FakeLemonade.load_in_flight()=True stands in for that
+    live in-flight load; the world is arranged exactly like
+    test_reconciler_restores_a_key_at_most_once_per_cooldown (permanently
+    unloaded, so 'down' derives every tick) to isolate this guard from the
+    cooldown."""
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.m.gguf", engine="lemonade")
+
+    lemonade = FakeLemonade(in_flight=True)
+    watcher, _events = _make_watcher(
+        tmp_path, FakeWorld(_world(lemonade=_lem(state="unloaded"))),
+        FakeRegistry(), _policy(), lemonade=lemonade, intent_store=intent,
+    )
+
+    watcher.tick()
+
+    assert lemonade.loaded == []  # no second, watcher-thread load fired
+    # A skipped restore is a non-action (no event, no failure charged) — it
+    # must not consume the per-key cooldown slot either, so the key
+    # reconciles cleanly the moment the in-flight load clears.
+    assert "local/lemonade" not in watcher._restore_last_attempt_at
+
+    # Control: once the deck-authored load is no longer in flight, the exact
+    # same 'down' derivation DOES restore — the guard is per-tick (reads
+    # load_in_flight() fresh), not a sticky suppression.
+    lemonade._in_flight = False
+    watcher.tick()
+
+    assert lemonade.loaded == ["extra.m.gguf"]

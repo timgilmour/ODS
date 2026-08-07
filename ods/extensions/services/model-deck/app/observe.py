@@ -48,7 +48,7 @@ def observe_local(world: dict) -> dict[str, dict]:
     comfy = tenants["comfyui"]
 
     return {
-        f"{_LOCAL_NODE}/lemonade": _record(
+        LOCAL_LEMONADE_KEY: _record(
             unknown=lemonade["state"] == "unknown",
             loaded=lemonade["state"] == "loaded",
             model=lemonade.get("model"),
@@ -109,7 +109,7 @@ def observe_spark(spark_status: dict | None) -> dict[str, dict]:
 # Which engine owns each resource key. Used by restore dispatch and adopt;
 # a new engine adds a line here rather than editing either caller.
 _ENGINE_BY_KEY = {
-    "local/lemonade": "lemonade",
+    LOCAL_LEMONADE_KEY: "lemonade",
     "local/hipfire": "hipfire",
     "local/comfyui": "comfyui",
     SPARK_SLOT_KEY: "spark",

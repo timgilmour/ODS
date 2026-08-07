@@ -578,8 +578,12 @@ class Watcher:
                 if self._intent_store is not None:
                     self._intent_store.record(
                         LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade")
-                self._lemonade.unload(action["model"])
+                # Added BEFORE the engine call (mirrors the retrigger tail
+                # below) so the invariant is structural: an unload wrapped in
+                # try/except in the future still can't return without this
+                # key marked actuated.
                 actuated.add(LOCAL_LEMONADE_KEY)
+                self._lemonade.unload(action["model"])
                 # Deck-initiated unload (idle release OR contention eviction):
                 # arm suppression so healing can't immediately revert it.
                 self._heal_suppressor.note_deck_unload()
@@ -682,6 +686,24 @@ class Watcher:
 
         for action in actions:
             key = action["key"]
+
+            # A deck-authored load (router route or watcher heal re-trigger)
+            # may already be in flight for this exact key: intent was
+            # recorded and the engine call started before this tick's world
+            # snapshot was taken, so the snapshot still reads unloaded and
+            # this derives 'down' even though the deck is already acting on
+            # it. Restoring now would double-load the same model from the
+            # watcher thread — blocking it up to 180 s and, if that in-flight
+            # load's own timeout fires afterward, charging note_failure
+            # against what is really a healthy load. Lazy litellm loads never
+            # set load_in_flight(), so this can only ever skip deck-authored
+            # activity, never mask a real gap. The key reconciles cleanly
+            # next tick once the snapshot catches up with the load. A skipped
+            # restore is a non-action, so — like the cooldown skip below — it
+            # must not be stamped.
+            if action["engine"] == "lemonade" and self._lemonade.load_in_flight():
+                continue
+
             last = self._restore_last_attempt_at.get(key)
             now_mono = self._clock()
             if last is not None and now_mono - last < _RESTORE_COOLDOWN_S:
