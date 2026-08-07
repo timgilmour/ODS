@@ -88,6 +88,17 @@ def test_planner_never_mutates_routes_or_client_pins():
     assert str(pins) == pins_before
 
 
+def test_duplicate_role_suffix_across_aliases_is_not_repeated_in_tags():
+    """mm27b's real compose carries two independent -ultimate aliases
+    (aeon-ultimate, qwen36-ultimate) -- proposed_tags is a TAG SET to apply
+    to the renamed identity, not one entry per alias, so a suffix shared by
+    more than one alias still appears exactly once (first-seen order)."""
+    profiles = {"mm27b": {"served_model_name": ["aeon", "aeon-ultimate", "qwen36-ultimate"],
+                          "identity": "Qwen3.5-27B-mm-modelopt"}}
+    plan = plan_rename(profiles, routes={}, client_pins={})
+    assert plan["renames"][0]["proposed_tags"] == ["ultimate"]
+
+
 def test_route_targeting_a_renamed_alias_is_reported():
     """A litellm route whose litellm_params.model resolves to an alias being
     renamed appears in the plan with its route name, so the operator knows
@@ -186,7 +197,10 @@ def test_route_plans_mm27b_style_renames(tmp_path, monkeypatch):
     mm27b = next(r for r in body["renames"] if r["profile"] == "mm27b")
     assert mm27b["to"] == "Qwen3.6-27B-AEON-MM-MTP"
     assert "aeon" in mm27b["from"]
-    assert "fast" in mm27b["proposed_tags"]
+    # Real fixture: aeon, aeon-fast, aeon-deep, aeon-ultimate,
+    # qwen36-ultimate, aeon-ultimate-xs -- two aliases share the "ultimate"
+    # suffix, so this also locks in the dedup (one "ultimate", not two).
+    assert mm27b["proposed_tags"] == ["fast", "deep", "ultimate", "xs"]
 
     heretic = next(r for r in body["renames"] if r["profile"] == "heretic")
     assert heretic["from"] == ["heretic"]
