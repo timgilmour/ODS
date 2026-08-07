@@ -62,10 +62,17 @@ def read_settings(profile: str) -> dict:
         # No settings yet is every profile's starting state, not an error --
         # same contract as swapctl.read_status() returning None.
         return dict(EMPTY)
-    except (OSError, ValueError):
-        # A half-written or corrupt document is reported as absent rather
-        # than crashing the read path; the next PUT overwrites it atomically.
+    except ValueError:
+        # Corrupt JSON is reported as absent rather than crashing the read
+        # path; writes are atomic (tmp+os.replace below), so this is not a
+        # half-written file, but the next PUT still overwrites it cleanly.
         return dict(EMPTY)
+    # Deliberately NOT catching OSError here: this file is written atomically
+    # by this same module, so any other OSError (PermissionError from a
+    # mis-mounted NODE_SETTINGS_DIR is the bug class this stack has actually
+    # hit) is a real fault, not "no settings yet" -- masking it as EMPTY
+    # would read as "profile has no settings" and misdirect debugging away
+    # from a broken mount. Let it propagate to a 500.
 
 
 def write_settings(profile: str, document: dict) -> None:

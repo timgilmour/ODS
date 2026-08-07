@@ -8,6 +8,7 @@ node-side merge would give the same key two owners.
 """
 
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -77,6 +78,32 @@ def test_traversal_profile_name_is_rejected(monkeypatch, tmp_path):
 
     assert resp.status_code in (400, 404)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_permission_error_does_not_read_as_empty_document(monkeypatch, tmp_path):
+    """Regression: a mis-mounted NODE_SETTINGS_DIR (the UID/GID bug class
+    this stack has actually hit) must not read as 'profile has no settings
+    yet' -- that would misdirect debugging away from a broken mount. Unlike
+    the catalog files, settings.json is written atomically by this same
+    module, so there is no legitimate half-written case to excuse masking a
+    read failure here.
+    """
+    _enable(monkeypatch, tmp_path)
+    (tmp_path / "heretic.json").write_text(json.dumps(DOC))
+
+    def _deny(self, *a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _deny)
+
+    local_client = TestClient(app, raise_server_exceptions=False)
+    resp = local_client.get("/v1/node/profile/heretic/settings", headers=AUTH)
+
+    # No handler is registered for a bare OSError, so this is Starlette's
+    # unhandled-exception response (plain text, not JSON) -- the point of
+    # the test is that it is NOT the 200 empty-document response.
+    assert resp.status_code == 500
+    assert resp.headers["content-type"] != "application/json"
 
 
 def test_settings_dir_unset_answers_503(monkeypatch):
