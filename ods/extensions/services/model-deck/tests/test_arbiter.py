@@ -23,6 +23,13 @@ from app.arbiter import HealSuppressor, Watcher, decide
 from app.characteristics import CharacteristicsStore
 from app.engines import EngineError, GuardError
 from app.events import tail_events
+# The node id the settings API reads catalogs under (app/observe.py:28) —
+# harvest-scoped tests inject engine names via `configurable_engines` and
+# must key their assertions off THIS constant, never a hand-typed "local"
+# literal or `settings.node_label`, so a future vocabulary regression here
+# would show up as an import/assertion mismatch, not a silently-passing
+# coincidence (see Watcher._configurable_engines's docstring, app/arbiter.py).
+from app.observe import _LOCAL_NODE
 
 # The reconcile pass is the first watcher code to call the hipfire client, so
 # it needs a real fake rather than the bare object() the arbitration tests
@@ -585,7 +592,8 @@ def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
     heal_suppressor=None, hostagent=None, catalog=None, hipfire=None,
     intent_store=None, spark=None, auto=True, characteristics_store=None,
-    gguf_dir=None, clock=None, on_derive=None, engine_exec=None, **sett,
+    gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
+    configurable_engines=None, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -609,6 +617,7 @@ def _make_watcher(
         clock=clock if clock is not None else time.monotonic,
         on_derive=on_derive,
         engine_exec=engine_exec,
+        configurable_engines=configurable_engines,
     )
     return watcher, events_path
 
@@ -2020,6 +2029,14 @@ def test_reconciler_skips_a_lemonade_restore_while_a_deck_load_is_in_flight(tmp_
 # ===========================================================================
 # CATALOG HARVEST (task 8) — _derive_pass harvests each configurable
 # engine's option catalog, once per observed engine version.
+#
+# Watcher._configurable_engines returns [] in production (F2, 2026-08-07:
+# hipfire is confirmed not vLLM-backed, so C1 has no valid local harvest
+# target — see its docstring in app/arbiter.py). Every test below injects
+# `configurable_engines=["hipfire"]` (engine names only — Watcher pairs each
+# with `_LOCAL_NODE` internally, never `settings.node_label`) purely to keep
+# exercising _harvest_catalogs's machinery; it is not a claim that hipfire
+# is a real harvest target.
 # ===========================================================================
 
 
@@ -2044,21 +2061,23 @@ def test_harvest_runs_once_and_caches_by_version(tmp_path, monkeypatch):
     store = CharacteristicsStore(tmp_path / "c.json")
     execs = []
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
-                       engine_exec=_recording_exec(execs, version="0.26.0"))
+                       engine_exec=_recording_exec(execs, version="0.26.0"),
+                       configurable_engines=["hipfire"])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
     watcher._derive_pass()
 
     assert len(execs) == 1
-    assert store.entry("engine/local/hipfire")["option_catalog"]["value"]["engine_version"] == "0.26.0"
+    assert store.entry(f"engine/{_LOCAL_NODE}/hipfire")["option_catalog"]["value"]["engine_version"] == "0.26.0"
 
 
 def test_harvest_reruns_when_the_engine_version_changes(tmp_path, monkeypatch):
     store = CharacteristicsStore(tmp_path / "c.json")
     execs = []
     exec_fn = _recording_exec(execs, version="0.26.0")
-    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=exec_fn)
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=exec_fn,
+                       configurable_engines=["hipfire"])
 
     watcher._derive_pass()
     exec_fn.version = "0.27.0"
@@ -2072,11 +2091,12 @@ def test_harvest_failure_leaves_no_catalog_and_does_not_raise(tmp_path, monkeypa
     """An engine that is down has no catalog. Supported state, not an error."""
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
-                       engine_exec=_raises(EngineError("not running")))
+                       engine_exec=_raises(EngineError("not running")),
+                       configurable_engines=["hipfire"])
 
     watcher._derive_pass()
 
-    assert "option_catalog" not in store.entry("engine/local/hipfire")
+    assert "option_catalog" not in store.entry(f"engine/{_LOCAL_NODE}/hipfire")
 
 
 # --- F3, Important (final branch review, 2026-08-07) -------------------------
@@ -2092,7 +2112,8 @@ def test_harvest_exec_failure_logs_a_deduped_harvest_failed_event(tmp_path):
     watcher, events_path = _make_watcher(
         tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
         characteristics_store=store,
-        engine_exec=_raises(EngineError("403 Forbidden")))
+        engine_exec=_raises(EngineError("403 Forbidden")),
+        configurable_engines=["hipfire"])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
@@ -2102,7 +2123,7 @@ def test_harvest_exec_failure_logs_a_deduped_harvest_failed_event(tmp_path):
 
     failures = [e for e in tail_events(events_path) if e["kind"] == "harvest-failed"]
     assert len(failures) == 1
-    assert failures[0]["detail"] == {"key": "engine/local/hipfire", "reason": "EngineError"}
+    assert failures[0]["detail"] == {"key": f"engine/{_LOCAL_NODE}/hipfire", "reason": "EngineError"}
 
 
 def test_harvest_failed_dedup_resets_when_the_failure_kind_changes(tmp_path):
@@ -2113,7 +2134,8 @@ def test_harvest_failed_dedup_resets_when_the_failure_kind_changes(tmp_path):
     watcher, events_path = _make_watcher(
         tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
         characteristics_store=store,
-        engine_exec=_raises(EngineError("403 Forbidden")))
+        engine_exec=_raises(EngineError("403 Forbidden")),
+        configurable_engines=["hipfire"])
 
     watcher._derive_pass()  # EngineError -> logged
     watcher._last_derive_at = None
@@ -2139,11 +2161,12 @@ def test_harvest_survives_guarderror_when_the_engine_is_not_allowlisted(tmp_path
     BusyError failure."""
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
-                       engine_exec=_raises(GuardError("container 'ods-hipfire' is not in the park allowlist")))
+                       engine_exec=_raises(GuardError("container 'ods-hipfire' is not in the park allowlist")),
+                       configurable_engines=["hipfire"])
 
     watcher._derive_pass()  # must not raise
 
-    assert "option_catalog" not in store.entry("engine/local/hipfire")
+    assert "option_catalog" not in store.entry(f"engine/{_LOCAL_NODE}/hipfire")
 
 
 def test_harvest_bare_engine_exec_without_version_peek_still_writes_once(tmp_path):
@@ -2169,7 +2192,8 @@ def test_harvest_bare_engine_exec_without_version_peek_still_writes_once(tmp_pat
         calls.append(1)
         return "0.26.0", PROBE_OUTPUT
 
-    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=bare_exec)
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, engine_exec=bare_exec,
+                       configurable_engines=["hipfire"])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
@@ -2213,7 +2237,8 @@ def test_harvest_reruns_against_the_real_dockerengineexec_when_the_image_id_chan
                            transport=httpx.MockTransport(handler))
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
-                       engine_exec=DockerEngineExec(dockerctl, "ods-hipfire"))
+                       engine_exec=DockerEngineExec(dockerctl, "ods-hipfire"),
+                       configurable_engines=["hipfire"])
 
     watcher._derive_pass()
     watcher._last_derive_at = None
@@ -2226,5 +2251,38 @@ def test_harvest_reruns_against_the_real_dockerengineexec_when_the_image_id_chan
     watcher._derive_pass()
 
     assert len(exec_creates) == 2  # changed image id -> re-harvested
-    assert (store.entry("engine/local/hipfire")["option_catalog"]["value"]["engine_version"]
+    assert (store.entry(f"engine/{_LOCAL_NODE}/hipfire")["option_catalog"]["value"]["engine_version"]
             == "sha256:new")
+
+
+# --- F1/F2, live-deploy fix round (2026-08-07) -------------------------------
+#
+# The live deploy's one real harvest pass wrote "engine/autarch/hipfire" —
+# `_configurable_engines` used to pair "hipfire" with `settings.node_label`
+# (the display label, "autarch" via MODEL_DECK_NODE_LABEL) instead of the
+# node id every reader keys on (`app.observe._LOCAL_NODE`, "local",
+# app/observe.py:28; see GET /api/settings/catalog/{node}/{engine}, app/
+# routers/settings.py:78-82). Unit tests never caught it because
+# node_label's default ("local") happens to equal the node id, making
+# label == id in every test that never overrode node_label.
+
+
+def test_harvest_key_uses_node_id_not_node_label(tmp_path):
+    """Regression for the live-deploy defect above: even with
+    settings.node_label set away from its "local" default, the harvested
+    catalog must land under the node id (`engine/local/hipfire`, what the
+    settings API actually reads) -- never under the label
+    (`engine/autarch/hipfire`, a key no API path reads)."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    execs = []
+    watcher = _watcher(
+        tmp_path=tmp_path, characteristics_store=store,
+        engine_exec=_recording_exec(execs, version="0.26.0"),
+        configurable_engines=["hipfire"],
+        node_label="autarch",
+    )
+
+    watcher._derive_pass()
+
+    assert store.entry(f"engine/{_LOCAL_NODE}/hipfire")["option_catalog"] is not None
+    assert store.entry("engine/autarch/hipfire") == {}

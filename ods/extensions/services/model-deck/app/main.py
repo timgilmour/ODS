@@ -249,12 +249,15 @@ def _build_watcher(settings: Settings):
         # will read from, and the read-only GGUF mount to scan.
         characteristics_store=deck["characteristics_store"],
         gguf_dir=deck["gguf_dir"],
-        # Catalog harvest (app.arbiter.Watcher._harvest_catalogs): hipfire is
-        # the sole app.harvest.PROBE_SOURCE-understood (vLLM-backed) local
-        # containerised engine in C1 (Watcher._configurable_engines) — same
-        # dockerctl/allowlist the park path already uses, over the socket-
-        # proxy sidecar's exec endpoints (see compose.yaml's docker-ctl
-        # -allowPOST lines and app.engines.docker_ctl's module docstring).
+        # Catalog harvest (app.arbiter.Watcher._harvest_catalogs): the exec
+        # path stays built and allowlisted (same dockerctl/allowlist the
+        # park path already uses, over the socket-proxy sidecar's exec
+        # endpoints — see compose.yaml's docker-ctl -allowPOST lines and
+        # app.engines.docker_ctl's module docstring) even though hipfire is
+        # confirmed NOT vLLM-backed (live-verified 2026-08-07 — see
+        # Watcher._configurable_engines's docstring) and so C1 has no valid
+        # local harvest target; C2 (spark/remote vLLM via node-agent +
+        # engine capability descriptors) is what actually calls this again.
         engine_exec=DockerEngineExec(deck["dockerctl"], deck["settings"].hipfire_container),
     )
 

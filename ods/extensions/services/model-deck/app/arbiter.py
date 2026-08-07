@@ -114,6 +114,7 @@ from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
 from app.lifecycle import derive_status
 from app.observe import (
+    _LOCAL_NODE,
     LOCAL_LEMONADE_KEY,
     SparkObserver,
     merge_observations,
@@ -397,6 +398,7 @@ class Watcher:
         clock=time.monotonic,
         on_derive=None,
         engine_exec=None,
+        configurable_engines=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -466,6 +468,15 @@ class Watcher:
         # shape as characteristics_store/hostagent/intent_store above (and
         # every unit test except the harvest-scoped ones gets it).
         self._engine_exec = engine_exec
+        # Test-only seam for _configurable_engines (see its docstring): a
+        # list of engine NAMES (not (node, engine) pairs) to probe on THIS
+        # node. Deliberately just names -- forcing the node half of the pair
+        # to always come from `_LOCAL_NODE` inside _configurable_engines
+        # means a test can never accidentally reintroduce the node_label
+        # vocabulary bug via this seam. None (every caller except the
+        # harvest-scoped unit tests, including app.main in production)
+        # leaves _configurable_engines returning [].
+        self._configurable_engine_names = configurable_engines
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -939,17 +950,47 @@ class Watcher:
             self._log("catalog-harvested", {"key": key, "engine_version": version})
 
     def _configurable_engines(self) -> list[tuple[str, str]]:
-        """(node, engine) pairs the Deck can harvest an option catalog from
-        -- in C1, the local containerised engines the argparse-introspection
-        probe (app.harvest.PROBE_SOURCE) actually understands. That probe
-        imports vLLM's own arg parser, so it is meaningful for hipfire (the
-        vLLM-backed engine) only; lemonade (llama-server) and comfyui are
-        local containerised engines the Deck ALSO controls, but are not
-        vLLM, so probing them would import-fail every derive pass forever --
-        never caching, since a failed probe yields no catalog to cache
-        against -- for no benefit. Remote/spark harvesting is out of scope
-        here (a later increment, C2)."""
-        return [(self._settings.node_label, "hipfire")]
+        """(node, engine) pairs the Deck can harvest an option catalog from.
+
+        C1 truth, live-verified 2026-08-07: ``docker exec ods-hipfire
+        python3 -c "import vllm"`` -> ``ModuleNotFoundError``. hipfire is a
+        Bun/TypeScript daemon (``bun run .hipfire/cli/index.ts serve`` + a
+        native daemon binary) -- no Python inference stack, nothing argparse
+        to introspect. The argparse-introspection probe (app.harvest.
+        PROBE_SOURCE) imports vLLM's own arg parser, so it is meaningful for
+        a vLLM-backed engine only, and no local engine on this box is
+        vLLM-backed: lemonade is llama-server, comfyui is comfyui, and now
+        hipfire is confirmed Bun, not vLLM either. The probe has no valid
+        local target in C1 -- this used to hardcode a (node, "hipfire")
+        pair anyway, which both begged a ModuleNotFoundError forever (never
+        caching, since a failed probe yields no catalog to cache against)
+        and keyed it wrong (see below). Returning [] here is the honest
+        C1 state; C2 (spark/remote vLLM via node-agent + engine capability
+        descriptors) repopulates this from real descriptors instead of a
+        hardcoded list.
+
+        Node vocabulary, for whenever C2 (or a test) populates this again:
+        the node half of the pair MUST be the node id (``app.observe.
+        _LOCAL_NODE``, "local", app/observe.py:28) -- the same id
+        ``GET /api/settings/catalog/{node}/{engine}`` reads into the
+        ``engine/{node}/{engine}`` characteristics key (app/routers/
+        settings.py:78-82) and ``_resolve`` looks up by (app/routers/
+        settings.py:175-183). It must NEVER be ``settings.node_label`` (a
+        display string, e.g. "autarch" via MODEL_DECK_NODE_LABEL, shown by
+        GET /state -- app/routers/status.py:24) -- that was this method's
+        original bug: a harvest that keyed "engine/autarch/hipfire" while
+        every reader looks under "engine/local/hipfire", silently writing a
+        catalog no API path could ever read. Unit tests never caught it
+        because node_label defaults to "local", making label == id.
+
+        _configurable_engine_names (constructor param, test-only) supplies
+        engine names for the harvest-scoped unit tests to keep exercising
+        _harvest_catalogs's machinery -- paired with _LOCAL_NODE here, never
+        with node_label, so the seam itself cannot resurrect the bug.
+        """
+        if self._configurable_engine_names is None:
+            return []
+        return [(_LOCAL_NODE, engine) for engine in self._configurable_engine_names]
 
     def _live_fact_sources(self) -> dict:
         """Engine clients exposing an OpenAI-style /v1/models surface.
