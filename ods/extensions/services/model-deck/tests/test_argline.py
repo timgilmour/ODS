@@ -317,3 +317,85 @@ def test_one_positional_token_round_trips_through_the_real_store_byte_exact(tmp_
     stored = store.scope("engines", "sparky/vllm")["args"]
 
     assert render_argline(stored) == line
+
+
+class TestRenderArgv:
+    """render_argv is the document form of render_argline: same dispatch,
+    no shell quoting — consumed by compose `command:` arrays, which take
+    tokens verbatim."""
+
+    def test_positionals_lead_then_flags(self):
+        from app.argline import POSITIONAL_KEY, render_argv
+
+        argv = render_argv({POSITIONAL_KEY: ["serve", "/model"],
+                            "max-model-len": "262144"})
+
+        assert argv == ["serve", "/model", "--max-model-len", "262144"]
+
+    def test_bare_flag_is_one_token(self):
+        from app.argline import render_argv
+
+        assert render_argv({"enable-prefix-caching": True}) == ["--enable-prefix-caching"]
+
+    def test_multi_value_flag_emits_separate_tokens(self):
+        from app.argline import render_argv
+
+        argv = render_argv({"served-model-name": ["aeon", "aeon-fast"]})
+
+        assert argv == ["--served-model-name", "aeon", "aeon-fast"]
+
+    def test_json_blob_survives_as_one_unquoted_token(self):
+        from app.argline import render_argv
+
+        argv = render_argv({"speculative-config": '{"method":"dflash"}'})
+
+        assert argv == ["--speculative-config", '{"method":"dflash"}']
+
+    def test_dash_shaped_scalar_renders_equals_form(self):
+        """RULING (C1): a value that looks like a flag fuses with its key so
+        argparse cannot misread it as a separate option. Task-1 brief's
+        literal example value was "-1" -- a negative number, which
+        _is_negative_number exempts from dash-shaped treatment on purpose
+        (RULING 2026-08-07, pinned by DASH_SHAPED_CASES' {"neg": "-5"}
+        control case above); using it here would demand overturning that
+        ruling for the scalar path render_argline shares via _argv_tokens.
+        Swapped for a non-numeric dash-shaped value that actually exercises
+        this branch, matching this file's own convention (e.g. "-x" in
+        DASH_SHAPED_CASES)."""
+        from app.argline import render_argv
+
+        assert render_argv({"some-offset": "-x"}) == ["--some-offset=-x"]
+
+    def test_single_char_key_gets_one_dash(self):
+        from app.argline import render_argv
+
+        assert render_argv({"c": "32768"}) == ["-c", "32768"]
+
+    def test_round_trip_through_parse(self):
+        """parse(render) is identity on the parsed shape — the property that
+        makes the document diffable against an adopted import."""
+        import shlex
+
+        from app.argline import POSITIONAL_KEY, parse_argline, render_argv
+
+        settings = {POSITIONAL_KEY: ["serve", "/model"],
+                    "max-model-len": "262144",
+                    "enable-prefix-caching": True,
+                    "served-model-name": ["a", "b"]}
+
+        argv = render_argv(settings)
+
+        assert parse_argline(" ".join(shlex.quote(t) for t in argv)) == settings
+
+    def test_argline_is_the_shell_quoted_join_of_argv(self):
+        """The two renderers cannot diverge: argline IS argv, quoted."""
+        import shlex
+
+        from app.argline import POSITIONAL_KEY, render_argline, render_argv
+
+        settings = {POSITIONAL_KEY: ["serve", "/model"],
+                    "speculative-config": '{"m":"d"}',
+                    "enable-prefix-caching": True}
+
+        assert render_argline(settings) == " ".join(
+            shlex.quote(t) for t in render_argv(settings))

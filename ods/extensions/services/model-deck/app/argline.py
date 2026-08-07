@@ -127,12 +127,15 @@ POSITIONAL_KEY = "_positional"
 _DROP = object()
 
 
-def render_argline(settings: dict) -> str:
-    """Render a settings map as a shell-safe command line."""
+def _argv_tokens(settings: dict) -> list[str]:
+    """The dispatch shared by render_argv and render_argline: positionals,
+    then one flag per remaining key, UNQUOTED. Quoting is each caller's own
+    concern -- render_argv ships tokens verbatim into a compose `command:`
+    array, render_argline joins them for a shell."""
     parts: list[str] = []
 
     for token in settings.get(POSITIONAL_KEY, []):
-        parts.append(shlex.quote(str(token)))
+        parts.append(str(token))
 
     for key, value in settings.items():
         if key == POSITIONAL_KEY:
@@ -144,17 +147,29 @@ def render_argline(settings: dict) -> str:
             if any(_looks_like_a_flag(v) for v in value):
                 # A dash-shaped element anywhere forces the whole list to
                 # equals-form -- see module docstring.
-                parts.extend(f"{flag}={shlex.quote(str(v))}" for v in value)
+                parts.extend(f"{flag}={v}" for v in value)
             else:
                 parts.append(flag)
-                parts.extend(shlex.quote(str(v)) for v in value)
+                parts.extend(str(v) for v in value)
         elif _looks_like_a_flag(value):
-            parts.append(f"{flag}={shlex.quote(str(value))}")
+            parts.append(f"{flag}={value}")
         else:
             parts.append(flag)
-            parts.append(shlex.quote(str(value)))
+            parts.append(str(value))
 
-    return " ".join(parts)
+    return parts
+
+
+def render_argv(settings: dict) -> list[str]:
+    """The settings document's argv: same dispatch as render_argline, no
+    shell quoting. Compose `command:` arrays consume tokens verbatim, so
+    quoting here would ship literal quote characters into the process."""
+    return _argv_tokens(settings)
+
+
+def render_argline(settings: dict) -> str:
+    """Render a settings map as a shell-safe command line."""
+    return " ".join(shlex.quote(token) for token in _argv_tokens(settings))
 
 
 def parse_argline(text: str) -> dict:
