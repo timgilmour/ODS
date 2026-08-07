@@ -55,7 +55,10 @@ _launch() { # profile
 
 # Compose override from the document: JSON is valid YAML, so python3's stdlib
 # is enough. Exits non-zero on any malformation, which drops the caller into
-# the swap.sh branch above.
+# the swap.sh branch above. Three outcomes, deliberately distinct:
+#   0  override written
+#   2  the document asserts nothing (settings_store.EMPTY) — fall back QUIETLY
+#   1  the document is malformed — fall back and say so
 _write_override() { # doc override
   python3 - "$1" "$2" <<'PYEOF'
 import json, os, sys
@@ -69,14 +72,35 @@ scalar = (str, int, float, bool, type(None))
 try:
     doc = json.load(open(doc_path))
     service, argv, env = doc["service"], doc["argv"], doc["env"]
+except Exception as exc:
+    # Falling back is safe, but it must not be silent: without this line the
+    # only symptom of a bad document is settings that quietly stop applying.
+    sys.stderr.write(
+        "swap-helper: unusable settings document %s: %r\n" % (doc_path, exc))
+    sys.exit(1)
+
+# A document that asserts nothing is every profile's STARTING state, not a
+# fault: node-agent hands out {"args": {}, "env": {}, "argv": [], "service":
+# None} (settings_store.EMPTY) for any profile nobody has configured yet.
+#
+# It must not actuate. Rendering `command: []` would not be a no-op --
+# compose REPLACES the base file's command outright, so an empty argv would
+# launch the profile on the image's default CMD and report `done`: a settings
+# document breaking a swap, the one outcome this split exists to prevent.
+#
+# And it must not warn. This shape reaches the helper on every swap of an
+# unconfigured profile, so a diagnostic here would be noise that trains
+# operators to ignore the line that DOES mean something.
+if service is None or (isinstance(argv, list) and not argv):
+    sys.exit(2)
+
+try:
     assert isinstance(service, str) and service, "service must be a non-empty string"
     assert isinstance(argv, list), "argv must be a list"
     assert all(isinstance(t, str) for t in argv), "argv must be all strings"
     assert isinstance(env, dict), "env must be an object"
     assert all(isinstance(v, scalar) for v in env.values()), "env values must be scalars"
 except Exception as exc:
-    # Falling back is safe, but it must not be silent: without this line the
-    # only symptom of a bad document is settings that quietly stop applying.
     sys.stderr.write(
         "swap-helper: unusable settings document %s: %r\n" % (doc_path, exc))
     sys.exit(1)

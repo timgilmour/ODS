@@ -16,6 +16,10 @@ from pathlib import Path
 
 import pytest
 
+# The real constant, not a copy: what the settings API hands back for a
+# profile nobody has configured is exactly what the helper has to survive.
+from settings_store import EMPTY
+
 HELPER = Path(__file__).resolve().parents[1] / "swap-helper" / "swap-helper.sh"
 PROBE = Path(__file__).resolve().parents[1] / "swap-helper" / "harvest_probe.py"
 
@@ -285,7 +289,9 @@ def test_no_settings_file_delegates_to_swap_sh(tmp_path):
     "{not json",                                        # unparseable
     json.dumps({"args": {}, "env": {}, "argv": "serve", "service": "x"}),
     json.dumps({"args": {}, "env": {}, "argv": ["ok"], "service": ""}),
-    json.dumps({"args": {}, "env": {"K": ["list"]}, "argv": [], "service": "x"}),
+    # argv non-empty on purpose: an empty one is the "asserts nothing" shape
+    # below, which falls back BEFORE env is ever inspected.
+    json.dumps({"args": {}, "env": {"K": ["list"]}, "argv": ["s"], "service": "x"}),
     json.dumps(["not", "an", "object"]),
 ])
 def test_corrupt_settings_delegates_and_removes_stale_override(tmp_path, bad):
@@ -307,6 +313,41 @@ def test_corrupt_settings_delegates_and_removes_stale_override(tmp_path, bad):
     # Falling back is safe but it is not silent -- an operator has to be able
     # to see WHY a settings document stopped being honoured.
     assert "unusable settings document" in r.stderr
+
+
+@pytest.mark.parametrize("doc, why", [
+    (EMPTY, "settings_store.EMPTY -- what the API hands back for a profile "
+            "nobody has configured yet"),
+    ({**EMPTY, "service": "aeon-vllm"}, "a service, but nothing to say about it"),
+    ({"args": {}, "env": {"V": "1"}, "argv": [], "service": "aeon-vllm"},
+     "an env but no command"),
+    ({**EMPTY, "argv": ["serve", "/model"]}, "a command but no service to put it on"),
+])
+def test_document_that_asserts_nothing_falls_back_silently(tmp_path, doc, why):
+    """A document that asserts nothing is every profile's STARTING state, not
+    a fault.
+
+    It must not actuate: compose REPLACES `command` rather than merging it,
+    so rendering `command: []` would launch the profile on the image's
+    default CMD and still report `done` -- a settings document breaking a
+    swap. And it must not warn: this shape arrives on every swap of an
+    unconfigured profile, so a diagnostic here is noise that trains operators
+    to ignore the line that does mean something."""
+    vllm, calls = _mk_vllm(tmp_path, containers=True)
+    settings = _mk_settings(tmp_path, "laguna", doc)
+    override = vllm / "settings-laguna.override.yaml"
+    override.write_text('{"services": {"aeon-vllm": {"command": ["stale"]}}}')
+    docker = _mk_docker(tmp_path)
+    ctl = _mk_ctl(tmp_path, "laguna")
+
+    r = _run_once4(ctl, vllm, settings, docker.bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert calls.read_text().strip() == "laguna", why   # swap.sh owned it
+    assert docker.calls("compose") == []                # the helper did NOT
+    assert not override.exists()                        # stale override gone
+    assert r.stderr == ""                               # and it said nothing
+    assert _status(ctl)["state"] == "done"
 
 
 def test_unwritable_override_falls_back_instead_of_failing_the_swap(tmp_path):
