@@ -127,16 +127,42 @@ class SparkServingDirect:
         # What the deck's litellm default-route guard matches on.
         self.host = urlparse(base_url).netloc
 
-    def served_model(self) -> str | None:
-        """The id on :8000, or None while nothing is listening there."""
+    def _models(self) -> list[dict]:
+        """Raw ``data`` list from /v1/models, or ``[]`` while unreachable —
+        the one HTTP call served_model/reachable/max_model_len each read a
+        different field off of."""
         try:
             r = self._c.get("/v1/models", timeout=10.0)
         except httpx.TransportError:
-            return None
+            return []
         if not r.is_success:
-            return None
-        data = r.json().get("data") or []
+            return []
+        return r.json().get("data") or []
+
+    def served_model(self) -> str | None:
+        """The id on :8000, or None while nothing is listening there."""
+        data = self._models()
         return data[0]["id"] if data else None
+
+    def reachable(self) -> bool:
+        """True once :8000 answers /v1/models at all, regardless of WHICH
+        model — D11 (test_disruptive_settings.py) uses this right after a
+        settings PUT to prove the save alone didn't restart anything; it
+        doesn't care which identity is currently up, only that nothing fell
+        over."""
+        return bool(self._models())
+
+    def max_model_len(self) -> int | None:
+        """The context length vLLM is serving right now, or None while
+        unreachable or not reported. Same field app.derive_live.
+        derive_live_models reads off /v1/models' data[0] to derive
+        max_model_len_live (app/derive_live.py:32-33: ``entry.get(
+        "max_model_len")``) — this is that same read, direct from the
+        engine rather than through the deck's characteristics cache, for
+        D11's ground-truth proof that a reload actually reshaped the
+        running process instead of just the settings document."""
+        data = self._models()
+        return data[0].get("max_model_len") if data else None
 
     def inflight(self) -> int | None:
         """ds4's in-flight count, or None when that gauge is absent.

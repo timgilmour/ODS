@@ -107,6 +107,7 @@ See the **Storage tiering** section below for detailed semantics.
 |--------|------|-------------|
 | `GET` | `/api/spark/status` | Spark node status (profiles, swap status, what is serving) |
 | `POST` | `/api/spark/swap` | Hot-swap the node's single slot to a profile (`{profile, force}`) |
+| `POST` | `/api/spark/reload` | Ship the resolved DECLARED-only settings for whatever profile is (or will be) serving to the node, then re-swap that same profile so they actually launch (`{profile?, force?}` — no `profile` reloads whatever last swapped in). The one human action design decision 5 calls for; see [Settings](#settingsjson--what-things-are-launched-and-served-with) below |
 
 ### Lifecycle
 
@@ -120,6 +121,18 @@ See the **Storage tiering** section below for detailed semantics.
 
 `{key}` is a resource key and contains a slash (`local/hipfire`), e.g.
 `POST /api/lifecycle/adopt/local/hipfire`.
+
+### Settings & rename planning
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/settings/catalog/{node}/{engine}` | The engine's harvested option catalog (`null` if it has never been up) |
+| `GET` | `/api/settings/effective/{node}/{engine}/{model}?layers=` | Resolved ladder for one placement — `resolved` (all five layers, full provenance) and `argline` (declared-only, what would actually ship); `?layers=` filters `resolved` only |
+| `POST` | `/api/settings/preview` | Parse a typed argline into a settings map without saving — the text field's live feedback |
+| `POST` | `/api/settings/adopt/{node}/{engine}` | Sweep the node's real compose profiles into the settings store (see **Adopt**, below). Only `sparky/vllm` is adoptable today |
+| `GET` | `/api/settings/{kind}/{key}` | One scope (`kind` is `engines`, `models`, or `engine_models`) |
+| `PUT` | `/api/settings/{kind}/{key}` | Merge values into one namespace of one scope: `{"namespace": "args"\|"env"\|"container", "values": {...}}` |
+| `POST` | `/api/rename/plan` | Read-only: plan the alias → identity rename migration for sparky's vLLM profiles (`{"client_pins": {route: [pin, ...]}}`, optional). Plans, never executes — see `~/notes/model-deck-rename-runbook.md` |
 
 ### `characteristics.json` / `declared.json` — model and engine facts
 
@@ -166,8 +179,14 @@ or conflict with a derived fact (`--quantization modelopt` against a
 `compressed-tensors` checkpoint: severity `crash`).
 
 **Saving changes intent only.** A loaded placement gains `settings_drift`
-with the changed keys; the reconciler never restarts on it. Reload is a
-human click.
+with the changed keys (namespace-qualified, `"args:max-model-len"` never a
+bare `"max-model-len"` — same-named keys in different namespaces must stay
+distinguishable); the reconciler never restarts on it. Reload is a human
+click, and it's the ONLY thing that clears `settings_drift`: reloading
+re-records the placement's intent, and the drift flag's baseline *is* that
+intent's `updated_ts` — so re-recording it is the whole clearing mechanism.
+Nothing corrects drift by itself; a save that nobody reloads stays flagged
+forever, on purpose.
 
 Option catalogs are harvested by **argparse introspection inside the running
 engine container** (`vllm serve --help` crashes without a GPU, and its text
@@ -175,6 +194,67 @@ carries no types or choices). No catalog is a supported state.
 
 `container` settings are an allowlist: `image`, `shm_size`, `ulimits`.
 Volumes stay Deck-managed — the model mount *is* the placement.
+
+#### Applying settings — one mech per engine capability
+
+`app/configure.py`'s `apply_settings(mech, ...)` is the one dispatch point
+between "settings saved" and "an engine actually sees them." The write
+boundary is what each engine's capability descriptor declares, not
+local-vs-remote:
+
+| Mech | Engines | Behavior |
+|------|---------|----------|
+| `api` | lemonade | A live call; applies immediately, no reload needed |
+| `env+restart` | hipfire, comfyui | Writes environment; reports `requires_reload` — a restart applies it later |
+| `node-settings` | spark (and future remote engines) — **implemented, Plan C2** | Ships a settings *document* to the node-agent; the host-side swap-helper merges it into the next launch. Always `requires_reload`: applying it is the human's Reload click, never this call |
+| `none` | anything the Deck doesn't own | Read and warn, permanently — keeps the general rule honest for a source it cannot configure |
+
+**Nothing here restarts anything.** A save changes intent; the reload that
+applies launch-class settings is always a human click. Applying an *empty*
+settings map is a no-op, never a wipe — "I have nothing to say about this
+engine" must not mean "clear its configuration."
+
+#### `node-settings`: document → override → helper-owned launch
+
+For spark, "shipping settings to the node" means writing a small JSON
+*document* — `{"args", "env", "argv", "service"}`, `argv` and `service`
+pre-rendered by the Deck (the shared `render_argv`/`_declared_only` code
+path both `GET /api/settings/effective/...` and `POST /api/spark/reload`
+use, so the two can never disagree about what "declared-only" ships) — to
+a file the node-agent and the privileged host-side swap-helper share.
+Node-agent has no docker access at all; it only ever writes
+`<settings-dir>/<profile>.json`, atomically. The swap-helper reads that
+document at the *next* swap of that profile, renders it into a small
+compose **override** file (`command:` / `environment:` for the one
+service), and launches with both files: `docker compose -f
+compose-<profile>.yaml -f settings-<profile>.override.yaml up -d`.
+
+**The Deck never rewrites `compose-*.yaml`.** The override is a separate
+file, regenerated fresh from the settings document on every launch that
+has one; the base compose file — and the human-authored comments in it —
+is never touched. A missing, empty, or unusable settings document falls
+back to launching the base compose file exactly as `swap.sh` always did —
+a settings bug can degrade a launch to "as configured in compose," never
+break it.
+
+#### Adopt: importing what's already running
+
+`POST /api/settings/adopt/{node}/{engine}` (today: only `sparky/vllm`)
+sweeps the node's real `compose-*.yaml` profiles and imports each one's
+`command:`/`environment:`/container fields into the matching
+`engine_models` scope, plus any inline comment explaining an absent flag
+(carried through as a `note` — the reason `--quantization` is missing from
+heretic's launch would otherwise live only in a compose comment nobody
+reads before regenerating it). **Never clobbers**: a scope that already has
+something in its `args` namespace is left untouched and reported `kept`,
+not overwritten, so re-running adopt after a human has already edited a
+profile is safe. A profile that isn't vLLM (`ds4`, `comfyui`, ...) is
+reported `skipped` with its real engine named, never guessed at. Adopt also
+records the profile → identity map (which compose service and container
+each profile is) as a characteristics field — that map is what lets
+`settings_drift` and `POST /api/spark/reload` translate a spark *profile*
+(what intent records) into an `engine_models` scope key (what settings are
+keyed by) without re-parsing compose themselves.
 
 ## Storage tiering (hot/cold model moves)
 
