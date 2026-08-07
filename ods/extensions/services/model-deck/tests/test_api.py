@@ -14,6 +14,8 @@ it says: no action was executed, even though preview must still read live
 state to diff against.
 """
 
+import json
+
 from fastapi.testclient import TestClient
 
 from app.engines import EngineError, GuardError
@@ -1623,6 +1625,21 @@ def test_put_settings_missing_body_fields_is_422_not_500(tmp_path, monkeypatch):
     assert resp.status_code == 422
 
 
+def test_get_settings_rejects_an_unknown_kind_422(tmp_path, monkeypatch):
+    """Optional fix, final branch review 2026-08-07: PUT already 422s an
+    unknown `kind` via SettingsStore.put's own ValueError; GET had no
+    equivalent check and silently returned 200 {} for a typo'd kind,
+    indistinguishable from a real, empty scope of a valid kind."""
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+
+    resp = TestClient(app).get("/api/settings/bogus-kind/sparky/vllm")
+
+    assert resp.status_code == 422
+
+
 def test_put_settings_rejects_deck_managed_container_field(tmp_path, monkeypatch):
     from app.settings_store import SettingsStore
 
@@ -1660,36 +1677,58 @@ def test_effective_settings_resolves_five_layers_against_a_real_catalog(tmp_path
     models/engine_models store layers, five-layer per-key precedence (a
     store layer beating a derived one), and a catalog-driven non-'unknown'
     warning actually firing.
+
+    F2, CRITICAL (final branch review, 2026-08-07): the catalog is built by
+    running the REAL app.harvest.parse_probe_output over a probe payload
+    shaped exactly like PROBE_SOURCE's own output (extending
+    tests/test_harvest.py's PROBE_OUTPUT) rather than hand-written option
+    dicts. A hand-seeded `"default": 4096` (a Python int) is a shape
+    parse_probe_output can never actually produce — the real probe always
+    stores `repr(action.default)`, a STRING — and building the catalog
+    that way is exactly what masked the F2 bug this test now also covers:
+    a repr'd string default (`"'auto'"`) or a repr'd `False` reaching
+    engine_defaults, and the resolved settings/argline, undecoded.
     """
     from app.characteristics import CharacteristicsStore
+    from app.harvest import parse_probe_output
     from app.settings_store import SettingsStore
 
     app, deck = make_app(tmp_path, monkeypatch)
 
+    probe_output = json.dumps({"options": [
+        # default=4096 (int): must survive the `default not in (None,
+        # "None")` filter and normalize_args_map's int->str axis to
+        # become an engine_defaults entry. repr'd exactly as the real
+        # probe would: `repr(4096)`, not the bare int.
+        {"flags": ["--max-model-len"], "type": "int", "choices": None,
+         "default": repr(4096), "nargs": None, "cls": "_StoreAction",
+         "help": "Model context length."},
+        # default=None (repr'd "None"): must NOT become an
+        # engine_defaults entry.
+        {"flags": ["--quantization"], "type": "str",
+         "choices": ["awq", "gptq"], "default": repr(None), "nargs": None,
+         "cls": "_StoreAction", "help": "Quantization method."},
+        # F2: a repr'd STRING default (`repr("auto") == "'auto'"`) — the
+        # exact shape a real argparse `default="auto"` produces. Must
+        # decode to the plain string 'auto', not the two-quote literal
+        # text "'auto'", and must not warn as a type mismatch against its
+        # own choices.
+        {"flags": ["--tokenizer-mode"], "type": "str",
+         "choices": ["auto", "slow", "mistral", "custom"],
+         "default": repr("auto"), "nargs": None, "cls": "_StoreAction",
+         "help": "Tokenizer mode."},
+        # F2: a store_true option whose default is False (repr'd
+        # "False"). An off-by-default flag's honest rendering is an
+        # ABSENT flag, not a bare flag turned on and not the literal
+        # string 'False' as a value.
+        {"flags": ["--enable-log-requests"], "type": None, "choices": None,
+         "default": repr(False), "nargs": 0, "cls": "_StoreTrueAction",
+         "help": "Enable request logging."},
+    ]})
+
     characteristics = CharacteristicsStore(tmp_path / "c.json")
     characteristics.put_fields("engine/sparky/vllm", {
-        "option_catalog": {
-            "value": {
-                "engine_version": "test",
-                "options": {
-                    # default=4096 (int): must survive the `default not in
-                    # (None, "None")` filter and normalize_args_map's
-                    # int->str axis to become an engine_defaults entry.
-                    "max-model-len": {
-                        "aliases": [], "type": "int", "choices": None,
-                        "default": 4096, "nargs": None, "repeatable": False,
-                        "help": "", "widget": "number",
-                    },
-                    # default=None: must NOT become an engine_defaults entry.
-                    "quantization": {
-                        "aliases": [], "type": "str", "choices": ["awq", "gptq"],
-                        "default": None, "nargs": None, "repeatable": False,
-                        "help": "", "widget": "select",
-                    },
-                },
-            },
-            "source": "test", "derived_ts": "t",
-        },
+        "option_catalog": parse_probe_output(probe_output, engine_version="test", now="t"),
     })
     characteristics.put_fields("model/TestModel-7B", {
         # Raw int, straight from generation_config.json shape — proves the
@@ -1742,6 +1781,22 @@ def test_effective_settings_resolves_five_layers_against_a_real_catalog(tmp_path
     assert quant_warnings[0]["class"] == "type"
     # max-model-len IS in the catalog — must not also read as unknown.
     assert not any(w["key"] == "max-model-len" for w in body["warnings"])
+
+    # F2: the repr'd string default decodes to the plain value.
+    assert resolved["tokenizer-mode"]["value"] == "auto"
+    assert resolved["tokenizer-mode"]["origin"] == "derived"
+    assert resolved["tokenizer-mode"]["layer"] == "engine_defaults"
+    assert "--tokenizer-mode auto" in body["argline"]
+    assert "'auto'" not in body["argline"]
+
+    # F2: the store_true default of False is an absent flag, not a value.
+    assert "enable-log-requests" not in resolved
+    assert "--enable-log-requests" not in body["argline"]
+
+    # F2: neither engine-default-derived key trips a warning of its own —
+    # these are the engine's OWN harvested defaults.
+    assert not any(w["key"] in ("tokenizer-mode", "enable-log-requests")
+                   for w in body["warnings"])
 
 
 def test_preview_parses_text_and_returns_warnings(tmp_path, monkeypatch):

@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     hostagent_url: str = ""
     hostagent_key: str = Field(default="", validation_alias="HOST_AGENT_KEY")
 
-    # --- Docker control (tecnativa/docker-socket-proxy sidecar) ---
+    # --- Docker control (wollomatic/socket-proxy sidecar) ---
     dockerctl_url: str = "http://docker-ctl:2375"
 
     # --- Parking / arbitration ---

@@ -879,8 +879,14 @@ class Watcher:
         container isn't in the deck's own park allowlist (GuardError --
         deliberately not an EngineError subclass, see app.engines) simply
         yields no catalog -- a supported state, since validation warns
-        rather than blocks (app.validate_settings). This pass must never
-        raise past this method: tick()'s broad supervisor catch is not a
+        rather than blocks (app.validate_settings). It still logs a
+        deduped ``harvest-failed`` event (F3, final branch review,
+        2026-08-07): "no catalog" alone can't tell "engine parked" apart
+        from a real, persistent exec failure (e.g. the proxy's
+        ``-allowPOST`` lines missing from a hand-merged live compose --
+        see the branch's own recorded deploy hazard), and the two need to
+        be distinguishable from the outside. This pass must never raise
+        past this method: tick()'s broad supervisor catch is not a
         substitute for handling foreseeable failures here (see this
         module's own design notes on that at the top of the file).
         """
@@ -898,7 +904,20 @@ class Watcher:
 
             try:
                 version, output = self._engine_exec(node, engine, PROBE_INTERPRETER, PROBE_SOURCE)
-            except (EngineError, BusyError, GuardError):
+            except (EngineError, BusyError, GuardError) as exc:
+                # F3, Important (final branch review, 2026-08-07): this
+                # branch used to emit nothing at all, which makes it
+                # indistinguishable from "engine parked" forever -- and the
+                # branch's own recorded deploy hazard (a live compose
+                # hand-merge losing the proxy's -allowPOST lines -> 403 on
+                # exec) lands EXACTLY here. Deduped like harvest-empty. The
+                # detail is the exception's CLASS only, not its message
+                # text: a real failure's message (a proxy's response body,
+                # a transport error string) is not guaranteed stable call
+                # to call, and an unstable detail would defeat the dedup
+                # entirely -- re-logging every derive_interval_s is the
+                # exact spam this exists to avoid.
+                self._log("harvest-failed", {"key": key, "reason": type(exc).__name__})
                 continue
 
             if cached_version is not None and cached_version == version:
@@ -948,7 +967,8 @@ class Watcher:
     # between resets the suppression. Real one-shot actions (unloads, frees,
     # loads) are NEVER deduped and always logged.
     _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced", "host-agent-busy",
-                          "lifecycle-spark-unreachable", "harvest-empty"})
+                          "lifecycle-spark-unreachable", "harvest-empty",
+                          "harvest-failed"})
 
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))

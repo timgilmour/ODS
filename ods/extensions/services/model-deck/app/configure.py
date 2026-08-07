@@ -26,7 +26,10 @@ MECHS = ("api", "env+restart", "node-settings", "none")
 
 
 def apply_settings(mech: str, *, engine_client, resolved: dict) -> dict:
-    """Apply `resolved` settings via `mech`. Returns an outcome record."""
+    """Apply `resolved` settings via `mech`. Returns an outcome record.
+
+    No caller in C1 (settings are savable, but "apply"/reload is a later
+    increment — this function is wired up when reload lands)."""
     if mech not in MECHS:
         raise ValueError(f"unknown configure mech {mech!r}; expected one of {MECHS}")
 

@@ -1,7 +1,7 @@
 """
 Docker control client — socket-proxy wrapper for container park/resume/exec.
 
-Talks to the Docker Engine API through a tecnativa/docker-socket-proxy
+Talks to the Docker Engine API through a wollomatic/socket-proxy
 sidecar (default http://docker-ctl:2375) over a 5 s httpx.Client. The proxy
 accepts unversioned paths, so no `/v1.4x` prefix is needed. A `transport=`
 kwarg lets tests inject httpx.MockTransport instead of touching the network.

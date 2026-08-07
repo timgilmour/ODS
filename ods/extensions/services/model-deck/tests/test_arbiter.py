@@ -2079,6 +2079,55 @@ def test_harvest_failure_leaves_no_catalog_and_does_not_raise(tmp_path, monkeypa
     assert "option_catalog" not in store.entry("engine/local/hipfire")
 
 
+# --- F3, Important (final branch review, 2026-08-07) -------------------------
+#
+# The exec-failure branch above used to be fully silent -- indistinguishable
+# from "engine parked" forever, and the branch's own recorded deploy hazard
+# (a hand-merged live compose losing the proxy's -allowPOST lines -> 403 on
+# exec) lands exactly there. It now logs a deduped harvest-failed event.
+
+
+def test_harvest_exec_failure_logs_a_deduped_harvest_failed_event(tmp_path):
+    store = CharacteristicsStore(tmp_path / "c.json")
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
+        characteristics_store=store,
+        engine_exec=_raises(EngineError("403 Forbidden")))
+
+    watcher._derive_pass()
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+    watcher._last_derive_at = None
+    watcher._derive_pass()
+
+    failures = [e for e in tail_events(events_path) if e["kind"] == "harvest-failed"]
+    assert len(failures) == 1
+    assert failures[0]["detail"] == {"key": "engine/local/hipfire", "reason": "EngineError"}
+
+
+def test_harvest_failed_dedup_resets_when_the_failure_kind_changes(tmp_path):
+    """A different failure in between resets the suppression -- same dedup
+    semantics as every other _DEDUP_KINDS event (see the tick-error dedup
+    test above)."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
+        characteristics_store=store,
+        engine_exec=_raises(EngineError("403 Forbidden")))
+
+    watcher._derive_pass()  # EngineError -> logged
+    watcher._last_derive_at = None
+    watcher._derive_pass()  # EngineError again -> deduped
+
+    watcher._engine_exec = _raises(
+        GuardError("container 'ods-hipfire' is not in the park allowlist"))
+    watcher._last_derive_at = None
+    watcher._derive_pass()  # GuardError -> resets + logged
+
+    failures = [e for e in tail_events(events_path) if e["kind"] == "harvest-failed"]
+    assert [f["detail"]["reason"] for f in failures] == ["EngineError", "GuardError"]
+
+
 # --- fix round 1 (2026-08-07) ------------------------------------------------
 
 

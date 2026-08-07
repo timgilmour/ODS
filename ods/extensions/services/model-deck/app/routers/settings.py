@@ -30,19 +30,46 @@ app.routers.facts' declared-key validation), so this router does not
 duplicate that mapping. A ``PUT`` body missing ``namespace``/``values``
 raises the same ``ValueError`` -> 422 rather than subscripting the body
 and letting a ``KeyError`` 500 — same error family, not a special case.
+``GET`` rejects an unknown ``kind`` the same way (optional fix, final
+branch review 2026-08-07) — before this, a typo'd ``kind`` silently read
+back ``200 {}``, indistinguishable from a real, empty scope of a valid
+one.
 
 ``GET``/``PUT /settings/{kind}/{key}`` strip ``updated_ts`` out of the
 returned scope before it reaches a caller: it is write-tracking bookkeeping
 for ``app.routers._settings_drift``'s comparison, stamped by
 ``SettingsStore.put``, not a documented field of this response shape — and
 leaking it would make it part of the API's contract by accident.
+
+Engine-default decoding — F2, CRITICAL (final branch review, 2026-08-07):
+``app.harvest`` stores each option's ``default`` as ``repr(action.default)``
+— the probe's raw truth, e.g. ``"'auto'"`` for the Python string ``"auto"``,
+``"False"``/``"None"``/``"[]"``/``"{}"`` for their respective values. Those
+are text, not the values they represent; consuming them as-is (with only a
+``not in (None, "None")`` filter, which only catches the ``None`` repr) fed
+``"'auto'"`` — nested quotes and all — into a resolved setting and the
+rendered argline, and turned every off-by-default flag (``store_true``
+defaults to ``False``, ``append`` defaults to ``[]``) into a flag-with-a-
+string-value that isn't even the right value. ``_decode_harvested_default``
+undoes the ``repr()`` with ``ast.literal_eval`` (falling back to the raw
+string on a literal it can't parse — a repr this module can't decode is
+still a string value, and dropping it would lose real information a
+scalar-string default wouldn't) and then applies the honest reading of each
+decoded shape: ``True`` is a bare flag; ``False``/``None``/``[]``/``{}`` are
+an ABSENT flag (an off-by-default option's honest rendering is no flag at
+all, not the flag holding its own "off" value); everything else is a normal
+scalar/list value bound for ``normalize_args_map`` like any other
+args-shaped layer.
 """
+
+import ast
 
 from fastapi import APIRouter, Request
 
 from app.argline import normalize_args_map, parse_argline, render_argline
 from app.facts import resolve_facts
 from app.ladder import resolve_settings
+from app.settings_store import KINDS
 from app.validate_settings import validate_settings
 
 router = APIRouter(tags=["settings"])
@@ -86,6 +113,13 @@ def preview(body: dict, request: Request) -> dict:
 
 @router.get("/settings/{kind}/{key:path}")
 def get_settings(kind: str, key: str, request: Request) -> dict:
+    # Symmetry with PUT (optional fix, final branch review, 2026-08-07):
+    # SettingsStore.put() rejects an unknown `kind` with a ValueError -> 422
+    # (see module docstring), but scope()/GET had no equivalent check and
+    # silently returned 200 {} for a typo'd kind -- indistinguishable from
+    # a real, empty scope of a valid kind.
+    if kind not in KINDS:
+        raise ValueError(f"unknown scope kind {kind!r}; expected one of {KINDS}")
     return _public_scope(request.app.state.deck, kind, key)
 
 
@@ -111,6 +145,33 @@ def _public_scope(deck: dict, kind: str, key: str) -> dict:
     return scope
 
 
+# Sentinel: this decoded default's honest rendering is an absent flag, not
+# a value — see _decode_harvested_default and this module's docstring,
+# "Engine-default decoding".
+_DROP = object()
+
+
+def _decode_harvested_default(raw):
+    """Decode one harvested option's ``repr()``'d default (see
+    app.harvest module docstring: PROBE_SOURCE stores ``repr(action.
+    default)``, the cache's raw truth, unconditionally) back to the Python
+    value it represents, or ``_DROP`` when that value's honest rendering is
+    an absent flag — see this module's docstring, "Engine-default
+    decoding". ``ast.literal_eval`` failing (a string that never was a
+    Python repr, or a repr shape it doesn't cover) falls back to the raw
+    string: a repr this module can't decode is still a string value, and
+    dropping it here would lose real information a scalar-string default
+    would keep.
+    """
+    try:
+        decoded = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        decoded = raw
+    if decoded is False or decoded is None or decoded in ([], {}):
+        return _DROP
+    return decoded
+
+
 def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:
     store = deck["settings_store"]
     characteristics = deck["characteristics_store"]
@@ -119,11 +180,13 @@ def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:
     catalog_entry = characteristics.entry(f"engine/{engine_key}").get("option_catalog")
     engine_defaults = {}
     if catalog_entry:
-        engine_defaults = {
-            name: option["default"]
-            for name, option in catalog_entry["value"]["options"].items()
-            if option.get("default") not in (None, "None")
-        }
+        for name, option in catalog_entry["value"]["options"].items():
+            raw_default = option.get("default")
+            if raw_default in (None, "None"):
+                continue
+            decoded = _decode_harvested_default(raw_default)
+            if decoded is not _DROP:
+                engine_defaults[name] = decoded
 
     recommended = characteristics.entry(f"model/{model}").get("recommended_sampling")
 
