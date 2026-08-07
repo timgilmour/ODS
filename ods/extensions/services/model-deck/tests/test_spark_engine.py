@@ -175,6 +175,65 @@ def test_get_compose_returns_the_node_agents_text_field():
     assert client.get_compose("heretic") == text
 
 
+# --- settings (node-settings mech, Plan C2 Task 7) ---
+
+_DOCUMENT = {"args": {"max-model-len": "131072"}, "env": {"V": "1"},
+            "argv": ["serve", "/model", "--max-model-len", "131072"],
+            "service": "aeon-vllm"}
+
+
+def _settings_put_handler(profile="heretic", status_code=200, echo=None):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.url.path == f"/v1/node/profile/{profile}/settings"
+        assert request.method == "PUT"
+        return httpx.Response(status_code, json=echo or _DOCUMENT, request=request)
+
+    handler.calls = calls
+    return handler
+
+
+def test_put_settings_puts_the_right_path_and_body():
+    handler = _settings_put_handler()
+    client = _client(handler)
+    client.put_settings("heretic", _DOCUMENT)
+    assert len(handler.calls) == 1
+    assert json.loads(handler.calls[0].content) == _DOCUMENT
+
+
+def test_put_settings_raises_engineerror_on_500():
+    client = _client(_settings_put_handler(status_code=500))
+    with pytest.raises(EngineError):
+        client.put_settings("heretic", _DOCUMENT)
+
+
+def test_put_settings_raises_engineerror_on_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("down")
+    client = _client(handler)
+    with pytest.raises(EngineError):
+        client.put_settings("heretic", _DOCUMENT)
+
+
+def test_get_settings_returns_the_document():
+    def handler(request):
+        assert request.url.path == "/v1/node/profile/heretic/settings"
+        assert request.method == "GET"
+        return httpx.Response(200, json=_DOCUMENT, request=request)
+    client = _client(handler)
+    assert client.get_settings("heretic") == _DOCUMENT
+
+
+def test_get_settings_raises_engineerror_on_500():
+    def handler(request):
+        return httpx.Response(500, text="boom", request=request)
+    client = _client(handler)
+    with pytest.raises(EngineError):
+        client.get_settings("heretic")
+
+
 # --- models (characteristics derive pass) ---
 
 def _models_handler(body):

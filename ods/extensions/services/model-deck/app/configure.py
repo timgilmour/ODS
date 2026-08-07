@@ -6,10 +6,10 @@ capability descriptor declares:
 * ``api``          — lemonade: a live call, no reload.
 * ``env+restart``  — hipfire, comfyui: write env, reload later.
 * ``node-settings``— spark and future remote engines: ship a settings
-  document to the node-agent, whose host-side helper merges it into argv at
-  launch. **Implemented in Plan C2**, and raising here rather than stubbing:
-  a stub that reported success while dropping the settings would be far
-  worse than an error that says what it is.
+  document to the node-agent (Plan C2 Task 7), whose host-side helper merges
+  it into argv at the next swap. Ships and returns ``requires_reload`` —
+  applying it is always the human's Reload click (see app.routers.spark),
+  never this call.
 * ``none``         — a source you don't own (someone else's API): read and
   warn, permanently. This slot exists so the general rule stays honest.
 
@@ -25,19 +25,41 @@ say about this engine" must not mean "clear its configuration".
 MECHS = ("api", "env+restart", "node-settings", "none")
 
 
-def apply_settings(mech: str, *, engine_client, resolved: dict) -> dict:
+def apply_settings(
+    mech: str,
+    *,
+    engine_client,
+    resolved: dict,
+    profile: str | None = None,
+    env: dict | None = None,
+    argv: list | None = None,
+    service: str | None = None,
+) -> dict:
     """Apply `resolved` settings via `mech`. Returns an outcome record.
 
-    No caller in C1 (settings are savable, but "apply"/reload is a later
-    increment — this function is wired up when reload lands)."""
+    `profile`/`env`/`argv`/`service` are node-settings-only (Plan C2): every
+    other mech ignores them, matching each engine's own configure()/set_env()
+    call shape, which has no notion of a profile or a launch argv."""
     if mech not in MECHS:
         raise ValueError(f"unknown configure mech {mech!r}; expected one of {MECHS}")
 
     if mech == "node-settings":
-        raise NotImplementedError(
-            "configure.mech 'node-settings' lands in Plan C2 (node-agent settings "
-            "endpoint + swap-helper argv merge)"
-        )
+        if not profile:
+            raise ValueError("node-settings requires a profile")
+        # The one shape node-agent's settings_store accepts, verbatim (see
+        # node-agent/settings_store.py's EMPTY/_KEYS) — args here is
+        # WHATEVER `resolved` was handed, declared-only filtering already
+        # done by the caller (app.routers.spark.spark_reload), not this
+        # function's concern.
+        document = {
+            "args": {key: entry["value"] for key, entry in resolved.items()},
+            "env": dict(env or {}),
+            "argv": list(argv or []),
+            "service": service,
+        }
+        engine_client.put_settings(profile, document)
+        return {"applied": True, "requires_reload": True,
+                "reason": "settings shipped to the node; reload to apply"}
 
     if mech == "none":
         return {

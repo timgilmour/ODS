@@ -66,11 +66,57 @@ def test_none_mech_applies_nothing_and_says_so():
     assert "cannot be configured" in result["reason"]
 
 
-def test_node_settings_mech_is_explicitly_not_implemented_yet():
-    """Better a clear NotImplementedError than a stub that reports success
-    and silently drops the settings."""
-    with pytest.raises(NotImplementedError, match="C2"):
-        apply_settings("node-settings", engine_client=None, resolved={})
+def test_node_settings_ships_the_document_and_requires_reload():
+    """The node-settings mech (Plan C2): ship a full settings document to
+    the node-agent and report requires_reload — no swap, no local write, an
+    honest 'shipped, not yet live' outcome."""
+    class FakeNode:
+        sent = None
+
+        def put_settings(self, profile, document):
+            self.sent = (profile, document)
+
+    node = FakeNode()
+    result = apply_settings(
+        "node-settings", engine_client=node,
+        resolved={"max-model-len": {"value": "131072", "origin": "declared",
+                                    "layer": "engine_model"}},
+        profile="heretic", env={"V": "1"},
+        argv=["serve", "/model", "--max-model-len", "131072"],
+        service="aeon-vllm")
+
+    assert node.sent == ("heretic", {
+        "args": {"max-model-len": "131072"}, "env": {"V": "1"},
+        "argv": ["serve", "/model", "--max-model-len", "131072"],
+        "service": "aeon-vllm"})
+    assert result == {"applied": True, "requires_reload": True,
+                      "reason": "settings shipped to the node; reload to apply"}
+
+
+def test_node_settings_requires_a_profile():
+    """There is no per-node scope to ship to without one — unlike api/
+    env+restart, which apply to whatever engine_client already points at."""
+    with pytest.raises(ValueError):
+        apply_settings("node-settings", engine_client=object(), resolved={})
+
+
+def test_node_settings_does_not_swap():
+    """Shipping settings must never trigger a multi-minute swap by itself —
+    that stays the human's explicit Reload click (POST /api/spark/reload)."""
+    class FakeNode:
+        swapped = False
+
+        def put_settings(self, profile, document):
+            pass
+
+        def swap(self, profile, force=False):
+            self.swapped = True
+
+    node = FakeNode()
+    apply_settings("node-settings", engine_client=node,
+                   resolved={}, profile="heretic", service="s")
+
+    assert node.swapped is False
 
 
 def test_unknown_mech_raises():

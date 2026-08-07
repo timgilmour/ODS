@@ -7,6 +7,8 @@ including the disabled state (deck["spark"] is None => 503), which is the
 default on boxes with no spark configured.
 """
 
+import json
+
 from fastapi.testclient import TestClient
 
 from app.engines import BusyError, EngineError, GuardError
@@ -18,6 +20,8 @@ class FakeSpark:
         self.calls = []  # mutating only: ("swap", profile, force)
         self.status_calls = 0
         self.fail = None
+        self.settings_sent = None  # (profile, document), last put_settings call
+        self.settings_fail = None
         self._status = {
             "profiles": [
                 {"name": "laguna", "engine": "vllm", "health_url": None,
@@ -39,6 +43,11 @@ class FakeSpark:
         if self.fail:
             raise self.fail
         return {"id": "u1", "profile": profile}
+
+    def put_settings(self, profile, document):
+        if self.settings_fail:
+            raise self.settings_fail
+        self.settings_sent = (profile, document)
 
 
 def _spark_app(tmp_path, monkeypatch, spark="default"):
@@ -159,3 +168,150 @@ def test_swap_invalidates_the_cached_spark_observation(tmp_path, monkeypatch):
     observer.status()
 
     assert deck["spark"].status_calls > before
+
+
+# ===========================================================================
+# POST /api/spark/reload (Plan C2, Task 7) — resolve -> ship -> re-swap the
+# serving profile, ONE human action (design decision 5). settings_store and
+# characteristics_store need real, tmp_path-backed instances (same reason
+# as test_api.py's _adopt_app): the default deck's copies point at the
+# container's /data, which does not exist under test.
+# ===========================================================================
+
+_IDENTITY = "Qwen3.6-35B-A3B-heretic-NVFP4"
+
+
+def _reload_app(tmp_path, monkeypatch, identities=None, spark="default"):
+    from app.characteristics import CharacteristicsStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["spark"] = FakeSpark() if spark == "default" else spark
+
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    if identities is not None:
+        characteristics.put_fields("engine/sparky/vllm", {
+            "profile_identities": {"value": identities, "source": "compose import",
+                                   "derived_ts": "t"},
+        })
+    deck["characteristics_store"] = characteristics
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    return app, deck
+
+
+def test_reload_resolves_ships_and_swaps_the_serving_profile(tmp_path, monkeypatch):
+    """The whole point of Decision 5: reload is ONE human action that
+    resolves the ladder, ships it, re-swaps, and re-records intent — which
+    clears settings_drift with zero extra machinery (the drift baseline IS
+    the intent's updated_ts)."""
+    from app.harvest import parse_probe_output
+    from app.observe import SPARK_SLOT_KEY
+    from app.routers import _settings_drift
+
+    identities = {"heretic": {"identity": _IDENTITY, "service": "aeon-vllm",
+                              "container_name": "aeon-vllm"}}
+    app, deck = _reload_app(tmp_path, monkeypatch, identities=identities)
+    deck["spark"]._status["swap_status"] = {
+        "state": "done", "profile": "heretic", "id": "u0",
+        "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
+
+    # A harvested engine default (derived layer) that WOULD render as a
+    # flag if the argline were not declared-only.
+    probe_output = json.dumps({"options": [
+        {"flags": ["--tokenizer-mode"], "type": "str",
+         "choices": ["auto", "slow", "mistral", "custom"],
+         "default": repr("auto"), "nargs": None, "cls": "_StoreAction",
+         "help": "Tokenizer mode."},
+    ]})
+    deck["characteristics_store"].put_fields("engine/sparky/vllm", {
+        "option_catalog": parse_probe_output(probe_output, engine_version="test", now="t"),
+    })
+
+    deck["settings_store"].put(
+        "engine_models", f"sparky/vllm|{_IDENTITY}", "args",
+        {"max-model-len": "131072", "_positional": ["serve", "/model"]})
+
+    # A stale intent baseline (T0), well before the settings write above —
+    # sets up the drift this reload must clear.
+    deck["intent_store"].record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+                                engine="spark", now="2020-01-01T00:00:00+00:00")
+    stale_intent = deck["intent_store"].get()[SPARK_SLOT_KEY]
+    assert _settings_drift(deck["settings_store"].get(), SPARK_SLOT_KEY, stale_intent,
+                           identity_map=identities) is not None
+
+    resp = TestClient(app).post("/api/spark/reload", json={})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["shipped"] is True
+    assert body["profile"] == "heretic"
+    assert body["id"] == "u1"
+
+    sent_profile, document = deck["spark"].settings_sent
+    assert sent_profile == "heretic"
+    assert document["args"] == {"max-model-len": "131072",
+                                "_positional": ["serve", "/model"]}
+    assert document["argv"] == ["serve", "/model", "--max-model-len", "131072"]
+    assert document["service"] == "aeon-vllm"
+    # Declared-only: the harvested engine default never leaked into what
+    # was shipped, even though it's part of the full resolution.
+    assert "tokenizer-mode" not in document["args"]
+    assert "--tokenizer-mode" not in document["argv"]
+
+    assert deck["spark"].calls == [("swap", "heretic", False)]
+
+    fresh_intent = deck["intent_store"].get()[SPARK_SLOT_KEY]
+    assert fresh_intent["model"] == "heretic"
+    assert fresh_intent["updated_ts"] > stale_intent["updated_ts"]
+    assert _settings_drift(deck["settings_store"].get(), SPARK_SLOT_KEY, fresh_intent,
+                           identity_map=identities) is None
+
+
+def test_reload_on_unadopted_profile_is_409(tmp_path, monkeypatch):
+    """No identity-map entry for the requested profile -> 409 telling the
+    operator to adopt first; put_settings must not have been called."""
+    app, deck = _reload_app(tmp_path, monkeypatch,
+                            identities={"heretic": {"identity": _IDENTITY,
+                                                    "service": "aeon-vllm",
+                                                    "container_name": "aeon-vllm"}})
+
+    resp = TestClient(app).post("/api/spark/reload", json={"profile": "ghost"})
+
+    assert resp.status_code == 409
+    assert "adopt" in resp.json()["detail"].lower()
+    assert deck["spark"].settings_sent is None
+    assert deck["spark"].calls == []
+
+
+def test_reload_with_nothing_serving_and_no_profile_is_409(tmp_path, monkeypatch):
+    """No serving profile (swap_status None) and no explicit profile in the
+    body -> 409; there is nothing to name a reload target from."""
+    app, deck = _reload_app(tmp_path, monkeypatch, identities={})
+
+    resp = TestClient(app).post("/api/spark/reload", json={})
+
+    assert resp.status_code == 409
+    assert deck["spark"].settings_sent is None
+    assert deck["spark"].calls == []
+
+
+def test_reload_explicit_profile_overrides_serving(tmp_path, monkeypatch):
+    """An explicit body profile wins over whatever swap_status reports as
+    currently serving."""
+    identities = {"heretic": {"identity": _IDENTITY, "service": "aeon-vllm",
+                              "container_name": "aeon-vllm"}}
+    app, deck = _reload_app(tmp_path, monkeypatch, identities=identities)
+    deck["spark"]._status["swap_status"] = {
+        "state": "done", "profile": "mm27b", "id": "u0",
+        "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
+    deck["settings_store"].put(
+        "engine_models", f"sparky/vllm|{_IDENTITY}", "args",
+        {"max-model-len": "131072"})
+
+    resp = TestClient(app).post("/api/spark/reload", json={"profile": "heretic"})
+
+    assert resp.status_code == 200
+    assert resp.json()["profile"] == "heretic"
+    assert deck["spark"].settings_sent[0] == "heretic"
+    assert deck["spark"].calls == [("swap", "heretic", False)]

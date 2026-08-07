@@ -203,6 +203,26 @@ class SparkClient:
         app.routers.settings' adopt route)."""
         return self._node_get(f"/v1/node/profile/{profile}/compose")["text"]
 
+    def get_settings(self, profile: str) -> dict:
+        """`profile`'s settings document (GET /v1/node/profile/{profile}/
+        settings) — the node-agent's file-protocol store, schema {args, env,
+        argv, service} (node-agent/settings_store.py's EMPTY/_KEYS)."""
+        return self._node_get(f"/v1/node/profile/{profile}/settings")
+
+    def put_settings(self, profile: str, document: dict) -> None:
+        """Ship a settings document for `profile` (PUT /v1/node/profile/
+        {profile}/settings) — the node-settings configure mech's write path
+        (app.configure.apply_settings). Mirrors swap()'s POST below:
+        EngineError on a transport failure or a non-2xx response. The
+        node-agent echoes the document back on success; this client ignores
+        the body — the caller already knows what it sent."""
+        try:
+            resp = self._node.put(f"/v1/node/profile/{profile}/settings", json=document)
+        except httpx.TransportError as exc:
+            raise EngineError(str(exc)) from exc
+        if not resp.is_success:
+            raise EngineError(resp.text)
+
     def swap_in_progress(self) -> bool:
         """True while a previous swap is still booting. Same judgement the
         boot-window guard in swap() makes, exposed for the deck's lifecycle

@@ -71,7 +71,7 @@ from app.argline import normalize_args_map, parse_argline, render_argline
 from app.compose_import import import_compose
 from app.engines import EngineError
 from app.facts import resolve_facts
-from app.ladder import resolve_settings
+from app.ladder import LAYERS, resolve_settings
 from app.observe import spark_node_id
 from app.settings_store import KINDS
 from app.validate_settings import validate_settings
@@ -92,15 +92,38 @@ def get_catalog(node: str, engine: str, request: Request):
 
 
 @router.get("/settings/effective/{node}/{engine}/{model:path}")
-def get_effective(node: str, engine: str, model: str, request: Request) -> dict:
+def get_effective(
+    node: str, engine: str, model: str, request: Request, layers: str | None = None
+) -> dict:
     deck = request.app.state.deck
     resolved = _resolve(deck, node, engine, model)
     catalog = get_catalog(node, engine, request)
     facts = _facts_for(deck, model)
 
+    # Design decision 3 (Plan C2, Task 7): the argline — and, by extension,
+    # anything ever SHIPPED to an engine (app.routers.spark.spark_reload) —
+    # renders DECLARED layers (engine/model/engine_model) only. The two
+    # DERIVED layers (engine_defaults, checkpoint_recommendations) are the
+    # engine's own applied behavior, never re-asserted back at it as flags;
+    # 'resolved' below still carries them, full provenance intact, for the
+    # UI's structured view.
+    declared = _declared_only(resolved)
+    argline = render_argline({k: v["value"] for k, v in declared.items()})
+
+    view = resolved
+    if layers is not None:
+        names = [name for name in layers.split(",") if name]
+        unknown = sorted(set(names) - set(LAYERS))
+        if unknown:
+            raise ValueError(f"unknown layer(s) {unknown}; expected one of {LAYERS}")
+        # A display filter on the structured view only — warnings and the
+        # argline above are computed from the FULL resolution regardless,
+        # so this param can never silently change what would actually ship.
+        view = {k: v for k, v in resolved.items() if v["layer"] in names}
+
     return {
-        "resolved": resolved,
-        "argline": render_argline({k: v["value"] for k, v in resolved.items()}),
+        "resolved": view,
+        "argline": argline,
         "warnings": validate_settings(resolved, catalog, facts),
     }
 
@@ -299,6 +322,34 @@ def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:
         model=store.scope("models", model).get("args", {}),
         engine_model=store.scope("engine_models", f"{engine_key}|{model}").get("args", {}),
     )
+
+
+def _declared_only(resolved: dict) -> dict:
+    """Design decision 3 (Plan C2, Task 7): the DECLARED layers of a
+    resolution — engine/model/engine_model, never engine_defaults or
+    checkpoint_recommendations. Shared by get_effective's argline and
+    app.routers.spark.spark_reload's shipped document, so the two can never
+    drift apart on what "declared-only" means."""
+    return {k: v for k, v in resolved.items() if v["origin"] == "declared"}
+
+
+def _resolve_env(deck: dict, node: str, engine: str, model: str) -> dict:
+    """Env's most-specific-wins resolution — no derived layers exist for
+    env (engine_defaults/checkpoint_recommendations are args-only concepts:
+    a harvested CLI flag's default, a checkpoint's generation_config.json
+    sampling), so this reuses app.ladder.resolve_settings with both derived
+    layers empty rather than re-implementing "most specific wins" a second
+    time for env."""
+    store = deck["settings_store"]
+    engine_key = f"{node}/{engine}"
+    resolved = resolve_settings(
+        engine_defaults={},
+        checkpoint_recommendations={},
+        engine=store.scope("engines", engine_key).get("env", {}),
+        model=store.scope("models", model).get("env", {}),
+        engine_model=store.scope("engine_models", f"{engine_key}|{model}").get("env", {}),
+    )
+    return {key: entry["value"] for key, entry in resolved.items()}
 
 
 def _facts_for(deck: dict, model: str) -> dict:

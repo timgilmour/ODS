@@ -1787,7 +1787,11 @@ def test_effective_settings_resolves_five_layers_against_a_real_catalog(tmp_path
     assert resolved["tokenizer-mode"]["value"] == "auto"
     assert resolved["tokenizer-mode"]["origin"] == "derived"
     assert resolved["tokenizer-mode"]["layer"] == "engine_defaults"
-    assert "--tokenizer-mode auto" in body["argline"]
+    # CHANGED, Task 7 (design decision 3): the argline is declared-only —
+    # engine_defaults never renders as a flag, even decoded correctly, even
+    # though 'resolved' above still carries it with full provenance. Was
+    # `assert "--tokenizer-mode auto" in body["argline"]` before Task 7.
+    assert "--tokenizer-mode auto" not in body["argline"]
     assert "'auto'" not in body["argline"]
 
     # F2: the store_true default of False is an absent flag, not a value.
@@ -1798,6 +1802,111 @@ def test_effective_settings_resolves_five_layers_against_a_real_catalog(tmp_path
     # these are the engine's OWN harvested defaults.
     assert not any(w["key"] in ("tokenizer-mode", "enable-log-requests")
                    for w in body["warnings"])
+
+
+def test_effective_argline_renders_declared_layers_only(tmp_path, monkeypatch):
+    """Design decision 3 (Plan C2, Task 7): the argline — and, by extension,
+    anything ever SHIPPED to an engine — renders DECLARED layers (engine/
+    model/engine_model) only. A harvested engine_defaults value that would
+    otherwise render as a flag stays out of the argline even though it
+    fully resolves and keeps its provenance in 'resolved'."""
+    from app.characteristics import CharacteristicsStore
+    from app.harvest import parse_probe_output
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    probe_output = json.dumps({"options": [
+        {"flags": ["--tokenizer-mode"], "type": "str",
+         "choices": ["auto", "slow", "mistral", "custom"],
+         "default": repr("auto"), "nargs": None, "cls": "_StoreAction",
+         "help": "Tokenizer mode."},
+    ]})
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("engine/sparky/vllm", {
+        "option_catalog": parse_probe_output(probe_output, engine_version="test", now="t"),
+    })
+    deck["characteristics_store"] = characteristics
+
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engine_models", "sparky/vllm|TestModel-7B", "args",
+              {"max-model-len": "131072"})
+    deck["settings_store"] = store
+
+    body = TestClient(app).get(
+        "/api/settings/effective/sparky/vllm/TestModel-7B").json()
+
+    # 'resolved' keeps full provenance for both layers.
+    assert body["resolved"]["tokenizer-mode"]["origin"] == "derived"
+    assert body["resolved"]["tokenizer-mode"]["layer"] == "engine_defaults"
+    assert body["resolved"]["max-model-len"]["origin"] == "declared"
+
+    # The argline carries the declared flag and NOT the derived one.
+    assert "--max-model-len 131072" in body["argline"]
+    assert "--tokenizer-mode" not in body["argline"]
+
+
+def test_effective_layers_filter(tmp_path, monkeypatch):
+    """?layers=engine_model narrows the structured 'resolved' view to just
+    that layer's keys; the argline is unaffected (still declared-only,
+    across every declared layer, regardless of the filter). An unknown
+    layer name is a 422, matching this router's other ValueError -> 422
+    save-time rejections."""
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engines", "sparky/vllm", "args", {"engine-flag": "1"})
+    store.put("models", "TestModel-7B", "args", {"model-flag": "1"})
+    store.put("engine_models", "sparky/vllm|TestModel-7B", "args",
+              {"engine-model-flag": "1"})
+    deck["settings_store"] = store
+    client = TestClient(app)
+
+    body = client.get("/api/settings/effective/sparky/vllm/TestModel-7B",
+                      params={"layers": "engine_model"}).json()
+
+    assert set(body["resolved"]) == {"engine-model-flag"}
+    assert "--engine-flag 1" in body["argline"]
+    assert "--model-flag 1" in body["argline"]
+    assert "--engine-model-flag 1" in body["argline"]
+
+    multi = client.get("/api/settings/effective/sparky/vllm/TestModel-7B",
+                       params={"layers": "engine,model"}).json()
+    assert set(multi["resolved"]) == {"engine-flag", "model-flag"}
+
+    resp = client.get("/api/settings/effective/sparky/vllm/TestModel-7B",
+                      params={"layers": "bogus"})
+    assert resp.status_code == 422
+
+
+def test_unset_round_trip_none_survives_to_the_ladder(tmp_path, monkeypatch):
+    """PUT {'max-model-len': None} at the most specific layer unsets an
+    inherited value all the way through: the store's normalize_args_map
+    (verified 2026-08-07: None passes through both normalization axes
+    unchanged), the ladder's None-pop (app.ladder L73-76), the structured
+    'resolved' view, and the argline all agree the key is gone."""
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engines", "sparky/vllm", "args", {"max-model-len": "8192"})
+    deck["settings_store"] = store
+    client = TestClient(app)
+
+    before = client.get("/api/settings/effective/sparky/vllm/TestModel-7B").json()
+    assert "max-model-len" in before["resolved"]
+    assert "--max-model-len 8192" in before["argline"]
+
+    put_resp = client.put(
+        "/api/settings/engine_models/sparky/vllm|TestModel-7B",
+        json={"namespace": "args", "values": {"max-model-len": None}})
+    assert put_resp.status_code == 200
+    assert put_resp.json()["args"]["max-model-len"] is None
+
+    after = client.get("/api/settings/effective/sparky/vllm/TestModel-7B").json()
+    assert "max-model-len" not in after["resolved"]
+    assert "--max-model-len" not in after["argline"]
 
 
 def test_preview_parses_text_and_returns_warnings(tmp_path, monkeypatch):
