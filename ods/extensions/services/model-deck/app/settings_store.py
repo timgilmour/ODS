@@ -73,13 +73,23 @@ save. A put() whose values are entirely dropped this way still merges and
 writes normally: an empty dict merged into an existing namespace is a
 no-op on its other keys, not a special case. ``env``/``container`` values
 are not argv and are stored as given.
+
+The implementation of this normalization has moved: it is now
+``app.argline.normalize_args_map`` (hoisted, review 2026-08-07). A review
+of app.ladder found that this store was the ONLY place either axis got
+enforced, so a layer that never passes through here — a derived layer such
+as checkpoint recommendations parsed straight from generation_config.json
+— could hand the ladder a raw int, a shape Tasks 1/2 ruled impossible.
+This store now normalizes on write purely by delegating to that function;
+its own behavior, including the warn-and-drop posture above, is unchanged.
 """
 
 import json
 import os
 import threading
-import warnings
 from pathlib import Path
+
+from app.argline import normalize_args_map
 
 KINDS = ("engines", "models", "engine_models")
 NAMESPACES = ("args", "env", "container")
@@ -91,43 +101,6 @@ CONTAINER_ALLOWLIST = ("image", "shm_size", "ulimits")
 
 def _empty() -> dict:
     return {kind: {} for kind in KINDS}
-
-
-# Sentinel: this args value carries no argline opinion and must be dropped
-# from the key, not stored — see _normalize_args_value and put().
-_DROP = object()
-
-
-def _normalize_args_scalar(value):
-    """One value of the two RULING 2026-08-07 axes: int/float becomes str.
-    bool is an int subclass in Python, so it is excluded explicitly —
-    ``True`` is the bare-flag sentinel, not a number. Anything else
-    (str, None, dict, ...) is outside the documented axes and passes
-    through unchanged rather than guessed at."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return str(value)
-    return value
-
-
-def _normalize_args_value(value):
-    """Normalize one `args` value to argline's post-round-trip shape, or
-    return _DROP if the value carries no argline opinion at all.
-
-    A list of one collapses to its (normalized) element — the other RULING
-    2026-08-07 axis. A list of zero is _DROP: RULING 2026-08-07 (review),
-    see module docstring — it renders byte-identical to no value at all,
-    so keeping it as a stored key would claim an opinion the operator
-    never expressed.
-    """
-    if isinstance(value, list):
-        if not value:
-            return _DROP
-        if len(value) == 1:
-            return _normalize_args_scalar(value[0])
-        return [_normalize_args_scalar(v) for v in value]
-    return _normalize_args_scalar(value)
 
 
 class SettingsStore:
@@ -204,19 +177,10 @@ class SettingsStore:
                     f"editable: {list(CONTAINER_ALLOWLIST)}"
                 )
         if namespace == "args":
-            normalized = {}
-            for k, v in values.items():
-                n = _normalize_args_value(v)
-                if n is _DROP:
-                    warnings.warn(
-                        f"settings_store: empty list for args key {k!r} carries "
-                        "no argline value (RULING 2026-08-07 review); dropped, "
-                        "not stored",
-                        stacklevel=2,
-                    )
-                    continue
-                normalized[k] = n
-            values = normalized
+            # Delegates to app.argline — see module docstring, "The
+            # implementation of this normalization has moved". The warning
+            # for a dropped empty-list key is emitted from inside there.
+            values = normalize_args_map(values)
 
         with self._lock:
             data = self._load()

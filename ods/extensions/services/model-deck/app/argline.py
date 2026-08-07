@@ -41,6 +41,21 @@ string). Callers that store or diff resolved settings (app.ladder, Task 2
 onward) must normalize on write, or compare via rendered text — not via
 ``==`` on the raw map.
 
+``normalize_args_map`` (below) is THE canonical enforcement of both axes,
+plus the empty-list-carries-no-opinion rule (RULING 2026-08-07 review) —
+hoisted here from app.settings_store (review, 2026-08-07) after a review
+finding on app.ladder (Task 3): resolved ladder output could carry a raw
+int (e.g. ``checkpoint_recommendations`` built straight from
+generation_config.json sampling values) — a shape Tasks 1/2 ruled
+impossible — because normalization lived ONLY inside
+``SettingsStore.put()``, and a derived layer (code-baked engine defaults, a
+live-harvested line, checkpoint recommendations) never passes through the
+store at all. Any args-shaped layer assembled OUTSIDE the store must be
+passed through ``normalize_args_map`` before it enters
+``app.ladder.resolve_settings`` — the ladder is deliberately value-blind
+(see app.ladder module docstring) and will resolve and serve whatever
+shape it is handed, normalized or not.
+
 Dash-shaped values — CRITICAL, fixed 2026-08-07: a value that itself starts
 with ``-`` (``--stop-token --foo``, or a ``--served-model-name`` list with
 ``-basemodel`` as one element) is, once space-separated, indistinguishable
@@ -84,8 +99,14 @@ degrade to a best-effort parse rather than an exception.
 """
 
 import shlex
+import warnings
 
 POSITIONAL_KEY = "_positional"
+
+# Sentinel: this args value carries no argline opinion and must be dropped
+# from the map, not returned — see _normalize_args_value and
+# normalize_args_map. Hoisted from app.settings_store, review 2026-08-07.
+_DROP = object()
 
 
 def render_argline(settings: dict) -> str:
@@ -202,3 +223,63 @@ def _looks_like_a_flag(value) -> bool:
     predicate parse uses so the two sides can never disagree."""
     text = str(value)
     return text.startswith("-") and not _is_negative_number(text)
+
+
+def _normalize_args_scalar(value):
+    """One of the two RULING 2026-08-07 axes: int/float becomes str. bool
+    is an int subclass in Python, so it is excluded explicitly -- ``True``
+    is the bare-flag sentinel, not a number. Anything else (str, None,
+    dict, ...) is outside the documented axes and passes through unchanged
+    rather than guessed at."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    return value
+
+
+def _normalize_args_value(value):
+    """Normalize one args value to argline's post-round-trip shape, or
+    return _DROP if the value carries no argline opinion at all.
+
+    A list of one collapses to its (normalized) element -- the other
+    RULING 2026-08-07 axis. A list of zero is _DROP: RULING 2026-08-07
+    (review) -- it renders byte-identical to no value at all (see module
+    docstring), so keeping it as a key would claim an opinion the caller
+    never expressed.
+    """
+    if isinstance(value, list):
+        if not value:
+            return _DROP
+        if len(value) == 1:
+            return _normalize_args_scalar(value[0])
+        return [_normalize_args_scalar(v) for v in value]
+    return _normalize_args_scalar(value)
+
+
+def normalize_args_map(values: dict) -> dict:
+    """Normalize an args-shaped map to argline's post-round-trip shape --
+    THE canonical enforcement of both RULING 2026-08-07 axes (singleton
+    list -> scalar, numeric -> string) plus the empty-list-drop rule (see
+    module docstring). A key whose value is an empty list carries no
+    argline opinion and is dropped from the result with a ``UserWarning``,
+    not returned -- matching app.settings_store's pre-hoist posture byte
+    for byte.
+
+    Any caller assembling an args-shaped layer outside app.settings_store
+    (code-baked defaults, a live-harvested line through parse_argline,
+    checkpoint recommendations from generation_config.json) must call this
+    before the layer reaches app.ladder.resolve_settings.
+    """
+    normalized = {}
+    for key, value in values.items():
+        n = _normalize_args_value(value)
+        if n is _DROP:
+            warnings.warn(
+                f"app.argline: empty list for args key {key!r} carries no "
+                "argline value (RULING 2026-08-07 review); dropped, not returned",
+                stacklevel=2,
+            )
+            continue
+        normalized[key] = n
+    return normalized

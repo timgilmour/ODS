@@ -99,3 +99,44 @@ def test_explicit_none_at_a_higher_layer_unsets_a_lower_one():
                         engine_model={"quantization": None})
 
     assert "quantization" not in resolved
+
+
+# --- review 2026-08-07 additions: minors, hand-verified correct beforehand ---
+
+
+def test_same_key_present_in_all_five_layers_only_the_most_specific_wins():
+    resolved = _resolve(
+        engine_defaults={"a": "ed"},
+        checkpoint_recommendations={"a": "cr"},
+        engine={"a": "e"},
+        model={"a": "m"},
+        engine_model={"a": "em"},
+    )
+
+    assert resolved["a"]["value"] == "em"
+    assert resolved["a"]["layer"] == "engine_model"
+
+
+def test_key_only_in_lowest_layer_keeps_derived_origin_and_layer():
+    resolved = _resolve(engine_defaults={"a": "1"})
+
+    assert resolved["a"] == {"value": "1", "origin": "derived", "layer": "engine_defaults"}
+
+
+def test_true_and_scalar_override_each_other_regardless_of_direction():
+    bare_then_scalar = _resolve(engine={"a": True}, model={"a": "5"})
+    scalar_then_bare = _resolve(engine={"a": "5"}, model={"a": True})
+
+    assert bare_then_scalar["a"]["value"] == "5"
+    assert scalar_then_bare["a"]["value"] is True
+
+
+def test_equal_value_at_a_higher_layer_still_re_attributes_provenance():
+    """Value-blind by design (confirmed correct in review): the ladder
+    never compares values across layers, so even an unchanged value
+    re-attributes to whichever layer most specifically set it — correct
+    provenance, not a no-op skip."""
+    resolved = _resolve(engine={"a": "5"}, engine_model={"a": "5"})
+
+    assert resolved["a"]["value"] == "5"
+    assert resolved["a"]["layer"] == "engine_model"

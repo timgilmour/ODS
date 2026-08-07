@@ -26,7 +26,7 @@ import shlex
 
 import pytest
 
-from app.argline import parse_argline, render_argline
+from app.argline import normalize_args_map, parse_argline, render_argline
 
 ROUND_TRIP_CASES = [
     {},
@@ -217,3 +217,53 @@ def test_int_value_normalizes_to_a_string_on_round_trip():
     assert parse_argline(render_argline({"max-model-len": 262144})) == {
         "max-model-len": "262144"
     }
+
+
+# --- normalize_args_map: hoisted from app.settings_store, review 2026-08-07 ---
+#
+# Review finding: resolved ladder output could carry a raw int (e.g.
+# checkpoint_recommendations built straight from generation_config.json
+# sampling values) — a shape Tasks 1/2 ruled impossible — because
+# normalization lived ONLY inside SettingsStore.put(), and a derived layer
+# never passes through the store. normalize_args_map is now the one place
+# both RULING 2026-08-07 axes (singleton list -> scalar, numeric -> string)
+# plus the empty-list-drop rule are enforced, so any layer assembled outside
+# the store can be normalized before it reaches app.ladder.resolve_settings.
+
+
+def test_normalize_args_map_collapses_a_singleton_list_to_its_scalar():
+    assert normalize_args_map({"served-model-name": ["solo"]}) == {
+        "served-model-name": "solo"
+    }
+
+
+def test_normalize_args_map_stringifies_a_numeric_scalar():
+    assert normalize_args_map({"max-model-len": 262144}) == {"max-model-len": "262144"}
+
+
+def test_normalize_args_map_stringifies_each_element_of_a_multi_value_list():
+    assert normalize_args_map({"ports": [1, 2]}) == {"ports": ["1", "2"]}
+
+
+def test_normalize_args_map_passes_bare_flags_and_strings_through_unchanged():
+    result = normalize_args_map({"enable-prefix-caching": True, "reasoning-parser": "qwen3"})
+
+    assert result == {"enable-prefix-caching": True, "reasoning-parser": "qwen3"}
+
+
+def test_normalize_args_map_drops_an_empty_list_with_a_warning():
+    """Matches app.settings_store's pre-hoist posture byte for byte: an
+    empty list renders byte-identical to no value at all (RULING
+    2026-08-07 review), so it is dropped rather than stored/returned, but
+    warned rather than silently discarded."""
+    with pytest.warns(UserWarning, match="empty list"):
+        result = normalize_args_map({"served-model-name": []})
+
+    assert "served-model-name" not in result
+
+
+def test_normalize_args_map_drop_does_not_disturb_sibling_keys():
+    with pytest.warns(UserWarning, match="empty list"):
+        result = normalize_args_map({"a": "1", "tags": []})
+
+    assert result == {"a": "1"}
