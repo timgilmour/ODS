@@ -196,6 +196,13 @@ class SparkClient:
             # ``except (EngineError, BusyError)`` catch wouldn't see it.
             raise EngineError(f"non-JSON response from /v1/models: {exc}") from exc
 
+    def get_compose(self, profile: str) -> str:
+        """The raw compose YAML text node-agent holds for `profile` (GET
+        /v1/node/profile/{profile}/compose) — the adopt sweep's one source
+        of a profile's real launch configuration (app.compose_import,
+        app.routers.settings' adopt route)."""
+        return self._node_get(f"/v1/node/profile/{profile}/compose")["text"]
+
     def swap_in_progress(self) -> bool:
         """True while a previous swap is still booting. Same judgement the
         boot-window guard in swap() makes, exposed for the deck's lifecycle

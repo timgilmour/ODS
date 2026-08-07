@@ -148,6 +148,15 @@ def test_spark_unreachable():
     assert result["sparky/slot0"]["reachable"] is False
 
 
+def test_spark_node_id_is_the_slot_key_prefix():
+    """The ONE source of the spark node id (observe.py:39 SPARK_SLOT_KEY).
+    settings.spark_node_name is a coincidentally-equal different string —
+    regression guard for vocabulary bug class #4."""
+    from app.observe import SPARK_SLOT_KEY, spark_node_id
+
+    assert spark_node_id() == SPARK_SLOT_KEY.split("/", 1)[0] == "sparky"
+
+
 def test_merge_combines_maps():
     merged = merge_observations({"a": {"loaded": True}}, {"b": {"loaded": False}})
 

@@ -39,6 +39,14 @@ LOCAL_LEMONADE_KEY = f"{_LOCAL_NODE}/lemonade"
 SPARK_SLOT_KEY = "sparky/slot0"
 
 
+def spark_node_id() -> str:
+    """The spark node's id in every key vocabulary (settings scopes,
+    catalog keys, adopt). Derived from SPARK_SLOT_KEY so there is exactly
+    one source; settings.spark_node_name is a credential-lookup name that
+    happens to match and must never build a key (C1's live-only bug)."""
+    return SPARK_SLOT_KEY.split("/", 1)[0]
+
+
 def observe_local(world: dict) -> dict[str, dict]:
     """Map a World snapshot's tenants to observation records."""
     tenants = world["tenants"]

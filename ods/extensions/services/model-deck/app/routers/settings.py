@@ -63,16 +63,23 @@ args-shaped layer.
 """
 
 import ast
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.argline import normalize_args_map, parse_argline, render_argline
+from app.compose_import import import_compose
 from app.facts import resolve_facts
 from app.ladder import resolve_settings
+from app.observe import spark_node_id
 from app.settings_store import KINDS
 from app.validate_settings import validate_settings
 
 router = APIRouter(tags=["settings"])
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 @router.get("/settings/catalog/{node}/{engine}")
@@ -109,6 +116,69 @@ def preview(body: dict, request: Request) -> dict:
         catalog = get_catalog(node, engine, request)
     facts = _facts_for(request.app.state.deck, body.get("model", ""))
     return {"parsed": parsed, "warnings": validate_settings(resolved, catalog, facts)}
+
+
+@router.post("/settings/adopt/{node}/{engine}")
+def adopt(node: str, engine: str, request: Request) -> dict:
+    """Sweep a node's real compose profiles into the settings store — the
+    "adopt" half of adopt-then-own (Plan C2). Only ``(spark_node_id(),
+    "vllm")`` is adoptable in C2 (an unknown pair is a ValueError -> 422,
+    same family as this router's other save-time rejections); every other
+    profile on the node (ds4, comfyui, ...) is reported 'skipped' rather
+    than guessed at.
+
+    Never clobbers: a scope whose args namespace already has something in
+    it is left untouched and reported 'kept', not overwritten — adopt runs
+    once against a live node, and re-running it must not stomp an edit a
+    human already made.
+
+    Also records the profile -> identity map (which compose service and
+    container each profile is) as a characteristics field, so Tasks 6+7
+    (drift translation, reload) can go from a profile name to the
+    engine_models scope key without re-parsing compose themselves.
+    """
+    deck = request.app.state.deck
+    if (node, engine) != (spark_node_id(), "vllm"):
+        raise ValueError(f"only {spark_node_id()}/vllm is adoptable in C2")
+    spark = deck.get("spark")
+    if spark is None:
+        raise HTTPException(status_code=503, detail="spark engine is not configured")
+
+    store = deck["settings_store"]
+    adopted, kept, skipped, identities = [], [], [], {}
+    for meta in spark.status()["profiles"]:
+        if meta["engine"] != "vllm":
+            skipped.append({"profile": meta["name"], "engine": meta["engine"]})
+            continue
+        imported = import_compose(spark.get_compose(meta["name"]))
+        identity = imported["identity"]
+        if identity is None:
+            skipped.append({"profile": meta["name"], "engine": "vllm",
+                            "reason": "no /model mount"})
+            continue
+        identities[meta["name"]] = {"identity": identity,
+                                    "service": imported["service"],
+                                    "container_name": imported["container_name"]}
+        key = f"{node}/{engine}|{identity}"
+        if store.scope("engine_models", key).get("args"):
+            kept.append(key)
+            continue
+        note = f"adopted from compose-{meta['name']}.yaml"
+        store.put("engine_models", key, "args", imported["args"],
+                  note=(imported["notes"].get("args") or note))
+        if imported["env"]:
+            store.put("engine_models", key, "env", imported["env"], note=note)
+        if imported["container"]:
+            store.put("engine_models", key, "container", imported["container"], note=note)
+        adopted.append(key)
+
+    if identities:
+        deck["characteristics_store"].put_fields(
+            f"engine/{node}/{engine}",
+            {"profile_identities": {"value": identities,
+                                    "source": "compose import",
+                                    "derived_ts": _now_iso()}})
+    return {"adopted": adopted, "kept": kept, "skipped": skipped}
 
 
 @router.get("/settings/{kind}/{key:path}")

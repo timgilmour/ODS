@@ -160,6 +160,21 @@ def test_status_raises_engineerror_on_node_transport_failure():
         client.status()
 
 
+# --- get_compose (adopt sweep, Plan C2 Task 5) ---
+
+def _compose_handler(text, profile="heretic"):
+    def handler(request):
+        assert request.url.path == f"/v1/node/profile/{profile}/compose"
+        return httpx.Response(200, json={"profile": profile, "text": text}, request=request)
+    return handler
+
+
+def test_get_compose_returns_the_node_agents_text_field():
+    text = "services:\n  aeon-vllm:\n    image: x\n"
+    client = _client(_compose_handler(text))
+    assert client.get_compose("heretic") == text
+
+
 # --- models (characteristics derive pass) ---
 
 def _models_handler(body):

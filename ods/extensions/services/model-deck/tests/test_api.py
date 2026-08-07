@@ -15,6 +15,7 @@ state to diff against.
 """
 
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -2004,3 +2005,137 @@ def test_settings_drift_never_triggers_a_restart(tmp_path, monkeypatch):
 
     assert "settings_drift" not in statuses["local/hipfire"]
     assert plan_reconcile(statuses, intents, auto_enabled=True) == []
+
+
+# ===========================================================================
+# Adopt sweep (Plan C2, Task 5) — compose import into settings scopes +
+# the profile -> identity map.
+# ===========================================================================
+
+HERETIC_COMPOSE = (Path(__file__).parent / "fixtures" / "spark-profiles"
+                   / "compose-heretic.yaml").read_text()
+DS4_COMPOSE = (Path(__file__).parent / "fixtures" / "spark-profiles"
+               / "compose-ds4.yaml").read_text()
+
+
+class FakeSparkForAdopt:
+    """Just enough of SparkClient for the adopt route: status() for the
+    profile list (mirrors FakeSpark in test_spark_api.py) and get_compose()
+    serving the two real fixture files straight off disk — real compose
+    text, not a hand-shaped stand-in, is the whole point of these tests."""
+
+    def __init__(self):
+        self.compose = {"heretic": HERETIC_COMPOSE, "ds4": DS4_COMPOSE}
+
+    def status(self):
+        return {"profiles": [
+            {"name": "heretic", "engine": "vllm", "health_url": None, "container": None},
+            {"name": "ds4", "engine": "ds4",
+             "health_url": "http://127.0.0.1:8000/metrics", "container": "spark-ds4"},
+        ], "swap_status": None, "serving": None}
+
+    def get_compose(self, profile):
+        return self.compose[profile]
+
+
+def _adopt_app(tmp_path, monkeypatch, spark="default"):
+    """Same shape as test_spark_api.py's _spark_app: the adopt route needs
+    settings_store AND characteristics_store pointed at tmp_path — the
+    default deck's copies point at the container's /data, which does not
+    exist under test."""
+    from app.characteristics import CharacteristicsStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["spark"] = FakeSparkForAdopt() if spark == "default" else spark
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    deck["characteristics_store"] = CharacteristicsStore(tmp_path / "c.json")
+    return app, deck
+
+
+def test_adopt_imports_vllm_profiles_into_engine_models_scope(tmp_path, monkeypatch):
+    """POST /api/settings/adopt/sparky/vllm ->
+    engine_models scope 'sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4' has the
+    imported args (max-model-len 262144, _positional [serve, /model]) and
+    the modelopt note; response lists it under 'adopted'."""
+    from app.argline import POSITIONAL_KEY
+
+    app, deck = _adopt_app(tmp_path, monkeypatch)
+    key = "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4"
+
+    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    assert resp.status_code == 200
+    assert resp.json()["adopted"] == [key]
+
+    scope = deck["settings_store"].scope("engine_models", key)
+    assert scope["args"]["max-model-len"] == "262144"
+    assert scope["args"][POSITIONAL_KEY] == ["serve", "/model"]
+    assert "modelopt" in scope["notes"]["args"]
+
+
+def test_adopt_skips_non_vllm_profiles(tmp_path, monkeypatch):
+    """ds4 appears in 'skipped' with its engine named; no ds4 scope is
+    written."""
+    app, deck = _adopt_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    body = resp.json()
+    assert {"profile": "ds4", "engine": "ds4"} in body["skipped"]
+
+    all_engine_models = deck["settings_store"].get()["engine_models"]
+    assert not any("ds4" in key for key in all_engine_models)
+
+
+def test_adopt_never_clobbers_an_existing_scope(tmp_path, monkeypatch):
+    """Pre-seed the heretic identity scope with one arg; adopt again ->
+    response lists it under 'kept' and the pre-seeded value survives."""
+    app, deck = _adopt_app(tmp_path, monkeypatch)
+    key = "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4"
+    deck["settings_store"].put("engine_models", key, "args", {"max-model-len": "999"})
+
+    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    body = resp.json()
+    assert body["kept"] == [key]
+    assert key not in body["adopted"]
+    assert deck["settings_store"].scope("engine_models", key)["args"] == {
+        "max-model-len": "999"
+    }
+
+
+def test_adopt_records_the_identity_map(tmp_path, monkeypatch):
+    """characteristics entry engine/sparky/vllm gains profile_identities
+    with heretic -> {identity, service='aeon-vllm',
+    container_name='aeon-vllm'}, carrying value/source/derived_ts."""
+    app, deck = _adopt_app(tmp_path, monkeypatch)
+
+    TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    field = deck["characteristics_store"].entry("engine/sparky/vllm")["profile_identities"]
+    assert set(field) == {"value", "source", "derived_ts"}
+    assert field["value"]["heretic"] == {
+        "identity": "Qwen3.6-35B-A3B-heretic-NVFP4",
+        "service": "aeon-vllm",
+        "container_name": "aeon-vllm",
+    }
+
+
+def test_adopt_on_unknown_node_or_engine_is_422(tmp_path, monkeypatch):
+    """POST /api/settings/adopt/local/vllm and /sparky/spark -> 422; only
+    the (spark_node_id(), 'vllm') pair is adoptable in C2."""
+    app, deck = _adopt_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    assert client.post("/api/settings/adopt/local/vllm").status_code == 422
+    assert client.post("/api/settings/adopt/sparky/spark").status_code == 422
+
+
+def test_adopt_with_no_spark_configured_is_503(tmp_path, monkeypatch):
+    """deck['spark'] is None -> 503, matching routers/spark.py's _spark."""
+    app, deck = _adopt_app(tmp_path, monkeypatch, spark=None)
+
+    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+
+    assert resp.status_code == 503
