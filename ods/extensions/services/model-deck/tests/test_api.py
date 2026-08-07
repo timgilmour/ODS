@@ -1569,3 +1569,114 @@ def test_drift_endpoint_is_empty_when_nothing_disagrees(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
 
     assert TestClient(app).get("/api/facts/drift").json() == {}
+
+
+# ===========================================================================
+# Settings API (Task 7)
+# ===========================================================================
+
+
+def test_put_and_get_settings_round_trip(tmp_path, monkeypatch):
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
+
+    client.put("/api/settings/engines/sparky/vllm",
+               json={"namespace": "args", "values": {"generation-config": "auto"}})
+    body = client.get("/api/settings/engines/sparky/vllm").json()
+
+    assert body["args"]["generation-config"] == "auto"
+
+
+def test_put_settings_rejects_deck_managed_container_field(tmp_path, monkeypatch):
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+
+    resp = TestClient(app).put("/api/settings/engines/sparky/vllm",
+                               json={"namespace": "container",
+                                     "values": {"volumes": ["/a:/b"]}})
+
+    assert resp.status_code == 422
+
+
+def test_effective_settings_include_argline_and_warnings(tmp_path, monkeypatch):
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engines", "sparky/vllm", "args", {"brand-new-flag": "1"})
+    deck["settings_store"] = store
+
+    body = TestClient(app).get(
+        "/api/settings/effective/sparky/vllm/Qwen3.6-35B-A3B-heretic-NVFP4").json()
+
+    assert "--brand-new-flag 1" in body["argline"]
+    assert body["warnings"][0]["class"] == "unknown"
+
+
+def test_preview_parses_text_and_returns_warnings(tmp_path, monkeypatch):
+    """The text field's live feedback — parse without saving."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    body = TestClient(app).post("/api/settings/preview",
+                                json={"argline": "--max-model-len 262144 --weird"}).json()
+
+    assert body["parsed"]["max-model-len"] == "262144"
+    assert body["parsed"]["weird"] is True
+    assert any(w["key"] == "weird" for w in body["warnings"])
+
+
+def test_preview_preserves_an_unknown_token(tmp_path, monkeypatch):
+    """The unacceptable failure mode is dropping something a human typed."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    body = TestClient(app).post("/api/settings/preview",
+                                json={"argline": "--totally-made-up xyz"}).json()
+
+    assert body["parsed"]["totally-made-up"] == "xyz"
+
+
+def test_catalog_absent_is_null_not_an_error(tmp_path, monkeypatch):
+    """An engine that has never run has no catalog. Supported state."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).get("/api/settings/catalog/sparky/vllm")
+
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+def test_settings_change_flags_drift_on_a_loaded_placement(tmp_path, monkeypatch):
+    from app.intent import IntentStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/hipfire", state="loaded", model=None, engine="hipfire")
+    deck["intent_store"] = intent
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
+
+    client.put("/api/settings/engines/local/hipfire",
+               json={"namespace": "env", "values": {"HIPFIRE_MAX_SEQ": "131072"}})
+
+    entry = client.get("/api/state").json()["lifecycle"]["local/hipfire"]
+    assert entry["settings_drift"]["changed"] == ["HIPFIRE_MAX_SEQ"]
+
+
+def test_settings_drift_never_triggers_a_restart(tmp_path, monkeypatch):
+    """Distinct from placement drift, which DOES auto-restore. Conflating
+    the two would restart a serving model because someone typed in a box."""
+    from app.intent import IntentStore
+    from app.reconcile import plan_reconcile
+
+    statuses = {"local/hipfire": {"status": "serving", "reason": "r"}}
+    intents = {"local/hipfire": {"state": "loaded", "model": None, "engine": "hipfire",
+                                 "updated_ts": "t", "last_healthy_ts": None,
+                                 "failures": 0, "quarantined": False}}
+
+    assert plan_reconcile(statuses, intents, auto_enabled=True) == []

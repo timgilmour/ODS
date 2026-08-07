@@ -41,6 +41,10 @@ from fastapi.staticfiles import StaticFiles
 from app.engines import BusyError, EngineError, GuardError
 from app.gateway import detect_default_gateway
 from app.routers import control, facts, lifecycle, policy, sets, spark, status, storage
+# Aliased: create_app() below has its own local `settings` (the Settings()
+# instance) and app.settings already owns that name for env config — the
+# router module would silently shadow (or be shadowed by) either otherwise.
+from app.routers import settings as settings_router
 from app.settings import Settings
 
 # The GGUF store is bound read-only into the container at this path (see
@@ -102,6 +106,7 @@ def _build_deck(settings: Settings) -> dict:
     from app.policy import PolicyStore, StoragePolicyStore
     from app.registry import Registry
     from app.sets import SetStore
+    from app.settings_store import SettingsStore
     from app.state import World
 
     data_dir = Path(settings.data_dir)
@@ -165,6 +170,10 @@ def _build_deck(settings: Settings) -> dict:
         "registry": Registry(data_dir / "registry.json", _GGUF_DIR),
         "characteristics_store": CharacteristicsStore(data_dir / "characteristics.json"),
         "declared_store": DeclaredStore(data_dir / "declared.json"),
+        # Human/UI-owned launch configuration (app.settings_store) — a
+        # sibling of characteristics/declared, not a replacement: this store
+        # asserts what things are launched WITH, the other two what they ARE.
+        "settings_store": SettingsStore(data_dir / "settings.json"),
         "gguf_dir": _GGUF_DIR,
         "policy_store": PolicyStore(data_dir / "policy.json"),
         # Durable desired state. Shared, like policy_store, between the HTTP
@@ -316,6 +325,7 @@ def create_app() -> FastAPI:
     app.include_router(lifecycle.router, prefix="/api")
     app.include_router(storage.router, prefix="/api")
     app.include_router(facts.router, prefix="/api")
+    app.include_router(settings_router.router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when
     # present so the API keeps working standalone until then. Mounted LAST:

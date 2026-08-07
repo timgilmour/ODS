@@ -30,6 +30,13 @@ imports those comments here instead of discarding them, which is one of the
 reasons the Deck ships settings documents rather than regenerating compose
 files.
 
+Every ``put()`` stamps the scope entry with an ``updated_ts`` (entry-level,
+not per-namespace or per-key — this store keeps no history to diff a single
+key's change against). Task 7's settings-drift flag compares this against a
+placement's ``intent.last_healthy_ts`` to say "settings were touched since
+this was last known healthy" — a display flag only; it never feeds
+app.reconcile.
+
 Human/UI-owned. Missing/corrupt reads as empty; writes are atomic; a
 rejected put leaves the file untouched. Self-healing is recursive: a
 corrupt top-level kind, a corrupt scope entry, or a corrupt namespace or
@@ -87,6 +94,7 @@ its own behavior, including the warn-and-drop posture above, is unchanged.
 import json
 import os
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.argline import normalize_args_map
@@ -101,6 +109,10 @@ CONTAINER_ALLOWLIST = ("image", "shm_size", "ulimits")
 
 def _empty() -> dict:
     return {kind: {} for kind in KINDS}
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 class SettingsStore:
@@ -188,6 +200,14 @@ class SettingsStore:
             entry.setdefault(namespace, {}).update(values)
             if note is not None:
                 entry.setdefault("notes", {})[namespace] = note
+            # Entry-level (not per-namespace/per-key) write timestamp — Task 7
+            # compares this against a placement's intent.last_healthy_ts to
+            # flag settings_drift. One clock per scope entry, bumped on every
+            # put() regardless of which namespace changed, matches "changed"
+            # meaning "this scope entry has settings written since the
+            # baseline", not a value-level diff (this store keeps no history
+            # to diff against).
+            entry["updated_ts"] = _now_iso()
             self._save(data)
 
     def forget(self, kind: str, key: str) -> None:
