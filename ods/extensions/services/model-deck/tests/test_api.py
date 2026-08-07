@@ -2008,6 +2008,143 @@ def test_settings_drift_never_triggers_a_restart(tmp_path, monkeypatch):
 
 
 # ===========================================================================
+# Settings drift speaks the spark vocabulary (Plan C2, Task 6) — unit tests
+# of _settings_drift's identity_map translation, called directly (rather
+# than through the API) so the profile/identity boundary is exercised
+# precisely, the same way Task 5's adopt tests below exercise
+# CharacteristicsStore directly. settings_data/intent are still built with
+# the real stores, matching every other test in this module.
+# ===========================================================================
+
+
+def test_spark_drift_translates_profile_to_identity(tmp_path):
+    """intent {engine: 'spark', model: 'heretic', updated_ts: T0};
+    identity_map {'heretic': {'identity': 'Qwen3.6-35B-A3B-heretic-NVFP4', ...}};
+    settings_data with engine_models 'sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4'
+    args updated_ts AFTER T0 -> _settings_drift(..., 'sparky/slot0', intent,
+    identity_map=map) returns changed == ['args:max-model-len'] (qualified,
+    per T7's C1 ruling). This is the 5th vocabulary-bug instance, caught at
+    plan time: intent records the deck adapter ('spark') and the PROFILE
+    ('heretic'), but the settings PUT lands under the real engine ('vllm')
+    and the checkpoint identity — the exact D11 live-drill flow."""
+    from app.intent import IntentStore
+    from app.observe import SPARK_SLOT_KEY
+    from app.routers import _settings_drift
+    from app.settings_store import SettingsStore
+
+    intent_store = IntentStore(tmp_path / "intent.json")
+    # Fixed PAST baseline (T0) — the settings PUT below lands at real "now",
+    # unambiguously after it (same idiom as C1's baseline tests above).
+    intent_store.record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+                        engine="spark", now="2020-01-01T00:00:00+00:00")
+    intent = intent_store.get()[SPARK_SLOT_KEY]
+
+    identity_map = {"heretic": {"identity": "Qwen3.6-35B-A3B-heretic-NVFP4",
+                                "service": "aeon-vllm",
+                                "container_name": "aeon-vllm"}}
+
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.put("engine_models", "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4",
+                "args", {"max-model-len": "131072"})
+
+    result = _settings_drift(settings.get(), SPARK_SLOT_KEY, intent,
+                             identity_map=identity_map)
+
+    assert result is not None
+    assert result["changed"] == ["args:max-model-len"]
+
+
+def test_spark_drift_without_map_entry_falls_back_to_old_scopes(tmp_path):
+    """No identity_map (or profile absent from it) -> behaves exactly as
+    C1 shipped (scopes from intent verbatim); returns None here. The write
+    below lands under the real vllm/identity vocabulary, which is invisible
+    to intent's verbatim scopes ('sparky/spark|heretic') — proving the
+    translation is opt-in per call, not a silent behavior change."""
+    from app.intent import IntentStore
+    from app.observe import SPARK_SLOT_KEY
+    from app.routers import _settings_drift
+    from app.settings_store import SettingsStore
+
+    intent_store = IntentStore(tmp_path / "intent.json")
+    intent_store.record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+                        engine="spark", now="2020-01-01T00:00:00+00:00")
+    intent = intent_store.get()[SPARK_SLOT_KEY]
+
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.put("engine_models", "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4",
+                "args", {"max-model-len": "131072"})
+    settings_data = settings.get()
+
+    # No map at all — the C1 3-arg call site.
+    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent) is None
+
+    # Map present but the profile never made it in (e.g. never adopted) —
+    # same verbatim fallback as no map at all.
+    other_map = {"other-profile": {"identity": "some-other-identity",
+                                   "service": "x", "container_name": "x"}}
+    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent,
+                           identity_map=other_map) is None
+
+
+def test_local_keys_are_untouched_by_the_map(tmp_path):
+    """A local/hipfire key with a populated identity_map still resolves
+    scopes from intent verbatim — the translation is spark-slot-only,
+    gated on key == SPARK_SLOT_KEY. A populated map must never leak into a
+    local resource's scope resolution even though build_lifecycle_view
+    hoists and passes the same map to every key's _settings_drift call."""
+    from app.intent import IntentStore
+    from app.routers import _settings_drift
+    from app.settings_store import SettingsStore
+
+    intent_store = IntentStore(tmp_path / "intent.json")
+    intent_store.record("local/hipfire", state="loaded", model=None,
+                        engine="hipfire", now="2020-01-01T00:00:00+00:00")
+    intent = intent_store.get()["local/hipfire"]
+
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.put("engines", "local/hipfire", "env", {"HIPFIRE_MAX_SEQ": "131072"})
+
+    identity_map = {"heretic": {"identity": "Qwen3.6-35B-A3B-heretic-NVFP4",
+                                "service": "aeon-vllm",
+                                "container_name": "aeon-vllm"}}
+
+    result = _settings_drift(settings.get(), "local/hipfire", intent,
+                             identity_map=identity_map)
+
+    assert result is not None
+    assert result["changed"] == ["env:HIPFIRE_MAX_SEQ"]
+
+
+def test_engines_scope_translates_too(tmp_path):
+    """A change under engines 'sparky/vllm' (no model half) also flags —
+    the translation touches engine_key (used by the 'engines' scope on its
+    own), not only the model half used by 'models'/'engine_models'."""
+    from app.intent import IntentStore
+    from app.observe import SPARK_SLOT_KEY
+    from app.routers import _settings_drift
+    from app.settings_store import SettingsStore
+
+    intent_store = IntentStore(tmp_path / "intent.json")
+    intent_store.record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+                        engine="spark", now="2020-01-01T00:00:00+00:00")
+    intent = intent_store.get()[SPARK_SLOT_KEY]
+
+    identity_map = {"heretic": {"identity": "Qwen3.6-35B-A3B-heretic-NVFP4",
+                                "service": "aeon-vllm",
+                                "container_name": "aeon-vllm"}}
+
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.put("engines", "sparky/vllm", "env",
+                {"VLLM_USE_FLASHINFER_SAMPLER": "1"})
+
+    result = _settings_drift(settings.get(), SPARK_SLOT_KEY, intent,
+                             identity_map=identity_map)
+
+    assert result is not None
+    assert result["changed"] == ["env:VLLM_USE_FLASHINFER_SAMPLER"]
+
+
+# ===========================================================================
 # Adopt sweep (Plan C2, Task 5) — compose import into settings scopes +
 # the profile -> identity map.
 # ===========================================================================
