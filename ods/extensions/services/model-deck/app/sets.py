@@ -42,6 +42,7 @@ re-activate), so a durable revert may warn "unavailable" — the ephemeral rever
 always works.
 """
 
+import copy
 import os
 import re
 import threading
@@ -52,6 +53,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
+from app.settings_store import KINDS, NAMESPACES
 
 # Reserved on-disk slug for the auto-captured pre-apply snapshot. Written only
 # by apply(); user sets are forbidden from slugging to it (or to "previous",
@@ -121,6 +123,14 @@ class ConfigSet(BaseModel):
     ephemeral: Ephemeral | None = None
     # Passed to PolicyStore.put verbatim at apply time; its validation is the gate.
     policy_overrides: dict | None = None
+    # The ENTIRE settings store (app.settings_store.SettingsStore.get()'s
+    # shape), captured at save time (design decision 6, Tim, 2026-08-07) --
+    # a real ConfigSet has no placements, so "reproducible" means the whole
+    # tenant-state recipe, not a per-scope subset. None for every set saved
+    # before this field existed (and the reserved ``_previous`` slot, when
+    # no settings_store was wired into the apply that captured it) -- those
+    # plan and apply exactly as they did pre-Task-9 (see plan_apply below).
+    settings_snapshot: dict | None = None
 
     @field_validator("name")
     @classmethod
@@ -207,16 +217,160 @@ class SetStore:
 
 
 # ===========================================================================
+# Settings-snapshot diffing (Task 9) — one stripped-view helper, two callers:
+# diff_snapshot (the settings-diff route) and plan_apply's own differ-check.
+# ===========================================================================
+
+
+def _stripped(store: dict) -> dict:
+    """A settings-store snapshot with ``updated_ts``/``notes`` excluded —
+    the one comparison view both ``diff_snapshot`` and ``plan_apply`` use, so
+    a set never looks "different" for reasons a human never asked about: an
+    older snapshot's stale write-clock, or a note added after the fact,
+    must never themselves count as drift. Pure dict reshaping, no I/O."""
+    return {
+        kind: {
+            scope_key: {
+                namespace: dict(entry.get(namespace) or {})
+                for namespace in NAMESPACES
+                if namespace in entry
+            }
+            for scope_key, entry in (store or {}).get(kind, {}).items()
+        }
+        for kind in KINDS
+    }
+
+
+def diff_snapshot(snapshot: dict | None, current: dict) -> dict:
+    """Diff a set's captured ``settings_snapshot`` against the live
+    settings store -> ``{"changed": [...], "added": [...], "removed": [...]}``.
+
+    ``snapshot=None`` (an old set, saved before this field existed, or the
+    ``_previous`` slot when no settings_store was wired into the apply that
+    captured it) diffs as empty — there is nothing to compare TO, which is
+    the honest answer, not a suppressed positive. Whether to *label* that
+    "no snapshot" for a caller is the route's job (``has_snapshot``), not
+    this pure function's.
+
+    Each entry:
+    * ``changed``: ``{"scope", "key", "snapshot", "current"}`` — present on
+      both sides with different values.
+    * ``added``/``removed``: ``{"scope", "key"}`` — present on only one side
+      (``added`` = only in ``current``, ``removed`` = only in ``snapshot``).
+
+    ``scope`` is ``"<kind>/<key>"`` (e.g. ``"engines/sparky/vllm"``); ``key``
+    is the C1 qualified form ``"<namespace>:<name>"`` (e.g. ``"args:x"`` —
+    see ``app.routers._settings_drift``'s ``"namespace:key"`` convention,
+    routers/__init__.py:182) so same-named keys in different namespaces
+    never collide. Compares through ``_stripped`` — see its docstring.
+    """
+    empty = {"changed": [], "added": [], "removed": []}
+    if snapshot is None:
+        return empty
+
+    snap = _stripped(snapshot)
+    curr = _stripped(current)
+
+    changed: list[dict] = []
+    added: list[dict] = []
+    removed: list[dict] = []
+
+    for kind in KINDS:
+        scope_keys = sorted(set(snap[kind]) | set(curr[kind]))
+        for scope_key in scope_keys:
+            scope = f"{kind}/{scope_key}"
+            snap_entry = snap[kind].get(scope_key, {})
+            curr_entry = curr[kind].get(scope_key, {})
+            for namespace in NAMESPACES:
+                snap_ns = snap_entry.get(namespace, {})
+                curr_ns = curr_entry.get(namespace, {})
+                for name in sorted(set(snap_ns) | set(curr_ns)):
+                    key = f"{namespace}:{name}"
+                    if name in snap_ns and name in curr_ns:
+                        if snap_ns[name] != curr_ns[name]:
+                            changed.append({
+                                "scope": scope, "key": key,
+                                "snapshot": snap_ns[name], "current": curr_ns[name],
+                            })
+                    elif name in curr_ns:
+                        added.append({"scope": scope, "key": key})
+                    else:
+                        removed.append({"scope": scope, "key": key})
+
+    return {"changed": changed, "added": added, "removed": removed}
+
+
+def _empty_settings() -> dict:
+    return {kind: {} for kind in KINDS}
+
+
+def adopt_selective(snapshot: dict | None, current: dict, keys: list[dict]) -> dict:
+    """Selective adopt (``POST /api/sets/{slug}/adopt``, ``mode="selective"``):
+    take ONLY the named diff entries — each ``{"scope", "key"}`` pair, the
+    exact shape ``diff_snapshot`` emits — from the live settings store into
+    a copy of ``snapshot``; everything else in the snapshot is left exactly
+    as it was. ``snapshot=None`` (adopting into a set that never had one)
+    starts from an empty store.
+
+    A requested key that no longer exists in ``current`` (a "removed" diff
+    entry) is DROPPED from the result — adopting means "make the snapshot
+    agree with current," and current no longer has an opinion. A malformed
+    entry (missing/mistyped ``scope``/``key``, an unknown scope kind or
+    namespace) is refused loudly (``ValueError`` -> 422 via the app-wide
+    handler): adopting a key the caller asked for and getting silence
+    instead is worse than an explicit error.
+    """
+    result = copy.deepcopy(snapshot) if snapshot is not None else _empty_settings()
+    for entry in keys:
+        if not isinstance(entry, dict) or "scope" not in entry or "key" not in entry:
+            raise ValueError(f"adopt key entries need 'scope' and 'key': {entry!r}")
+        scope, qualified = entry["scope"], entry["key"]
+        if not isinstance(scope, str) or "/" not in scope:
+            raise ValueError(f"malformed scope {scope!r}")
+        kind, scope_key = scope.split("/", 1)
+        if kind not in KINDS:
+            raise ValueError(f"unknown scope kind {kind!r} in {scope!r}")
+        if not isinstance(qualified, str) or ":" not in qualified:
+            raise ValueError(f"malformed key {qualified!r}")
+        namespace, name = qualified.split(":", 1)
+        if namespace not in NAMESPACES:
+            raise ValueError(f"unknown namespace {namespace!r} in {qualified!r}")
+
+        current_entry = current.get(kind, {}).get(scope_key, {})
+        current_ns = current_entry.get(namespace, {})
+        if name in current_ns:
+            dest_entry = result.setdefault(kind, {}).setdefault(scope_key, {})
+            dest_entry.setdefault(namespace, {})[name] = current_ns[name]
+            ts = current_entry.get("updated_ts", {}).get(namespace)
+            if ts is not None:
+                dest_entry.setdefault("updated_ts", {})[namespace] = ts
+        else:
+            dest_ns = result.get(kind, {}).get(scope_key, {}).get(namespace, {})
+            dest_ns.pop(name, None)
+    return result
+
+
+# ===========================================================================
 # plan_apply — pure diff
 # ===========================================================================
 
 
-def plan_apply(cfgset: ConfigSet, world: dict) -> list[dict]:
-    """Diff ``cfgset`` against ``world`` -> ordered list of step dicts.
+def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None) -> list[dict]:
+    """Diff ``cfgset`` against ``world`` (and, for a set carrying a
+    settings snapshot, against ``settings_now``) -> ordered list of step
+    dicts.
 
     PURE: no I/O, no client calls. Emits only steps that change reality.
     Order: evictions (unload/free) -> park -> activate -> resume -> load ->
-    policy_patch, with ``warn`` steps interleaved where they are generated.
+    restore_settings -> policy_patch, with ``warn`` steps interleaved where
+    they are generated.
+
+    ``settings_now`` (Task 9) is the caller's own snapshot of the live
+    settings store — this function does no I/O, so it cannot fetch it
+    itself, exactly like ``world`` above. ``None`` (a caller that never
+    wired up a settings_store) skips the restore_settings check entirely,
+    the same as an old set with no ``settings_snapshot`` — see the callers'
+    docstrings (``app.routers.sets``, ``apply`` below) for how it's sourced.
     """
     tenants = world["tenants"]
     lem_world = tenants["lemonade"]
@@ -297,6 +451,22 @@ def plan_apply(cfgset: ConfigSet, world: dict) -> list[dict]:
         else:
             steps.append({"step": "load_lemonade", "model": model})
 
+    # --- Restore settings (Task 9) ------------------------------------------
+    # Independent of engine state: a settings write never itself restarts
+    # anything (reload stays human), so its position relative to the
+    # evict/park/activate/load steps above is cosmetic. Placed alongside the
+    # always-emitted policy_patch below: both are config-only writes, never
+    # diffed against ``world``. Emitted only when BOTH sides are knowable
+    # (snapshot exists, settings_now was supplied) AND they actually differ
+    # — an old set (no snapshot) or a caller with no settings_store wired in
+    # (settings_now=None) plans exactly as before this field existed.
+    if (
+        cfgset.settings_snapshot is not None
+        and settings_now is not None
+        and _stripped(cfgset.settings_snapshot) != _stripped(settings_now)
+    ):
+        steps.append({"step": "restore_settings", "settings": cfgset.settings_snapshot})
+
     # --- Policy patch (always, not diffed) ---------------------------------
     if cfgset.policy_overrides is not None:
         steps.append({"step": "policy_patch", "policies": cfgset.policy_overrides})
@@ -349,6 +519,8 @@ def apply(
     heal_suppressor=None,
     catalog=None,
     force: bool = False,
+    settings_now: dict | None = None,
+    settings_store=None,
 ) -> dict:
     """Execute ``cfgset`` against the live box, serialized under a module lock.
 
@@ -365,6 +537,18 @@ def apply(
     ``force=True`` skips the hipfire conversation-guard (both the pre-veto
     and the per-step rechecks) for an operator overriding an abandoned
     conversation; it does NOT skip park()'s litellm route guard.
+
+    ``settings_now`` (Task 9; optional, None tolerated) is the caller's own
+    fresh read of the live settings store — plan_apply's pure input, exactly
+    like ``world`` above (this function does no I/O of its own to get it).
+    ``settings_store`` (optional, None tolerated) is the CLIENT that
+    executes a ``restore_settings`` step, deliberately kept separate from
+    ``settings_now``: reading "what's current" (to decide whether to plan a
+    restore) and writing "the restore itself" are different capabilities, so
+    a caller can supply one without the other. If the plan ends up
+    containing ``restore_settings`` anyway and no ``settings_store`` was
+    given, the step fails loudly (ValueError) rather than silently
+    no-opping — see ``_execute_step``.
 
     Returns an ApplyReport dict:
         {"completed": [<step>, ...], "failed": <step>|None,
@@ -384,6 +568,8 @@ def apply(
             heal_suppressor=heal_suppressor,
             catalog=catalog,
             force=force,
+            settings_now=settings_now,
+            settings_store=settings_store,
         )
 
 
@@ -401,8 +587,10 @@ def _run_apply(
     heal_suppressor=None,
     catalog=None,
     force=False,
+    settings_now=None,
+    settings_store=None,
 ) -> dict:
-    steps = plan_apply(cfgset, world)
+    steps = plan_apply(cfgset, world, settings_now=settings_now)
 
     # Veto BEFORE any mutation (and before the _previous snapshot — a refused
     # apply changes nothing, so there is nothing to revert): a plan that would
@@ -444,8 +632,9 @@ def _run_apply(
     log_event(events_path, "apply-start", {"name": cfgset.name})
 
     # FIRST mutation: capture pre-apply reality as the one-click revert set,
-    # before any step touches the box.
-    store.save_previous(_previous_set(world))
+    # before any step touches the box. settings_now rides along so reverting
+    # to "· previous" restores settings too (Task 9).
+    store.save_previous(_previous_set(world, settings_now))
 
     report: dict = {"completed": [], "failed": None, "error": None, "warnings": []}
 
@@ -468,6 +657,7 @@ def _run_apply(
                 heal_suppressor,
                 catalog,
                 force=force,
+                settings_store=settings_store,
             )
         except _HALT_EXCEPTIONS as exc:
             report["failed"] = step
@@ -479,7 +669,15 @@ def _run_apply(
             )
             return report
 
-        log_event(events_path, name, {k: v for k, v in step.items() if k != "step"})
+        # restore_settings carries the whole settings store as its payload —
+        # log a compact scope count instead of dumping it verbatim into
+        # events.jsonl.
+        detail = (
+            {"scopes": sum(len(v) for v in step["settings"].values())}
+            if name == "restore_settings"
+            else {k: v for k, v in step.items() if k != "step"}
+        )
+        log_event(events_path, name, detail)
         report["completed"].append(step)
 
     log_event(events_path, "apply-end", {"outcome": "ok"})
@@ -488,7 +686,7 @@ def _run_apply(
 
 def _execute_step(
     step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor=None,
-    catalog=None, force=False,
+    catalog=None, force=False, settings_store=None,
 ) -> None:
     name = step["step"]
     if name == "unload_lemonade":
@@ -530,16 +728,34 @@ def _execute_step(
             base.update(override)
             merged[tenant] = base
         policy_store.put(merged)
+    elif name == "restore_settings":
+        # Fail LOUDLY, never a silent no-op: if the plan says restore but no
+        # settings_store was wired into apply(), that's a real misconfiguration
+        # a caller needs to know about, not something to quietly skip past.
+        if settings_store is None:
+            raise ValueError(
+                "restore_settings step has no settings_store wired into apply(); "
+                "cannot restore settings"
+            )
+        settings_store.restore(step["settings"])
     else:  # pragma: no cover - plan_apply is the sole producer of steps
         raise AssertionError(f"unknown step {name!r}")
 
 
-def _previous_set(world: dict) -> ConfigSet:
+def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
     """Build the ``· previous`` revert snapshot from pre-apply world reality.
 
     ephemeral mirrors current load/park state (comfyui is always "leave" — a
     freed VRAM cache can't be meaningfully un-freed); durable records the old
     default route with activate_model_id=None (world carries no catalog id).
+
+    ``settings_now`` (Task 9) is stamped straight into this set's own
+    ``settings_snapshot``, so the one-click revert restores settings too:
+    applying "· previous" later diffs its snapshot (pre-apply settings)
+    against whatever is live BY THEN, and proposes a restore_settings step
+    if the original apply changed anything. ``None`` (no settings_store
+    wired into the apply that produced this snapshot) keeps the pre-Task-9
+    shape exactly — settings_snapshot stays None, same as an old set.
     """
     tenants = world["tenants"]
     lem_state = "loaded" if tenants["lemonade"]["state"] == "loaded" else "unloaded"
@@ -561,4 +777,5 @@ def _previous_set(world: dict) -> ConfigSet:
             "comfyui": {"state": "leave"},
             "hipfire": {"state": hip_state},
         },
+        settings_snapshot=settings_now,
     )

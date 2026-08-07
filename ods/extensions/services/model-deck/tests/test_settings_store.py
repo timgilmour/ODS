@@ -309,3 +309,110 @@ def test_normalization_is_scoped_to_the_args_namespace(tmp_path):
     store.put("engines", "sparky/vllm", "env", {"COUNT": 5})
 
     assert store.scope("engines", "sparky/vllm")["env"]["COUNT"] == 5
+
+
+# ===========================================================================
+# restore() — bulk replace (Task 9: sets snapshot the whole settings store)
+# ===========================================================================
+
+
+def test_restore_replaces_the_whole_store(tmp_path):
+    """A bulk restore is a real REPLACE, not a merge — whatever was there
+    before (sparky/vllm here) is gone if the restored data doesn't carry it."""
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engines", "sparky/vllm", "args", {"old": "1"})
+
+    store.restore({
+        "engines": {"autarch/lemonade": {"args": {"new": "2"}}},
+        "models": {}, "engine_models": {},
+    })
+
+    assert "sparky/vllm" not in store.get()["engines"]
+    assert store.scope("engines", "autarch/lemonade")["args"] == {"new": "2"}
+
+
+def test_restore_stamps_fresh_per_namespace_updated_ts(tmp_path):
+    """A restore is a write: the namespace's updated_ts is stamped NOW, not
+    carried over from whatever the snapshot recorded — settings_drift may
+    honestly flag it, even though nothing here reloads the running engine
+    (reload stays human)."""
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({
+        "engines": {"sparky/vllm": {
+            "args": {"x": "1"},
+            "updated_ts": {"args": "2020-01-01T00:00:00+00:00"},
+        }},
+        "models": {}, "engine_models": {},
+    })
+
+    ts = store.scope("engines", "sparky/vllm")["updated_ts"]["args"]
+    assert ts != "2020-01-01T00:00:00+00:00"
+
+
+def test_restore_only_stamps_namespaces_actually_present(tmp_path):
+    """An entry that never carried an env/container namespace doesn't grow
+    a fabricated timestamp for one it never had."""
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({
+        "engines": {"sparky/vllm": {"args": {"x": "1"}}},
+        "models": {}, "engine_models": {},
+    })
+
+    ts = store.scope("engines", "sparky/vllm")["updated_ts"]
+    assert set(ts) == {"args"}
+
+
+def test_restore_renormalizes_args(tmp_path):
+    """A snapshot captured before a normalization rule changed (or one that
+    simply rode in with a raw shape) gets the same normalize_args_map pass
+    put() applies on write — a singleton list collapses to its scalar and
+    becomes a string."""
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({
+        "engines": {"sparky/vllm": {"args": {"flag": [1]}}},
+        "models": {}, "engine_models": {},
+    })
+
+    assert store.scope("engines", "sparky/vllm")["args"]["flag"] == "1"
+
+
+def test_restore_heals_corrupt_entries_like_a_file_load(tmp_path):
+    """restore() validates through the same _load-style healing a corrupt
+    file read gets — a non-dict scope entry resets to {} instead of
+    raising or leaking a non-dict value out through get()/scope()."""
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({
+        "engines": {"sparky/vllm": "not-a-dict"},
+        "models": {}, "engine_models": {},
+    })
+
+    assert store.scope("engines", "sparky/vllm") == {}
+
+
+def test_restore_preserves_notes(tmp_path):
+    """Human rationale in notes is data the snapshot carries, not a
+    write-timestamp — restore must not discard or reset it."""
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({
+        "engines": {"sparky/vllm": {
+            "args": {"x": "1"}, "notes": {"args": "no --quantization: breaks the load"},
+        }},
+        "models": {}, "engine_models": {},
+    })
+
+    assert store.scope("engines", "sparky/vllm")["notes"]["args"] == (
+        "no --quantization: breaks the load"
+    )
+
+
+def test_restore_is_atomic_no_temp_files_left(tmp_path):
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({"engines": {}, "models": {}, "engine_models": {}})
+
+    assert list(tmp_path.glob("*.tmp")) == []

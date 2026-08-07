@@ -227,6 +227,46 @@ class SettingsStore:
             entry.setdefault("updated_ts", {})[namespace] = _now_iso()
             self._save(data)
 
+    def restore(self, data: dict) -> None:
+        """Bulk-REPLACE the entire store from ``data`` — a previously
+        captured ``get()`` snapshot (e.g. a config set's ``settings_snapshot``,
+        app.sets Task 9). Used by app.sets' ``restore_settings`` apply step
+        and nowhere else; a real write, not a merge.
+
+        ``data`` gets the same healing a corrupt file read gets (``_load``'s
+        per-kind/per-entry guards) — a snapshot is exactly as untrusted as a
+        file on disk: it rode through a pydantic JSON round-trip and, for the
+        auto-captured ``_previous`` set, may be older than the newest
+        healing rule. Every ``args`` namespace is re-normalized through
+        ``normalize_args_map``, the same pass ``put()`` applies on write, so
+        a snapshot captured before a normalization rule changed doesn't
+        persist a stale shape. Every namespace actually present in an entry
+        is stamped with a FRESH ``updated_ts`` — a restore is a real write,
+        so ``settings_drift`` may honestly flag it, even though nothing here
+        reloads the running engine (reload stays a human's call). ``notes``
+        is carried through unchanged (human rationale, not a write-clock).
+        """
+        if not isinstance(data, dict):
+            data = {}
+        healed = _empty()
+        for kind in KINDS:
+            value = data.get(kind)
+            if not isinstance(value, dict):
+                continue
+            healed[kind] = {key: self._heal_entry(entry) for key, entry in value.items()}
+
+        now = _now_iso()
+        for kind in KINDS:
+            for entry in healed[kind].values():
+                if "args" in entry:
+                    entry["args"] = normalize_args_map(entry["args"])
+                stamped = {ns: now for ns in NAMESPACES if ns in entry}
+                if stamped:
+                    entry["updated_ts"] = stamped
+
+        with self._lock:
+            self._save(healed)
+
     def forget(self, kind: str, key: str) -> None:
         with self._lock:
             data = self._load()

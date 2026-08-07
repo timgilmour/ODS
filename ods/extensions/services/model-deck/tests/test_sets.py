@@ -11,11 +11,13 @@ on the first failing step with an exact report. Clients are recording fakes.
 import threading
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.arbiter import HealSuppressor
 from app.engines import BusyError, EngineError, GuardError
 from app.events import tail_events
+from app.main import create_app
 from app.policy import DEFAULT_POLICIES, PolicyStore
 from app.sets import (
     PREVIOUS_NAME,
@@ -27,7 +29,7 @@ from app.sets import (
     plan_apply,
     slugify,
 )
-
+from app.settings_store import SettingsStore
 
 # ===========================================================================
 # Fakes + builders
@@ -1164,3 +1166,256 @@ def test_apply_load_step_without_catalog_still_works(tmp_path):
 
     assert report["failed"] is None
     assert clients["lemonade"].calls == [("load", "extra.d.gguf")]
+
+
+# ===========================================================================
+# Task 9 — sets snapshot the whole settings store (design decision 6,
+# 2026-08-07: a real ConfigSet has no placements, so the snapshot is the
+# WHOLE store, captured at save time).
+# ===========================================================================
+
+
+def _make_deck_app(tmp_path, monkeypatch):
+    """create_app() with set_store/settings_store pointed at tmp_path (real,
+    not faked — same posture as test_api.py's make_app for these two
+    stores). Returns (client, deck)."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    app = create_app()
+    deck = app.state.deck
+    deck["set_store"] = SetStore(tmp_path / "sets")
+    deck["settings_store"] = SettingsStore(tmp_path / "settings.json")
+    return TestClient(app), deck
+
+
+def test_saving_a_set_stamps_the_live_settings_store(tmp_path, monkeypatch):
+    """POST /api/sets with no settings_snapshot in the body -> the saved
+    file carries the store's current get() verbatim."""
+    client, deck = _make_deck_app(tmp_path, monkeypatch)
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "1"})
+
+    resp = client.post("/api/sets", json={"name": "Chat"})
+
+    assert resp.status_code == 200
+    saved = deck["set_store"].get("chat")
+    assert saved.settings_snapshot == deck["settings_store"].get()
+    assert saved.settings_snapshot["engines"]["sparky/vllm"]["args"] == {"x": "1"}
+
+
+def test_save_always_restamps_a_client_supplied_snapshot(tmp_path, monkeypatch):
+    """A body that DOES include settings_snapshot (a set round-tripped
+    through the UI) is overwritten with the live store: save means
+    'snapshot NOW'."""
+    client, deck = _make_deck_app(tmp_path, monkeypatch)
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "live"})
+    stale_snapshot = {
+        "engines": {"sparky/vllm": {"args": {"x": "STALE-CLIENT-VALUE"}}},
+        "models": {}, "engine_models": {},
+    }
+
+    resp = client.post(
+        "/api/sets", json={"name": "Chat", "settings_snapshot": stale_snapshot}
+    )
+
+    assert resp.status_code == 200
+    saved = deck["set_store"].get("chat")
+    assert saved.settings_snapshot == deck["settings_store"].get()
+    assert saved.settings_snapshot["engines"]["sparky/vllm"]["args"]["x"] == "live"
+
+
+def test_old_sets_without_snapshot_apply_exactly_as_today(tmp_path):
+    """ConfigSet(settings_snapshot=None): plan_apply emits no
+    restore_settings step; apply succeeds untouched, even when a live
+    settings store is wired in and would otherwise differ from... nothing,
+    because there is nothing to compare."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfg = ConfigSet(name="old", ephemeral={"lemonade": {"state": "loaded"}})
+    assert cfg.settings_snapshot is None
+
+    settings_now = {
+        "engines": {"sparky/vllm": {"args": {"x": "1"}}}, "models": {}, "engine_models": {},
+    }
+    plan = plan_apply(cfg, world, settings_now=settings_now)
+    assert plan == [{"step": "load_lemonade", "model": "extra.d.gguf"}]
+    assert not any(s["step"] == "restore_settings" for s in plan)
+
+    settings_store = SettingsStore(tmp_path / "settings.json")
+    report, clients = run_apply(
+        cfg, world, tmp_path, settings_now=settings_now, settings_store=settings_store
+    )
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("load", "extra.d.gguf")]
+    assert settings_store.get() == {"engines": {}, "models": {}, "engine_models": {}}
+
+
+def test_apply_restores_a_differing_snapshot_and_flags_drift_only(tmp_path):
+    """Snapshot differs from live store -> plan has restore_settings; after
+    apply the store equals the snapshot, updated_ts is FRESH (drift may
+    flag; nothing reloads — reload stays human)."""
+    world = make_world()
+    settings_store = SettingsStore(tmp_path / "settings.json")
+    settings_store.put("engines", "sparky/vllm", "args", {"x": "OLD-CURRENT"})
+    snapshot = {
+        "engines": {"sparky/vllm": {
+            "args": {"x": "SNAPSHOT-VALUE"},
+            "updated_ts": {"args": "2020-01-01T00:00:00+00:00"},
+        }},
+        "models": {}, "engine_models": {},
+    }
+    cfg = ConfigSet(name="restore-me", ephemeral={}, settings_snapshot=snapshot)
+
+    plan = plan_apply(cfg, world, settings_now=settings_store.get())
+    assert plan == [{"step": "restore_settings", "settings": snapshot}]
+
+    report, _ = run_apply(
+        cfg, world, tmp_path,
+        settings_now=settings_store.get(), settings_store=settings_store,
+    )
+
+    assert report["failed"] is None
+    assert [s["step"] for s in report["completed"]] == ["restore_settings"]
+    after = settings_store.get()
+    assert after["engines"]["sparky/vllm"]["args"] == {"x": "SNAPSHOT-VALUE"}
+    fresh_ts = after["engines"]["sparky/vllm"]["updated_ts"]["args"]
+    assert fresh_ts != "2020-01-01T00:00:00+00:00"
+
+
+def test_apply_restore_settings_without_store_fails_loudly(tmp_path):
+    """apply() threads settings_store through to _execute_step; a plan that
+    contains restore_settings but no settings_store wired in must fail
+    loudly (reported as the failed step), never silently no-op."""
+    world = make_world()
+    snapshot = {
+        "engines": {"sparky/vllm": {"args": {"x": "SNAPSHOT"}}}, "models": {}, "engine_models": {},
+    }
+    current = {
+        "engines": {"sparky/vllm": {"args": {"x": "DIFFERENT"}}}, "models": {}, "engine_models": {},
+    }
+    cfg = ConfigSet(name="broken", ephemeral={}, settings_snapshot=snapshot)
+
+    report, _ = run_apply(cfg, world, tmp_path, settings_now=current)  # no settings_store
+
+    assert report["failed"] == {"step": "restore_settings", "settings": snapshot}
+    assert "settings_store" in report["error"]
+
+
+def test_previous_set_carries_the_pre_apply_store(tmp_path):
+    """_previous_set stamps the pre-apply store into its OWN
+    settings_snapshot, so the one-click revert also carries settings."""
+    world = make_world(lemonade=("loaded", "extra.live.gguf"), default_route="extra.d.gguf")
+    settings_store = SettingsStore(tmp_path / "settings.json")
+    settings_store.put("engines", "sparky/vllm", "args", {"x": "pre-apply"})
+    pre_apply_settings = settings_store.get()
+
+    cfg = ConfigSet(name="noop", ephemeral={"comfyui": {"state": "leave"}})
+    _, clients = run_apply(
+        cfg, world, tmp_path,
+        settings_now=pre_apply_settings, settings_store=settings_store,
+    )
+
+    prev = clients["store"].get(RESERVED_SLUG)
+    assert prev.settings_snapshot == pre_apply_settings
+
+
+def test_previous_set_revert_round_trip_restores_settings(tmp_path):
+    """Round trip: apply mutates settings, then plan_apply(prev, ...)
+    against the now-mutated live store proposes restoring the pre-apply
+    values back — the whole point of the one-click revert."""
+    world = make_world()
+    settings_store = SettingsStore(tmp_path / "settings.json")
+    settings_store.put("engines", "sparky/vllm", "args", {"x": "pre-apply"})
+    pre_apply_settings = settings_store.get()
+
+    cfg = ConfigSet(name="noop", ephemeral={"comfyui": {"state": "leave"}})
+    _, clients = run_apply(
+        cfg, world, tmp_path,
+        settings_now=pre_apply_settings, settings_store=settings_store,
+    )
+    prev = clients["store"].get(RESERVED_SLUG)
+
+    # Something else changes settings after the apply completed.
+    settings_store.put("engines", "sparky/vllm", "args", {"x": "changed-after-apply"})
+
+    plan = plan_apply(prev, world, settings_now=settings_store.get())
+    assert {"step": "restore_settings", "settings": pre_apply_settings} in plan
+
+
+def test_settings_diff_route_and_adopt_current(tmp_path, monkeypatch):
+    client, deck = _make_deck_app(tmp_path, monkeypatch)
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "OLD"})
+
+    resp = client.post("/api/sets", json={"name": "Chat"})
+    assert resp.status_code == 200
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "NEW"})
+
+    resp = client.get("/api/sets/chat/settings-diff")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_snapshot"] is True
+    assert body["changed"] == [
+        {"scope": "engines/sparky/vllm", "key": "args:x", "snapshot": "OLD", "current": "NEW"}
+    ]
+    assert body["added"] == []
+    assert body["removed"] == []
+
+    resp = client.post("/api/sets/chat/adopt", json={"mode": "current"})
+    assert resp.status_code == 200
+    updated = deck["set_store"].get("chat")
+    assert updated.settings_snapshot == deck["settings_store"].get()
+    assert updated.settings_snapshot["engines"]["sparky/vllm"]["args"]["x"] == "NEW"
+
+    # After adopting "current", the diff is clean again.
+    resp = client.get("/api/sets/chat/settings-diff")
+    assert resp.json() == {"changed": [], "added": [], "removed": [], "has_snapshot": True}
+
+    # 404s
+    assert client.get("/api/sets/nope/settings-diff").status_code == 404
+    assert client.post("/api/sets/nope/adopt", json={"mode": "current"}).status_code == 404
+
+    # 422 bad mode
+    resp = client.post("/api/sets/chat/adopt", json={"mode": "bogus"})
+    assert resp.status_code == 422
+
+
+def test_settings_diff_route_reports_has_snapshot_false_for_old_sets(tmp_path, monkeypatch):
+    client, deck = _make_deck_app(tmp_path, monkeypatch)
+    deck["set_store"].save(ConfigSet(name="Legacy"))  # settings_snapshot=None
+
+    resp = client.get("/api/sets/legacy/settings-diff")
+    assert resp.status_code == 200
+    assert resp.json() == {"changed": [], "added": [], "removed": [], "has_snapshot": False}
+
+
+def test_adopt_selective_takes_named_keys_only(tmp_path, monkeypatch):
+    """selective adopt takes ONLY the requested diff entries from the live
+    store into the saved snapshot — a sibling key not named stays as the
+    old snapshot recorded it."""
+    client, deck = _make_deck_app(tmp_path, monkeypatch)
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "OLD", "y": "OLD-Y"})
+
+    resp = client.post("/api/sets", json={"name": "Chat"})
+    assert resp.status_code == 200
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "NEW", "y": "NEW-Y"})
+
+    resp = client.post("/api/sets/chat/adopt", json={
+        "mode": "selective",
+        "keys": [{"scope": "engines/sparky/vllm", "key": "args:x"}],
+    })
+    assert resp.status_code == 200
+
+    updated = deck["set_store"].get("chat")
+    assert updated.settings_snapshot["engines"]["sparky/vllm"]["args"]["x"] == "NEW"
+    assert updated.settings_snapshot["engines"]["sparky/vllm"]["args"]["y"] == "OLD-Y"
+
+
+def test_adopt_selective_rejects_malformed_key_entries(tmp_path, monkeypatch):
+    """A malformed key entry (missing scope/key) fails loudly (422 via
+    ValueError), not a silent skip."""
+    client, deck = _make_deck_app(tmp_path, monkeypatch)
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "1"})
+    client.post("/api/sets", json={"name": "Chat"})
+
+    resp = client.post("/api/sets/chat/adopt", json={
+        "mode": "selective",
+        "keys": [{"scope": "engines/sparky/vllm"}],  # missing "key"
+    })
+    assert resp.status_code == 422

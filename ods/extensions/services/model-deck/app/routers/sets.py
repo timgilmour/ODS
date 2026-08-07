@@ -21,15 +21,46 @@ stall the event loop.
 ``apply`` also records the resulting intent (``_record_intent`` below) for
 each step that actually completed — a set apply is as deliberate as a button
 press on the control routes, and the reconciler must see it the same way.
+
+Task 9 (2026-08-07): every saved set now carries the ENTIRE settings store,
+captured at save time — ``create_set`` always re-stamps ``settings_snapshot``
+from the live store, ignoring whatever the client sent (save means "snapshot
+NOW"). ``settings_diff``/``adopt_set`` below let a human inspect and
+reconcile drift between a saved snapshot and the live store without a full
+re-apply; ``preview``/``apply`` both now read the live store fresh (same
+"never reuse a stale snapshot" posture as ``World`` above) so a
+``restore_settings`` step shows up wherever it's actually going to fire.
 """
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 
 from app.routers import build_world_snapshot
-from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, plan_apply, slugify
+from app.sets import (
+    PREVIOUS_NAME,
+    RESERVED_SLUG,
+    ConfigSet,
+    adopt_selective,
+    diff_snapshot,
+    plan_apply,
+    slugify,
+)
 from app.sets import apply as sets_apply
 
 router = APIRouter(prefix="/sets", tags=["sets"])
+
+_ADOPT_MODES = frozenset({"current", "selective"})
+
+
+class AdoptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    # Each entry is the {"scope", "key"} shape diff_snapshot emits — plain
+    # dicts, not a stricter sub-model, so a malformed entry fails loudly via
+    # adopt_selective's own ValueError (-> 422) rather than FastAPI's
+    # differently-shaped request-validation error.
+    keys: list[dict] = []
 
 # preview()'s duration estimate, seconds per step kind. Unlisted step kinds
 # (unload_lemonade, free_comfyui, park_hipfire, load_lemonade, policy_patch)
@@ -48,10 +79,17 @@ def list_sets(request: Request) -> dict:
 
 @router.post("")
 def create_set(cfgset: ConfigSet, request: Request, overwrite: bool = False) -> dict:
-    store = request.app.state.deck["set_store"]
+    deck = request.app.state.deck
+    store = deck["set_store"]
     slug = slugify(cfgset.name)
     if not overwrite and store.get(slug) is not None:
         raise HTTPException(status_code=409, detail=f"set {slug!r} already exists")
+    # Save = "snapshot NOW" (Task 9, design decision 6): the live settings
+    # store, ALWAYS — never whatever the client sent, even a set that
+    # round-tripped through the UI carrying its own (now-stale) snapshot.
+    # A saved set is a whole-store recipe captured at save time, not
+    # something a client gets to author directly.
+    cfgset = cfgset.model_copy(update={"settings_snapshot": deck["settings_store"].get()})
     saved_slug = store.save(cfgset)
     return {"slug": saved_slug}
 
@@ -75,6 +113,46 @@ def delete_set(slug: str, request: Request) -> dict:
     return {"status": "ok"}
 
 
+@router.get("/{slug}/settings-diff")
+def settings_diff(slug: str, request: Request) -> dict:
+    """Diff a saved set's captured settings_snapshot against the live
+    settings store. ``has_snapshot`` lives HERE, not inside diff_snapshot
+    (Task 9): an old set (no snapshot) diffs as empty for the same reason a
+    set that IS identical to the live store does, so the caller needs the
+    extra bit to tell "nothing to compare" from "compared, no drift"."""
+    deck = request.app.state.deck
+    cfgset = deck["set_store"].get(slug)
+    if cfgset is None:
+        raise HTTPException(status_code=404, detail=f"unknown set {slug!r}")
+
+    diff = diff_snapshot(cfgset.settings_snapshot, deck["settings_store"].get())
+    return {**diff, "has_snapshot": cfgset.settings_snapshot is not None}
+
+
+@router.post("/{slug}/adopt")
+def adopt_set(slug: str, body: AdoptRequest, request: Request) -> ConfigSet:
+    """Update the SAVED set's settings_snapshot without a full re-apply.
+    ``mode="current"`` is a full re-stamp (identical to what saving does);
+    ``mode="selective"`` takes only the named diff entries (``body.keys``,
+    the {"scope", "key"} shape settings-diff emits) from the live store."""
+    deck = request.app.state.deck
+    store = deck["set_store"]
+    cfgset = store.get(slug)
+    if cfgset is None:
+        raise HTTPException(status_code=404, detail=f"unknown set {slug!r}")
+    if body.mode not in _ADOPT_MODES:
+        raise ValueError(f"unknown adopt mode {body.mode!r}; expected one of {sorted(_ADOPT_MODES)}")
+
+    current = deck["settings_store"].get()
+    new_snapshot = (
+        current if body.mode == "current"
+        else adopt_selective(cfgset.settings_snapshot, current, body.keys)
+    )
+    updated = cfgset.model_copy(update={"settings_snapshot": new_snapshot})
+    store.save(updated)
+    return updated
+
+
 @router.post("/{slug}/preview")
 def preview_set(slug: str, request: Request) -> dict:
     deck = request.app.state.deck
@@ -83,7 +161,7 @@ def preview_set(slug: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail=f"unknown set {slug!r}")
 
     world = build_world_snapshot(deck)
-    steps = plan_apply(cfgset, world)
+    steps = plan_apply(cfgset, world, settings_now=deck["settings_store"].get())
     estimate_s = sum(_STEP_DURATIONS.get(step["step"], _DEFAULT_DURATION) for step in steps)
     return {"steps": steps, "estimate_s": estimate_s}
 
@@ -112,6 +190,8 @@ def apply_set(slug: str, request: Request, force: bool = False) -> dict:
         events_path=deck["events_path"],
         heal_suppressor=deck["heal_suppressor"],
         catalog=deck["catalog"],
+        settings_now=deck["settings_store"].get(),
+        settings_store=deck["settings_store"],
     )
     _record_intent(deck, report)
     return report
