@@ -5,6 +5,8 @@ container). Namespaces exist because a real profile sets far more than
 flags: VLLM_USE_FLASHINFER_SAMPLER=1, a pinned image digest, shm_size 16g.
 """
 
+import json
+
 import pytest
 
 from app.settings_store import CONTAINER_ALLOWLIST, SettingsStore
@@ -183,19 +185,86 @@ def test_bare_flag_and_string_arg_values_pass_through_unnormalized(tmp_path):
     assert scope["reasoning-parser"] == "qwen3"
 
 
-def test_empty_list_arg_value_warns_and_normalizes_to_true(tmp_path):
-    """Edge case ruled to be handled at this layer: an empty list has no
-    argline representation — it renders as a bare flag and reparses as
-    True (see app.argline module docstring). This store's posture is
-    warn-and-normalize, not reject: the container allowlist is the one
-    hard validation failure here, everything else about a value's shape
-    is fixed up rather than blocking the save."""
+def test_empty_list_arg_value_warns_and_drops_the_key(tmp_path):
+    """RULING 2026-08-07 (review): overturns an earlier True-normalization.
+    render_argline({"k": []}) and render_argline({"k": True}) emit
+    byte-identical argv, so round-trip congruence with app.argline never
+    distinguished the two; a bare flag is not what an operator meant by
+    an empty list; and app.intent's idiom ("deleting a key is the only
+    way to say 'no opinion'") reads a zero-value list the same way.
+    Warned, not silently dropped — the container allowlist remains the
+    one hard validation failure in this module."""
     store = SettingsStore(tmp_path / "s.json")
 
     with pytest.warns(UserWarning, match="empty list"):
         store.put("engines", "sparky/vllm", "args", {"served-model-name": []})
 
-    assert store.scope("engines", "sparky/vllm")["args"]["served-model-name"] is True
+    assert "served-model-name" not in store.scope("engines", "sparky/vllm").get("args", {})
+
+
+def test_put_with_only_empty_list_values_is_a_clean_no_op_merge(tmp_path):
+    """A put() whose only values are empty lists must not crash or corrupt
+    the namespace — it merges an empty dict, which is a no-op on the
+    existing keys (the write to disk still happens; see put()'s docstring
+    for why that's an acceptable no-op rather than a special case)."""
+    store = SettingsStore(tmp_path / "s.json")
+    store.put("engines", "sparky/vllm", "args", {"a": "1"})
+
+    with pytest.warns(UserWarning, match="empty list"):
+        store.put("engines", "sparky/vllm", "args", {"tags": []})
+
+    assert store.scope("engines", "sparky/vllm")["args"] == {"a": "1"}
+
+
+def test_corrupt_scope_entry_heals_to_empty_dict(tmp_path):
+    """One level deeper than the existing per-kind self-heal: a scope
+    entry that is not a dict (hand-edit gone wrong, partial write) resets
+    to {} instead of leaking a bare value out of get()/scope()."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"engines": {"sparky/vllm": "oops"}}))
+    store = SettingsStore(path)
+
+    assert store.scope("engines", "sparky/vllm") == {}
+    assert store.get()["engines"] == {"sparky/vllm": {}}
+
+
+def test_put_succeeds_after_a_corrupt_scope_entry_heals(tmp_path):
+    """Same corruption as above must not crash put() with an uncaught
+    AttributeError (the pre-fix behavior: .setdefault() on a str)."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"engines": {"sparky/vllm": "oops"}}))
+    store = SettingsStore(path)
+
+    store.put("engines", "sparky/vllm", "args", {"a": "1"})
+
+    assert store.scope("engines", "sparky/vllm")["args"] == {"a": "1"}
+
+
+def test_corrupt_namespace_within_an_entry_heals_to_empty_dict(tmp_path):
+    """Same posture, one level further: args/env/container are each
+    individually guarded against being anything other than a dict, so one
+    corrupt namespace doesn't take a healthy sibling namespace down with it."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({
+        "engines": {"sparky/vllm": {"args": "oops", "env": {"a": "1"}}}
+    }))
+    store = SettingsStore(path)
+
+    scope = store.scope("engines", "sparky/vllm")
+    assert scope["args"] == {}
+    assert scope["env"] == {"a": "1"}
+
+
+def test_put_succeeds_after_a_corrupt_namespace_heals(tmp_path):
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({
+        "engines": {"sparky/vllm": {"args": "oops"}}
+    }))
+    store = SettingsStore(path)
+
+    store.put("engines", "sparky/vllm", "args", {"a": "1"})
+
+    assert store.scope("engines", "sparky/vllm")["args"] == {"a": "1"}
 
 
 def test_normalization_is_scoped_to_the_args_namespace(tmp_path):
