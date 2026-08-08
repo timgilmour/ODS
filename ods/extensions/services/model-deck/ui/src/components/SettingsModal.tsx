@@ -13,26 +13,30 @@ import {
   type Widget,
 } from "../api";
 import { startingValueFor } from "../model/catalogFilter";
+import {
+  abandonEdit,
+  addOption,
+  applyParsed,
+  beginEdit,
+  commitEdit,
+  emptyEdit,
+  forSave,
+  hasChanges,
+  removeChip,
+  type EditState,
+} from "../model/editState";
 import { labels, messages } from "../model/messages";
 import {
-  bufferRemove,
-  bufferSet,
   buildChips,
-  discardPendingAdd,
   displayValue,
-  emptyBuffer,
-  isDirty,
   isListEdit,
   LAYER_FOR_KIND,
   mergedArgsForPreview,
   parseValueText,
   POSITIONAL_KEY,
   scopeKeys,
-  supersedePendingAdd,
   toPuts,
-  type Buffer,
   type ChipView,
-  type PendingAdd,
 } from "../model/settingsView";
 import Banner from "../ui/Banner";
 import Modal from "../ui/Modal";
@@ -101,7 +105,11 @@ export default function SettingsModal({
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [kind, setKind] = useState<SettingsKind>(model ? "engine_models" : "engines");
-  const [buffer, setBuffer] = useState<Buffer>(emptyBuffer);
+  // The uncommitted edits, as a state machine — see model/editState. Every
+  // change to them goes through one of its transitions; a `bufferSet` reached
+  // straight from this component is how three leaks of the same defect
+  // happened, and none of them were reachable by a test from here.
+  const [edit, setEdit] = useState<EditState>(emptyEdit);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -121,16 +129,9 @@ export default function SettingsModal({
   // blur handler defers to it.
   const cancelledEdit = useRef(false);
 
-  // The brand-new add (if any) whose editor has not committed yet. "+ Add
-  // option" must buffer a starting value before the chip — and therefore the
-  // editor — can exist at all, and for the 166-of-274 live options with no
-  // catalog default that value is `""`. Every cancel path below runs it
-  // through `cancelEdit`, so an add the operator walked away from leaves the
-  // buffer exactly as clean as it found it instead of shipping `--flag ''` at
-  // the next Save. See settingsView's `discardPendingAdd`.
-  const pendingAdd = useRef<PendingAdd | null>(null);
-
-  const dirty = isDirty(buffer);
+  // Asks `forSave`, not the raw buffer: a brand-new add whose editor has not
+  // committed a value yet is scaffolding, not a change (editState).
+  const dirty = hasChanges(edit);
 
   useEffect(() => {
     let alive = true;
@@ -178,7 +179,10 @@ export default function SettingsModal({
     }
     let cancelled = false;
     const id = setTimeout(() => {
-      previewRender(mergedArgsForPreview(effective.resolved, buffer), {
+      // `forSave`, not the raw buffer: the preview is labelled as the command
+      // that will run, so it must not render a `--flag ''` that Save would
+      // drop.
+      previewRender(mergedArgsForPreview(effective.resolved, forSave(edit)), {
         node,
         engine,
         model: model ?? undefined,
@@ -204,10 +208,12 @@ export default function SettingsModal({
       cancelled = true;
       clearTimeout(id);
     };
-  }, [buffer, dirty, effective, node, engine, model]);
+  }, [edit, dirty, effective, node, engine, model]);
 
   const resolved = effective?.resolved ?? {};
-  const { declared, applied } = buildChips(resolved, buffer, kind);
+  // The RAW buffer, deliberately: a provisional add's chip has to render —
+  // that buffered set exists for no other reason.
+  const { declared, applied } = buildChips(resolved, edit.buffer, kind);
 
   // Warnings describe what the server currently HOLDS (validate_settings runs
   // over the saved resolution, app/routers/settings.py:get_effective), so a
@@ -229,27 +235,25 @@ export default function SettingsModal({
     return catalog?.options[name]?.widget ?? "text";
   }
 
-  function startEdit(name: string, value: ArgValue) {
+  /** Point the inline editor at `name` WITHOUT touching the edit state — the
+   * caller has already made whatever transition applies. */
+  function openEditor(name: string, value: ArgValue) {
     cancelledEdit.current = false;
-    // Moving to another chip's editor abandons a still-provisional add, and
-    // nothing else will take its `""` back out — a `select` has no onBlur to
-    // route through `commit`. handleAddOption re-arms this immediately AFTER
-    // calling startEdit.
-    const add = pendingAdd.current;
-    pendingAdd.current = null;
-    setBuffer((b) => supersedePendingAdd(b, add, name));
     setPopover(null);
     setEditing(name);
     setDraft(displayValue(value));
   }
 
+  function startEdit(name: string, value: ArgValue) {
+    setEdit((s) => beginEdit(s, name));
+    openEditor(name, value);
+  }
+
   /** Closes an editor WITHOUT committing, undoing a brand-new add that never
-   * got a value (see `pendingAdd`). Safe on every other edit: with no pending
-   * add recorded it is exactly the old `setEditing(null)`. */
+   * got a value. Safe on every other edit: with no add pending, `abandonEdit`
+   * is exactly the old `setEditing(null)`. */
   function cancelEdit() {
-    const add = pendingAdd.current;
-    pendingAdd.current = null;
-    if (add) setBuffer((b) => discardPendingAdd(b, add));
+    setEdit(abandonEdit);
     setEditing(null);
   }
 
@@ -268,6 +272,17 @@ export default function SettingsModal({
     setAllOptionsOpen(true);
   }
 
+  /** "Import argline" — same focus-steal hazard as `openAllOptions`, and the
+   * same answer. Left unguarded it also stranded a `select`/`toggle` add
+   * (no onBlur to cancel it) as provisional right through the import, so an
+   * imported value landing on that same key could be silently deleted by the
+   * next Escape or the next chip click. */
+  function openImport() {
+    cancelledEdit.current = true;
+    cancelEdit();
+    setImportOpen(true);
+  }
+
   /** All-options modal's onAdd — fired by both its "+" (unset row) and its
    * "✓" (already-set row), since AllOptionsModal itself has no opinion on
    * what should happen next, only whether `name` was in `setNames`.
@@ -280,10 +295,11 @@ export default function SettingsModal({
    * at the panel's current write scope, then its editor opens the same way
    * — one code path for "add" and "jump to" alike.
    *
-   * That buffered set is provisional until the editor commits: it is recorded
-   * in `pendingAdd` so every cancel path can take it back out (final branch
-   * review, 2026-08-07 — F1). Only the ADD needs this, not the "jump to": an
-   * existing chip's buffer entry was already the operator's. */
+   * Whether that buffered set counts as a decision is `addOption`'s call, not
+   * this component's: an empty starting value is scaffolding every exit path
+   * takes back out, a toggle's `true` or a real catalog default is already
+   * the answer. Only the ADD goes through it, not the "jump to" — an existing
+   * chip's buffer entry was already the operator's. */
   function handleAddOption(name: string) {
     setAllOptionsOpen(false);
     const existing = declared.find((c) => c.name === name);
@@ -292,14 +308,10 @@ export default function SettingsModal({
       return;
     }
     const value = startingValueFor(catalog?.options[name]);
-    setBuffer((b) => bufferSet(b, kind, name, value));
-    startEdit(name, value);
-    // AFTER startEdit (which clears it): this buffered set exists only so the
-    // chip and its editor can render, and until the editor commits it is not
-    // an operator decision — `cancelEdit` takes it back out. The kind is
-    // captured with the name because the scope segmented control can move
-    // `kind` on while this editor is open.
-    pendingAdd.current = { name, kind };
+    // `addOption`, not `startEdit` + a set: `beginEdit` would read this as the
+    // operator moving on from the add it is in the middle of creating.
+    setEdit((s) => addOption(s, kind, name, value));
+    openEditor(name, value);
   }
 
   /** AllOptionsModal's Refresh got a fresh harvest — refetch the catalog so
@@ -313,26 +325,14 @@ export default function SettingsModal({
   }
 
   function applyEdit(name: string, value: ArgValue) {
-    // A real commit: the add is now the operator's, not this panel's
-    // scaffolding, so it is no longer a candidate for `cancelEdit`.
-    pendingAdd.current = null;
-    setBuffer((b) => bufferSet(b, kind, name, value));
+    setEdit((s) => commitEdit(s, kind, name, value));
     setEditing(null);
   }
 
   /** Only ever called from a `setAtKind` chip — see the component docstring's
    * remove guard. */
   function removeAt(name: string) {
-    // Clearing this is not optional: the pending set is gone after this call,
-    // so a later `cancelEdit` would turn `discardPendingAdd` into a genuine
-    // `removes` entry naming a key the scope never had — the exact PUT the
-    // component docstring's remove guard exists to prevent. Removing a
-    // DIFFERENT chip abandons the add instead, so it goes out first (its own
-    // `bufferRemove` below is the undo when the two are the same key —
-    // supersedePendingAdd stands aside for that case).
-    const add = pendingAdd.current;
-    pendingAdd.current = null;
-    setBuffer((b) => bufferRemove(supersedePendingAdd(b, add, name), kind, name));
+    setEdit((s) => removeChip(s, kind, name));
     setEditing(null);
     setPopover(null);
   }
@@ -350,7 +350,11 @@ export default function SettingsModal({
       // can fail exactly the same way, and it would be guessing at a prior
       // state this panel does not hold. The modal stays open with the error;
       // the refetch on close-and-reopen is what shows the truth.
-      for (const put of toPuts(buffer, scopeKeys(node, engine, model))) {
+      // `forSave`, not `edit.buffer`: Save is an exit from an open editor just
+      // as Escape is, and the only one no cancel path covers — `select` and
+      // `toggle` have no onBlur, so the operator can click Save with a
+      // never-committed add still on screen.
+      for (const put of toPuts(forSave(edit), scopeKeys(node, engine, model))) {
         await putSettings(
           put.kind,
           put.key,
@@ -375,13 +379,7 @@ export default function SettingsModal({
         engine,
         model: model ?? undefined,
       });
-      setBuffer((b) => {
-        let next = b;
-        for (const [name, value] of Object.entries(res.parsed)) {
-          next = bufferSet(next, kind, name, value);
-        }
-        return next;
-      });
+      setEdit((s) => applyParsed(s, kind, res.parsed));
       setImportWarnings(res.warnings);
       setImportOpen(false);
       setImportText("");
@@ -692,11 +690,12 @@ export default function SettingsModal({
                       setKind(k);
                       // Also a cancel path for a never-committed add: the
                       // blur that would have committed a typed draft fires
-                      // first (and clears `pendingAdd` on its way through
-                      // applyEdit), and where it does not fire at all — React
-                      // unmounting the focused input — this is what stops an
-                      // untouched add from being stranded in the OLD kind's
-                      // buffer, which is why `PendingAdd` carries its kind.
+                      // first (and `commitEdit` settles the add on its way
+                      // through), and where it does not fire at all — React
+                      // unmounting the focused input, or a `select` that has
+                      // no onBlur — this is what stops an untouched add from
+                      // being stranded in the OLD kind's buffer, which is why
+                      // `PendingAdd` carries its kind.
                       cancelEdit();
                       setPopover(null);
                     }}
@@ -723,7 +722,7 @@ export default function SettingsModal({
               <button type="button" title={labels.addOptionTitle} onClick={openAllOptions}>
                 {labels.addOption}
               </button>
-              <button type="button" onClick={() => setImportOpen(true)}>
+              <button type="button" onClick={openImport}>
                 {labels.importArgline}
               </button>
             </div>

@@ -221,8 +221,8 @@ export interface PendingAdd {
  * "+ Add option" has to buffer a starting value immediately — the chip is
  * rendered FROM the buffer (buildChips's "pending set on a key `resolved`
  * doesn't have at all" branch), so there is no chip, and therefore no editor,
- * until the set exists. For the 166-of-274 live vLLM options with no catalog
- * default that starting value is `""` (catalogFilter's `startingValueFor`),
+ * until the set exists. For the 95 live vLLM options that start at `""`
+ * (catalogFilter's `startingValueFor` — see editState's `isProvisional`),
  * and the editor's own empty-means-cancel rule (SettingsModal's `commit`)
  * deliberately does NOT write `""` back — so an operator who adds an option
  * and then Escapes, blurs, or walks away left the `""` sitting in the buffer,
@@ -237,35 +237,6 @@ export interface PendingAdd {
 export function discardPendingAdd(b: Buffer, add: PendingAdd | null): Buffer {
   if (add === null) return b;
   return bufferRemove(b, add.kind, add.name);
-}
-
-/** Drops a still-provisional add that the operator walked away from by acting
- * on `name` instead — starting another chip's editor, or removing another
- * chip.
- *
- * `discardPendingAdd` covers the paths that run through SettingsModal's
- * `cancelEdit`; those all say "this editor is closing with nothing chosen".
- * `startEdit` and `removeAt` say something different — "I am now doing THIS
- * instead" — and used to answer it by dropping only the `PendingAdd`
- * reference, stranding its `""` in the buffer for the next Save (F1
- * re-review). The text editor masked it: moving focus fires its `onBlur` →
- * `commit`, whose empty branch cancels. A `select` has no onBlur, so the leak
- * was reachable there with one click.
- *
- * Acting on the add's OWN key is not abandonment and is deliberately left
- * alone: `applyEdit` commits it, and `removeAt`'s `bufferRemove` is itself the
- * undo (it deletes a pending set and records no removal). Discarding first
- * would leave that call nothing to delete and turn it into a genuine `removes`
- * entry naming a key the scope never had. Callers still clear their
- * `PendingAdd` afterwards in every case — the add stops being provisional
- * either way. */
-export function supersedePendingAdd(
-  b: Buffer,
-  add: PendingAdd | null,
-  name: string,
-): Buffer {
-  if (add === null || add.name === name) return b;
-  return discardPendingAdd(b, add);
 }
 
 export function isDirty(b: Buffer): boolean {

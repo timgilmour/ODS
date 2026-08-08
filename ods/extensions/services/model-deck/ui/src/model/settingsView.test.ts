@@ -15,7 +15,6 @@ import {
   POSITIONAL_KEY,
   scopeKeys,
   settingsIdentityFor,
-  supersedePendingAdd,
   toPuts,
 } from "./settingsView";
 
@@ -109,8 +108,8 @@ describe("buffer primitives", () => {
 describe("discardPendingAdd", () => {
   // F1, final branch review 2026-08-07. "+ Add option" has to buffer a
   // starting value before the chip (and so the editor) can render, and for
-  // the 166-of-274 live vLLM options with no catalog default that value is
-  // `""` (catalogFilter's startingValueFor). Abandoning that editor —
+  // the 95 live vLLM options that start at `""` (catalogFilter's
+  // startingValueFor) that value is empty. Abandoning that editor —
   // Escape, an empty blur, opening the all-options list again, switching
   // write scope — must leave nothing behind, or the next Save ships
   // `--flag ''`.
@@ -159,65 +158,6 @@ describe("discardPendingAdd", () => {
   it("is a no-op with no add pending — every non-add cancel path", () => {
     const b = bufferSet(emptyBuffer, "engines", "max-model-len", "8192");
     expect(discardPendingAdd(b, null)).toBe(b);
-  });
-});
-
-describe("supersedePendingAdd", () => {
-  // F1 re-review, 2026-08-08. `discardPendingAdd` closed the cancel paths that
-  // run through SettingsModal's `cancelEdit` (Escape, empty blur, scope
-  // switch, re-opening the all-options list). It did NOT close the paths that
-  // simply move on to ANOTHER chip — `startEdit` and `removeAt` — which only
-  // dropped the PendingAdd reference and left its buffered `""` behind. The
-  // text editor hides that: blur fires `commit`, whose empty branch cancels.
-  // The `select` widget has no onBlur at all, so a select-widget add walked
-  // away from by clicking a second chip shipped `--flag ''` at the next Save.
-  it("an add abandoned by acting on a different key leaves the buffer clean", () => {
-    const added = bufferSet(emptyBuffer, "engines", "cpu-offload-params", "");
-
-    const b = supersedePendingAdd(added, { name: "cpu-offload-params", kind: "engines" }, "seed");
-
-    expect(isDirty(b)).toBe(false);
-    expect(toPuts(b, scopeKeys("sparky", "vllm", "m"))).toEqual([]);
-  });
-
-  it("leaves the buffer to the caller when the action targets the add's own key", () => {
-    // `removeAt` on the pending add itself: its own `bufferRemove` is the undo
-    // (it drops a pending set and records NO removal), so discarding first
-    // would leave that call with no set to drop and turn it into a real
-    // `removes` entry naming a key the scope never had.
-    const added = bufferSet(emptyBuffer, "engines", "cpu-offload-params", "");
-
-    const b = supersedePendingAdd(
-      added,
-      { name: "cpu-offload-params", kind: "engines" },
-      "cpu-offload-params",
-    );
-
-    expect(b).toBe(added);
-    expect(bufferRemove(b, "engines", "cpu-offload-params").removes.engines ?? []).not.toContain(
-      "cpu-offload-params",
-    );
-  });
-
-  it("is a no-op with no add pending — the ordinary edit and remove", () => {
-    const b = bufferSet(emptyBuffer, "engines", "max-model-len", "8192");
-    expect(supersedePendingAdd(b, null, "seed")).toBe(b);
-  });
-
-  it("matches on name alone, so a scope switch mid-edit still undoes the add", () => {
-    // The add was buffered at `engine_models`; the panel's write scope has
-    // since moved to `engines`, so the next chip clicked is a DIFFERENT key at
-    // a different kind. The add is keyed by the kind it was buffered at.
-    const added = bufferSet(emptyBuffer, "engine_models", "offload-params", "");
-
-    const b = supersedePendingAdd(
-      added,
-      { name: "offload-params", kind: "engine_models" },
-      "max-model-len",
-    );
-
-    expect(b.sets.engine_models?.["offload-params"]).toBeUndefined();
-    expect(b.removes.engine_models ?? []).not.toContain("offload-params");
   });
 });
 
