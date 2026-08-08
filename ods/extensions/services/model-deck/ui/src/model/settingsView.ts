@@ -145,6 +145,15 @@ export interface ChipView {
  *   downstream UI can badge that.
  * - A pending set on a key `resolved` doesn't have at all creates a brand
  *   new chip at `kind`'s layer.
+ * - A pending set on a key whose resolved entry is DERIVED (a harvested
+ *   engine default or checkpoint recommendation — the ladder's core "I want
+ *   to override what the engine already applies" case) does NOT touch that
+ *   key's `applied` chip: the engine's own default keeps showing exactly as
+ *   before. Instead it adds a SECOND, independent chip to `declared` — the
+ *   override-in-progress — at `kind`'s layer with the pending value. The two
+ *   coexist deliberately: one says "the engine applies this", the other
+ *   says "you are about to declare this"; only Save reconciles them (into a
+ *   single declared winner on the next `resolved`).
  * - A pending remove at the winning kind keeps the chip (never drops it)
  *   with `pendingRemove: true` and TODAY's resolved value. This is a
  *   deliberate approximation, not an oversight: `resolved` is already the
@@ -179,6 +188,23 @@ export function buildChips(
         pendingRemove: false,
         pendingSet: false,
       });
+      // A pending set at `kind` on a currently-derived key is a real,
+      // in-progress override — the ladder's core use case — and gets its
+      // OWN declared-section chip rather than vanishing with no feedback
+      // while still shipping on Save (toPuts/mergedArgsForPreview read the
+      // buffer directly and always carried this edit; only the chip was
+      // missing).
+      if (Object.hasOwn(pendingSets, name)) {
+        declared.push({
+          name,
+          value: pendingSets[name],
+          layer,
+          origin: "declared",
+          setAtKind: true,
+          pendingRemove: false,
+          pendingSet: true,
+        });
+      }
       continue;
     }
 

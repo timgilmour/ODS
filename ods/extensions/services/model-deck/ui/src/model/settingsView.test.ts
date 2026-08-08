@@ -137,6 +137,41 @@ describe("buildChips", () => {
     expect(chip.setAtKind).toBe(true);
   });
 
+  it("a pending set on a currently-derived key adds a NEW declared chip, leaving the applied chip untouched", () => {
+    // Critical fix: overriding a harvested engine default (`seed`, derived
+    // origin) is the settings ladder's core use case. Before the fix the
+    // pending set produced NO chip anywhere — `seen` swallowed the key in
+    // the derived branch and the "new chip" loop skipped it as already
+    // seen — while toPuts/mergedArgsForPreview shipped the edit on Save
+    // with zero visual feedback along the way.
+    const b = bufferSet(emptyBuffer, "engines", "seed", "42");
+    const { declared, applied } = buildChips(resolved, b, "engines");
+
+    const appliedSeed = applied.find((c) => c.name === "seed")!;
+    expect(appliedSeed).toBeDefined();
+    expect(appliedSeed.value).toBe("1");
+    expect(appliedSeed.origin).toBe("derived");
+    expect(appliedSeed.pendingSet).toBe(false);
+
+    const declaredSeed = declared.find((c) => c.name === "seed")!;
+    expect(declaredSeed).toBeDefined();
+    expect(declaredSeed.value).toBe("42");
+    expect(declaredSeed.layer).toBe("engine");
+    expect(declaredSeed.origin).toBe("declared");
+    expect(declaredSeed.setAtKind).toBe(true);
+    expect(declaredSeed.pendingSet).toBe(true);
+    expect(declaredSeed.pendingRemove).toBe(false);
+
+    // toPuts and mergedArgsForPreview must agree with what the declared
+    // chip shows — they already read the buffer directly, so this also
+    // guards against a future regression drifting the three apart.
+    const merged = mergedArgsForPreview(resolved, b);
+    expect(merged.seed).toBe("42");
+
+    const puts = toPuts(b, scopeKeys("sparky", "vllm", "m"));
+    expect(puts.find((p) => p.kind === "engines")?.values.seed).toBe("42");
+  });
+
   it("a pending set on a key absent from resolved creates a new declared chip", () => {
     const b = bufferSet(emptyBuffer, "engines", "gpu-memory-utilization", "0.9");
     const { declared } = buildChips(resolved, b, "engines");
