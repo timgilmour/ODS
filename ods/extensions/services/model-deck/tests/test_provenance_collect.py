@@ -134,6 +134,61 @@ def test_spark_entry_refuses_a_digest_from_an_UNSTAMPED_catalog():
     assert entries[0]["current"]["version"] is None
 
 
+# --- many profiles, one image (live-deploy defect, 2026-08-08) -------------
+#
+# Every test above passes ONE profile, which is why this went unnoticed until
+# the live sweep: sparky runs seven profiles and five of them (heretic,
+# laguna, mm27b, ornith, qwen35) share ONE image reference. The artifact id
+# is keyed on the repository, so those five collapse to a single record --
+# and the collector emitted one entry per PROFILE, so the store's last writer
+# won. Only `laguna` matched the harvested catalog, and it sorts before
+# mm27b/ornith/qwen35, so the digest it correctly resolved was overwritten
+# with None three times. The live ledger read `version: null` for the very
+# image that was running.
+
+_COMPOSE_SHARED = """
+services:
+  vllm:
+    image: ghcr.io/aeon-7/aeon-vllm-ultimate:2026-07-27-v0.26.0
+    container_name: aeon-vllm
+"""
+
+
+def test_spark_collapses_profiles_that_share_one_repository():
+    texts = {p: _COMPOSE_SHARED for p in ("heretic", "laguna", "mm27b")}
+
+    entries = collect.spark_oci_entries(texts, None, node="sparky")
+
+    ids = [e["artifact_id"] for e in entries]
+    assert ids == ["oci:sparky:aeon-7/aeon-vllm-ultimate"], (
+        "one repository is one artifact — duplicate entries let whichever "
+        "the caller stores last decide what the artifact's version is")
+
+
+def test_spark_digest_survives_a_later_profile_sharing_the_repository():
+    """The regression proper: `laguna` resolves the digest, and mm27b/ornith
+    (which sort after it and share its image) must not erase it."""
+    texts = {p: _COMPOSE_SHARED for p in ("heretic", "laguna", "mm27b", "ornith")}
+    catalog = {"profile": "laguna", "image_id": "sha256:live",
+               "harvested_ts": "2026-08-08T00:00:00Z", "engine": "vllm"}
+
+    entries = collect.spark_oci_entries(texts, catalog, node="sparky")
+
+    assert len(entries) == 1
+    assert entries[0]["current"]["version"] == "sha256:live"
+    assert entries[0]["current"]["verification"] == origins.EXACT
+
+
+def test_spark_keeps_distinct_repositories_apart():
+    """The collapse must be by repository, not a blanket de-duplication."""
+    texts = {"ds4": _COMPOSE_DS4, "laguna": _COMPOSE_SHARED}
+
+    entries = collect.spark_oci_entries(texts, None, node="sparky")
+
+    assert sorted(e["artifact_id"] for e in entries) == [
+        "oci:sparky:aeon-7/aeon-vllm-ultimate", "oci:sparky:ds4-spark"]
+
+
 def test_spark_skips_a_profile_whose_compose_has_no_image_line():
     text = "services:\n  x:\n    container_name: x\n"
     assert collect.spark_oci_entries({"x": text}, None, node="sparky") == []

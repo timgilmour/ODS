@@ -87,11 +87,23 @@ def spark_oci_entries(compose_texts: dict, catalog: dict | None,
 
     See the module docstring for why the digest is attributed only on an
     exact ``catalog["profile"]`` match.
+
+    PROFILES ARE MANY, ARTIFACTS ARE FEW. The artifact id is keyed on the
+    repository, and sparky runs several profiles off one image — five of
+    seven share ``aeon-vllm-ultimate`` today. So this returns at most one
+    entry PER REPOSITORY, not one per profile: emitting duplicates left the
+    caller's last write deciding the artifact's version, and since only the
+    catalog-matching profile carries a digest, any profile sharing its image
+    and sorting after it erased that digest. Live, `laguna` resolved the
+    running image and `mm27b`/`ornith`/`qwen35` each overwrote it with None.
+
+    The merge rule is "a resolved digest wins", never "the last one wins" —
+    a digest is a measurement, its absence is only the absence of one.
     """
-    entries = []
     catalog_profile = (catalog or {}).get("profile")
     catalog_digest = (catalog or {}).get("image_id")
 
+    merged: dict[str, dict] = {}
     for profile in sorted(compose_texts):
         reference = _image_reference(compose_texts[profile])
         if not reference:
@@ -100,13 +112,19 @@ def spark_oci_entries(compose_texts: dict, catalog: dict | None,
         digest = catalog_digest if (catalog_profile
                                     and catalog_profile == profile) else None
         identity = oci_origin.identity_from_compose(reference, digest)
-        entries.append({
-            "artifact_id": origins.build_artifact_id("oci", node,
-                                                     origin["repository"]),
+        artifact_id = origins.build_artifact_id("oci", node,
+                                                origin["repository"])
+        existing = merged.get(artifact_id)
+        if existing is not None and existing["current"]["version"] is not None:
+            # Already measured by the profile the catalog named. A profile
+            # without a digest has nothing to add and must not subtract.
+            continue
+        merged[artifact_id] = {
+            "artifact_id": artifact_id,
             "kind": "oci", "node": node, "role": "engine",
             "current": {**identity, "verification": oci_origin.grade(identity)},
-        })
-    return entries
+        }
+    return [merged[k] for k in sorted(merged)]
 
 
 def _image_reference(text: str) -> str | None:
