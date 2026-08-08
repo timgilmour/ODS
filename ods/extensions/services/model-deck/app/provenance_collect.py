@@ -34,19 +34,52 @@ def local_oci_entries(inspect_bodies: dict, node: str) -> list[dict]:
     """Container name -> its inspect body (or None if the read failed).
 
     One GET per container gives both halves of the identity split: top-level
-    ``Image`` is the content id, ``Config.Image`` the human reference. A
-    ``None`` body yields NO entry — the caller marks that artifact
+    ``Image`` is the content id, ``Config.Image`` the human reference.
+
+    THE ARTIFACT IS THE IMAGE, NOT THE CONTAINER. Identity is the image
+    REPOSITORY — the same key sparky uses — and the containers running it are
+    recorded as placement facts, exactly as ``location`` is for weights
+    (identity is the relpath; where it currently sits is not part of it).
+    Keying per container would mean an operator declaring the same origin
+    once per deployment of one image, and N copies of a hand-maintained fact
+    drift.
+
+    A ``None`` body yields NO entry — the caller marks that artifact
     unavailable, which preserves its last known version; inventing a blank
-    entry here would erase it.
+    entry here would erase it. A body with no ``Config.Image`` yields no
+    entry either: without a reference there is no repository, and keying it
+    on the container name instead would be a guess (D8).
     """
-    entries = []
+    grouped: dict[str, dict] = {}
     for name in sorted(inspect_bodies):
         body = inspect_bodies[name]
         if not body:
             continue
         identity = oci_origin.identity_from_inspect(body)
+        reference = identity.get("label")
+        if not reference:
+            continue
+        repository = oci_origin.origin_from_reference(reference)["repository"]
+        group = grouped.setdefault(repository, {"containers": [],
+                                                "versions": set(),
+                                                "labels": set()})
+        group["containers"].append(name)
+        group["versions"].add(identity.get("version"))
+        group["labels"].add(reference)
+
+    entries = []
+    for repository in sorted(grouped):
+        group = grouped[repository]
+        # Unanimous or absent. Two containers on one repository running
+        # different digests means the artifact has no single version, and
+        # this module's standing rule is that a confidently wrong version is
+        # worse than no version.
+        version = next(iter(group["versions"])) if len(group["versions"]) == 1 else None
+        label = next(iter(group["labels"])) if len(group["labels"]) == 1 else None
+        identity = {"version": version, "label": label,
+                    "detail": {"containers": sorted(group["containers"])}}
         entries.append({
-            "artifact_id": origins.build_artifact_id("oci", node, name),
+            "artifact_id": origins.build_artifact_id("oci", node, repository),
             "kind": "oci", "node": node, "role": "engine",
             "current": {**identity, "verification": oci_origin.grade(identity)},
         })
@@ -104,6 +137,7 @@ def spark_oci_entries(compose_texts: dict, catalog: dict | None,
     catalog_digest = (catalog or {}).get("image_id")
 
     merged: dict[str, dict] = {}
+    profiles_by_artifact: dict[str, list[str]] = {}
     for profile in sorted(compose_texts):
         reference = _image_reference(compose_texts[profile])
         if not reference:
@@ -114,6 +148,10 @@ def spark_oci_entries(compose_texts: dict, catalog: dict | None,
         identity = oci_origin.identity_from_compose(reference, digest)
         artifact_id = origins.build_artifact_id("oci", node,
                                                 origin["repository"])
+        # WHICH profiles run this image is a fact about the image — the same
+        # placement rule local containers follow. Recorded for every profile,
+        # including the ones whose entry loses the digest merge below.
+        profiles_by_artifact.setdefault(artifact_id, []).append(profile)
         existing = merged.get(artifact_id)
         if existing is not None and existing["current"]["version"] is not None:
             # Already measured by the profile the catalog named. A profile
@@ -123,6 +161,11 @@ def spark_oci_entries(compose_texts: dict, catalog: dict | None,
             "artifact_id": artifact_id,
             "kind": "oci", "node": node, "role": "engine",
             "current": {**identity, "verification": oci_origin.grade(identity)},
+        }
+    for artifact_id, entry in merged.items():
+        entry["current"]["detail"] = {
+            **(entry["current"].get("detail") or {}),
+            "profiles": sorted(profiles_by_artifact[artifact_id]),
         }
     return [merged[k] for k in sorted(merged)]
 

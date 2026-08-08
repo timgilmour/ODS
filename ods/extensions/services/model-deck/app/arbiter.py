@@ -107,7 +107,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app import origins, provenance_collect
+from app import provenance_collect
 from app.derive_checkpoint import derive_checkpoint
 from app.derive_live import derive_live_models
 from app.engines import BusyError, EngineError, GuardError
@@ -1122,17 +1122,28 @@ class Watcher:
                 bodies[name] = self._dockerctl.inspect(name)
             except (EngineError, GuardError, KeyError):
                 bodies[name] = None
+        observed: set[str] = set()
         for entry in provenance_collect.local_oci_entries(bodies, node):
+            observed.add(entry["artifact_id"])
             current = entry.pop("current")
             self._provenance_store.observe(**entry, current=current, now=now)
-        for name, body in bodies.items():
-            if body is None:
-                # Built the SAME way local_oci_entries builds it — an id
-                # assembled two different ways in one pass is an id that
-                # will eventually disagree with itself, and a mismatch here
-                # would silently no-op instead of retaining anything.
-                self._provenance_store.mark_unavailable(
-                    origins.build_artifact_id("oci", node, name), now=now)
+
+        # Retention by ABSENCE, not by container name. Identity is the image
+        # repository, so a failed inspect no longer tells us which artifact
+        # went dark — the body we would have read is the only thing that
+        # names its repository. Anything this node previously recorded and
+        # did NOT observe this pass is unreachable, which RETAINS its last
+        # known version (app.catalog's rule: an unavailable source must not
+        # erase what it last told us).
+        #
+        # Deriving the id from the container name instead would silently
+        # no-op the moment a name and its repository differ — and they
+        # differ for two of the three allowlist containers today.
+        for artifact_id, stored in self._provenance_store.get().items():
+            if artifact_id in observed:
+                continue
+            if stored.get("kind") == "oci" and stored.get("node") == node:
+                self._provenance_store.mark_unavailable(artifact_id, now=now)
 
     def _provenance_local_weights(self, node: str, now: str) -> None:
         if self._catalog is None:

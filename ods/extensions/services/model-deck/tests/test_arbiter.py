@@ -2587,6 +2587,36 @@ def test_a_provenance_failure_is_logged_not_raised(tmp_path):
     assert "tick-error" not in kinds
 
 
+def test_provenance_marks_unavailable_by_artifact_id_not_container_name(tmp_path):
+    """The retention path must target the id the entry was CREATED with.
+
+    Identity is now the image repository, so the container name is no longer
+    that id — `ods-comfyui` runs `ignatberesnev/comfyui-gfx1151`, and the two
+    differ. Every pre-existing fixture used `ods-hipfire`, whose name and
+    repository happen to be identical, which is exactly why the suite stayed
+    green while this path marked an id that does not exist: a silent no-op
+    leaving the artifact reporting `exact` forever with its container gone.
+    """
+    clock = _FakeClock()
+    store = _prov_store(tmp_path)
+    docker = _FakeDockerCtl({"ods-comfyui": {
+        "Image": "sha256:a",
+        "Config": {"Image": "ignatberesnev/comfyui-gfx1151:v0.2"}}})
+    watcher = _watcher(tmp_path, provenance_store=store, dockerctl=docker,
+                       park_allowlist=["ods-comfyui"], clock=clock)
+    watcher.tick()
+    assert store.entry("oci:local:ignatberesnev/comfyui-gfx1151") is not None
+
+    docker.bodies.clear()
+    clock.advance(10_000)
+    watcher.tick()
+
+    entry = store.entry("oci:local:ignatberesnev/comfyui-gfx1151")
+    assert entry["current"]["verification"] == "unavailable"
+    assert entry["current"]["version"] == "sha256:a", (
+        "an unreachable source must RETAIN its last known version, not blank it")
+
+
 def test_provenance_unavailable_marking_uses_the_same_id_the_entry_was_created_with(tmp_path):
     """An id assembled two different ways in one pass is an id that will
     eventually disagree with itself — and a mismatch here would silently

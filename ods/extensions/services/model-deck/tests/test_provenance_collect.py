@@ -18,16 +18,62 @@ services:
 
 # --- local oci ------------------------------------------------------------
 
-def test_local_oci_entry_carries_digest_and_tag():
+# THE ARTIFACT IS THE IMAGE, NOT THE DEPLOYMENT (keying decision, 2026-08-08).
+#
+# Local OCI used to key on the CONTAINER name while sparky keyed on the image
+# repository — two nodes, two rules. Worse, the thing an operator declares
+# ("aeon-vllm has no source repo, it is archived at /mnt/cold/images") is a
+# fact about the IMAGE; keying per deployment means typing it once per
+# container that runs it and maintaining N copies.
+#
+# So identity is the repository on BOTH nodes, and the containers/profiles
+# referencing it are placement facts — exactly the rule the design already
+# applies to weights, where identity is the relpath and `location` is "a
+# current-placement fact, not part of identity".
+#
+# ⚠ These fixtures deliberately use containers whose NAME DIFFERS FROM THEIR
+# REPOSITORY. `ods-hipfire` runs `ods-hipfire:latest`, so a test built on it
+# passes under either rule and proves nothing — the same coincidence that let
+# node_label ("local") masquerade as the node id for two days.
+
+def test_local_oci_is_keyed_on_the_image_repository_not_the_container_name():
     entries = collect.local_oci_entries(
-        {"ods-hipfire": {"Image": "sha256:a",
-                         "Config": {"Image": "ods-hipfire:latest"}}},
+        {"ods-comfyui": {"Image": "sha256:a",
+                         "Config": {"Image": "ignatberesnev/comfyui-gfx1151:v0.2"}}},
         node="local")
     assert entries == [{
-        "artifact_id": "oci:local:ods-hipfire", "kind": "oci", "node": "local",
-        "role": "engine",
-        "current": {"version": "sha256:a", "label": "ods-hipfire:latest",
-                    "detail": {}, "verification": origins.EXACT}}]
+        "artifact_id": "oci:local:ignatberesnev/comfyui-gfx1151",
+        "kind": "oci", "node": "local", "role": "engine",
+        "current": {"version": "sha256:a",
+                    "label": "ignatberesnev/comfyui-gfx1151:v0.2",
+                    "detail": {"containers": ["ods-comfyui"]},
+                    "verification": origins.EXACT}}]
+
+
+def test_local_oci_collapses_containers_sharing_one_image():
+    """Two deployments of one image are one artifact, with both recorded as
+    placement facts."""
+    body = {"Image": "sha256:a", "Config": {"Image": "ods-lemonade-server:latest"}}
+    entries = collect.local_oci_entries(
+        {"ods-llama-server": dict(body), "ods-llama-2": dict(body)}, node="local")
+
+    assert len(entries) == 1
+    assert entries[0]["artifact_id"] == "oci:local:ods-lemonade-server"
+    assert entries[0]["current"]["detail"]["containers"] == ["ods-llama-2",
+                                                             "ods-llama-server"]
+
+
+def test_local_oci_refuses_a_version_when_referrers_disagree():
+    """Same repository, different resolved digests — the artifact has no one
+    version, and a confidently wrong one is worse than none."""
+    entries = collect.local_oci_entries(
+        {"a": {"Image": "sha256:old", "Config": {"Image": "shared/img:v1"}},
+         "b": {"Image": "sha256:new", "Config": {"Image": "shared/img:v2"}}},
+        node="local")
+
+    assert len(entries) == 1
+    assert entries[0]["current"]["version"] is None
+    assert entries[0]["current"]["verification"] == origins.UNKNOWN
 
 
 def test_local_oci_skips_a_container_that_could_not_be_inspected():
@@ -36,11 +82,18 @@ def test_local_oci_skips_a_container_that_could_not_be_inspected():
     assert collect.local_oci_entries({"ods-hipfire": None}, node="local") == []
 
 
-def test_local_oci_is_in_name_order():
-    bodies = {"z-engine": {"Image": "sha256:z", "Config": {}},
-              "a-engine": {"Image": "sha256:a", "Config": {}}}
+def test_local_oci_skips_a_container_with_no_image_reference():
+    """Without `Config.Image` there is no repository, so there is no key.
+    Refused rather than keyed on the container name as a guess (D8)."""
+    assert collect.local_oci_entries(
+        {"ods-hipfire": {"Image": "sha256:a", "Config": {}}}, node="local") == []
+
+
+def test_local_oci_is_in_artifact_id_order():
+    bodies = {"z": {"Image": "sha256:z", "Config": {"Image": "z-repo:latest"}},
+              "a": {"Image": "sha256:a", "Config": {"Image": "a-repo:latest"}}}
     assert [e["artifact_id"] for e in collect.local_oci_entries(bodies, node="local")] == [
-        "oci:local:a-engine", "oci:local:z-engine"]
+        "oci:local:a-repo", "oci:local:z-repo"]
 
 
 # --- local weights --------------------------------------------------------
@@ -177,6 +230,18 @@ def test_spark_digest_survives_a_later_profile_sharing_the_repository():
     assert len(entries) == 1
     assert entries[0]["current"]["version"] == "sha256:live"
     assert entries[0]["current"]["verification"] == origins.EXACT
+
+
+def test_spark_records_every_profile_that_references_the_image():
+    """Same placement rule as local containers: which profiles run an image
+    is a fact ABOUT the image, and the five that share aeon-vllm-ultimate
+    must all be visible on its one record."""
+    texts = {p: _COMPOSE_SHARED for p in ("laguna", "heretic", "mm27b")}
+
+    entries = collect.spark_oci_entries(texts, None, node="sparky")
+
+    assert len(entries) == 1
+    assert entries[0]["current"]["detail"]["profiles"] == ["heretic", "laguna", "mm27b"]
 
 
 def test_spark_keeps_distinct_repositories_apart():
