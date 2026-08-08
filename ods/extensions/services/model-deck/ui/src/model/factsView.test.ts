@@ -6,6 +6,8 @@ import {
   factRows,
   factValueText,
   partitionDrift,
+  tagsSettled,
+  tagsWith,
 } from "./factsView";
 
 function fact(value: unknown, origin: FactEntry["origin"] = "derived"): FactEntry {
@@ -130,5 +132,60 @@ describe("partitionDrift", () => {
     const { byName, unmatched } = partitionDrift(items, ["max_model_len"]);
     expect(byName.get("max_model_len")?.severity).toBe("mismatch");
     expect(unmatched.map((i) => i.severity)).toEqual(["crash"]);
+  });
+});
+
+describe("tagsWith", () => {
+  it("appends a trimmed tag to the list that will be PUT", () => {
+    expect(tagsWith(["fast"], "  deep ")).toEqual(["fast", "deep"]);
+  });
+
+  it("refuses a duplicate — so the call site can keep the typed text", () => {
+    // Clearing the box on a duplicate left an operator watching their word
+    // vanish with no chip to show for it.
+    expect(tagsWith(["fast"], "fast")).toBeNull();
+    expect(tagsWith(["fast"], " fast ")).toBeNull();
+  });
+
+  it("refuses a blank entry", () => {
+    expect(tagsWith(["fast"], "")).toBeNull();
+    expect(tagsWith(["fast"], "   ")).toBeNull();
+  });
+
+  it("never mutates the list it was given", () => {
+    const tags = ["fast"];
+    tagsWith(tags, "deep");
+    expect(tags).toEqual(["fast"]);
+  });
+});
+
+describe("tagsSettled", () => {
+  it("is false while nothing has been written", () => {
+    expect(tagsSettled(null, ["fast"])).toBe(false);
+  });
+
+  it("is false while the server still carries the PRE-write list", () => {
+    // The loss window: a second edit composed against this would ship the
+    // pre-write array and undo the first (remove A then B resurrects A).
+    expect(tagsSettled(["fast"], ["fast", "deep"])).toBe(false);
+  });
+
+  it("is true once the server's own list matches what was written", () => {
+    expect(tagsSettled(["fast", "deep"], ["fast", "deep"])).toBe(true);
+  });
+
+  it("treats an empty write as settled only against an empty server list", () => {
+    // Removing the last tag is a real write, and it has to be able to settle.
+    expect(tagsSettled([], [])).toBe(true);
+    expect(tagsSettled([], undefined)).toBe(true);
+    expect(tagsSettled([], ["fast"])).toBe(false);
+  });
+
+  it("is order-sensitive, because the whole array is what gets replaced", () => {
+    expect(tagsSettled(["fast", "deep"], ["deep", "fast"])).toBe(false);
+  });
+
+  it("holds rather than settles against a malformed server value", () => {
+    expect(tagsSettled(["fast"], "fast")).toBe(false);
   });
 });

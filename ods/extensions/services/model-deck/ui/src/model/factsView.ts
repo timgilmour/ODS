@@ -48,6 +48,46 @@ export function declaredTags(value: unknown): string[] {
   return value.filter((t): t is string => typeof t === "string");
 }
 
+// ---------------------------------------------------------------------------
+// Tags — the one declared field whose edits compose
+// ---------------------------------------------------------------------------
+
+/** The list to PUT when `raw` is added, or `null` when there is nothing to
+ * write. A blank entry and a tag already on the model are both non-edits, and
+ * the difference matters at the call site: a duplicate must NOT blank the
+ * input, or the operator is left guessing where their word went. Trims,
+ * because a tag is an identifier and " fast" and "fast" are one role named
+ * twice. */
+export function tagsWith(tags: string[], raw: string): string[] | null {
+  const tag = raw.trim();
+  if (tag === "" || tags.includes(tag)) return null;
+  return [...tags, tag];
+}
+
+/** Whether the server's own view has caught up with the last tag list this
+ * screen successfully wrote.
+ *
+ * A tags PUT replaces the WHOLE array (app/declared.py merges per FIELD, not
+ * per element), so in the window between the write and the refetch that
+ * reflects it, a second edit built on the pre-write array silently undoes the
+ * first — remove A then B resurrects A, two quick adds drop the first. That
+ * window is a full App refresh wide (three fetches, one of them to a remote
+ * node), not an instant. So the drawer keeps the array it actually sent, and
+ * further edits build on THAT until this returns true.
+ *
+ * Deliberately compares VALUES rather than counting refresh ticks: a tick
+ * only says a fetch happened, not that it started after the PUT landed, and
+ * clearing one fetch too early reopens exactly the window this closes. The
+ * cost is the opposite bias — if another client edits the tags meanwhile,
+ * this screen keeps showing its own last write until it writes again or is
+ * reopened, which is the safer of the two ways to be wrong.
+ */
+export function tagsSettled(written: string[] | null, value: unknown): boolean {
+  if (written === null) return false;
+  const server = declaredTags(value);
+  return server.length === written.length && server.every((t, i) => t === written[i]);
+}
+
 /** The fact rows of one key, name-sorted. Sorted because the map arrives in
  * insertion order (derived first, then declared — app/facts.py:resolve_facts)
  * and a table whose row order shifts when a human declares something is a
@@ -75,6 +115,14 @@ export function factRows(
  * DRIFT_RULES in TypeScript is exactly what goes stale silently. Unmatched
  * items are rendered on their own, naming their runtime field verbatim, so
  * every item the backend reports reaches the screen either way.
+ *
+ * ⚠ The row match is a NAME COLLISION, not a resolved relationship: a fact
+ * that happened to be called `max_model_len` would capture the
+ * `max_model_len` rule's item and print its numbers — which are the LIVE
+ * length against `max_position_embeddings`, not against that fact — beneath
+ * the wrong row. No such fact exists today. If one is ever derived, the fix
+ * is for the drift payload to name the fact it compared against, not for
+ * this file to learn the rules table.
  */
 export function partitionDrift(
   items: FactsDriftItem[] | undefined,

@@ -229,6 +229,15 @@ export const messages = {
   // request itself never came back (ApiError/network failure), that error's
   // message — both land the operator in the same "try again" banner, since
   // neither case leaves them with a fresher catalog.
+  harvestFailed: (outcome: string): Message => ({
+    tone: "warning",
+    title: outcome === "empty" ? "Harvest found no options" : "Harvest failed",
+    body:
+      outcome === "empty"
+        ? "the engine answered but the probe found nothing to catalog."
+        : `the engine could not be probed (${outcome}).`,
+  }),
+
   // Model detail drawer (phase 3) ------------------------------------------
 
   factsLoadFailed: (detail: string): Message => ({
@@ -261,15 +270,6 @@ export const messages = {
     tone: "neutral",
     title: "No longer on the deck",
     body: "this placement is not in the latest state — what follows is the last thing we knew.",
-  }),
-
-  harvestFailed: (outcome: string): Message => ({
-    tone: "warning",
-    title: outcome === "empty" ? "Harvest found no options" : "Harvest failed",
-    body:
-      outcome === "empty"
-        ? "the engine answered but the probe found nothing to catalog."
-        : `the engine could not be probed (${outcome}).`,
   }),
 };
 
@@ -560,6 +560,14 @@ export const labels = {
     "re-apply the declared settings on the node — the serving container is recreated",
   modelSettings: "Settings",
   modelSettingsTitle: "edit the flags this model is served with",
+  /** Why the button is disabled while the facts fetch is outstanding — and,
+   * on a failed fetch, indefinitely. The profile→checkpoint translation
+   * (settingsIdentityFor) lives in those facts, and without it the panel
+   * would open on the placement's PROFILE: a scope key nothing resolves,
+   * with nothing on screen saying so. Refusing is the honest answer; a
+   * silent wrong target is not. */
+  modelSettingsNoFactsTitle:
+    "facts have not loaded — without them Settings could open on the wrong scope",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

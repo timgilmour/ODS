@@ -19,6 +19,8 @@ import {
   factRows,
   factValueText,
   partitionDrift,
+  tagsSettled,
+  tagsWith,
 } from "../model/factsView";
 import { labels, messages } from "../model/messages";
 import { isTenantName, SPARK_SLOT_KEY, type DeckResource, type Placement } from "../model/nodes";
@@ -116,13 +118,24 @@ export default function ModelDetailDrawer({
   const [labelDraft, setLabelDraft] = useState("");
   const [notesDraft, setNotesDraft] = useState("");
   const [enginePrefDraft, setEnginePrefDraft] = useState("");
+  // The tag list the last successful PUT actually sent, held until the
+  // server's own view catches up (tagsSettled). Edits build on THIS, or the
+  // refresh window between a write and its refetch would let a second edit
+  // ship the pre-write array — see tagsSettled's docstring.
+  const [writtenTags, setWrittenTags] = useState<string[] | null>(null);
 
-  // The three free-text fields are seeded from the FIRST facts response and
-  // never again. Facts refetch on every poll tick (below), and re-seeding on
-  // each of those would delete whatever the operator was typing three
-  // characters in. App keys this component on the placement id, so clicking a
-  // different chip remounts it and seeds afresh.
-  const seeded = useRef(false);
+  // The facts key whose values the three free-text drafts were seeded from —
+  // NOT a bare "have we seeded yet" flag. Facts refetch on every poll tick
+  // (below) and re-seeding on each of those would delete whatever the
+  // operator was typing three characters in; but the KEY itself can change
+  // under a stable component identity, because App keys this component on the
+  // placement ID and a spark swap changes the model NAME while `sparky/slot0`
+  // persists. Seeded once per key, the drawer would then hold the previous
+  // model's label/notes over the new model's facts and write them onto it at
+  // the next blur — cross-model corruption from a component that never
+  // remounted.
+  const seededKey = useRef<string | null>(null);
+  const tagInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let alive = true;
@@ -146,12 +159,26 @@ export default function ModelDetailDrawer({
   }, [refreshTrigger]);
 
   useEffect(() => {
-    if (seeded.current || facts === null) return;
-    seeded.current = true;
-    const entry = facts[factsKey] ?? {};
-    setLabelDraft(declaredText(entry.label?.value));
-    setNotesDraft(declaredText(entry.notes?.value));
-    setEnginePrefDraft(declaredText(entry.engine_preference?.value));
+    if (facts === null || seededKey.current === factsKey) return;
+    seededKey.current = factsKey;
+    const seed = facts[factsKey] ?? {};
+    setLabelDraft(declaredText(seed.label?.value));
+    setNotesDraft(declaredText(seed.notes?.value));
+    setEnginePrefDraft(declaredText(seed.engine_preference?.value));
+    // Both belong to the key that was just left behind: an unsent tag and an
+    // optimistic list written against the PREVIOUS model must not carry over
+    // onto the new one.
+    setTagDraft("");
+    setWrittenTags(null);
+  }, [facts, factsKey]);
+
+  // Hands the tag list back to the server the moment its own view reflects
+  // what was written. Functional update so this cannot race the seeding
+  // effect above, which resets the same state on a key change.
+  useEffect(() => {
+    if (facts === null) return;
+    const serverTags = facts[factsKey]?.tags?.value;
+    setWrittenTags((cur) => (tagsSettled(cur, serverTags) ? null : cur));
   }, [facts, factsKey]);
 
   useEffect(() => {
@@ -173,7 +200,9 @@ export default function ModelDetailDrawer({
     rows.map(([name]) => name),
   );
 
-  const tags = declaredTags(entry?.tags?.value);
+  // What this screen last wrote wins over what the last refetch happened to
+  // carry, until the two agree (tagsSettled).
+  const tags = writtenTags ?? declaredTags(entry?.tags?.value);
   const toolsVerified = entry?.tools_verified?.value === true;
   const gone = placedOn === null;
 
@@ -190,17 +219,40 @@ export default function ModelDetailDrawer({
    * is per FIELD, not per list element. `onRefresh` runs either way: it bumps
    * refreshTrigger, which is what pulls the server's own view of what landed
    * back onto the screen. */
-  async function saveDeclared(fields: Record<string, unknown>) {
+  async function saveDeclared(fields: Record<string, unknown>): Promise<boolean> {
     setDeclaredBusy(true);
     try {
       await putDeclared(factsKey, fields);
       setDeclaredError(null);
+      return true;
     } catch (err) {
       setDeclaredError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setDeclaredBusy(false);
       onRefresh();
     }
+  }
+
+  /** Tag writes go through here rather than calling saveDeclared directly:
+   * the array that was actually sent has to be remembered on success, or the
+   * next edit composes against whatever the last refetch delivered — which,
+   * for the whole width of an App refresh, is still the pre-write list. The
+   * unlock does NOT wait for that refetch (it is three fetches away, one of
+   * them to a remote node, and freezing the form for that long to protect one
+   * field is the wrong trade); remembering what was sent closes the same
+   * window without the freeze. */
+  async function saveTags(next: string[]) {
+    const key = factsKey;
+    const ok = await saveDeclared({ tags: next });
+    // `seededKey` is "which model this form is currently showing", which is
+    // exactly the question here: a swap that completed while the PUT was in
+    // flight has already re-pointed the drawer, and remembering this list
+    // would then hold the PREVIOUS model's tags over the new one — the
+    // cross-model carry-over the seeding effect exists to prevent. The write
+    // still landed on `key`, correctly; only the optimistic display is
+    // dropped.
+    if (ok && seededKey.current === key) setWrittenTags(next);
   }
 
   /** Saves a text field only when the draft actually differs from what the
@@ -217,10 +269,18 @@ export default function ModelDetailDrawer({
   }
 
   function addTag() {
-    const tag = tagDraft.trim();
+    const next = tagsWith(tags, tagDraft);
+    if (next === null) {
+      // A duplicate (or a blank) is not an edit, so the box KEEPS what was
+      // typed rather than blanking silently — the previous version cleared
+      // first and left an operator watching their word disappear with no
+      // chip to show for it. Selecting it points at the reason without a
+      // banner for something that has not failed.
+      tagInputRef.current?.select();
+      return;
+    }
     setTagDraft("");
-    if (tag === "" || tags.includes(tag)) return;
-    saveDeclared({ tags: [...tags, tag] });
+    saveTags(next);
   }
 
   async function handleReload() {
@@ -390,13 +450,14 @@ export default function ModelDetailDrawer({
                       aria-label={labels.removeTagTitle(tag)}
                       title={labels.removeTagTitle(tag)}
                       disabled={declaredLocked}
-                      onClick={() => saveDeclared({ tags: tags.filter((t) => t !== tag) })}
+                      onClick={() => saveTags(tags.filter((t) => t !== tag))}
                     >
                       ✕
                     </button>
                   </span>
                 ))}
                 <input
+                  ref={tagInputRef}
                   className="drawer-input"
                   type="text"
                   aria-label={labels.addTag}
@@ -479,7 +540,20 @@ export default function ModelDetailDrawer({
                 {settingsEngine && (
                   <button
                     type="button"
-                    title={labels.modelSettingsTitle}
+                    // Refuses while the facts are outstanding — the whole
+                    // first tick, and permanently when /api/facts is failing,
+                    // since the error path deliberately leaves `facts` as it
+                    // found it. settingsIdentityFor's fallback is the
+                    // placement name, which for a spark profile is the
+                    // UNTRANSLATED "heretic": Settings would then open on
+                    // `sparky/vllm|heretic`, a scope key nothing resolves,
+                    // with nothing on screen saying so. That is the D11
+                    // defect the helper exists to prevent, and a fallback is
+                    // the wrong answer to "we do not know yet".
+                    disabled={facts === null}
+                    title={
+                      facts === null ? labels.modelSettingsNoFactsTitle : labels.modelSettingsTitle
+                    }
                     onClick={() =>
                       onOpenSettings({
                         node: placedOn.nodeId,
@@ -488,6 +562,7 @@ export default function ModelDetailDrawer({
                         // settings live under the checkpoint identity. See
                         // settingsIdentityFor — a local placement's name is
                         // already the model and passes through unchanged.
+                        // `?? {}` is unreachable while the button is enabled.
                         model: settingsIdentityFor(
                           facts ?? {},
                           placedOn.nodeId,
