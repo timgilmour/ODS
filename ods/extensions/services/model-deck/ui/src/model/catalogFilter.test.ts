@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Catalog, CatalogOption } from "../api";
-import { filterCatalog, type CatalogRow } from "./catalogFilter";
+import { filterCatalog } from "./catalogFilter";
 
 function option(overrides: Partial<CatalogOption> = {}): CatalogOption {
   return {

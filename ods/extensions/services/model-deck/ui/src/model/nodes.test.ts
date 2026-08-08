@@ -197,6 +197,7 @@ describe("buildNodes", () => {
         intent: null,
         observed: { reachable: true, loaded: true, model: null, transitioning: false },
         last_healthy_ts: null,
+        settings_drift: null,
       },
     };
     const [local] = buildNodes(s, null);
@@ -218,6 +219,7 @@ function lifecycleEntry(overrides: Partial<LifecycleEntry> = {}): LifecycleEntry
     status: "serving",
     reason: "",
     intent: null,
+    settings_drift: null,
     observed: { reachable: true, loaded: true, model: "heretic", transitioning: false },
     last_healthy_ts: "2026-08-04T14:23:11Z",
     ...overrides,
