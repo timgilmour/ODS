@@ -113,7 +113,10 @@ export default function NodeCard({
             spark={spark}
             stale={unreachable}
             staleAge={age}
+            nodeId={node.id}
+            settingsEngine={settingsEngine}
             onChipClick={onChipClick}
+            onOpenSettings={onOpenSettings}
             onRefresh={onRefresh}
           />
         ))}

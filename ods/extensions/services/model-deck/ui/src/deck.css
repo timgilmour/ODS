@@ -922,6 +922,103 @@ input[type="password"] {
   margin-top: 0;
 }
 
+/* --- Settings drift card (Task 11) ---------------------------------------
+   BLUE, on purpose, not the model detail drawer's amber .fact-drifted:
+   build-design decision 5 treats a settings drift as a decision pending —
+   declared settings changed since the placement last (re)launched — not a
+   disagreement the deck is flagging as wrong. --chip-idle-bg/-fg is the same
+   blue family .ui-banner-neutral and .ui-pill-busy already use. */
+.drift-card {
+  margin-top: calc(var(--space) / 2);
+  padding: calc(var(--space) * 1.5);
+  border: 1px solid var(--chip-idle-fg);
+  border-radius: var(--radius);
+  background: var(--chip-idle-bg);
+}
+
+.drift-card-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space);
+  margin-bottom: var(--space);
+}
+
+.drift-card-title {
+  font-weight: 600;
+  color: var(--chip-idle-fg);
+}
+
+.drift-card-count {
+  color: var(--text-dim);
+}
+
+.drift-card-age {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.drift-rows {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 2);
+}
+
+.drift-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: calc(var(--space) / 2);
+}
+
+.drift-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+}
+
+/* Struck-through even when it is showing labels.addedValue rather than a
+   real prior value — the slot always means "what used to be here". */
+.drift-old {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  text-decoration: line-through;
+  overflow-wrap: anywhere;
+}
+
+.drift-arrow {
+  color: var(--text-dim);
+}
+
+.drift-new {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+/* labels.removedValue — italic rather than struck-through: this slot never
+   held a value that then got crossed out, it is reporting that the key is
+   gone. */
+.drift-value-removed {
+  font-style: italic;
+  color: var(--text-dim);
+}
+
+/* Legacy (pre-journal) path: names only, mono/dim like .drift-key since
+   there is no old/new pair to show beside them. */
+.drift-legacy-list {
+  margin: 0;
+  padding-left: 1.2em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+}
+
+.drift-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space);
+  margin-top: var(--space);
+}
+
 /* A guard banner is a full-width row inside its control group, never a flex
    item competing with the select and buttons beside it. .ui-banner is itself
    a flex container whose spacer relies on margin-left:auto, which only means

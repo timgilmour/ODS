@@ -568,6 +568,28 @@ export const labels = {
    * silent wrong target is not. */
   modelSettingsNoFactsTitle:
     "facts have not loaded — without them Settings could open on the wrong scope",
+
+  // Settings drift card (phase 3, Task 11) -----------------------------------
+  // BLUE, not the facts table's amber above: build-design decision 5 treats
+  // this as a decision pending — declared settings changed since the
+  // placement last (re)launched (app/routers/__init__.py:116's
+  // `settings_drift`, baselined on intent's `updated_ts`) — never a
+  // disagreement the deck is flagging as wrong. The R1 mockup's amber
+  // treatment for this exact card is superseded.
+
+  settingsDrift: "Settings drift",
+  keysChanged: (n: number) => `${n} key${n === 1 ? "" : "s"} changed`,
+  /** entries[].new === null — settings_store.py:252's `ns.get(name)` reading
+   * back empty after a `remove`. */
+  removedValue: "(removed)",
+  /** entries[].old === null — settings_store.py:252's `before.get(name)` for
+   * a key that did not exist before this change. */
+  addedValue: "(added)",
+  notAppliedUntilReload: "not applied until this placement reloads",
+
+  reloadToApply: "Reload to apply",
+  reviewInSettings: "Review in Settings",
+  openingSettings: "Opening…",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

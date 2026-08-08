@@ -4,7 +4,9 @@ import { isTenantName, SPARK_CONTROL, type DeckResource, type Placement } from "
 import Meter from "../ui/Meter";
 import ModelChip from "../ui/ModelChip";
 import Panel from "../ui/Panel";
+import DriftCard from "./DriftCard";
 import PlacementActions from "./PlacementActions";
+import type { SettingsTarget } from "./SettingsModal";
 import SparkSwap from "./SparkSwap";
 
 /** The facts that do not fit on the chip: which engine (when it is not the
@@ -56,7 +58,10 @@ export default function ResourcePanel({
   spark,
   stale,
   staleAge,
+  nodeId,
+  settingsEngine,
   onChipClick,
+  onOpenSettings,
   onRefresh,
 }: {
   resource: DeckResource;
@@ -72,6 +77,14 @@ export default function ResourcePanel({
    * already says "last known", this answers the next question, which is
    * *how* stale — a different fact, not a redundant one. */
   staleAge: string | null;
+  /** The node this resource belongs to — threaded to the drift card, which
+   * needs it (with `settingsEngine`) for the same Settings-target
+   * translation ModelDetailDrawer performs. */
+  nodeId: string;
+  /** The node's configurable engine (App's catalog probe), or null when it
+   * has none. Same gate NodeCard's Engine settings button and
+   * ModelDetailDrawer's Settings button use. */
+  settingsEngine: string | null;
   /** Opens the model detail drawer for a chip. Optional so a chip stays a
    * plain, unclickable div wherever no handler is threaded (ModelChip renders
    * a button only when it has an onClick) — the affordance never appears
@@ -79,6 +92,7 @@ export default function ResourcePanel({
    * drawer is a read surface, and last-known facts are exactly what an
    * operator wants while a node is dark. */
   onChipClick?: (placement: Placement) => void;
+  onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
 }) {
   return (
@@ -99,6 +113,17 @@ export default function ResourcePanel({
               <span className="ui-chip-stale-note">
                 {messages.lastSeen(staleAge).title}
               </span>
+            )}
+            {p.settingsDrift && (
+              <DriftCard
+                placement={p}
+                drift={p.settingsDrift}
+                nodeId={nodeId}
+                settingsEngine={settingsEngine}
+                stale={stale}
+                onOpenSettings={onOpenSettings}
+                onRefresh={onRefresh}
+              />
             )}
           </div>
         ))

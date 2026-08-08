@@ -27,6 +27,7 @@ import type {
   LifecycleMap,
   LifecycleStatus,
   PolicyMap,
+  SettingsDrift,
   SparkStatus,
   StateResponse,
   TenantName,
@@ -82,6 +83,13 @@ export interface Placement {
    * "vllm". The comparison is made here, not in a component, so a node
    * registry can vary the default per node without touching the board. */
   engineBadge?: string;
+  /** Declared settings written more recently than this placement's intent
+   * last (re)launched it — copied verbatim from the lifecycle view's own
+   * `settings_drift` (app/routers/__init__.py:116's `_settings_drift`,
+   * mirrored as `SettingsDrift`). `undefined` (never `null`) means no
+   * drift, so `placement.settingsDrift &&` is a complete check at every call
+   * site. */
+  settingsDrift?: SettingsDrift;
 }
 
 export interface DeckResource {
@@ -152,6 +160,13 @@ function statusOf(lifecycle: LifecycleMap, key: string, fallback: LifecycleStatu
   return lifecycle[key]?.status ?? fallback;
 }
 
+/** `lifecycle[key].settings_drift`, `null` folded to `undefined` so
+ * `Placement.settingsDrift` stays an absent-means-none optional rather than
+ * every caller re-checking two different "nothing here" values. */
+function driftOf(lifecycle: LifecycleMap, key: string): SettingsDrift | undefined {
+  return lifecycle[key]?.settings_drift ?? undefined;
+}
+
 /** Whether a tenant is currently occupying its GPU with something worth a
  * chip. An unloaded lemonade or a parked hipfire gets no chip — that empty
  * space is the point, it is where the "serving slot" dropzone shows. */
@@ -172,7 +187,7 @@ function tenantPlacement(
     return {
       id: key, name: t.model, bytes: t.footprint, engine: "lemonade",
       kind: "model", stale: false, status: statusOf(lifecycle, key, "serving"),
-      pinned, priority, idleSeconds: t.idle_s,
+      pinned, priority, idleSeconds: t.idle_s, settingsDrift: driftOf(lifecycle, key),
     };
   }
 
@@ -187,6 +202,7 @@ function tenantPlacement(
       // hipfire reports no idle_s at all — it has one admission slot, and
       // what matters about it is whether a turn is in flight right now.
       busy: (t.queue_depth ?? 0) > 0,
+      settingsDrift: driftOf(lifecycle, key),
     };
   }
 
@@ -197,6 +213,7 @@ function tenantPlacement(
     id: key, name: "comfyui", bytes: null, engine: "comfyui",
     kind: "engine", stale: false, status: statusOf(lifecycle, key, "idle"),
     pinned, priority, queue: comfy.queue, idleSeconds: comfy.idle_s,
+    settingsDrift: driftOf(lifecycle, key),
   };
 }
 
@@ -368,6 +385,7 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
                 engineBadge: engine === SPARK_DEFAULT_ENGINE ? undefined : engine,
                 kind: "model",
                 stale,
+                settingsDrift: driftOf(lifecycle, SPARK_SLOT_KEY),
               },
             ]
           : [],

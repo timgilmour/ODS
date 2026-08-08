@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LifecycleEntry, SparkStatus, StateResponse } from "../api";
+import type { LifecycleEntry, SettingsDrift, SparkStatus, StateResponse } from "../api";
 import { buildNodes, findPlacement, isTenantName, TENANT_ORDER } from "./nodes";
 
 function state(overrides: Partial<StateResponse> = {}): StateResponse {
@@ -203,6 +203,48 @@ describe("buildNodes", () => {
     const [local] = buildNodes(s, null);
     expect(local.resources[0].placements[0].status).toBe("drifted");
   });
+
+  it("carries settings drift onto a placement from the lifecycle view", () => {
+    // Task 11's adapter copy — app/routers/__init__.py:116 writes
+    // `settings_drift` onto every lifecycle entry; this is the one place
+    // that value crosses into the board's own Placement shape.
+    const drift: SettingsDrift = {
+      changed: ["args:max-model-len"],
+      entries: [
+        { key: "args:max-model-len", old: "262144", new: "131072", ts: "2026-08-07T00:00:00Z" },
+      ],
+      since: "2026-08-07T00:00:00Z",
+    };
+    const s = state();
+    s.lifecycle = {
+      "local/hipfire": {
+        status: "drifted",
+        reason: "settings changed",
+        intent: null,
+        observed: { reachable: true, loaded: true, model: null, transitioning: false },
+        last_healthy_ts: null,
+        settings_drift: drift,
+      },
+    };
+    const [local] = buildNodes(s, null);
+    expect(local.resources[0].placements[0].settingsDrift).toEqual(drift);
+  });
+
+  it("leaves settingsDrift undefined when the lifecycle entry carries none", () => {
+    const s = state();
+    s.lifecycle = {
+      "local/hipfire": {
+        status: "serving",
+        reason: "",
+        intent: null,
+        observed: { reachable: true, loaded: true, model: null, transitioning: false },
+        last_healthy_ts: null,
+        settings_drift: null,
+      },
+    };
+    const [local] = buildNodes(s, null);
+    expect(local.resources[0].placements[0].settingsDrift).toBeUndefined();
+  });
 });
 
 function sparkStatus(overrides: Partial<SparkStatus> = {}): SparkStatus {
@@ -392,6 +434,22 @@ describe("buildNodes — spark", () => {
       sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
     )[1];
     expect(spark.detail).toBeUndefined();
+  });
+
+  it("carries settings drift onto the spark slot too", () => {
+    // The reload verb is gated on placement.id === SPARK_SLOT_KEY, so drift
+    // has to reach exactly this placement, not just local tenants.
+    const drift: SettingsDrift = {
+      changed: ["args:served-model-name"],
+      entries: [],
+      since: "2026-08-07T00:00:00Z",
+    };
+    const s = state();
+    s.lifecycle = {
+      "sparky/slot0": lifecycleEntry({ settings_drift: drift }),
+    };
+    const spark = buildNodes(s, sparkStatus())[1];
+    expect(spark.resources[0].placements[0].settingsDrift).toEqual(drift);
   });
 
   it("has an empty slot when nothing is serving", () => {
