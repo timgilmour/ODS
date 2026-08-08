@@ -416,3 +416,68 @@ def test_restore_is_atomic_no_temp_files_left(tmp_path):
     store.restore({"engines": {}, "models": {}, "engine_models": {}})
 
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# ===========================================================================
+# Journal and remove parameter (Task 1, Phase 3)
+# ===========================================================================
+
+
+def test_put_journals_old_and_new(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    store.put("engines", "sparky/vllm", "args", {"max-model-len": "131072"})
+    store.put("engines", "sparky/vllm", "args", {"max-model-len": "262144"})
+    journal = store.get()["engines"]["sparky/vllm"]["journal"]["args"]
+    assert journal[0]["old"] is None and journal[0]["new"] == "131072"
+    assert journal[1]["old"] == "131072" and journal[1]["new"] == "262144"
+    assert all(e["ts"] for e in journal)
+
+
+def test_put_remove_deletes_key_and_journals(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    store.put("engines", "sparky/vllm", "args", {"quantization": "q4_k_m"})
+    store.put("engines", "sparky/vllm", "args", {}, remove=["quantization"])
+    entry = store.get()["engines"]["sparky/vllm"]
+    assert "quantization" not in entry["args"]
+    last = entry["journal"]["args"][-1]
+    assert last["old"] == "q4_k_m" and last["new"] is None
+
+
+def test_put_remove_and_set_same_key_refused(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    with pytest.raises(ValueError):
+        store.put("engines", "sparky/vllm", "args",
+                  {"seed": "1"}, remove=["seed"])
+
+
+def test_unchanged_value_appends_no_journal_entry(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    store.put("engines", "sparky/vllm", "args", {"seed": "1"})
+    store.put("engines", "sparky/vllm", "args", {"seed": "1"})
+    assert len(store.get()["engines"]["sparky/vllm"]["journal"]["args"]) == 1
+
+
+def test_journal_capped(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    for i in range(60):
+        store.put("engines", "sparky/vllm", "args", {"seed": str(i)})
+    assert len(store.get()["engines"]["sparky/vllm"]["journal"]["args"]) == 50
+
+
+def test_corrupt_journal_heals(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"engines": {"sparky/vllm": {
+        "args": {"seed": "1"}, "journal": "corrupt"}},
+        "models": {}, "engine_models": {}}))
+    store = SettingsStore(path)
+    assert store.get()["engines"]["sparky/vllm"]["journal"] == {}
+
+
+def test_restore_journals_diff_against_previous(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    store.put("engines", "sparky/vllm", "args", {"max-model-len": "262144"})
+    snapshot = store.get()
+    snapshot["engines"]["sparky/vllm"]["args"]["max-model-len"] = "131072"
+    store.restore(snapshot)
+    last = store.get()["engines"]["sparky/vllm"]["journal"]["args"][-1]
+    assert last["old"] == "262144" and last["new"] == "131072"

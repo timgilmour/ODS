@@ -32,8 +32,7 @@ files.
 
 Every ``put()`` stamps the touched namespace with an ``updated_ts`` — a
 dict ``{namespace: iso}`` on the scope entry, one clock per namespace, not
-one per entry and not one per key (this store keeps no history to diff a
-single key's change against). PER-NAMESPACE, not entry-level, as of the
+one per entry and not one per key. PER-NAMESPACE, not entry-level, as of the
 Task 7 review round 2026-08-07: an entry-level clock made a settings_drift
 "changed" list report keys from namespaces that were never written,
 whenever ANY namespace of the same entry was touched later. Task 7's
@@ -44,6 +43,14 @@ which would make the flag self-erase within one tick of a placement
 actually serving) to say "this namespace was written since the placement's
 settings were last (re)recorded" — a display flag only; it never feeds
 app.reconcile.
+
+Per-key change history is now kept in the ``journal`` dict: ``journal[namespace]``
+is a list of change records ``{"key": name, "old": prev, "new": current, "ts": iso}``,
+capped at 50 entries per namespace. Only changes that actually modified a key's value
+are journaled (unchanged puts do not append). A ``remove`` list on ``put()`` deletes
+keys from a namespace while journaling their removal as ``"new": None``. The journal
+is consulted by ``_settings_drift`` (Task 2) to report which keys changed, and by the
+UI (Task 5) to understand a removal was requested.
 
 Human/UI-owned. Missing/corrupt reads as empty; writes are atomic; a
 rejected put leaves the file untouched. Self-healing is recursive: a
@@ -109,6 +116,7 @@ from app.argline import normalize_args_map
 
 KINDS = ("engines", "models", "engine_models")
 NAMESPACES = ("args", "env", "container")
+_JOURNAL_CAP = 50
 
 # Container-level settings a human may edit. Everything else about the
 # container is Deck-managed — see the module docstring.
@@ -159,8 +167,10 @@ class SettingsStore:
         into it per namespace) — also covers a pre-migration entry that
         still carries the old entry-level string form (Task 7 review round
         2026-08-07), which would otherwise crash ``_settings_drift``'s
-        ``.get(namespace)`` on a str. Any other key is out of this scope
-        and passes through untouched."""
+        ``.get(namespace)`` on a str. ``journal`` is guarded the same way
+        since put() extends journal[namespace] — any corrupt present value
+        would crash with a TypeError on list.extend(). Any other key is out
+        of this scope and passes through untouched."""
         if not isinstance(entry, dict):
             return {}
         healed = dict(entry)
@@ -171,6 +181,8 @@ class SettingsStore:
             healed["notes"] = {}
         if "updated_ts" in healed and not isinstance(healed["updated_ts"], dict):
             healed["updated_ts"] = {}
+        if "journal" in healed and not isinstance(healed["journal"], dict):
+            healed["journal"] = {}
         return healed
 
     def _save(self, data: dict) -> None:
@@ -186,11 +198,11 @@ class SettingsStore:
         return self._load().get(kind, {}).get(key, {})
 
     def put(self, kind: str, key: str, namespace: str, values: dict,
-            note: str | None = None) -> None:
-        """Merge `values` into one namespace of one scope entry.
-
-        Per-key merge, never per-blob: setting one flag must not discard the
-        others. Validates before writing anything.
+            note: str | None = None, remove: list | None = None) -> None:
+        """Merge `values` into one namespace of one scope entry, optionally
+        removing keys. Per-key merge, never per-blob: setting one flag must
+        not discard the others. Optionally delete keys from the namespace
+        while journaling the removal. Validates before writing anything.
         """
         if kind not in KINDS:
             raise ValueError(f"unknown scope kind {kind!r}; expected one of {KINDS}")
@@ -209,10 +221,31 @@ class SettingsStore:
             # for a dropped empty-list key is emitted from inside there.
             values = normalize_args_map(values)
 
+        if remove:
+            overlap = set(remove) & set(values)
+            if overlap:
+                raise ValueError(
+                    f"keys {sorted(overlap)} appear in both 'values' and 'remove'; "
+                    "a put must say one thing per key")
+
         with self._lock:
             data = self._load()
             entry = data[kind].setdefault(key, {})
-            entry.setdefault(namespace, {}).update(values)
+            ns = entry.setdefault(namespace, {})
+            before = dict(ns)
+            ns.update(values)
+            for name in remove or []:
+                ns.pop(name, None)
+            now = _now_iso()
+            changes = [
+                {"key": name, "old": before.get(name), "new": ns.get(name), "ts": now}
+                for name in sorted(set(values) | set(remove or []))
+                if before.get(name) != ns.get(name)
+            ]
+            if changes:
+                log = entry.setdefault("journal", {}).setdefault(namespace, [])
+                log.extend(changes)
+                entry["journal"][namespace] = log[-_JOURNAL_CAP:]
             if note is not None:
                 entry.setdefault("notes", {})[namespace] = note
             # PER-NAMESPACE write timestamp (Task 7 review round,
@@ -224,7 +257,7 @@ class SettingsStore:
             # settings_drift's "changed" is "every key of a namespace
             # written since the baseline," an accepted C1 approximation —
             # see app.routers._settings_drift.
-            entry.setdefault("updated_ts", {})[namespace] = _now_iso()
+            entry.setdefault("updated_ts", {})[namespace] = now
             self._save(data)
 
     def restore(self, data: dict) -> None:
@@ -245,6 +278,10 @@ class SettingsStore:
         so ``settings_drift`` may honestly flag it, even though nothing here
         reloads the running engine (reload stays a human's call). ``notes``
         is carried through unchanged (human rationale, not a write-clock).
+        Each namespace is journaled with its per-key diff against the
+        previous store — a restore is a real write and is recorded as such.
+        Entries removed wholesale by the restore have no surviving scope entry
+        to carry a journal; a vanished scope has no chip to show drift on.
         """
         if not isinstance(data, dict):
             data = {}
@@ -265,6 +302,24 @@ class SettingsStore:
                     entry["updated_ts"] = stamped
 
         with self._lock:
+            previous = self._load()
+            for kind in KINDS:
+                for key, entry in healed[kind].items():
+                    prev_entry = previous.get(kind, {}).get(key, {})
+                    journal = {}
+                    for ns_name in NAMESPACES:
+                        before = prev_entry.get(ns_name, {}) or {}
+                        after = entry.get(ns_name, {}) or {}
+                        changes = [
+                            {"key": name, "old": before.get(name),
+                             "new": after.get(name), "ts": now}
+                            for name in sorted(set(before) | set(after))
+                            if before.get(name) != after.get(name)
+                        ]
+                        if changes:
+                            journal[ns_name] = changes[-_JOURNAL_CAP:]
+                    if journal:
+                        entry["journal"] = journal
             self._save(healed)
 
     def forget(self, kind: str, key: str) -> None:
