@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from app import origins, provenance, provenance_history
 from app.mover import hash_file
+from app.observe import _LOCAL_NODE
 from app.origins import file as file_origin
 
 router = APIRouter(prefix="/provenance", tags=["provenance"])
@@ -102,7 +103,11 @@ def backfill(request: Request) -> dict:
     store = deck["provenance_store"]
     before = set(store.get())
 
-    node = deck["settings"].node_label
+    # Node ID, never settings.node_label — see Watcher._provenance_pass.
+    # Backfill and the watcher pass MUST agree here: disagreeing would make
+    # backfill create a second, differently-keyed copy of every local
+    # artifact rather than filling in the gaps it exists to fill.
+    node = _LOCAL_NODE
     entries = list(provenance_collect.local_file_entries(
         deck["catalog"].units(), node))
 

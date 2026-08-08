@@ -115,6 +115,7 @@ from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
 from app.lifecycle import derive_status
 from app.observe import (
+    _LOCAL_NODE,
     LOCAL_LEMONADE_KEY,
     SparkObserver,
     merge_observations,
@@ -1089,7 +1090,14 @@ class Watcher:
         self._last_provenance_at = now_mono
 
         now = datetime.now(UTC).isoformat()
-        node = self._settings.node_label
+        # The node ID, never settings.node_label — the display string
+        # ("autarch" here) that app/routers/status.py:27 deliberately keeps
+        # SEPARATE from the id. Keying artifact ids on a label an operator
+        # can rename would orphan every declared origin and its history on
+        # a rename, and it left the ledger holding two vocabularies at once
+        # (local by label, sparky by id). Same defect the harvest path
+        # shipped on 2026-08-07; see _configurable_engines' docstring above.
+        node = _LOCAL_NODE
 
         try:
             self._provenance_local_oci(node, now)

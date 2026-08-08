@@ -2514,6 +2514,57 @@ def test_provenance_pass_records_catalog_units_as_weights(tmp_path):
     assert entry["current"]["verification"] == "consistent"
 
 
+# --- node vocabulary, provenance edition (live-deploy defect, 2026-08-08) ---
+#
+# The SAME defect the harvest path shipped on 2026-08-07 (see the F1/F2
+# block above), in a module written after that warning: the local collectors
+# keyed artifact ids on `settings.node_label` -- the display string, e.g.
+# "autarch" via MODEL_DECK_NODE_LABEL, documented as presentation-only at
+# app/settings.py:31-34 and split from the id at app/routers/status.py:27
+# (`{"id": "local", "label": node_label}`) -- instead of the node id every
+# other node-scoped key in the deck uses (`app.observe._LOCAL_NODE`).
+#
+# Sparky's collector got it right (`spark_node_id()`, app/arbiter.py:1144),
+# so the ledger keyed local artifacts by label and remote ones by id: one
+# namespace, two vocabularies. Nothing refused it because
+# `origins._NODE_RE` validates the node as a slug, and "autarch" is a
+# perfectly good slug.
+#
+# Every unit test missed it for the documented reason -- node_label DEFAULTS
+# to "local", making label == id -- so these two pin the distinction by
+# setting node_label away from its default. Only the live box, where the
+# label really is "autarch", could tell the difference before this.
+
+
+def test_provenance_pass_keys_containers_on_node_id_not_node_label(tmp_path):
+    """Regression: with node_label set away from "local", a local engine
+    must still land under the node id."""
+    watcher, store, _docker = _one_container(tmp_path, node_label="autarch")
+
+    watcher.tick()
+
+    assert store.entry(f"oci:{_LOCAL_NODE}:ods-hipfire") is not None
+    assert store.entry("oci:autarch:ods-hipfire") is None, (
+        "artifact keyed on the display label -- a rename of "
+        "MODEL_DECK_NODE_LABEL would orphan every declared origin and its "
+        "history, in the one file that is their only home (D13)")
+
+
+def test_provenance_pass_keys_weights_on_node_id_not_node_label(tmp_path):
+    """Same vocabulary, the other local collector."""
+    store = _prov_store(tmp_path)
+    catalog = _FakeCatalogUnits([{
+        "id": "hot:m.gguf", "name": "m.gguf", "relpath": "m.gguf",
+        "location": "hot", "size": 4096, "mtime": 2.0, "state": "resident"}])
+    watcher = _watcher(tmp_path, provenance_store=store, catalog=catalog,
+                       node_label="autarch")
+
+    watcher.tick()
+
+    assert store.entry(f"file:{_LOCAL_NODE}:m.gguf") is not None
+    assert store.entry("file:autarch:m.gguf") is None
+
+
 def test_a_provenance_failure_is_logged_not_raised(tmp_path):
     """A collector raising must be caught inside the pass. If it escaped to
     tick()'s supervisor catch it would look identical in the log while
