@@ -6,8 +6,10 @@ import {
   beginEdit,
   commitEdit,
   emptyEdit,
+  forChips,
   forSave,
   hasChanges,
+  leaveEdit,
   removeChip,
 } from "./editState";
 import { scopeKeys, toPuts } from "./settingsView";
@@ -19,9 +21,9 @@ function shipped(s: Parameters<typeof forSave>[0]) {
   return toPuts(forSave(s), keys);
 }
 
-// A brand-new add of an option the catalog has no default for. Measured
-// against the live sparky/vllm catalog (274 options, 2026-08-08): 95 start
-// at `""` (catalogFilter's startingValueFor), five of them `select` widgets
+// A brand-new add with nothing to start from. Measured against the live
+// sparky/vllm catalog (274 options, 2026-08-08): 100 start at `""`
+// (catalogFilter's startingValueFor), five of them `select` widgets
 // — collect-detailed-traces, gdn-prefill-backend, mm-encoder-attn-dtype,
 // safetensors-load-strategy, spec-method. Those five are the one-click leak:
 // `select` has no onBlur, so nothing cancels the add on the way out. The
@@ -31,7 +33,11 @@ const provisional = addOption(emptyEdit, "engines", "spec-method", "");
 
 describe("addOption", () => {
   it("marks an empty starting value provisional — it is a placeholder, not a value", () => {
-    expect(provisional.pendingAdd).toEqual({ name: "spec-method", kind: "engines" });
+    expect(provisional.pendingAdd).toEqual({
+      name: "spec-method",
+      kind: "engines",
+      provisional: true,
+    });
   });
 
   it("does NOT mark a toggle's `true` provisional — that IS the value", () => {
@@ -39,7 +45,7 @@ describe("addOption", () => {
     // complete meaning of a bare flag. Treating it as provisional would make
     // "add --enforce-eager, click away" silently do nothing.
     const s = addOption(emptyEdit, "engines", "enforce-eager", true);
-    expect(s.pendingAdd).toBeNull();
+    expect(s.pendingAdd?.provisional).toBe(false);
     expect(shipped(s)).toEqual([
       { kind: "engines", key: "sparky/vllm", values: { "enforce-eager": true }, remove: [] },
     ]);
@@ -49,14 +55,18 @@ describe("addOption", () => {
     // Declaring the current default explicitly is a genuine choice: it pins
     // the value against a future upstream default change.
     const s = addOption(emptyEdit, "engines", "kv-cache-dtype", "auto");
-    expect(s.pendingAdd).toBeNull();
+    expect(s.pendingAdd?.provisional).toBe(false);
     expect(shipped(s)[0].values).toEqual({ "kv-cache-dtype": "auto" });
   });
 
   it("abandons an earlier provisional add rather than stacking two", () => {
     const s = addOption(provisional, "engines", "gdn-prefill-backend", "");
-    expect(s.pendingAdd).toEqual({ name: "gdn-prefill-backend", kind: "engines" });
-    expect(s.buffer.sets.engines?.["spec-method"]).toBeUndefined();
+    expect(s.pendingAdd).toEqual({
+      name: "gdn-prefill-backend",
+      kind: "engines",
+      provisional: true,
+    });
+    expect(forChips(s).sets.engines?.["spec-method"]).toBeUndefined();
   });
 });
 
@@ -110,7 +120,7 @@ describe("beginEdit", () => {
     // Reopening the same editor commits nothing, so the add is still
     // provisional and every later exit must still be able to take it back out.
     const s = beginEdit(provisional, "spec-method");
-    expect(s.pendingAdd).toEqual({ name: "spec-method", kind: "engines" });
+    expect(s.pendingAdd).toEqual({ name: "spec-method", kind: "engines", provisional: true });
     expect(shipped(s)).toEqual([]);
   });
 });
@@ -132,7 +142,7 @@ describe("removeChip", () => {
 
   it("drops a provisional add when a DIFFERENT chip is removed", () => {
     const s = removeChip(provisional, "engines", "max-model-len");
-    expect(s.buffer.sets.engines?.["spec-method"]).toBeUndefined();
+    expect(forChips(s).sets.engines?.["spec-method"]).toBeUndefined();
     expect(shipped(s)).toEqual([
       { kind: "engines", key: "sparky/vllm", values: {}, remove: ["max-model-len"] },
     ]);
@@ -140,16 +150,18 @@ describe("removeChip", () => {
 });
 
 describe("the write scope moving under an open editor", () => {
-  // The scope segmented control can change `kind` while an add's editor is
-  // open, which is why PendingAdd carries the kind it was buffered at. These
-  // are the states where the add's NAME matches the incoming action but its
-  // KIND does not — matching on name alone would strand the `""` at the old
+  // DEFENSIVE, not a reproduction: SettingsModal calls `leaveEditor` on every
+  // scope switch, so today the add is always settled before `kind` can move.
+  // These pin the module's behaviour if that guard is ever relaxed — the add
+  // carries the kind it was buffered at precisely so it can be. The states
+  // below are the ones where the add's NAME matches the incoming action but
+  // its KIND does not; matching on name alone stranded the `""` at the old
   // kind while writing at the new one.
   const atModels = addOption(emptyEdit, "engine_models", "spec-method", "");
 
   it("commits at the new scope without stranding the add at the old one", () => {
     const s = commitEdit(atModels, "engines", "spec-method", "eagle");
-    expect(s.buffer.sets.engine_models?.["spec-method"]).toBeUndefined();
+    expect(forChips(s).sets.engine_models?.["spec-method"]).toBeUndefined();
     expect(shipped(s)).toEqual([
       { kind: "engines", key: "sparky/vllm", values: { "spec-method": "eagle" }, remove: [] },
     ]);
@@ -157,7 +169,7 @@ describe("the write scope moving under an open editor", () => {
 
   it("removes at the new scope without stranding the add at the old one", () => {
     const s = removeChip(atModels, "engines", "spec-method");
-    expect(s.buffer.sets.engine_models?.["spec-method"]).toBeUndefined();
+    expect(forChips(s).sets.engine_models?.["spec-method"]).toBeUndefined();
     expect(shipped(s)).toEqual([
       { kind: "engines", key: "sparky/vllm", values: {}, remove: ["spec-method"] },
     ]);
@@ -167,7 +179,44 @@ describe("the write scope moving under an open editor", () => {
     expect(beginEdit(atModels, "spec-method").pendingAdd).toEqual({
       name: "spec-method",
       kind: "engine_models",
+      provisional: true,
     });
+  });
+});
+
+describe("an add that arrived WITH a value", () => {
+  // 96 of the 274 live options are number/select/text/list with a real
+  // catalog default, so "+ Add option" lands a genuine value on the chip.
+  // Picking the option is the decision and the default is the value, so
+  // walking away keeps it — but Escape still has to mean cancel.
+  const withValue = addOption(emptyEdit, "engines", "kv-cache-dtype", "auto");
+
+  it("survives moving to another chip", () => {
+    expect(shipped(beginEdit(withValue, "max-model-len"))[0].values).toEqual({
+      "kv-cache-dtype": "auto",
+    });
+  });
+
+  it("survives Save with its editor still open", () => {
+    expect(shipped(withValue)[0].values).toEqual({ "kv-cache-dtype": "auto" });
+  });
+
+  it("is still cancelled by Escape — an add nobody confirmed is not a change", () => {
+    expect(shipped(abandonEdit(withValue))).toEqual([]);
+  });
+
+  it("counts as a change while it stands", () => {
+    expect(hasChanges(withValue)).toBe(true);
+  });
+});
+
+describe("forChips", () => {
+  it("keeps the provisional add visible — its chip is the only reason it exists", () => {
+    // The raw buffer, unlike forSave's: buildChips renders the chip FROM this,
+    // so hiding the provisional set here would close the editor the operator
+    // is standing in.
+    expect(forChips(provisional).sets.engines?.["spec-method"]).toBe("");
+    expect(forSave(provisional).sets.engines?.["spec-method"]).toBeUndefined();
   });
 });
 
@@ -180,6 +229,21 @@ describe("abandonEdit", () => {
   it("leaves a committed edit alone", () => {
     const s = commitEdit(emptyEdit, "engines", "max-model-len", "8192");
     expect(abandonEdit(s)).toEqual(s);
+  });
+});
+
+describe("leaveEdit", () => {
+  // The write scope changing, or a modal about to steal focus: the operator
+  // moved on without saying no. Distinct from abandonEdit, which is them
+  // saying no.
+  it("drops a provisional add", () => {
+    expect(shipped(leaveEdit(provisional))).toEqual([]);
+    expect(leaveEdit(provisional).pendingAdd).toBeNull();
+  });
+
+  it("keeps an add that arrived with a value", () => {
+    const withValue = addOption(emptyEdit, "engines", "kv-cache-dtype", "auto");
+    expect(shipped(leaveEdit(withValue))[0].values).toEqual({ "kv-cache-dtype": "auto" });
   });
 });
 

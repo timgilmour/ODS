@@ -465,6 +465,10 @@ export const labels = {
   cannotUnsetHere:
     "not declared at the selected scope — switch scopes to remove it where it is set",
   unsavedBadge: "unsaved",
+  // A brand-new add still sitting on the `""` placeholder. NOT "unsaved":
+  // Save is disabled for it and `forSave` would drop it (editState), so
+  // calling it unsaved would promise a write that is not going to happen.
+  chooseValueBadge: "choose a value",
   willBeRemovedBadge: "will be removed",
   shadowedBadge: "shadowed by a more specific scope",
   positionalName: "positional",

@@ -20,8 +20,10 @@ import {
   beginEdit,
   commitEdit,
   emptyEdit,
+  forChips,
   forSave,
   hasChanges,
+  leaveEdit,
   removeChip,
   type EditState,
 } from "../model/editState";
@@ -213,7 +215,7 @@ export default function SettingsModal({
   const resolved = effective?.resolved ?? {};
   // The RAW buffer, deliberately: a provisional add's chip has to render —
   // that buffered set exists for no other reason.
-  const { declared, applied } = buildChips(resolved, edit.buffer, kind);
+  const { declared, applied } = buildChips(resolved, forChips(edit), kind);
 
   // Warnings describe what the server currently HOLDS (validate_settings runs
   // over the saved resolution, app/routers/settings.py:get_effective), so a
@@ -249,11 +251,21 @@ export default function SettingsModal({
     openEditor(name, value);
   }
 
-  /** Closes an editor WITHOUT committing, undoing a brand-new add that never
-   * got a value. Safe on every other edit: with no add pending, `abandonEdit`
+  /** The operator said no — Escape, or emptying the field (see `commit`).
+   * Retracts a brand-new add whether or not the catalog gave it a starting
+   * value: "Escape means cancel" cannot depend on that. With no add pending it
    * is exactly the old `setEditing(null)`. */
   function cancelEdit() {
     setEdit(abandonEdit);
+    setEditing(null);
+  }
+
+  /** The operator moved on without saying no — the write scope changed, or a
+   * modal is about to take the focus. Keeps an add that arrived with a real
+   * value (picking the option out of the catalog was the decision); retracts
+   * one still sitting on the `""` placeholder. */
+  function leaveEditor() {
+    setEdit(leaveEdit);
     setEditing(null);
   }
 
@@ -261,14 +273,19 @@ export default function SettingsModal({
    * autofocused on open. Review finding (task-9, Minor): left as a bare
    * `setAllOptionsOpen(true)`, that autofocus steals focus away from
    * whatever chip editor the operator had open, and blur is what commits a
-   * text-editor draft (see `renderEditor`'s `onBlur`) — abandoning an
-   * in-progress edit to go browse the catalog would silently SAVE
-   * whatever half-typed text was sitting in the box. This cancels the
-   * editor the same way Escape does (`cancelledEdit` above) — discard, not
-   * commit — before the modal ever mounts. */
+   * text-editor draft (see `renderEditor`'s `onBlur`). Closing the editor
+   * before the modal mounts is what stops one being left open behind it, and
+   * — the F1-relevant part — it is the only thing that retracts a
+   * `select`/`toggle` add, which has no onBlur at all.
+   *
+   * What `cancelledEdit` does NOT do, despite how it reads: stop a half-typed
+   * text draft from being committed. A mouse click blurs the input BEFORE the
+   * click handler runs, so `commit()` has already fired by the time this line
+   * sets the flag. It still earns its keep against the blur React fires when
+   * it unmounts the focused input. */
   function openAllOptions() {
     cancelledEdit.current = true;
-    cancelEdit();
+    leaveEditor();
     setAllOptionsOpen(true);
   }
 
@@ -279,7 +296,7 @@ export default function SettingsModal({
    * next Escape or the next chip click. */
   function openImport() {
     cancelledEdit.current = true;
-    cancelEdit();
+    leaveEditor();
     setImportOpen(true);
   }
 
@@ -508,6 +525,11 @@ export default function SettingsModal({
     // buildChips reports that as `pendingSet` with the resolved (not
     // buffered) layer. Badging it is the only way that edit is visible.
     const shadowed = chip.pendingSet && chip.layer !== LAYER_FOR_KIND[kind];
+    // The add whose editor is open on the `""` placeholder. Save is disabled
+    // while it is the only pending change and `forSave` drops it either way,
+    // so it must not claim to be an unsaved edit.
+    const provisionalAdd =
+      edit.pendingAdd?.provisional === true && edit.pendingAdd.name === chip.name;
     const classes = [
       "settings-chip",
       warns.length > 0 ? "settings-chip-warn" : null,
@@ -554,7 +576,11 @@ export default function SettingsModal({
           )}
           {chip.pendingSet && !chip.pendingRemove && (
             <span className="settings-chip-badge">
-              {shadowed ? labels.shadowedBadge : labels.unsavedBadge}
+              {provisionalAdd
+                ? labels.chooseValueBadge
+                : shadowed
+                  ? labels.shadowedBadge
+                  : labels.unsavedBadge}
             </span>
           )}
 
@@ -695,8 +721,8 @@ export default function SettingsModal({
                       // unmounting the focused input, or a `select` that has
                       // no onBlur — this is what stops an untouched add from
                       // being stranded in the OLD kind's buffer, which is why
-                      // `PendingAdd` carries its kind.
-                      cancelEdit();
+                      // the add carries its kind.
+                      leaveEditor();
                       setPopover(null);
                     }}
                   >

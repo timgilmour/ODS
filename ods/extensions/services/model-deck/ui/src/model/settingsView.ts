@@ -221,8 +221,8 @@ export interface PendingAdd {
  * "+ Add option" has to buffer a starting value immediately — the chip is
  * rendered FROM the buffer (buildChips's "pending set on a key `resolved`
  * doesn't have at all" branch), so there is no chip, and therefore no editor,
- * until the set exists. For the 95 live vLLM options that start at `""`
- * (catalogFilter's `startingValueFor` — see editState's `isProvisional`),
+ * until the set exists. For the 100 live vLLM options that start at `""`
+ * (catalogFilter's `startingValueFor` — see editState's `UncommittedAdd`),
  * and the editor's own empty-means-cancel rule (SettingsModal's `commit`)
  * deliberately does NOT write `""` back — so an operator who adds an option
  * and then Escapes, blurs, or walks away left the `""` sitting in the buffer,
