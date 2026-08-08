@@ -37,6 +37,17 @@ services:
       # take effect.
       - HIPFIRE_MAX_TOKENS=${HIPFIRE_MAX_TOKENS:-4096}
       - HIPFIRE_THINKING_BUDGET=${HIPFIRE_THINKING_BUDGET:-med}
+      # Tool-call grammar kill-switch (daemon default is ON: `env != "0"`).
+      # The qwen35 grammar refuses to let the model close a tool call until
+      # every `required` field NAME has appeared in the args body — see
+      # grammar.rs `required_fields_satisfied`, a loose substring match.
+      # omp declares `i` ("concise intent") required on 11 of its 12 tools;
+      # when the model omits it the close is rejected indefinitely, the model
+      # spirals appending fragments until EOS, and the resulting JSON is
+      # unparseable — so the daemon falls back to dumping the raw
+      # `<tool_call>` buffer as assistant TEXT, which clients print verbatim.
+      # Measured 57% of tool-calling turns. Analysis: ~/notes/reports/2026-08-08.md
+      - HIPFIRE_QWEN35_GRAMMAR=${HIPFIRE_QWEN35_GRAMMAR:-0}
     volumes:
       - ./data/hipfire/models:/opt/hipfire/.hipfire/models:ro,z
       # JIT-validated kernel-blob cache (.hsaco + .hash sidecars). The image
