@@ -21,6 +21,7 @@ _MANIFEST_ACCEPT = ", ".join((
     "application/vnd.docker.distribution.manifest.list.v2+json",
     "application/vnd.docker.distribution.manifest.v2+json",
 ))
+_MALFORMED_TAGS_NOTE = "registry returned a malformed tags response"
 
 
 def _result(source, status, *, current=None, latest=None, detail=None, note=None):
@@ -87,13 +88,21 @@ def check_tags(source: dict, fetch) -> dict:
                        note=f"registry returned {response['status_code']}")
 
     body = response["json"]
-    # Same defensive note as `_token`: `json` may legally be a list here per
-    # the fetch contract. A tags/list body that isn't a dict is a malformed
-    # read -- fold it into "no tags" rather than crashing on `.get`.
-    tags = (body.get("tags") or []) if isinstance(body, dict) else []
-    if not tags:
-        # No tags at all is a failure to LEARN anything about the repository,
-        # not evidence of being current -- distinct from tags-present-but-
+    if not isinstance(body, dict):
+        # `json` is typed dict | list | None; a tags/list body that isn't
+        # even an object cannot be read as a tag set at all. This is a
+        # failure to PARSE the response and gets its own note, distinct
+        # from "no tags" below -- an operator reading `note` must be able
+        # to tell "the registry said it has none" from "we couldn't make
+        # sense of what it sent".
+        return _result(source, updates.UNAVAILABLE, current=pinned,
+                       note=_MALFORMED_TAGS_NOTE)
+
+    raw = body.get("tags")
+    if raw is None or raw == []:
+        # Genuinely nothing there: the key is absent, or it's an empty
+        # list. A failure to LEARN anything about the repository, not
+        # evidence of being current -- distinct from tags-present-but-
         # unparseable (UNDETERMINED, below). `rank([], ...)` would happily
         # hand back `newer: [], rankable: False`, which the naive mapping
         # reads as "nothing newer" -- a false CURRENT built on having read
@@ -101,6 +110,25 @@ def check_tags(source: dict, fetch) -> dict:
         # judge an empty set.
         return _result(source, updates.UNAVAILABLE, current=pinned,
                        note="registry returned no tags")
+
+    if not isinstance(raw, list):
+        # The `tags` field is present but structurally wrong (e.g. a bare
+        # string). A string IS iterable in Python -- iterating it here
+        # would silently manufacture one "tag" per character instead of
+        # failing loudly. Same "could not read it" category as a non-dict
+        # body above, not "no tags" (something WAS there, just not a list).
+        return _result(source, updates.UNAVAILABLE, current=pinned,
+                       note=_MALFORMED_TAGS_NOTE)
+
+    tags = [t for t in raw if isinstance(t, str)]
+    if not tags:
+        # Elements were present but none were strings (e.g. all ints) --
+        # ordering.rank's regexes assume strings and would raise TypeError
+        # on anything else. Nothing usable survived, so this is a failure
+        # to read what the registry sent, not "reached it, cannot rank it"
+        # (that status is for tag STRINGS we can read but not order).
+        return _result(source, updates.UNAVAILABLE, current=pinned,
+                       note=_MALFORMED_TAGS_NOTE)
 
     ranked = ordering.rank(tags, source["order"], pinned)
     detail = {"newer": ranked["newer"], "unranked": ranked["unranked"],
