@@ -58,6 +58,24 @@ def test_compare_reports_available_when_behind():
     assert r["latest"] == "b91f0e22"
 
 
+def test_compare_requests_pinned_ellipsis_ref_in_order():
+    # The scaffolding (fake_fetch.calls) exists precisely to catch a
+    # swapped base/head: `_compare(owner, repo, pinned, ref, fetch)` must
+    # build `.../compare/{pinned}...{ref}`. Swap that order and every other
+    # test in this file would still pass -- only reading the actual
+    # constructed URL back catches it.
+    src = {"id": "up", "check": "git_compare",
+           "remote": "https://github.com/warpfront/hipfire",
+           "ref": "master", "pinned": "5d3683a7", "order": None}
+    fetch = fake_fetch({"/compare/": {
+        "status_code": 200, "headers": {},
+        "json": {"ahead_by": 0, "behind_by": 0, "commits": []}}})
+    git.check_compare(src, fetch)
+    assert len(fetch.calls) == 1
+    assert fetch.calls[0]["url"] == (
+        "https://api.github.com/repos/warpfront/hipfire/compare/5d3683a7...master")
+
+
 def test_compare_reports_current_when_identical():
     src = {"id": "up", "check": "git_compare",
            "remote": "https://github.com/a/b", "ref": "main",
@@ -99,14 +117,30 @@ def test_rate_limited_is_unavailable_and_says_so():
 
 def test_403_without_rate_limit_header_is_ordinary_failure_not_rate_limit():
     # A 403 is not automatically a rate-limit report -- only a confirmed
-    # X-RateLimit-Remaining: 0 earns that specific note. Anything else
-    # (missing header, or present but nonzero) is an ordinary failure.
+    # X-RateLimit-Remaining: 0 earns that specific note. Present but
+    # nonzero is an ordinary failure (this test); so is the header being
+    # entirely absent (the next test).
     src = {"id": "up", "check": "git_compare",
            "remote": "https://github.com/a/b", "ref": "main",
            "pinned": "abc", "order": None}
     fetch = fake_fetch({"/compare/": {
         "status_code": 403, "headers": {"X-RateLimit-Remaining": "42"},
         "json": None}})
+    r = git.check_compare(src, fetch)
+    assert r["status"] == updates.UNAVAILABLE
+    assert "rate limit" not in r["note"].lower()
+    assert "403" in r["note"]
+
+
+def test_403_with_rate_limit_header_entirely_absent_is_ordinary_failure():
+    # Same code path as above, pinned separately: no header at all (the
+    # common case for a non-rate-limit 403, e.g. an auth problem) must not
+    # be misread as "rate limit exhausted".
+    src = {"id": "up", "check": "git_compare",
+           "remote": "https://github.com/a/b", "ref": "main",
+           "pinned": "abc", "order": None}
+    fetch = fake_fetch({"/compare/": {
+        "status_code": 403, "headers": {}, "json": None}})
     r = git.check_compare(src, fetch)
     assert r["status"] == updates.UNAVAILABLE
     assert "rate limit" not in r["note"].lower()
@@ -154,9 +188,13 @@ def test_compare_non_dict_last_commit_does_not_crash():
 def test_compare_non_int_behind_by_does_not_crash():
     # `behind_by` is the verdict-determining field. A non-int value (e.g. a
     # garbled string) must not be trusted into a comparison -- `"12" > 0`
-    # raises TypeError in Python 3, and even if it didn't, coercing an
-    # untrusted shape into a verdict is exactly the guessing this package
-    # refuses to do.
+    # raises TypeError in Python 3 -- AND must not be silently defaulted
+    # into a verdict either. Defaulting to 0 would manufacture CURRENT out
+    # of a field that could not be read: an upstream that is genuinely 12
+    # commits ahead would be reported "you are up to date" with no note
+    # explaining why. The correct answer when the verdict-driving field
+    # cannot be read is unavailable, same as everywhere else in this
+    # package.
     src = {"id": "up", "check": "git_compare",
            "remote": "https://github.com/a/b", "ref": "main",
            "pinned": "abc", "order": None}
@@ -164,8 +202,36 @@ def test_compare_non_int_behind_by_does_not_crash():
         "status_code": 200, "headers": {},
         "json": {"behind_by": "12", "ahead_by": 0, "commits": []}}})
     r = git.check_compare(src, fetch)
-    assert r["status"] == updates.CURRENT
-    assert r["detail"]["behind_by"] == 0
+    assert r["status"] == updates.UNAVAILABLE
+    assert "malformed" in r["note"].lower()
+
+
+def test_compare_non_int_ahead_by_is_unavailable_not_a_crash():
+    # Same discipline applies symmetrically to ahead_by, even though it
+    # does not itself drive the verdict -- an unreadable sibling field
+    # means the whole body is untrustworthy.
+    src = {"id": "up", "check": "git_compare",
+           "remote": "https://github.com/a/b", "ref": "main",
+           "pinned": "abc", "order": None}
+    fetch = fake_fetch({"/compare/": {
+        "status_code": 200, "headers": {},
+        "json": {"ahead_by": "5", "behind_by": 0, "commits": []}}})
+    r = git.check_compare(src, fetch)
+    assert r["status"] == updates.UNAVAILABLE
+    assert "malformed" in r["note"].lower()
+
+
+def test_compare_missing_ahead_and_behind_by_is_unavailable_not_a_crash():
+    # Both fields absent entirely (not just wrong-typed) -- still cannot be
+    # read as ints, so still unavailable rather than a guessed CURRENT.
+    src = {"id": "up", "check": "git_compare",
+           "remote": "https://github.com/a/b", "ref": "main",
+           "pinned": "abc", "order": None}
+    fetch = fake_fetch({"/compare/": {
+        "status_code": 200, "headers": {}, "json": {"status": "identical"}}})
+    r = git.check_compare(src, fetch)
+    assert r["status"] == updates.UNAVAILABLE
+    assert "malformed" in r["note"].lower()
 
 
 def test_compare_malformed_body_not_a_dict_is_unavailable():
@@ -194,6 +260,21 @@ def test_git_tags_ranks_with_semver():
     assert r["latest"] == "v0.5.6"
 
 
+def test_git_tags_requests_the_right_url():
+    # Owner/repo must interpolate correctly and the endpoint must be tags,
+    # not compare -- pinned directly via the recorded call, not just
+    # inferred from the response matching.
+    src = {"id": "tags", "check": "git_tags",
+           "remote": "https://github.com/Entrpi/ds4",
+           "pinned": "v0.5.6", "order": "semver"}
+    fetch = fake_fetch({"/tags": {
+        "status_code": 200, "headers": {}, "json": [{"name": "v0.5.6"}]}})
+    git.check_tags(src, fetch)
+    assert len(fetch.calls) == 1
+    assert fetch.calls[0]["url"] == (
+        "https://api.github.com/repos/Entrpi/ds4/tags?per_page=100")
+
+
 def test_git_tags_carries_divergence_as_context_not_a_verdict():
     # ds4's tags live on batched-serving, 569/216 diverged from main. That is
     # context on the tag answer, never a status of its own.
@@ -212,6 +293,11 @@ def test_git_tags_carries_divergence_as_context_not_a_verdict():
     assert r["status"] == updates.AVAILABLE
     assert r["latest"] == "v0.5.6"
     assert r["detail"]["diverges_from_default"] == {"ahead_by": 569, "behind_by": 216}
+    # The divergence fetch is base...head = default_branch...ref, not the
+    # reverse -- a swap here would silently invert ahead_by/behind_by.
+    compare_calls = [c["url"] for c in fetch.calls if "/compare/" in c["url"]]
+    assert compare_calls == [
+        "https://api.github.com/repos/Entrpi/ds4/compare/main...batched-serving"]
 
 
 def test_git_tags_rate_limited_reuses_failure_classification():

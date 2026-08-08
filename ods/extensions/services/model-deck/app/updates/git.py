@@ -68,41 +68,25 @@ def _compare(owner, repo, base, head, fetch):
     return fetch(f"{_API}/repos/{owner}/{repo}/compare/{base}...{head}")
 
 
-def _int_or_zero(value) -> int:
-    """An untrusted int-shaped field, defaulting to 0 on anything else.
-
-    `behind_by` drives the compare verdict directly, so a garbled value
-    (e.g. a string) must not be trusted into a comparison -- `"12" > 0`
-    raises TypeError in Python 3, and coercing an unrecognized shape into a
-    number would be exactly the guessing this package refuses to do. Bools
-    are excluded even though `bool` is an `int` subclass in Python: a JSON
-    `true`/`false` here is not a count.
-    """
-    return value if _is_int(value) else 0
-
-
 def _is_int(value) -> bool:
     """True for a genuine int, excluding bool (a `bool` is an `int`
     subclass in Python, but a JSON `true`/`false` is not a count)."""
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _commits_summary(body: dict) -> tuple[int, int, str | None]:
-    """(ahead_by, behind_by, latest sha) from a compare body, defensively.
-
-    `commits` may legitimately be absent, empty, not a list, or contain
-    non-dict elements (or a dict with a non-string `sha`) -- none of that
-    may crash the check, it should just fail to produce a `latest`.
-    """
-    ahead_by = _int_or_zero(body.get("ahead_by"))
-    behind_by = _int_or_zero(body.get("behind_by"))
+def _latest_sha(body: dict) -> str | None:
+    """The most recent commit sha from a compare body's `commits` list,
+    defensively. `commits` may legitimately be absent, empty, not a list,
+    or contain non-dict elements (or a dict with a non-string `sha`) --
+    none of that may crash the check, it should just fail to produce a
+    `latest`. Unlike `ahead_by`/`behind_by` this never drives the verdict,
+    so defaulting to None on anything unreadable is safe here."""
     commits = body.get("commits")
-    latest = None
     if isinstance(commits, list) and commits:
         last = commits[-1]
         if isinstance(last, dict) and isinstance(last.get("sha"), str):
-            latest = last["sha"]
-    return ahead_by, behind_by, latest
+            return last["sha"]
+    return None
 
 
 def check_compare(source: dict, fetch) -> dict:
@@ -123,9 +107,18 @@ def check_compare(source: dict, fetch) -> dict:
         return _result(source, updates.UNAVAILABLE, current=pinned,
                        note=_MALFORMED_COMPARE_NOTE)
 
-    ahead_by, behind_by, latest = _commits_summary(body)
+    ahead_by, behind_by = body.get("ahead_by"), body.get("behind_by")
+    if not _is_int(ahead_by) or not _is_int(behind_by):
+        # `behind_by` drives the verdict directly. Defaulting an unreadable
+        # value to 0 would manufacture CURRENT out of a field we could not
+        # read -- exactly what this module exists to refuse. Fail loudly
+        # instead, the same discipline `_divergence` already applies to its
+        # own (context-only) reading of these two fields.
+        return _result(source, updates.UNAVAILABLE, current=pinned,
+                       note=_MALFORMED_COMPARE_NOTE)
+
     status = updates.AVAILABLE if behind_by > 0 else updates.CURRENT
-    return _result(source, status, current=pinned, latest=latest,
+    return _result(source, status, current=pinned, latest=_latest_sha(body),
                    detail={"ahead_by": ahead_by, "behind_by": behind_by,
                            "compare_status": body.get("status")})
 
