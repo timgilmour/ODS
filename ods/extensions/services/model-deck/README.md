@@ -530,6 +530,125 @@ Unit rows cover intent, status derivation, reconcile planning, observation, the 
 - `observe_local` names the three current tenants explicitly. That is the adapter's job (it is the vocabulary boundary), but a fourth local engine does touch that file.
 - **There is no lifecycle UI.** The `lifecycle` block is served and typed (`ui/src/api.ts`), but no component renders status, quarantine release, or adopt — those are curl-level operations today.
 
+## Provenance: where every artifact came from
+
+The deck records the upstream origin and current version of every artifact it
+can see — engine images, model weights, source repos, ComfyUI node packs — so
+that "what was ds4 running last Tuesday, and where did it come from" has an
+answer. This is the **ledger only**. Recipes, backup export, and
+update-checking are later specs that read it.
+
+### Three kinds, not four
+
+Four artifact classes collapse to three origin kinds, because a ComfyUI node
+pack *is* a git checkout — pinning KJNodes is a git-ref problem, not a fourth
+mechanism. `role` (`engine` / `weights` / `source` / `nodepack` / `other`)
+keeps the four-way distinction as data without a fourth code path.
+
+| Kind | `artifact_id` | Version identity |
+|---|---|---|
+| `oci` | `oci:<node>:<repository>` | image digest |
+| `git` | `git:<node>:<path>` | resolved commit |
+| `file` | `file:<node>:<relpath>` | sha256, or `null` |
+
+The tag is **not** part of the id: `ds4-spark` is one artifact whose version
+moved v0.5.3 → v0.5.6. Weights key on `relpath`, never the catalog unit id —
+`catalog.record_moved()` rewrites that id, so keying on it would orphan a
+model's provenance exactly when the mover runs.
+
+### `version` vs `label`
+
+`current.version` is the exact machine identity nobody types (a digest, a
+commit, a sha256). `current.label` is the string a human recognises
+(`v0.5.6`). One is for comparing, the other for reading; neither is derivable
+from the other, and `label: null` is honest for the many artifacts with no
+human version. A single container inspect yields both — top-level `Image` and
+`Config.Image`.
+
+### Verification states
+
+Four are stored; `stale` is computed at read time from `verified_at`, the way
+`locations.describe()` computes `available`.
+
+| State | Meaning |
+|---|---|
+| `exact` | Machine identity read directly this pass. |
+| `consistent` | The cheap check passed but is not proof — size+mtime match, sha256 unknown. This is the honest state for weights. |
+| `unavailable` | The source could not be reached. Deliberately distinct from `unknown`. |
+| `unknown` | Never observed. Every `git` artifact is here in v1. |
+| `stale` | Not stored. Reported when `verified_at` is older than `provenance_stale_s` (default 3600 s). `unavailable` never decays to `stale` — "the node is down" is the actionable fact. |
+
+Only the on-demand deep check (`POST /api/provenance/verify`, which hashes the
+file) can grade weights `exact`. A routine pass compares size and mtime, which
+is a fingerprint, not a version.
+
+### Nothing converges
+
+Provenance records a desired version and reports drift. **No code acts on
+it**, and that is not a missing feature — it is currently outside the deck's
+permissions:
+
+- **autarch** — converging would need `docker pull` plus a container *create*.
+  The socket proxy allows `start`/`stop`/`exec` only, and `exec` is pinned to
+  one container precisely because a wildcard there would make the in-process
+  guard the last thing between a deck bug and host-wide RCE.
+- **sparky** — converging would need to edit an `image:` line in
+  `compose-<profile>.yaml`. The node-agent serves compose **read-only** and
+  has no docker access at all by design.
+
+Widening either is a security decision, not an implementation detail. Drift
+surfaces the way facts drift already does: reported, for a human to act on.
+
+### Collection
+
+- **Local images** — one `GET /containers/{name}/json` per park-allowlist
+  container. Iterating known names rather than listing containers is what
+  keeps this free of a new socket-proxy rule and a compose change.
+- **Local weights** — from the catalog the deck already scans. No new I/O.
+- **sparky images** — the `image:` line from the compose text the node-agent
+  serves (declared), plus the digest from its harvested catalog (derived).
+  ⚠ The digest is attributed **only** when `catalog["profile"]` names that
+  exact profile. A node-agent older than the profile stamp, or a catalog
+  belonging to a different profile, yields `version: null` — absent, never
+  guessed. Sparky digests therefore require a node-agent carrying the
+  `read_newest_catalog` profile stamp.
+- **git** — declared only. The deck container cannot see host repos and there
+  is no `git rev-parse` endpoint; `grade()` takes an injected `run_git` so the
+  seam is named, and production passes `None`.
+- **Declared** — `PUT /api/provenance/origin`. This is how aeon-vllm's
+  "no source repo available" and its `/mnt/cold/images/` archive get recorded.
+- **Backfill** — `POST /api/provenance/backfill` creates entries with
+  `origin: null` for everything visible. It never fills in an origin; its
+  output *is* the gap list.
+
+### Files and endpoints
+
+State lives in `/data/provenance.json` (atomic writes) and
+`/data/provenance-history.jsonl` (append-only, fsync'd, one line per
+transition, `to` embedding the whole block so a restore is one scan).
+
+A corrupt `provenance.json` is **renamed aside** to
+`provenance.json.corrupt-<ts>` rather than self-healed to empty — unlike
+policy/registry/catalog, this file is the only home of operator-declared
+origins.
+
+```
+GET    /api/provenance                      # ledger + gap list
+GET    /api/provenance/history?artifact_id= # transitions, oldest first
+POST   /api/provenance/backfill             # idempotent; never guesses an origin
+PUT    /api/provenance/origin               # declare where something came from
+PUT    /api/provenance/desired              # record what it SHOULD be (data only)
+DELETE /api/provenance/desired?artifact_id= # "no opinion"
+POST   /api/provenance/verify               # deep sha256 (file artifacts only)
+DELETE /api/provenance?artifact_id=         # remove an entry (history survives)
+```
+
+`artifact_id` is never a URL path segment — it contains `:` and can contain
+`/` and `~`, so it travels as a query parameter or a body field.
+
+`GET /api/state` carries a summary block:
+`{"provenance": {"drift": [...], "gaps": <int>}}`.
+
 ## Safety invariants (12–17): storage
 
 The storage feature enforces six safety invariants (continuing the deck's numbered safety list):
