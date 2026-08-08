@@ -7,6 +7,7 @@ import {
   displayValue,
   emptyBuffer,
   isDirty,
+  isListEdit,
   LAYER_FOR_KIND,
   mergedArgsForPreview,
   parseValueText,
@@ -314,5 +315,37 @@ describe("displayValue / parseValueText", () => {
   it("makes displayValue and parseValueText inverses for a multi-value flag", () => {
     const value = ["a", "b"];
     expect(parseValueText("served-model-name", displayValue(value))).toEqual(value);
+  });
+});
+
+describe("isListEdit", () => {
+  it("keeps a list value a list even when the widget degraded to text", () => {
+    // The defect this exists for: `widget` falls back to "text" for an
+    // uncatalogued key, and for EVERY key when the pair has no catalog at
+    // all. Opening a six-value --served-model-name and blurring would then
+    // commit one space-containing scalar, which render_argline quotes into a
+    // single argument — a different command line, produced by merely looking.
+    expect(isListEdit("text", ["a", "b"])).toBe(true);
+  });
+
+  it("honours the catalog's list widget for a scalar value", () => {
+    expect(isListEdit("list", "solo")).toBe(true);
+  });
+
+  it("leaves a scalar under a scalar widget alone", () => {
+    expect(isListEdit("text", "262144")).toBe(false);
+    expect(isListEdit("number", "8192")).toBe(false);
+  });
+
+  it("does not treat a bare flag as a list", () => {
+    expect(isListEdit("toggle", true)).toBe(false);
+  });
+
+  it("round-trips a multi-value flag through display and parse under a text widget", () => {
+    const value = ["a", "b", "c"];
+    const parsed = isListEdit("text", value)
+      ? parseValueText("served-model-name", displayValue(value))
+      : displayValue(value);
+    expect(parsed).toEqual(value);
   });
 });

@@ -12,7 +12,7 @@
  * client actually can — see buildChips's pendingRemove handling below.
  */
 
-import type { ArgValue, Layer, ResolvedEntry, SettingsKind } from "../api";
+import type { ArgValue, Layer, ResolvedEntry, SettingsKind, Widget } from "../api";
 
 // ---------------------------------------------------------------------------
 // Value text — the one place an ArgValue becomes readable text and back
@@ -53,6 +53,26 @@ export function parseValueText(name: string, text: string): ArgValue {
   if (name === POSITIONAL_KEY) return parts;
   if (parts.length === 1) return parts[0];
   return parts;
+}
+
+/** Whether an edited value must be read back through `parseValueText` (as a
+ * list) rather than committed as the typed scalar.
+ *
+ * The catalog's `widget` alone is NOT sufficient, and trusting it was a real
+ * defect: `widget` degrades to "text" for any key the harvest has no option
+ * for, and for EVERY key when the catalog is null (a pair that never
+ * harvested — a supported state, app/routers/settings.py:get_catalog) or when
+ * the catalog fetch failed. A live `--served-model-name` holding six values
+ * would then open in a text editor and, on a blur with nothing typed, commit
+ * back as ONE space-containing scalar — which `render_argline` quotes into a
+ * single argument. That is a different command line than the one that was
+ * there, produced by merely looking at a chip.
+ *
+ * So the value's own CURRENT shape is a second, independent signal: if the
+ * resolution says this key holds a list, an edit of it stays a list whatever
+ * the catalog does or does not know about the key. */
+export function isListEdit(widget: Widget, current: ArgValue): boolean {
+  return widget === "list" || Array.isArray(current);
 }
 
 // ---------------------------------------------------------------------------

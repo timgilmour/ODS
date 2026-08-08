@@ -112,7 +112,7 @@ export default function App() {
   }, [modalOpen, policyModalOpen, settingsTarget, refreshAll]);
 
   // One probe, once, on mount. `(spark_node_id(), "vllm")` is the only
-  // configurable engine pair the deck wires today (app/main.py:243-244 builds
+  // configurable engine pair the deck wires today (app/main.py:245-247 builds
   // `configurable_engines` from exactly that one route), and a non-null
   // catalog for it is what earns the node its Engine settings button. A null
   // catalog (never harvested) or a failed probe leaves the map empty, so the
@@ -238,7 +238,20 @@ export default function App() {
       )}
 
       {settingsTarget && (
+        // Keyed on the target so a NEW target remounts the panel rather than
+        // reusing the instance. Without it, opening Settings for a second
+        // model while one is already open carries the whole panel's state
+        // across: the edit buffer (pending edits for model A would save into
+        // model B's scopes — the buffer is keyed by write KIND, which says
+        // nothing about which model it was typed for), the selected kind (an
+        // engine-only target stranded on "engine_models" makes toPuts throw
+        // its developer-facing message into the save banner), the last good
+        // argline, and the import warnings. Only the fetch effect re-runs on
+        // a prop change; useState initializers do not. Unreachable from
+        // today's single entry point — Tasks 10 and 11 add exactly the call
+        // sites that arm it.
         <SettingsModal
+          key={`${settingsTarget.node}/${settingsTarget.engine}/${settingsTarget.model ?? ""}`}
           target={settingsTarget}
           onClose={() => setSettingsTarget(null)}
           onSaved={refreshAll}

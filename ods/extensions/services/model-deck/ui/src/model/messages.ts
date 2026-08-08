@@ -366,7 +366,7 @@ export const labels = {
       engine_model: "declared for this model on this engine — the most specific scope",
     })[layer],
 
-  /** The three write kinds — exactly app/settings_store.py:110's `KINDS`
+  /** The three write kinds — exactly app/settings_store.py:117's `KINDS`
    * ("engines", "models", "engine_models"), mirrored as `SettingsKind`.
    * Labelled by what each one SCOPES rather than by its store name, because
    * the store name is an implementation detail an operator never types. */

@@ -20,6 +20,7 @@ import {
   displayValue,
   emptyBuffer,
   isDirty,
+  isListEdit,
   LAYER_FOR_KIND,
   mergedArgsForPreview,
   parseValueText,
@@ -58,7 +59,7 @@ export interface SettingsTarget {
   model: string | null;
 }
 
-/** app/settings_store.py:110's `KINDS`, in ladder order (least → most
+/** app/settings_store.py:117's `KINDS`, in ladder order (least → most
  * specific). The segmented control renders them in exactly this order. */
 const KIND_ORDER: SettingsKind[] = ["engines", "models", "engine_models"];
 
@@ -354,7 +355,13 @@ export default function SettingsModal({
         setEditing(null);
         return;
       }
-      applyEdit(chip.name, widget === "list" ? parseValueText(chip.name, text) : text);
+      // `isListEdit`, not `widget === "list"`: an uncatalogued key (or every
+      // key, when the pair has no catalog) degrades to the "text" widget
+      // while still holding a real list value. See settingsView.isListEdit.
+      applyEdit(
+        chip.name,
+        isListEdit(widget, chip.value) ? parseValueText(chip.name, text) : text,
+      );
     }
 
     return (
@@ -489,11 +496,33 @@ export default function SettingsModal({
     // Inert by construction: derived layers are never editable and never
     // shipped (app/routers/settings.py's declared-only rule), so this render
     // has no buttons at all rather than disabled ones.
+    //
+    // Warnings render here exactly as they do on a declared chip. They are
+    // not a declared-only concern: app/validate_settings.py:validate_settings
+    // iterates the WHOLE resolution, both derived layers included, so a
+    // checkpoint's recommended sampling keys (temperature, top_p, …) each
+    // produce an "unknown" warning whenever they are not in the engine's
+    // option catalog. Dropping those was silent data loss — the operator saw
+    // a clean panel while the server held warnings about it. The section's
+    // dimming stays; the warning is what it always was, the backend's own
+    // sentence.
+    const warns = warningsFor.get(chip.name) ?? [];
+    const classes = ["settings-chip", "settings-chip-applied", warns.length > 0 ? "settings-chip-warn" : null]
+      .filter(Boolean)
+      .join(" ");
+
     return (
-      <div className="settings-chip settings-chip-applied" key={chip.name}>
-        <ProvenanceDot layer={chip.layer} />
-        <span className="settings-chip-name">{`--${chip.name}`}</span>
-        <span className="settings-chip-value-static">{displayValue(chip.value) || "·"}</span>
+      <div className="settings-chip-wrap" key={chip.name}>
+        <div className={classes}>
+          <ProvenanceDot layer={chip.layer} />
+          <span className="settings-chip-name">{`--${chip.name}`}</span>
+          <span className="settings-chip-value-static">{displayValue(chip.value) || "·"}</span>
+        </div>
+        {warns.map((w, i) => (
+          <div className="settings-chip-warning" key={i}>
+            {w.message}
+          </div>
+        ))}
       </div>
     );
   }

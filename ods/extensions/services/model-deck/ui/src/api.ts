@@ -150,7 +150,7 @@ export interface EventEntry {
 
 // Settings & Facts (Phase 3) -------------------------------------------------
 
-export type SettingsKind = "engines" | "models" | "engine_models"; // app/settings_store.py:110
+export type SettingsKind = "engines" | "models" | "engine_models"; // app/settings_store.py:117
 export type Layer = "engine_defaults" | "checkpoint_recommendations"
   | "engine" | "model" | "engine_model"; // app/ladder.py:48
 export type Widget = "toggle" | "list" | "select" | "number" | "text"; // app/harvest.py:widget_for
