@@ -203,9 +203,33 @@ def test_deep_verify_hashes_the_file_and_promotes_to_exact(tmp_path, monkeypatch
                        json={"artifact_id": "file:local:m.gguf"}).json()
 
     assert len(body["sha256"]) == 64
-    assert body["grade"] == "exact"
+    assert body["matched_recorded"] is None      # nothing recorded to compare
     assert deck["provenance_store"].entry(
         "file:local:m.gguf")["current"]["verification"] == "exact"
+
+
+def test_deep_verify_reports_a_changed_file_while_still_grading_it_exact(
+        tmp_path, monkeypatch):
+    """A mismatch is a fact about the FILE (the bytes changed), not a doubt
+    about the check — we just hashed it directly, so the new sha is exact."""
+    store_dir = tmp_path / "hot"
+    store_dir.mkdir()
+    (store_dir / "m.gguf").write_bytes(b"weights")
+    units = [{"id": "hot:m.gguf", "name": "m.gguf", "relpath": "m.gguf",
+              "location": "hot", "size": 7, "mtime": 2.0, "state": "resident"}]
+    client, deck = _app(tmp_path, monkeypatch, units=units,
+                        locations=[{"name": "hot", "path": str(store_dir)}])
+    _observe(deck, artifact_id="file:local:m.gguf", version="stale-sha",
+             kind="file", role="weights", verification="exact",
+             detail={"size_bytes": 7, "mtime": 2.0})
+
+    body = client.post("/api/provenance/verify",
+                       json={"artifact_id": "file:local:m.gguf"}).json()
+
+    assert body["matched_recorded"] is False
+    entry = deck["provenance_store"].entry("file:local:m.gguf")
+    assert entry["current"]["version"] == body["sha256"]
+    assert entry["current"]["verification"] == "exact"
 
 
 def test_deep_verify_refuses_a_non_file_artifact(app_client):

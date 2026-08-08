@@ -182,10 +182,14 @@ def deep_verify(request: Request, body: ArtifactBody) -> dict:
             detail="no available location currently holds this file")
 
     observed = hash_file(path)
-    grade = file_origin.grade_deep(observed, (entry["current"] or {}).get("version"))
+    matched = file_origin.matches_recorded(
+        observed, (entry["current"] or {}).get("version"))
     updated = store.record_deep_verify(body.artifact_id, observed)
     return {"artifact_id": body.artifact_id, "sha256": observed,
-            "grade": grade, "entry": updated}
+            # None = nothing was recorded to compare against; False = the
+            # bytes changed since the last deep check. Either way the entry
+            # is now EXACT — the file was just hashed.
+            "matched_recorded": matched, "entry": updated}
 
 
 @router.delete("")

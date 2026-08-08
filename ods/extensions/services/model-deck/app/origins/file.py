@@ -42,11 +42,19 @@ def grade(identity: dict, *, available: bool) -> str:
     return origins.CONSISTENT if available else origins.UNAVAILABLE
 
 
-def grade_deep(observed_sha: str, recorded_sha: str | None) -> str:
-    """The on-demand check. A first deep check ESTABLISHES the sha (there
-    was nothing to disagree with); a mismatch drops back to CONSISTENT —
-    the bytes changed, so the recorded sha describes a different file and
-    the caller records the new one."""
-    if recorded_sha is None or observed_sha == recorded_sha:
-        return origins.EXACT
-    return origins.CONSISTENT
+def matches_recorded(observed_sha: str, recorded_sha: str | None) -> bool | None:
+    """Whether an on-demand hash agrees with what was already recorded.
+    ``None`` when nothing was recorded — a first deep check has nothing to
+    disagree with.
+
+    Deliberately NOT a verification state. The state after a deep check is
+    always EXACT either way: the file WAS hashed directly, so the new sha
+    describes the current bytes exactly. ``False`` here says the BYTES
+    CHANGED since the last record — a fact about the file, not a doubt about
+    the check — and the caller records the new sha. An earlier draft returned
+    CONSISTENT on a mismatch, which read as "we are less sure now" when the
+    opposite is true; the store recorded EXACT regardless, so the two
+    disagreed about the same event."""
+    if recorded_sha is None:
+        return None
+    return observed_sha == recorded_sha

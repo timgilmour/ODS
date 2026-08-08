@@ -582,6 +582,14 @@ Only the on-demand deep check (`POST /api/provenance/verify`, which hashes the
 file) can grade weights `exact`. A routine pass compares size and mtime, which
 is a fingerprint, not a version.
 
+⚠ **Read `verification` from the top level of a `GET /api/provenance` entry,
+never from inside `current`.** The read layer removes the nested copy on the
+way out precisely so there is one field with one answer — a consumer reading
+the stored value would never see `stale`. The deep check's response reports
+`matched_recorded` (`true`/`false`/`null`), which says whether the bytes
+changed since the last hash; the entry is `exact` either way, because the file
+was just hashed.
+
 ### Nothing converges
 
 Provenance records a desired version and reports drift. **No code acts on

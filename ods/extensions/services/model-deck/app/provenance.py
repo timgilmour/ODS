@@ -278,19 +278,28 @@ def describe(data: dict, *, now: str, stale_s: float) -> list[dict]:
     Only EXACT and CONSISTENT can decay to STALE. UNAVAILABLE outranks it —
     "the node is down" is the actionable fact and collapsing it into "we
     have not looked lately" would hide it.
+
+    ONE PLACE TO READ THE VERIFICATION. The stored ``current.verification``
+    is REMOVED from the returned copy and replaced by a top-level
+    ``verification`` carrying the read-time value. Leaving both would give a
+    consumer two fields with the same name and different answers — a reader
+    that happened to pick the nested one would never see STALE at all, which
+    is precisely the copy-the-wrong-vocabulary bug this codebase has shipped
+    before. The stored file is untouched.
     """
     out = []
     for artifact_id in sorted(data):
         entry = data[artifact_id]
-        current = entry.get("current") or {}
+        current = dict(entry.get("current") or {})
         desired = entry.get("desired")
         drift = bool(desired and current.get("version") and desired.get("version")
                      and current["version"] != desired["version"])
-        verification = current.get("verification", origins.UNKNOWN)
+        verification = current.pop("verification", origins.UNKNOWN)
         if verification in (origins.EXACT, origins.CONSISTENT) and _is_stale(
                 current.get("verified_at"), now, stale_s):
             verification = origins.STALE
-        out.append({**entry, "version_drift": drift, "verification": verification})
+        out.append({**entry, "current": current,
+                    "version_drift": drift, "verification": verification})
     return out
 
 

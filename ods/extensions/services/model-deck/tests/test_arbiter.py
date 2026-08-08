@@ -2534,3 +2534,20 @@ def test_a_provenance_failure_is_logged_not_raised(tmp_path):
     kinds = [e["kind"] for e in tail_events(events_path, 50)]
     assert "provenance-pass-error" in kinds
     assert "tick-error" not in kinds
+
+
+def test_provenance_unavailable_marking_uses_the_same_id_the_entry_was_created_with(tmp_path):
+    """An id assembled two different ways in one pass is an id that will
+    eventually disagree with itself — and a mismatch here would silently
+    no-op instead of retaining the last known version."""
+    clock = _FakeClock()
+    watcher, store, docker = _one_container(tmp_path, clock=clock)
+    watcher.tick()
+    created = set(store.get())
+
+    docker.bodies.clear()
+    clock.advance(10_000)
+    watcher.tick()
+
+    assert set(store.get()) == created
+    assert store.entry(next(iter(created)))["current"]["verification"] == "unavailable"

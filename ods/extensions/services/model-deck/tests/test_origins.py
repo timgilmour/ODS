@@ -146,7 +146,12 @@ def test_file_grade_is_unknown_with_no_fingerprint_at_all():
                              available=True) == origins.UNKNOWN
 
 
-def test_file_deep_grade_is_exact_only_on_a_matching_sha():
-    assert file_origin.grade_deep("abc", "abc") == origins.EXACT
-    assert file_origin.grade_deep("abc", None) == origins.EXACT   # first deep check establishes it
-    assert file_origin.grade_deep("abc", "xyz") == origins.CONSISTENT
+def test_file_deep_check_reports_agreement_not_a_verification_state():
+    # A mismatch means the BYTES changed, not that the check is less certain
+    # — the stored state is EXACT either way, because the file was hashed.
+    assert file_origin.matches_recorded("abc", "abc") is True
+    assert file_origin.matches_recorded("abc", "xyz") is False
+
+
+def test_file_deep_check_of_a_first_hash_has_nothing_to_disagree_with():
+    assert file_origin.matches_recorded("abc", None) is None

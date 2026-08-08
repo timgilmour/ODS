@@ -107,7 +107,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app import provenance_collect
+from app import origins, provenance_collect
 from app.derive_checkpoint import derive_checkpoint
 from app.derive_live import derive_live_models
 from app.engines import BusyError, EngineError, GuardError
@@ -1119,7 +1119,12 @@ class Watcher:
             self._provenance_store.observe(**entry, current=current, now=now)
         for name, body in bodies.items():
             if body is None:
-                self._provenance_store.mark_unavailable(f"oci:{node}:{name}", now=now)
+                # Built the SAME way local_oci_entries builds it — an id
+                # assembled two different ways in one pass is an id that
+                # will eventually disagree with itself, and a mismatch here
+                # would silently no-op instead of retaining anything.
+                self._provenance_store.mark_unavailable(
+                    origins.build_artifact_id("oci", node, name), now=now)
 
     def _provenance_local_weights(self, node: str, now: str) -> None:
         if self._catalog is None:

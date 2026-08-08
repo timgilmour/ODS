@@ -299,3 +299,15 @@ def test_gaps_lists_artifacts_with_no_recorded_origin():
         "oci:local:b": {"origin": {"registry": None, "repository": "b"}},
     }
     assert provenance.gaps(data) == ["oci:local:a"]
+
+
+def test_describe_leaves_exactly_one_place_to_read_the_verification():
+    """Two fields with the same name and different answers is how a UI ends
+    up rendering `exact` for something that has gone stale."""
+    data = {"oci:local:x": _entry()}
+    described = provenance.describe(data, now="2026-08-09T00:00:00+00:00",
+                                    stale_s=3600)[0]
+    assert described["verification"] == origins.STALE
+    assert "verification" not in described["current"]
+    # ...and the stored document is untouched.
+    assert data["oci:local:x"]["current"]["verification"] == origins.EXACT
