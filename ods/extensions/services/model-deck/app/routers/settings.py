@@ -176,8 +176,15 @@ def get_effective(
 
 @router.post("/settings/preview")
 def preview(body: dict, request: Request) -> dict:
-    """Parse typed text without saving — the text field's live feedback."""
-    parsed = parse_argline(body.get("argline", ""))
+    """Parse typed text or render args map without saving — the text field's live feedback."""
+    argline_in, args_in = body.get("argline"), body.get("args")
+    if (argline_in is None) == (args_in is None):
+        raise ValueError("preview requires exactly one of 'argline' or 'args'")
+    if args_in is not None:
+        parsed = normalize_args_map(args_in)
+    else:
+        parsed = parse_argline(argline_in)
+    argline = render_argline(parsed)
     resolved = {k: {"value": v, "origin": "declared", "layer": "engine_model"}
                 for k, v in parsed.items()}
     catalog = None
@@ -185,7 +192,7 @@ def preview(body: dict, request: Request) -> dict:
     if node and engine:
         catalog = get_catalog(node, engine, request)
     facts = _facts_for(request.app.state.deck, body.get("model", ""))
-    return {"parsed": parsed, "warnings": validate_settings(resolved, catalog, facts)}
+    return {"parsed": parsed, "argline": argline, "warnings": validate_settings(resolved, catalog, facts)}
 
 
 @router.post("/settings/adopt/{node}/{engine}")

@@ -1931,6 +1931,42 @@ def test_preview_preserves_an_unknown_token(tmp_path, monkeypatch):
     assert body["parsed"]["totally-made-up"] == "xyz"
 
 
+def test_preview_renders_args_map(tmp_path, monkeypatch):
+    """The render direction: args map -> argline in the response."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    res = TestClient(app).post("/api/settings/preview",
+                               json={"args": {"max-model-len": 131072}})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["argline"] == "--max-model-len 131072"   # match render_argline's real join
+    assert body["parsed"] == {"max-model-len": "131072"} # normalize: int -> str
+
+
+def test_preview_requires_exactly_one_direction(tmp_path, monkeypatch):
+    """Must accept exactly one of argline or args, not both or neither."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    # Neither argline nor args
+    assert client.post("/api/settings/preview", json={}).status_code == 422
+
+    # Both argline and args
+    assert client.post("/api/settings/preview",
+                       json={"argline": "--seed 1", "args": {"seed": "1"}}
+                       ).status_code == 422
+
+
+def test_preview_parses_also_returns_argline(tmp_path, monkeypatch):
+    """Existing parse direction now also returns argline."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    body = TestClient(app).post("/api/settings/preview",
+                                json={"argline": "--max-model-len 262144"}).json()
+
+    assert body["parsed"]["max-model-len"] == "262144"
+    assert body["argline"] == "--max-model-len 262144"
+
+
 def test_catalog_absent_is_null_not_an_error(tmp_path, monkeypatch):
     """An engine that has never run has no catalog. Supported state."""
     app, deck = make_app(tmp_path, monkeypatch)
