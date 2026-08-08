@@ -28,6 +28,7 @@ import {
   parseValueText,
   POSITIONAL_KEY,
   scopeKeys,
+  supersedePendingAdd,
   toPuts,
   type Buffer,
   type ChipView,
@@ -230,10 +231,13 @@ export default function SettingsModal({
 
   function startEdit(name: string, value: ArgValue) {
     cancelledEdit.current = false;
-    // Any newly started edit ends the previous add's grace period: whatever
-    // it left in the buffer is now an ordinary pending edit like any other.
-    // handleAddOption re-arms this immediately AFTER calling startEdit.
+    // Moving to another chip's editor abandons a still-provisional add, and
+    // nothing else will take its `""` back out — a `select` has no onBlur to
+    // route through `commit`. handleAddOption re-arms this immediately AFTER
+    // calling startEdit.
+    const add = pendingAdd.current;
     pendingAdd.current = null;
+    setBuffer((b) => supersedePendingAdd(b, add, name));
     setPopover(null);
     setEditing(name);
     setDraft(displayValue(value));
@@ -322,9 +326,13 @@ export default function SettingsModal({
     // Clearing this is not optional: the pending set is gone after this call,
     // so a later `cancelEdit` would turn `discardPendingAdd` into a genuine
     // `removes` entry naming a key the scope never had — the exact PUT the
-    // component docstring's remove guard exists to prevent.
+    // component docstring's remove guard exists to prevent. Removing a
+    // DIFFERENT chip abandons the add instead, so it goes out first (its own
+    // `bufferRemove` below is the undo when the two are the same key —
+    // supersedePendingAdd stands aside for that case).
+    const add = pendingAdd.current;
     pendingAdd.current = null;
-    setBuffer((b) => bufferRemove(b, kind, name));
+    setBuffer((b) => bufferRemove(supersedePendingAdd(b, add, name), kind, name));
     setEditing(null);
     setPopover(null);
   }
