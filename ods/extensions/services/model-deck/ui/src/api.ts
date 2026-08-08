@@ -154,14 +154,15 @@ export type SettingsKind = "engines" | "models" | "engine_models"; // app/settin
 export type Layer = "engine_defaults" | "checkpoint_recommendations"
   | "engine" | "model" | "engine_model"; // app/ladder.py:48
 export type Widget = "toggle" | "list" | "select" | "number" | "text"; // app/harvest.py:widget_for
-export type ArgValue = string | string[];
+export type ArgValue = string | string[] | boolean; // app/argline.py:8-13, bare flags normalize as true end-to-end
 
 /** app/harvest.py:parse_probe_output options[...] */
 export interface CatalogOption {
   aliases: string[];
   type: string | null;
   choices: string[] | null;
-  default: string | null;
+  /** default: string representation of the default value; Python None arrives as literal "None" (app/harvest.py:81). */
+  default: string;
   nargs: unknown;
   repeatable: boolean;
   help: string;
@@ -204,11 +205,14 @@ export interface SettingsPreviewResponse {
   warnings: SettingsWarning[];
 }
 
-/** app/routers/__init__.py:291 - a single settings change entry */
+/** app/routers/__init__.py:291 - a single settings change entry
+ * Drift folds changes across args, env, and container namespaces (app/routers/__init__.py fold loop).
+ * Args values are ArgValue-shaped (string | string[] | boolean), but container values (ulimits etc.)
+ * may be arbitrary nested mappings. old/new are unknown to accommodate all three namespaces. */
 export interface SettingsDriftEntry {
   key: string;
-  old: ArgValue | null;
-  new: ArgValue | null;
+  old: unknown;
+  new: unknown;
   ts: string;
 }
 
@@ -231,10 +235,14 @@ export interface FactEntry {
 /** Record<namespace, Record<key, FactEntry>> */
 export type FactsMap = Record<string, Record<string, FactEntry>>;
 
-/** app/facts.py:detect_drift entries */
+/** app/facts.py:detect_drift entries — exactly six fields, severity always present */
 export interface FactsDriftItem {
-  [k: string]: unknown;
-  severity?: string;
+  field: string;
+  expected: unknown;
+  actual: unknown;
+  expected_source: string;
+  actual_source: string;
+  severity: string;
 }
 
 // Config sets ----------------------------------------------------------------
@@ -461,24 +469,16 @@ export function putPolicy(policies: PolicyMap): Promise<PolicyMap> {
 // Settings & Facts (Phase 3) — /api/settings/*, /api/facts/*
 // ---------------------------------------------------------------------------
 
-/** GET /api/settings/catalog/{node}/{engine} — null when the catalog
- * endpoint returns null JSON body (no such engine/node). */
+/** GET /api/settings/catalog/{node}/{engine} — returns 200 with JSON null or object;
+ * null when no such engine/node. */
 export async function getCatalog(node: string, engine: string): Promise<Catalog | null> {
-  try {
-    const res = await fetch(`/api/settings/catalog/${encodeURIComponent(node)}/${encodeURIComponent(engine)}`);
-    if (!res.ok) {
-      const body: ErrorBody | null = await res.json().catch(() => null);
-      throw new ApiError(res.status, body?.detail ?? `${res.status} ${res.statusText}`);
-    }
-    if (res.status === 204 || res.headers.get("content-length") === "0") {
-      return null;
-    }
-    const data = await res.json();
-    return data === null ? null : (data as Catalog);
-  } catch (err) {
-    if (err instanceof ApiError) throw err;
-    throw err;
+  const res = await fetch(`/api/settings/catalog/${encodeURIComponent(node)}/${encodeURIComponent(engine)}`);
+  if (!res.ok) {
+    const body: ErrorBody | null = await res.json().catch(() => null);
+    throw new ApiError(res.status, body?.detail ?? `${res.status} ${res.statusText}`);
   }
+  const data = await res.json();
+  return data === null ? null : (data as Catalog);
 }
 
 /** GET /api/settings/effective/{node}/{engine}/{model} */
@@ -570,9 +570,13 @@ export function putDeclared(key: string, fields: Record<string, unknown>): Promi
   });
 }
 
-/** POST /api/spark/reload */
+/** POST /api/spark/reload — route requires a JSON body (no default); matches sparkSwap pattern. */
 export function sparkReload(): Promise<unknown> {
-  return request<unknown>("/api/spark/reload", { method: "POST" });
+  return request<unknown>("/api/spark/reload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
 }
 
 // ---------------------------------------------------------------------------
