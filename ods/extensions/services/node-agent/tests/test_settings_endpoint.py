@@ -172,3 +172,29 @@ def test_catalog_skips_corrupt_files(monkeypatch, tmp_path):
          "engine": "vllm", "probe_output": "OK"}))
 
     assert client.get("/v1/node/catalog", headers=AUTH).json()["catalog"]["image_id"] == "sha256:g"
+
+
+def test_catalog_is_stamped_with_the_profile_from_its_filename(monkeypatch, tmp_path):
+    """The body carries engine and harvested_ts but not the profile, so the
+    Deck could only attribute a digest to a profile by guessing. The FILENAME
+    already knows — stamp it, and the guess becomes unnecessary."""
+    _enable(monkeypatch, tmp_path)
+    (tmp_path / "catalog-laguna.json").write_text(json.dumps(
+        {"image_id": "sha256:new", "harvested_ts": "2026-08-08T00:00:00Z",
+         "engine": "vllm", "probe_output": "{}"}))
+
+    body = client.get("/v1/node/catalog", headers=AUTH).json()
+
+    assert body["catalog"]["profile"] == "laguna"
+
+
+def test_catalog_profile_stamp_does_not_overwrite_an_explicit_one(monkeypatch, tmp_path):
+    """If the helper ever starts writing the field itself, the file wins."""
+    _enable(monkeypatch, tmp_path)
+    (tmp_path / "catalog-laguna.json").write_text(json.dumps(
+        {"image_id": "sha256:new", "harvested_ts": "2026-08-08T00:00:00Z",
+         "engine": "vllm", "probe_output": "{}", "profile": "explicit"}))
+
+    body = client.get("/v1/node/catalog", headers=AUTH).json()
+
+    assert body["catalog"]["profile"] == "explicit"

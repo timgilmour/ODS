@@ -99,6 +99,14 @@ def read_newest_catalog() -> dict | None:
     os.replace), so a half-written file is not the expected case -- a
     catalog from an older schema, or a permissions failure on one file, is.
     One such file must not take the newest good catalog down with it.
+
+    The returned body is stamped with ``profile`` from the file's own name.
+    The body itself carries ``engine`` and ``harvested_ts`` but has never
+    carried the profile, so a consumer wanting to know WHICH profile this
+    image_id belongs to could only guess -- and the deck's provenance ledger
+    must never attribute a digest to a profile by inference. The filename is
+    authoritative and free. An explicit field in the file wins, so a future
+    helper that writes one is not overridden here.
     """
     directory = _dir()
     newest = None
@@ -111,6 +119,7 @@ def read_newest_catalog() -> dict | None:
             continue
         if not isinstance(ts, str):
             continue
+        data.setdefault("profile", path.name[len("catalog-"):-len(".json")])
         if newest is None or ts > newest_ts:
             newest_ts = ts
             newest = data
