@@ -120,6 +120,7 @@ export interface LifecycleEntry {
   intent: IntentRecord | null;
   observed: Observation;
   last_healthy_ts: string | null;
+  settings_drift: SettingsDrift | null;
 }
 
 export type LifecycleMap = Record<string, LifecycleEntry>;
@@ -145,6 +146,95 @@ export interface EventEntry {
   ts: string;
   kind: string;
   detail: Record<string, unknown>;
+}
+
+// Settings & Facts (Phase 3) -------------------------------------------------
+
+export type SettingsKind = "engines" | "models" | "engine_models"; // app/settings_store.py:110
+export type Layer = "engine_defaults" | "checkpoint_recommendations"
+  | "engine" | "model" | "engine_model"; // app/ladder.py:48
+export type Widget = "toggle" | "list" | "select" | "number" | "text"; // app/harvest.py:widget_for
+export type ArgValue = string | string[];
+
+/** app/harvest.py:parse_probe_output options[...] */
+export interface CatalogOption {
+  aliases: string[];
+  type: string | null;
+  choices: string[] | null;
+  default: string | null;
+  nargs: unknown;
+  repeatable: boolean;
+  help: string;
+  widget: Widget;
+}
+
+/** app/routers/settings.py:get_catalog */
+export interface Catalog {
+  engine_version: string;
+  harvested_ts: string | null;
+  options: Record<string, CatalogOption>;
+}
+
+/** app/ladder.py:resolve_settings output */
+export interface ResolvedEntry {
+  value: ArgValue;
+  origin: "derived" | "declared";
+  layer: Layer;
+}
+
+/** app/validate_settings.py:issues.append shape */
+export interface SettingsWarning {
+  key: string;
+  "class": string;
+  severity: string;
+  message: string;
+}
+
+/** app/routers/settings.py:get_effective */
+export interface EffectiveResponse {
+  resolved: Record<string, ResolvedEntry>;
+  argline: string;
+  warnings: SettingsWarning[];
+}
+
+/** POST /api/settings/preview response: {parsed, argline, warnings} */
+export interface SettingsPreviewResponse {
+  parsed: Record<string, ArgValue>;
+  argline: string;
+  warnings: SettingsWarning[];
+}
+
+/** app/routers/__init__.py:291 - a single settings change entry */
+export interface SettingsDriftEntry {
+  key: string;
+  old: ArgValue | null;
+  new: ArgValue | null;
+  ts: string;
+}
+
+/** app/routers/__init__.py:291 - drift report on lifecycle entry */
+export interface SettingsDrift {
+  changed: string[];
+  entries: SettingsDriftEntry[];
+  since: string | null;
+}
+
+/** app/facts.py:resolve_facts */
+export interface FactEntry {
+  value: unknown;
+  origin: "derived" | "declared";
+  source: string;
+  derived_ts: string | null;
+  shadowed_value?: unknown;
+}
+
+/** Record<namespace, Record<key, FactEntry>> */
+export type FactsMap = Record<string, Record<string, FactEntry>>;
+
+/** app/facts.py:detect_drift entries */
+export interface FactsDriftItem {
+  [k: string]: unknown;
+  severity?: string;
 }
 
 // Config sets ----------------------------------------------------------------
@@ -365,6 +455,124 @@ export function putPolicy(policies: PolicyMap): Promise<PolicyMap> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(policies),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Settings & Facts (Phase 3) — /api/settings/*, /api/facts/*
+// ---------------------------------------------------------------------------
+
+/** GET /api/settings/catalog/{node}/{engine} — null when the catalog
+ * endpoint returns null JSON body (no such engine/node). */
+export async function getCatalog(node: string, engine: string): Promise<Catalog | null> {
+  try {
+    const res = await fetch(`/api/settings/catalog/${encodeURIComponent(node)}/${encodeURIComponent(engine)}`);
+    if (!res.ok) {
+      const body: ErrorBody | null = await res.json().catch(() => null);
+      throw new ApiError(res.status, body?.detail ?? `${res.status} ${res.statusText}`);
+    }
+    if (res.status === 204 || res.headers.get("content-length") === "0") {
+      return null;
+    }
+    const data = await res.json();
+    return data === null ? null : (data as Catalog);
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw err;
+  }
+}
+
+/** GET /api/settings/effective/{node}/{engine}/{model} */
+export function getEffective(node: string, engine: string, model: string): Promise<EffectiveResponse> {
+  const encodedModel = encodeURIComponent(model).replace(/%2F/g, '/');
+  return request<EffectiveResponse>(
+    `/api/settings/effective/${encodeURIComponent(node)}/${encodeURIComponent(engine)}/${encodedModel}`
+  );
+}
+
+/** PUT /api/settings/{kind}/{key} with {namespace: "args", values, remove?} */
+export function putSettings(
+  kind: SettingsKind,
+  key: string,
+  namespace: "args",
+  values: Record<string, ArgValue>,
+  remove?: string[]
+): Promise<unknown> {
+  const encodedKey = encodeURIComponent(key).replace(/%2F/g, '/');
+  const body: {namespace: string; values: Record<string, ArgValue>; remove?: string[]} = { namespace, values };
+  if (remove) body.remove = remove;
+  return request<unknown>(
+    `/api/settings/${encodeURIComponent(kind)}/${encodedKey}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+}
+
+/** POST /api/settings/preview with {argline} body */
+export function previewParse(
+  argline: string,
+  ctx?: { node?: string; engine?: string; model?: string }
+): Promise<SettingsPreviewResponse> {
+  const body: {argline: string; node?: string; engine?: string; model?: string} = { argline };
+  if (ctx?.node) body.node = ctx.node;
+  if (ctx?.engine) body.engine = ctx.engine;
+  if (ctx?.model) body.model = ctx.model;
+  return request<SettingsPreviewResponse>("/api/settings/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** POST /api/settings/preview with {args} body */
+export function previewRender(
+  args: Record<string, ArgValue>,
+  ctx?: { node?: string; engine?: string; model?: string }
+): Promise<SettingsPreviewResponse> {
+  const body: {args: Record<string, ArgValue>; node?: string; engine?: string; model?: string} = { args };
+  if (ctx?.node) body.node = ctx.node;
+  if (ctx?.engine) body.engine = ctx.engine;
+  if (ctx?.model) body.model = ctx.model;
+  return request<SettingsPreviewResponse>("/api/settings/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** POST /api/settings/harvest/{node}/{engine} */
+export function postHarvest(node: string, engine: string): Promise<{ outcome: string }> {
+  return request<{ outcome: string }>(
+    `/api/settings/harvest/${encodeURIComponent(node)}/${encodeURIComponent(engine)}`,
+    { method: "POST" }
+  );
+}
+
+/** GET /api/facts */
+export function getFacts(): Promise<FactsMap> {
+  return request<FactsMap>("/api/facts");
+}
+
+/** GET /api/facts/drift */
+export function getFactsDrift(): Promise<Record<string, FactsDriftItem[]>> {
+  return request<Record<string, FactsDriftItem[]>>("/api/facts/drift");
+}
+
+/** PUT /api/facts/declared/{key} with {namespace, values, ...} body */
+export function putDeclared(key: string, fields: Record<string, unknown>): Promise<unknown> {
+  const encodedKey = encodeURIComponent(key).replace(/%2F/g, '/');
+  return request<unknown>(`/api/facts/declared/${encodedKey}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+}
+
+/** POST /api/spark/reload */
+export function sparkReload(): Promise<unknown> {
+  return request<unknown>("/api/spark/reload", { method: "POST" });
 }
 
 // ---------------------------------------------------------------------------
