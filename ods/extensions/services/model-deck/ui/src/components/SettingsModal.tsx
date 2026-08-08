@@ -12,6 +12,7 @@ import {
   type SettingsWarning,
   type Widget,
 } from "../api";
+import { startingValueFor } from "../model/catalogFilter";
 import { labels, messages } from "../model/messages";
 import {
   bufferRemove,
@@ -33,6 +34,7 @@ import {
 import Banner from "../ui/Banner";
 import Modal from "../ui/Modal";
 import ProvenanceDot from "../ui/ProvenanceDot";
+import AllOptionsModal from "./AllOptionsModal";
 
 /** Where the panel is pointed. `model === null` is the ENGINE-LEVEL entry
  * (the node card's "Engine settings" button): there is no checkpoint in
@@ -108,6 +110,7 @@ export default function SettingsModal({
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [importWarnings, setImportWarnings] = useState<SettingsWarning[]>([]);
+  const [allOptionsOpen, setAllOptionsOpen] = useState(false);
 
   // Escape must cancel an inline editor without buffering. Removing the
   // focused input from the DOM can fire blur on the way out in some engines,
@@ -214,11 +217,44 @@ export default function SettingsModal({
     return catalog?.options[name]?.widget ?? "text";
   }
 
-  function startEdit(chip: ChipView) {
+  function startEdit(name: string, value: ArgValue) {
     cancelledEdit.current = false;
     setPopover(null);
-    setEditing(chip.name);
-    setDraft(displayValue(chip.value));
+    setEditing(name);
+    setDraft(displayValue(value));
+  }
+
+  /** All-options modal's onAdd — fired by both its "+" (unset row) and its
+   * "✓" (already-set row), since AllOptionsModal itself has no opinion on
+   * what should happen next, only whether `name` was in `setNames`.
+   *
+   * An already-declared name (found in the CURRENT `declared` list — the
+   * exact set `setNames` below is built from) is never re-buffered: doing
+   * so would stomp whatever the operator already has pending or saved for
+   * it. It only opens that chip's editor. A genuinely new name gets a
+   * starting value derived from the catalog (see startingValueFor) buffered
+   * at the panel's current write scope, then its editor opens the same way
+   * — one code path for "add" and "jump to" alike. */
+  function handleAddOption(name: string) {
+    setAllOptionsOpen(false);
+    const existing = declared.find((c) => c.name === name);
+    if (existing) {
+      startEdit(existing.name, existing.value);
+      return;
+    }
+    const value = startingValueFor(catalog?.options[name]);
+    setBuffer((b) => bufferSet(b, kind, name, value));
+    startEdit(name, value);
+  }
+
+  /** AllOptionsModal's Refresh got a fresh harvest — refetch the catalog so
+   * both this panel's widgets (widgetFor, choices) and the modal's own
+   * rows/provenance line reflect it. Best-effort: the harvest itself already
+   * succeeded and AllOptionsModal already reported that outcome, so a
+   * transport blip on this follow-up GET is not worth a second banner —
+   * closing and reopening Settings re-fetches the same way. */
+  function handleCatalogRefreshed() {
+    getCatalog(node, engine).then(setCatalog, () => {});
   }
 
   function applyEdit(name: string, value: ArgValue) {
@@ -438,7 +474,7 @@ export default function SettingsModal({
               type="button"
               className="settings-chip-value"
               title={labels.editOption}
-              onClick={() => startEdit(chip)}
+              onClick={() => startEdit(chip.name, chip.value)}
             >
               {displayValue(chip.value) || "·"}
             </button>
@@ -606,7 +642,11 @@ export default function SettingsModal({
             </div>
 
             <div className="settings-actions">
-              <button type="button" disabled title={labels.addOptionTitle}>
+              <button
+                type="button"
+                title={labels.addOptionTitle}
+                onClick={() => setAllOptionsOpen(true)}
+              >
                 {labels.addOption}
               </button>
               <button type="button" onClick={() => setImportOpen(true)}>
@@ -686,6 +726,22 @@ export default function SettingsModal({
           />
           <div className="settings-note">{labels.importArglineHint}</div>
         </Modal>
+      )}
+
+      {allOptionsOpen && (
+        <AllOptionsModal
+          node={node}
+          engine={engine}
+          catalog={catalog}
+          // Names with a declared winning value or a pending set — exactly
+          // what buildChips already put in `declared` (see its own
+          // docstring: a pending set on a key with no resolved entry, or on
+          // a currently-derived one, both get their own `declared` chip).
+          setNames={new Set(declared.map((c) => c.name))}
+          onAdd={handleAddOption}
+          onClose={() => setAllOptionsOpen(false)}
+          onRefreshed={handleCatalogRefreshed}
+        />
       )}
     </>
   );

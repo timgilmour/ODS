@@ -6,7 +6,7 @@
  * option identity.
  */
 
-import type { Catalog, CatalogOption, Widget } from "../api";
+import type { ArgValue, Catalog, CatalogOption, Widget } from "../api";
 
 /**
  * A filtered and sorted catalog row, ready to render.
@@ -93,4 +93,29 @@ export function filterCatalog(
   }
 
   return rows;
+}
+
+/**
+ * The value a freshly-added chip should start with, before the operator has
+ * typed anything. Used by the All-options modal's "+" (AllOptionsModal.tsx)
+ * the moment an unset option is added to the buffer.
+ *
+ * - `toggle` widgets start `true`: the only value a bare-flag chip can ever
+ *   hold (app/argline.py renders `value is True` as the flag alone; there is
+ *   no false-valued rendering of one), so starting at `false` would need an
+ *   immediate operator click just to reach the one state the flag can mean.
+ * - Otherwise the catalog's own default is the honest starting point, EXCEPT
+ *   the literal string `"None"`, which is `default`'s spelling of "the
+ *   engine has no default for this" (app/harvest.py:81) rather than an
+ *   actual value — that starts empty instead of declaring the four
+ *   characters "None".
+ * - No option (a name absent from the catalog, or a null catalog — a pair
+ *   that never harvested, app/routers/settings.py:get_catalog) also starts
+ *   empty: there is nothing to derive a default from.
+ */
+export function startingValueFor(option: CatalogOption | undefined): ArgValue {
+  if (!option) return "";
+  if (option.widget === "toggle") return true;
+  if (option.default !== "None") return option.default;
+  return "";
 }

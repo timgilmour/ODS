@@ -12,7 +12,7 @@
  * humanized ages.
  */
 
-import type { Layer, SettingsKind } from "../api";
+import type { Layer, SettingsKind, Widget } from "../api";
 
 export type Tone = "neutral" | "warning" | "danger";
 
@@ -211,6 +211,31 @@ export const messages = {
     tone: "danger",
     title: "Could not read that command line",
     body: detail,
+  }),
+
+  // All-options modal's manual Refresh (POST /api/settings/harvest/{node}/{engine}).
+  // Neutral, not a Message-worthy failure: the probe ran, the catalog it
+  // would have written is byte-identical to what is already on screen, so
+  // there is nothing stale here to complain about.
+  catalogCurrent: (): Message => ({
+    tone: "neutral",
+    title: "Catalog is already current",
+  }),
+
+  // Warning rather than danger: the panel itself is unaffected (it still
+  // has whatever catalog it had before this click), so this reports "the
+  // refresh did not land" rather than "something here is broken". `outcome`
+  // carries either postHarvest's own "failed"/"empty" string or, when the
+  // request itself never came back (ApiError/network failure), that error's
+  // message — both land the operator in the same "try again" banner, since
+  // neither case leaves them with a fresher catalog.
+  harvestFailed: (outcome: string): Message => ({
+    tone: "warning",
+    title: outcome === "empty" ? "Harvest found no options" : "Harvest failed",
+    body:
+      outcome === "empty"
+        ? "the engine answered but the probe found nothing to catalog."
+        : `the engine could not be probed (${outcome}).`,
   }),
 };
 
@@ -413,7 +438,7 @@ export const labels = {
     "the command's leading positional tokens (app/argline.py's _positional) — not a flag",
 
   addOption: "+ Add option",
-  addOptionTitle: "browse this engine's harvested option catalog — not wired yet",
+  addOptionTitle: "browse this engine's harvested option catalog",
   importArgline: "Import argline…",
   importArglineTitle: "Import argline",
   importArglinePlaceholder: "--max-model-len 131072 --enable-auto-tool-choice",
@@ -427,6 +452,30 @@ export const labels = {
 
   engineSettings: "Engine settings",
   engineSettingsTitle: "edit the engine-scope flags for this node",
+
+  // All-options modal (phase 3) ---------------------------------------------
+
+  allOptions: "All options",
+  optionCount: (n: number) => `${n} option${n === 1 ? "" : "s"}`,
+  /** Half of the provenance line — the other half is `optionCount`, composed
+   * next to it as "harvested <age> · N options". Deliberately never takes
+   * `catalog.engine_version`: it is an opaque image content id
+   * (app/harvest.py:117-127, set from the engine container's own digest/tag),
+   * not a fact an operator can read a version number out of, so there is no
+   * label for it anywhere in this modal. */
+  catalogAge: (age: string | null) => (age ? `harvested ${age}` : "never harvested"),
+  catalogNeverHarvested: "not harvested yet — Refresh to probe the engine",
+  noCatalogMatches: "no options match this search",
+  searchOptions: "Search options…",
+  setOnly: "Set only",
+  refresh: "Refresh",
+  refreshing: "Refreshing…",
+  /** The five categories app/harvest.py:widget_for ever produces, mirrored
+   * as `Widget` in api.ts — the modal's filter-chip labels. */
+  widgetName: (w: Widget): string =>
+    ({ toggle: "Toggle", list: "List", select: "Select", number: "Number", text: "Text" })[w],
+  addOptionRowLabel: (flag: string) => `add ${flag}`,
+  jumpToOptionLabel: (flag: string) => `${flag} already set — edit it`,
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Catalog, CatalogOption } from "../api";
-import { filterCatalog } from "./catalogFilter";
+import { filterCatalog, startingValueFor } from "./catalogFilter";
 
 function option(overrides: Partial<CatalogOption> = {}): CatalogOption {
   return {
@@ -349,5 +349,27 @@ describe("filterCatalog", () => {
     });
 
     expect(rows[0].option).toEqual(opts["my-opt"]);
+  });
+});
+
+describe("startingValueFor", () => {
+  it("starts a toggle at true — the only value a bare flag can render", () => {
+    expect(startingValueFor(option({ widget: "toggle", default: "None" }))).toBe(true);
+  });
+
+  it("starts a toggle at true even when the catalog default is false-ish", () => {
+    expect(startingValueFor(option({ widget: "toggle", default: "False" }))).toBe(true);
+  });
+
+  it("starts a non-toggle at the catalog's default string", () => {
+    expect(startingValueFor(option({ widget: "number", default: "131072" }))).toBe("131072");
+  });
+
+  it("starts empty when the default is the literal string 'None'", () => {
+    expect(startingValueFor(option({ widget: "text", default: "None" }))).toBe("");
+  });
+
+  it("starts empty when there is no option at all", () => {
+    expect(startingValueFor(undefined)).toBe("");
   });
 });

@@ -1398,3 +1398,102 @@ input[type="password"] {
   width: 100%;
   resize: vertical;
 }
+
+/* --- All-options modal (phase 3) ----------------------------------------- */
+
+.catalog-provenance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space);
+  margin-bottom: var(--space);
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+
+.catalog-empty { color: var(--text-dim); padding: var(--space) 0; }
+
+.catalog-rows {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 2);
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-top: var(--space);
+}
+
+.catalog-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space);
+  padding: calc(var(--space) / 2) var(--space);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+}
+
+.catalog-row-set { border-color: var(--accent); }
+
+.catalog-row-add {
+  flex-shrink: 0;
+  width: 1.6em;
+  height: 1.6em;
+  line-height: 1;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+}
+
+.catalog-row-add-set { border-color: var(--accent); color: var(--accent); }
+
+.catalog-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 4);
+}
+
+.catalog-row-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space);
+}
+
+.catalog-row-flag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.catalog-row-aliases {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+
+.catalog-row-badge {
+  font-size: 0.75em;
+  color: var(--text-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.catalog-row-default {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+
+/* Truncated to one line — `title` on the element itself carries the full
+   text, matching the `truncateMiddle`/`title` pattern used elsewhere for
+   long strings (e.g. ModelLibrary's file names). */
+.catalog-row-help {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
