@@ -122,6 +122,19 @@ class DockerCtl:
         """
         return self._inspect(name)["Image"]
 
+    def inspect(self, name: str) -> dict:
+        """The full container inspect body — the same read running() and
+        image_ref() make (``GET /containers/{name}/json``), exposed whole so
+        provenance can take the resolved content id (top-level ``Image``)
+        AND the human reference it was created with (``Config.Image``) from
+        ONE request.
+
+        Not allowlist-gated: it is a read, the same posture running() and
+        image_ref() have always had, and it adds NO new socket-proxy
+        permission — which is what keeps local provenance collection free of
+        a compose change."""
+        return self._inspect(name)
+
     def _inspect(self, name: str) -> dict:
         try:
             resp = self._client.get(f"/containers/{name}/json")

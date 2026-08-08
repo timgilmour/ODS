@@ -107,6 +107,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app import provenance_collect
 from app.derive_checkpoint import derive_checkpoint
 from app.derive_live import derive_live_models
 from app.engines import BusyError, EngineError, GuardError
@@ -119,6 +120,7 @@ from app.observe import (
     merge_observations,
     observe_local,
     observe_spark,
+    spark_node_id,
 )
 from app.reconcile import plan_reconcile
 from app.sets import apply_in_progress
@@ -495,6 +497,8 @@ class Watcher:
         on_derive=None,
         engine_exec=None,
         configurable_engines=None,
+        provenance_store=None,
+        dockerctl=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -573,6 +577,16 @@ class Watcher:
         # guards against. None (every caller except the harvest-scoped unit
         # tests and app.main) leaves _configurable_engines returning [].
         self._configurable_engine_pairs = configurable_engines
+        # Provenance ledger (app.provenance). None -- every unit test and
+        # every pre-provenance caller -- disables the pass entirely, the same
+        # opt-in shape as characteristics_store/intent_store/hostagent above.
+        # `dockerctl` is the LOCAL oci source; the spark client (already held)
+        # is the remote one; the catalog (already held) is weights. The pass
+        # RECORDS ONLY -- see _provenance_pass.
+        self._provenance_store = provenance_store
+        self._dockerctl = dockerctl
+        self._provenance_interval_s = settings.provenance_interval_s
+        self._last_provenance_at: float | None = None
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -646,6 +660,7 @@ class Watcher:
             actuated_keys = self._execute(actions, pending)
             self._reconcile_pass(world, actuated_keys)
             self._derive_pass()
+            self._provenance_pass()
         except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above
             self._log("tick-error", {"error": str(exc)})
 
@@ -1043,6 +1058,102 @@ class Watcher:
         if self._spark is not None:
             sources["spark"] = self._spark
         return sources
+
+    # --- provenance --------------------------------------------------------
+
+    def _provenance_pass(self) -> None:
+        """Refresh the provenance ledger, at most every
+        settings.provenance_interval_s.
+
+        RECORDS ONLY. Nothing here pulls, rebuilds, swaps or converges —
+        app.reconcile stays the single actuator, and convergence is not
+        merely deferred but currently outside the deck's permissions: the
+        socket proxy allows start/stop/exec, not pull/create (see
+        app/engines/docker_ctl.py's deploy note on why a wildcard there is
+        refused), and sparky's compose files are served read-only by a
+        node-agent with no docker access at all.
+
+        Best-effort per source, like _derive_pass: one unreachable container
+        marks THAT artifact unavailable — which RETAINS its last known
+        version, app.catalog's rule that an unavailable source must not make
+        its contents vanish — and never blanks the others. Nothing raises
+        past this method; tick()'s broad supervisor catch is not a
+        substitute for handling foreseeable failures here.
+        """
+        if self._provenance_store is None:
+            return
+        now_mono = self._clock()
+        if (self._last_provenance_at is not None
+                and now_mono - self._last_provenance_at < self._provenance_interval_s):
+            return
+        self._last_provenance_at = now_mono
+
+        now = datetime.now(UTC).isoformat()
+        node = self._settings.node_label
+
+        try:
+            self._provenance_local_oci(node, now)
+            self._provenance_local_weights(node, now)
+            self._provenance_spark(now)
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            self._log("provenance-pass-error", {"error": str(exc)})
+
+    def _provenance_local_oci(self, node: str, now: str) -> None:
+        """Local engine images, one container inspect each.
+
+        Iterates the park allowlist BY NAME rather than listing containers:
+        the socket-proxy allowlist has no `GET /containers/json` rule, and
+        this way needs none — it is the same `GET /containers/{name}/json`
+        that running()/image_ref() already make.
+        """
+        if self._dockerctl is None:
+            return
+        bodies: dict[str, dict | None] = {}
+        for name in self._settings.park_allowlist:
+            try:
+                bodies[name] = self._dockerctl.inspect(name)
+            except (EngineError, GuardError, KeyError):
+                bodies[name] = None
+        for entry in provenance_collect.local_oci_entries(bodies, node):
+            current = entry.pop("current")
+            self._provenance_store.observe(**entry, current=current, now=now)
+        for name, body in bodies.items():
+            if body is None:
+                self._provenance_store.mark_unavailable(f"oci:{node}:{name}", now=now)
+
+    def _provenance_local_weights(self, node: str, now: str) -> None:
+        if self._catalog is None:
+            return
+        for entry in provenance_collect.local_file_entries(self._catalog.units(), node):
+            current = entry.pop("current")
+            self._provenance_store.observe(**entry, current=current, now=now)
+
+    def _provenance_spark(self, now: str) -> None:
+        """Sparky's engine images, from the two node-agent reads that already
+        exist (compose text for the reference, the harvested catalog for the
+        digest). ``spark_node_id()`` — NEVER settings.spark_node_name, a
+        coincidentally-equal different string; see _configurable_engines'
+        docstring for the live-only bug that rule guards against."""
+        if self._spark is None:
+            return
+        node = spark_node_id()
+        try:
+            profiles = [p["name"] for p in self._spark.status()["profiles"]]
+        except (EngineError, BusyError, GuardError, KeyError, TypeError):
+            return
+        texts: dict[str, str] = {}
+        for profile in profiles:
+            try:
+                texts[profile] = self._spark.get_compose(profile)
+            except (EngineError, BusyError, GuardError):
+                continue
+        try:
+            catalog = self._spark.get_catalog().get("catalog")
+        except (EngineError, BusyError, GuardError, AttributeError):
+            catalog = None
+        for entry in provenance_collect.spark_oci_entries(texts, catalog, node):
+            current = entry.pop("current")
+            self._provenance_store.observe(**entry, current=current, now=now)
 
     # Event kinds whose consecutive identical repeats are collapsed to a
     # single log line, so a persistent state (a stuck 'wont-fit', a crashing

@@ -599,7 +599,7 @@ def _make_watcher(
     heal_suppressor=None, hostagent=None, catalog=None, hipfire=None,
     intent_store=None, spark=None, auto=True, characteristics_store=None,
     gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
-    configurable_engines=None, **sett,
+    configurable_engines=None, provenance_store=None, dockerctl=None, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -624,6 +624,8 @@ def _make_watcher(
         on_derive=on_derive,
         engine_exec=engine_exec,
         configurable_engines=configurable_engines,
+        provenance_store=provenance_store,
+        dockerctl=dockerctl,
     )
     return watcher, events_path
 
@@ -2400,3 +2402,135 @@ def test_watcher_version_skip_prevents_refetch_after_store(tmp_path):
 
     assert len(calls) == 2   # no .version peek -> the exec runs every pass
     assert len(writes) == 1  # ...but the post-call compare stops the 2nd write
+
+
+# --- provenance pass -------------------------------------------------------
+
+class _FakeDockerCtl:
+    """Just the one read the provenance pass makes."""
+
+    def __init__(self, bodies):
+        self.bodies = dict(bodies)
+        self.inspected = []
+
+    def inspect(self, name):
+        self.inspected.append(name)
+        try:
+            return self.bodies[name]
+        except KeyError:
+            raise EngineError(f"no such container {name}") from None
+
+
+class _FakeCatalogUnits:
+    def __init__(self, units):
+        self._units = units
+
+    def units(self):
+        return list(self._units)
+
+
+def _prov_store(tmp_path):
+    from app.provenance import ProvenanceStore
+
+    return ProvenanceStore(tmp_path / "provenance.json", tmp_path / "prov-history.jsonl")
+
+
+def _one_container(tmp_path, bodies=None, **kwargs):
+    """A watcher whose only provenance source is one local container."""
+    store = _prov_store(tmp_path)
+    docker = _FakeDockerCtl(bodies if bodies is not None else {
+        "ods-hipfire": {"Image": "sha256:a", "Config": {"Image": "ods-hipfire:latest"}}})
+    watcher = _watcher(tmp_path, provenance_store=store, dockerctl=docker,
+                       park_allowlist=["ods-hipfire"], **kwargs)
+    return watcher, store, docker
+
+
+def test_provenance_pass_records_local_containers(tmp_path):
+    watcher, store, _docker = _one_container(tmp_path)
+
+    watcher.tick()
+
+    entry = store.entry("oci:local:ods-hipfire")
+    assert entry["current"]["version"] == "sha256:a"
+    assert entry["current"]["label"] == "ods-hipfire:latest"
+    assert entry["role"] == "engine"
+
+
+def test_provenance_pass_marks_an_unreadable_container_unavailable_not_gone(tmp_path):
+    # app.catalog's retention rule: a source going away must not erase what
+    # was already recorded about it.
+    clock = _FakeClock()
+    watcher, store, docker = _one_container(tmp_path, clock=clock)
+    watcher.tick()
+
+    docker.bodies.clear()
+    clock.advance(10_000)
+    watcher.tick()
+
+    entry = store.entry("oci:local:ods-hipfire")
+    assert entry["current"]["version"] == "sha256:a"
+    assert entry["current"]["verification"] == "unavailable"
+
+
+def test_provenance_pass_is_throttled(tmp_path):
+    watcher, _store, docker = _one_container(tmp_path, clock=_FakeClock())
+
+    watcher.tick()
+    watcher.tick()
+
+    assert docker.inspected == ["ods-hipfire"]   # the second tick did no I/O
+
+
+def test_provenance_pass_runs_again_once_the_interval_elapses(tmp_path):
+    clock = _FakeClock()
+    watcher, _store, docker = _one_container(tmp_path, clock=clock)
+
+    watcher.tick()
+    clock.advance(10_000)
+    watcher.tick()
+
+    assert docker.inspected == ["ods-hipfire", "ods-hipfire"]
+
+
+def test_provenance_pass_is_absent_without_a_store(tmp_path):
+    watcher = _watcher(tmp_path, dockerctl=_FakeDockerCtl({}))
+
+    watcher.tick()   # must not raise
+
+    assert not (tmp_path / "provenance.json").exists()
+
+
+def test_provenance_pass_records_catalog_units_as_weights(tmp_path):
+    store = _prov_store(tmp_path)
+    catalog = _FakeCatalogUnits([{
+        "id": "hot:m.gguf", "name": "m.gguf", "relpath": "m.gguf",
+        "location": "hot", "size": 4096, "mtime": 2.0, "state": "resident"}])
+    watcher = _watcher(tmp_path, provenance_store=store, catalog=catalog)
+
+    watcher.tick()
+
+    entry = store.entry("file:local:m.gguf")
+    assert entry["role"] == "weights"
+    assert entry["current"]["verification"] == "consistent"
+
+
+def test_a_provenance_failure_is_logged_not_raised(tmp_path):
+    """A collector raising must be caught inside the pass. If it escaped to
+    tick()'s supervisor catch it would look identical in the log while
+    silently being the LAST thing in the tick — which is fine today only
+    because provenance runs last. Catching it here keeps that an accident
+    rather than a dependency."""
+    class _Exploding:
+        def units(self):
+            raise RuntimeError("catalog on fire")
+
+    store = _prov_store(tmp_path)
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
+        provenance_store=store, catalog=_Exploding())
+
+    watcher.tick()
+
+    kinds = [e["kind"] for e in tail_events(events_path, 50)]
+    assert "provenance-pass-error" in kinds
+    assert "tick-error" not in kinds

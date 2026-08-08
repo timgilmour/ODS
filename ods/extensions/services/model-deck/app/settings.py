@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     # tick for the whole incident.
     derive_interval_s: float = 300.0
 
+    # Provenance refresh cadence. Images and repos change on the order of
+    # weeks, not the ~2 s tick, so this pass is throttled far harder than
+    # arbitration. Separate from derive_interval_s because the two answer
+    # different questions ("what is this model" vs "where did it come from")
+    # and should be tunable apart.
+    provenance_interval_s: float = 300.0
+    # How old a successful verification may be before the READ side reports
+    # it as `stale` (app.provenance.describe). Never stored — computed at
+    # read time, the way app.locations.describe computes `available`.
+    provenance_stale_s: float = 3600.0
+
     # Seconds a deliberate lemonade unload (manual, set-apply, or the
     # watcher's own idle release) suppresses contention healing's pending-load
     # inference, so healing can't immediately revert it. A subsequent load

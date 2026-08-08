@@ -104,6 +104,7 @@ def _build_deck(settings: Settings) -> dict:
     from app.locations import LocationStore
     from app.mover import JobQueue, Mover
     from app.policy import PolicyStore, StoragePolicyStore
+    from app.provenance import ProvenanceStore
     from app.registry import Registry
     from app.sets import SetStore
     from app.settings_store import SettingsStore
@@ -180,6 +181,14 @@ def _build_deck(settings: Settings) -> dict:
         # routers (which write it on every deliberate action) and — once the
         # reconcile pass lands — the watcher, which reads it.
         "intent_store": IntentStore(data_dir / "intent.json"),
+        # The provenance ledger: where each artifact came from and what
+        # version of it is here now. RECORDS ONLY — nothing converges to a
+        # desired version (see Watcher._provenance_pass). Its history is a
+        # separate append-only file, kept out of events.jsonl deliberately:
+        # that log is display-only and accepts losing its tail.
+        "provenance_store": ProvenanceStore(
+            data_dir / "provenance.json", data_dir / "provenance-history.jsonl"),
+        "provenance_history_path": data_dir / "provenance-history.jsonl",
         "set_store": SetStore(data_dir / "sets"),
         "events_path": data_dir / "events.jsonl",
         "read_gpus": read_gpus,
@@ -291,6 +300,12 @@ def _build_watcher(settings: Settings):
         # router built from the one real (spark_node_id(), "vllm") route.
         engine_exec=deck["engine_exec"],
         configurable_engines=deck["configurable_engines"],
+        # Provenance pass: the same shared ledger the HTTP routers read and
+        # declare into, plus the socket-proxy client that supplies local
+        # image identity (one inspect per park-allowlist container — no new
+        # proxy permission, see DockerCtl.inspect).
+        provenance_store=deck["provenance_store"],
+        dockerctl=deck["dockerctl"],
     )
 
 
