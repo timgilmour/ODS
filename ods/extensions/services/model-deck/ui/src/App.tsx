@@ -10,13 +10,14 @@ import {
 } from "./api";
 import Board from "./components/Board";
 import EventsView from "./components/EventsView";
+import ModelDetailDrawer from "./components/ModelDetailDrawer";
 import PolicyModal from "./components/PolicyModal";
 import SetBuilder from "./components/SetBuilder";
 import SettingsModal, { type SettingsTarget } from "./components/SettingsModal";
 import SetStrip from "./components/SetStrip";
 import StorageView from "./components/StorageView";
 import { labels, messages } from "./model/messages";
-import { buildNodes, SPARK_NODE_ID } from "./model/nodes";
+import { buildNodes, findPlacement, SPARK_NODE_ID, type Placement } from "./model/nodes";
 import Banner from "./ui/Banner";
 
 const POLL_MS = 3000;
@@ -42,6 +43,10 @@ export default function App() {
   // there is no separate "configurable" flag anywhere in the backend, by
   // design — so this is a probe, not a lookup.
   const [engineSettingsNodes, setEngineSettingsNodes] = useState<Record<string, string>>({});
+  // The placement the detail drawer was opened on. Held as the LAST-KNOWN
+  // object only: the drawer's live subject is re-derived from each poll by id
+  // (see `detailSpot` below), so this never drives the status pill.
+  const [detailPlacement, setDetailPlacement] = useState<Placement | null>(null);
   // Bumped on every poll tick and after any mutating action; EventsView
   // re-fetches its own window whenever this changes (see EventsView.tsx).
   const [refreshTrigger, setRefreshTrigger] = useState(0);
@@ -99,11 +104,27 @@ export default function App() {
     setRefreshTrigger((t) => t + 1);
   }, [refreshState]);
 
+  const closeDetail = useCallback(() => setDetailPlacement(null), []);
+
+  /** Switching tabs closes the drawer. It is a detail OF the board — leaving
+   * it floating over Storage or Events would put a model's verbs on a screen
+   * that has nothing to do with them. */
+  const showView = useCallback((next: View) => {
+    setView(next);
+    setDetailPlacement(null);
+  }, []);
+
   // Poll every 3s; paused entirely while an apply confirmation modal (Deck's
   // SetStrip, SetBuilder's own preview, the policy editor, or the settings
   // panel) is open. Settings joins the list for the same reason the others
   // are on it: it holds uncommitted operator edits, and a refresh underneath
   // one is a re-render of the surface being typed into.
+  //
+  // The model detail drawer is deliberately NOT on that list. Its headline is
+  // a live status pill over a placement the deck may unload out from under it,
+  // so a paused poll would freeze the one thing it exists to report. Its two
+  // free-text fields are seeded once rather than re-read on every tick, which
+  // is what makes a live refresh safe there (ModelDetailDrawer's `seeded`).
   useEffect(() => {
     if (modalOpen || policyModalOpen || settingsTarget) return;
     refreshAll();
@@ -141,6 +162,14 @@ export default function App() {
         storageState.locations.find((l) => l.name === u.location)?.engine !== "lemonade",
     ) ?? [];
 
+  const nodes = buildNodes(state, spark);
+  // Re-derived on EVERY render, i.e. after every poll: the drawer must read
+  // its subject out of the freshest board rather than out of the object the
+  // chip click captured, or it would keep showing "serving" over a model that
+  // was unloaded minutes ago. `null` means the placement left the board
+  // entirely — the drawer then keeps the last-known object and says so.
+  const detailSpot = detailPlacement ? findPlacement(nodes, detailPlacement.id) : null;
+
   return (
     <>
       <header className="deck-header">
@@ -151,25 +180,25 @@ export default function App() {
         <nav className="view-tabs">
           <button
             className={view === "deck" ? "primary" : undefined}
-            onClick={() => setView("deck")}
+            onClick={() => showView("deck")}
           >
             {labels.deck}
           </button>
           <button
             className={view === "builder" ? "primary" : undefined}
-            onClick={() => setView("builder")}
+            onClick={() => showView("builder")}
           >
             {labels.setBuilder}
           </button>
           <button
             className={view === "storage" ? "primary" : undefined}
-            onClick={() => setView("storage")}
+            onClick={() => showView("storage")}
           >
             {labels.storage}
           </button>
           <button
             className={view === "events" ? "primary" : undefined}
-            onClick={() => setView("events")}
+            onClick={() => showView("events")}
           >
             {labels.events}
           </button>
@@ -187,7 +216,7 @@ export default function App() {
 
           {state && (
             <Board
-              nodes={buildNodes(state, spark)}
+              nodes={nodes}
               world={state.world}
               models={state.models}
               coldGgufs={coldGgufs}
@@ -197,6 +226,7 @@ export default function App() {
               // each node up by id.
               nodeErrors={{ [SPARK_NODE_ID]: sparkError }}
               engineSettingsNodes={engineSettingsNodes}
+              onChipClick={setDetailPlacement}
               onOpenSettings={setSettingsTarget}
               onRefresh={refreshAll}
             />
@@ -234,6 +264,36 @@ export default function App() {
           storageState={storageState}
           onClose={() => setPolicyModalOpen(false)}
           onSaved={refreshAll}
+        />
+      )}
+
+      {detailPlacement && state && (
+        // Keyed on the placement id for the same reason SettingsModal is keyed
+        // on its target: clicking a second chip while one drawer is open must
+        // START the new one, not inherit the first's fetched facts and seeded
+        // text drafts (useState initializers and the `seeded` ref do not re-run
+        // on a prop change).
+        //
+        // `placement` is the freshly re-derived one wherever the board still
+        // carries it, and the last-known object otherwise — which is what
+        // `placedOn: null` then tells the drawer, so it drops its verbs and
+        // says the placement is gone rather than offering actions against
+        // something that is no longer there.
+        <ModelDetailDrawer
+          key={detailPlacement.id}
+          placement={detailSpot?.placement ?? detailPlacement}
+          placedOn={
+            detailSpot ? { nodeId: detailSpot.node.id, resource: detailSpot.resource } : null
+          }
+          world={state.world}
+          models={state.models}
+          coldGgufs={coldGgufs}
+          refreshTrigger={refreshTrigger}
+          engineSettingsNodes={engineSettingsNodes}
+          suspended={settingsTarget !== null}
+          onOpenSettings={setSettingsTarget}
+          onRefresh={refreshAll}
+          onClose={closeDetail}
         />
       )}
 

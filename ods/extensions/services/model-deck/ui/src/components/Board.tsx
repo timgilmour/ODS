@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
-import type { DeckNode } from "../model/nodes";
+import type { DeckNode, Placement } from "../model/nodes";
 import { applyOrder, loadOrder, reorder, saveOrder } from "../model/nodeOrder";
 import NodeCard from "./NodeCard";
 import type { SettingsTarget } from "./SettingsModal";
@@ -17,6 +17,7 @@ export default function Board({
   spark,
   nodeErrors,
   engineSettingsNodes,
+  onChipClick,
   onOpenSettings,
   onRefresh,
 }: {
@@ -35,6 +36,11 @@ export default function Board({
    * `nodeErrors`: Board stays node-agnostic and just looks each node up by
    * id, so a real node registry needs no change here. */
   engineSettingsNodes: Record<string, string>;
+  /** A chip was clicked: App opens the model detail drawer on it. Threaded
+   * rather than handled here because the drawer's subject has to be
+   * re-derived from every later poll (App holds the state; see
+   * findPlacement in model/nodes.ts). */
+  onChipClick: (placement: Placement) => void;
   onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
 }) {
@@ -76,6 +82,7 @@ export default function Board({
             spark={spark}
             fetchError={nodeErrors[node.id] ?? null}
             settingsEngine={engineSettingsNodes[node.id] ?? null}
+            onChipClick={onChipClick}
             onOpenSettings={onOpenSettings}
             onRefresh={onRefresh}
           />

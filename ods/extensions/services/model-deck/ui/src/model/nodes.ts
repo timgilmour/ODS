@@ -253,6 +253,40 @@ export function buildNodes(
   return nodes;
 }
 
+/** Where a placement sits: the node and resource that carry it, alongside
+ * the placement itself. Returned as one object because the two answers are
+ * only ever wanted together (a surface acting on a placement needs the
+ * resource's `controls` and the node's id), and re-deriving either from the
+ * other is what makes them disagree. */
+export interface PlacementSpot {
+  node: DeckNode;
+  resource: DeckResource;
+  placement: Placement;
+}
+
+/** Re-derives a placement from a freshly built board, by id.
+ *
+ * The detail drawer holds a placement the operator clicked, but the board
+ * underneath it keeps polling — so the drawer must read its subject out of
+ * the LATEST `buildNodes` output on every tick, never out of the object it
+ * was opened with. Without that, a drawer opened over a serving model keeps
+ * showing "serving" long after the model was unloaded from under it, which
+ * is the one thing a live status pill must never do.
+ *
+ * `null` means the placement is no longer on the board at all — unloaded,
+ * parked, or swapped away. That is a real answer, not a lookup failure: the
+ * caller keeps showing what it last knew and says so.
+ */
+export function findPlacement(nodes: DeckNode[], id: string): PlacementSpot | null {
+  for (const node of nodes) {
+    for (const resource of node.resources) {
+      const placement = resource.placements.find((p) => p.id === id);
+      if (placement) return { node, resource, placement };
+    }
+  }
+  return null;
+}
+
 /** The spark half of the board.
  *
  * `spark === null` means the engine is not configured on this deployment

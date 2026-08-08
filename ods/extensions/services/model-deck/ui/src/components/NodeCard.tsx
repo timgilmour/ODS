@@ -1,6 +1,6 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import { humanizeAge, labels, messages } from "../model/messages";
-import type { DeckNode } from "../model/nodes";
+import type { DeckNode, Placement } from "../model/nodes";
 import Banner from "../ui/Banner";
 import Panel from "../ui/Panel";
 import ResourcePanel from "./ResourcePanel";
@@ -21,6 +21,7 @@ export default function NodeCard({
   spark,
   fetchError,
   settingsEngine,
+  onChipClick,
   onOpenSettings,
   onRefresh,
 }: {
@@ -39,6 +40,9 @@ export default function NodeCard({
    * a catalog probe, because the presence of a harvested option catalog IS
    * the configurability signal (no invented flag anywhere in the payload). */
   settingsEngine: string | null;
+  /** Threaded straight through to every ResourcePanel — the card has no
+   * opinion about which chip was clicked, only App does. */
+  onChipClick: (placement: Placement) => void;
   onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
 }) {
@@ -109,6 +113,7 @@ export default function NodeCard({
             spark={spark}
             stale={unreachable}
             staleAge={age}
+            onChipClick={onChipClick}
             onRefresh={onRefresh}
           />
         ))}

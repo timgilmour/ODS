@@ -12,7 +12,7 @@
  * client actually can — see buildChips's pendingRemove handling below.
  */
 
-import type { ArgValue, Layer, ResolvedEntry, SettingsKind, Widget } from "../api";
+import type { ArgValue, FactsMap, Layer, ResolvedEntry, SettingsKind, Widget } from "../api";
 
 // ---------------------------------------------------------------------------
 // Value text — the one place an ArgValue becomes readable text and back
@@ -97,6 +97,45 @@ export function scopeKeys(node: string, engine: string, model: string | null): S
     models: model,
     engine_models: model === null ? null : `${engineKey}|${model}`,
   };
+}
+
+/** Which model identity a Settings panel must be opened for, given the name
+ * a placement carries on the board.
+ *
+ * A spark placement is named by its PROFILE ("heretic", "mm27b") — that is
+ * what /api/spark/swap takes and what intent records (app/routers/spark.py
+ * deliberately records profiles). Settings, though, live under the real
+ * CHECKPOINT identity: `engine_models/<node>/<engine>|<identity>`. The
+ * translation is the `profile_identities` characteristics fact, written by
+ * the adopt sweep (app/routers/settings.py:319) and read exactly this way by
+ * the backend itself — app/routers/spark.py:143 for reload, and
+ * app/routers/__init__.py:160-215 for settings drift, whose docstring names
+ * the failure this prevents: a PUT to `engine_models/sparky/vllm|<identity>`
+ * never registers against the verbatim `sparky/spark|heretic` key intent
+ * builds, so settings for the spark slot go silently dead (the D11 defect).
+ *
+ * Every miss falls back to the placement's own name, which is the honest
+ * answer in each case it can happen: a LOCAL tenant's placement name IS its
+ * model, and a spark profile with no adopted identity has nothing else to be
+ * called. Never throws — `FactEntry.value` is `unknown` by contract, so each
+ * step is checked rather than cast.
+ */
+export function settingsIdentityFor(
+  facts: FactsMap,
+  node: string,
+  engine: string,
+  placementName: string,
+): string {
+  // The engine-scoped facts key, `<kind>/<id>` like every other one
+  // (app/routers/facts.py:64-71); the id for an engine is `<node>/<engine>`.
+  const identities = facts[`engine/${node}/${engine}`]?.profile_identities?.value;
+  if (typeof identities !== "object" || identities === null || Array.isArray(identities)) {
+    return placementName;
+  }
+  const info = (identities as Record<string, unknown>)[placementName];
+  if (typeof info !== "object" || info === null) return placementName;
+  const identity = (info as Record<string, unknown>).identity;
+  return typeof identity === "string" && identity !== "" ? identity : placementName;
 }
 
 /** Which declared layer each write kind targets — engines -> engine,

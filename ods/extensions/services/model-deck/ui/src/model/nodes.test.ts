@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LifecycleEntry, SparkStatus, StateResponse } from "../api";
-import { buildNodes, isTenantName, TENANT_ORDER } from "./nodes";
+import { buildNodes, findPlacement, isTenantName, TENANT_ORDER } from "./nodes";
 
 function state(overrides: Partial<StateResponse> = {}): StateResponse {
   return {
@@ -418,5 +418,41 @@ describe("isTenantName", () => {
   it("rejects an unknown control rather than guessing", () => {
     expect(isTenantName("vllm")).toBe(false);
     expect(isTenantName("")).toBe(false);
+  });
+});
+
+describe("findPlacement", () => {
+  const nodes = buildNodes(state(), sparkStatus());
+
+  it("finds a local tenant placement and hands back the resource that carries it", () => {
+    // The drawer needs the RESOURCE too: its `controls` are what decide
+    // which verbs (if any) that placement gets.
+    const spot = findPlacement(nodes, "local/hipfire");
+    expect(spot?.node.id).toBe("local");
+    expect(spot?.resource.id).toBe("gpu0");
+    expect(spot?.placement.name).toBe("Qwen3.6-35B-A3B-heretic-NVFP4");
+    expect(spot?.resource.controls).toContain("hipfire");
+  });
+
+  it("finds the spark slot on the remote node", () => {
+    const spot = findPlacement(nodes, "sparky/slot0");
+    expect(spot?.node.id).toBe("sparky");
+    expect(spot?.resource.id).toBe("slot0");
+    expect(spot?.placement.name).toBe("heretic");
+  });
+
+  it("returns null once the placement leaves the board", () => {
+    // Parked/unloaded/swapped away: a real answer, not a lookup failure —
+    // the drawer keeps its last-known data and says the placement is gone.
+    const parked = state();
+    parked.world.tenants.hipfire = {
+      state: "parked", model: null, footprint: 0, queue_depth: null,
+    };
+    expect(findPlacement(buildNodes(parked, null), "local/hipfire")).toBeNull();
+  });
+
+  it("returns null for an id no node ever carried", () => {
+    expect(findPlacement(nodes, "local/nope")).toBeNull();
+    expect(findPlacement([], "local/hipfire")).toBeNull();
   });
 });

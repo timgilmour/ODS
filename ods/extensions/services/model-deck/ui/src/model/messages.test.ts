@@ -105,6 +105,31 @@ describe("messages", () => {
   });
 });
 
+describe("model detail drawer messages", () => {
+  it("can honestly say nothing was written when a declared save fails", () => {
+    // Unlike settingsSaveFailed's multi-scope walk: one declared edit is one
+    // PUT of one field, written atomically (app/declared.py's docstring —
+    // "a rejected put leaves the file untouched").
+    const m = messages.declaredSaveFailed("422 unprocessable");
+    expect(m.tone).toBe("danger");
+    expect(m.body).toContain("422 unprocessable");
+    expect(m.body).toContain("nothing was written");
+  });
+
+  it("treats a vanished placement as neutral news, not a failure", () => {
+    // Polling never stopped, so this IS current information — the model was
+    // unloaded/parked/swapped away, which is not an error.
+    expect(messages.placementGone().tone).toBe("neutral");
+  });
+
+  it("passes a facts or reload failure's detail through as the body", () => {
+    expect(messages.factsLoadFailed("500").body).toBe("500");
+    expect(messages.reloadFailed("nothing is serving; name a profile").body).toBe(
+      "nothing is serving; name a profile",
+    );
+  });
+});
+
 describe("labels", () => {
   it("exports a non-empty dismiss label", () => {
     expect(labels.dismiss).toEqual(expect.any(String));
@@ -155,6 +180,23 @@ describe("labels", () => {
   it("rounds an idle time to whole seconds", () => {
     expect(labels.idle(0)).toBe("idle 0 s");
     expect(labels.idle(12.4)).toBe("idle 12 s");
+  });
+
+  it("names a fact's origin by its own vocabulary, quoting the payload's source", () => {
+    // Facts have two ORIGINS (app/facts.py:resolve_facts), not the settings
+    // ladder's five layers — the drawer borrows the dot's colours but must
+    // never borrow layerName's sentence, which would claim a fact came from
+    // an engine probe.
+    expect(labels.factOrigin("derived", "config.json")).toContain("config.json");
+    expect(labels.factOrigin("derived", "config.json")).toContain("derived");
+    expect(labels.factOrigin("declared", "declared.json")).toContain("declared");
+    expect(labels.factOrigin("declared", "declared.json")).not.toContain("engine");
+  });
+
+  it("states drift as expected-vs-actual with the backend's own severity word", () => {
+    expect(labels.driftDetail("131072", "262144", "mismatch")).toBe(
+      "expected 131072 · actual 262144 · mismatch",
+    );
   });
 
   it("explains the pin and the in-use badge in their tooltips", () => {

@@ -229,6 +229,40 @@ export const messages = {
   // request itself never came back (ApiError/network failure), that error's
   // message — both land the operator in the same "try again" banner, since
   // neither case leaves them with a fresher catalog.
+  // Model detail drawer (phase 3) ------------------------------------------
+
+  factsLoadFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Could not load facts",
+    body: detail,
+  }),
+
+  // "Nothing was written" is a claim this one can actually make, unlike
+  // settingsSaveFailed's multi-scope walk: each declared edit is ONE PUT of
+  // one field, and app/declared.py's store writes atomically — "a rejected
+  // put leaves the file untouched" (its module docstring).
+  declaredSaveFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Could not save",
+    body: `${detail} — nothing was written.`,
+  }),
+
+  reloadFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Reload failed",
+    body: detail,
+  }),
+
+  // The drawer's subject is no longer on the board: unloaded, parked, or
+  // swapped away while the drawer was open. Neutral, because nothing failed
+  // — polling never stopped, so this IS current information. What follows is
+  // simply the last thing the board knew, and none of it can be acted on.
+  placementGone: (): Message => ({
+    tone: "neutral",
+    title: "No longer on the deck",
+    body: "this placement is not in the latest state — what follows is the last thing we knew.",
+  }),
+
   harvestFailed: (outcome: string): Message => ({
     tone: "warning",
     title: outcome === "empty" ? "Harvest found no options" : "Harvest failed",
@@ -476,6 +510,56 @@ export const labels = {
     ({ toggle: "Toggle", list: "List", select: "Select", number: "Number", text: "Text" })[w],
   addOptionRowLabel: (flag: string) => `add ${flag}`,
   jumpToOptionLabel: (flag: string) => `${flag} already set — edit it`,
+
+  // Model detail drawer (phase 3) -------------------------------------------
+
+  modelDetail: "Model detail",
+
+  factsSection: "FACTS",
+  factsSectionHint: "what the deck read from the model's own artifact, plus what a human overrode",
+  noFactsYet: "no facts recorded for this model yet",
+
+  /** The dot's name in the facts table. Facts carry an ORIGIN, not a ladder
+   * layer (app/facts.py:resolve_facts sets exactly "derived"/"declared"),
+   * and `source` is the payload's own account of where the value came from
+   * — "config.json", "compose import", "declared.json" — so it is quoted
+   * rather than paraphrased. */
+  factOrigin: (origin: "derived" | "declared", source: string) =>
+    origin === "declared"
+      ? `declared by a human — ${source}`
+      : `derived — read from ${source}`,
+  shadowedTitle: "the derived value this declaration overrides",
+
+  /** One drift line: what the fact says, what is actually in force, and how
+   * bad that is. `severity` is the backend's own word (app/facts.py's
+   * DRIFT_RULES: "crash", "mismatch"), never re-graded here. */
+  driftDetail: (expected: string, actual: string, severity: string) =>
+    `expected ${expected} · actual ${actual} · ${severity}`,
+  driftIn: (field: string) => `${field} —`,
+
+  declaredFactsSection: "DECLARED",
+  /** app/declared.py:32-38's allowlist is five fields and no more; the whole
+   * point of the layer is that everything a machine can read, it reads. */
+  declaredFactsHint: "the five fields a human owns — everything else is derived and read-only",
+  tagsField: "tags",
+  addTag: "add a tag…",
+  removeTagTitle: (tag: string) => `remove ${tag}`,
+  factLabel: "label",
+  factNotes: "notes",
+  factToolsVerified: "tools verified",
+  factToolsVerifiedTitle:
+    "true only after an end-to-end tool call actually worked — engines advertise tool support they cannot reliably parse",
+  factEnginePreference: "engine preference",
+  factEnginePreferenceTitle:
+    "the tie-break when more than one engine could serve this model",
+
+  actionsSection: "ACTIONS",
+  reload: "Reload",
+  reloading: "Reloading…",
+  reloadTitle:
+    "re-apply the declared settings on the node — the serving container is recreated",
+  modelSettings: "Settings",
+  modelSettingsTitle: "edit the flags this model is served with",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

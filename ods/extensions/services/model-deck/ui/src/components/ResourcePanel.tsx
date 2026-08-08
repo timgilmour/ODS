@@ -56,6 +56,7 @@ export default function ResourcePanel({
   spark,
   stale,
   staleAge,
+  onChipClick,
   onRefresh,
 }: {
   resource: DeckResource;
@@ -71,6 +72,13 @@ export default function ResourcePanel({
    * already says "last known", this answers the next question, which is
    * *how* stale — a different fact, not a redundant one. */
   staleAge: string | null;
+  /** Opens the model detail drawer for a chip. Optional so a chip stays a
+   * plain, unclickable div wherever no handler is threaded (ModelChip renders
+   * a button only when it has an onClick) — the affordance never appears
+   * without something behind it. A STALE chip stays clickable on purpose: the
+   * drawer is a read surface, and last-known facts are exactly what an
+   * operator wants while a node is dark. */
+  onChipClick?: (placement: Placement) => void;
   onRefresh: () => void;
 }) {
   return (
@@ -82,7 +90,10 @@ export default function ResourcePanel({
       ) : (
         resource.placements.map((p) => (
           <div key={p.id} className="resource-placement">
-            <ModelChip placement={p} />
+            <ModelChip
+              placement={p}
+              onClick={onChipClick ? () => onChipClick(p) : undefined}
+            />
             <PlacementMeta placement={p} />
             {stale && staleAge && (
               <span className="ui-chip-stale-note">

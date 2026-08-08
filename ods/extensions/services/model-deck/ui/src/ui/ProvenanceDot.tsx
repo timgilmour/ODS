@@ -13,9 +13,19 @@ import { labels } from "../model/messages";
  * the title rather than encoded as a second colour nobody could decode.
  *
  * Colour is never the only carrier: the title/aria-label names the layer,
- * and the popover behind the dot repeats it as text. */
-export default function ProvenanceDot({ layer }: { layer: Layer }) {
-  const name = labels.layerName(layer);
+ * and the popover behind the dot repeats it as text.
+ *
+ * `label` overrides that name for the ONE surface that reuses this dot for
+ * something that is not a ladder layer: the model detail drawer's facts
+ * table, whose entries have two ORIGINS (derived/declared,
+ * app/facts.py:resolve_facts) rather than five layers. It borrows the two
+ * colours whose meaning already matches — dim grey for "the machine read
+ * this", bright for "a human declared it" — and must not borrow the layer
+ * sentence with them, because "harvested from the engine" is simply not
+ * where a fact comes from. Absent, the name is the layer's, exactly as
+ * before. */
+export default function ProvenanceDot({ layer, label }: { layer: Layer; label?: string }) {
+  const name = label ?? labels.layerName(layer);
   return (
     <span
       className={`prov-dot prov-${layer}`}

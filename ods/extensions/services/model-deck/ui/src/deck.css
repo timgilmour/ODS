@@ -1497,3 +1497,203 @@ input[type="password"] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* --- Model detail drawer (phase 3) --------------------------------------- */
+/* A right-hand panel rather than a modal: the board behind it keeps polling
+   and stays readable, which is the point — the drawer reports on a placement
+   that is still live. Sits BELOW the modal layer (z-index 100) so a Settings
+   panel opened from inside it lands on top. Tokens only, no hex. */
+.ui-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg);
+  z-index: 90;
+}
+
+.ui-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 100%);
+  z-index: 91;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--panel-border);
+}
+
+.ui-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: calc(var(--space) * 2);
+  padding: calc(var(--space) * 2);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.ui-drawer-body {
+  padding: calc(var(--space) * 2);
+  overflow-y: auto;
+}
+
+.drawer-hero { min-width: 0; }
+
+/* Untruncated and monospaced: the checkpoint name IS the model's identity,
+   and this panel is where it is read in full — so it wraps rather than
+   ellipsing, however long it is. */
+.drawer-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.drawer-hero-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space);
+  margin-top: calc(var(--space) / 2);
+  color: var(--text-dim);
+}
+
+.drawer-section { margin-bottom: calc(var(--space) * 3); }
+
+.drawer-section-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space);
+  margin: 0 0 var(--space);
+  font-size: 0.8em;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.drawer-section-hint {
+  letter-spacing: normal;
+  font-size: 0.95em;
+  text-transform: none;
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+
+.drawer-empty { color: var(--text-dim); }
+
+.fact-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.fact-row {
+  padding: calc(var(--space) / 2) 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.fact-row:last-child { border-bottom: none; }
+
+.fact-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space);
+}
+
+.fact-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.fact-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* Amber, per decision 5: drift is a disagreement wanting a decision, not a
+   failure — the deck never corrects it (app/facts.py:detect_drift). */
+.fact-drifted { color: var(--chip-busy-fg); }
+
+/* What the deck DERIVED, under a human's declaration that overrode it
+   (app/facts.py:resolve_facts keeps the loser as shadowed_value). */
+.fact-shadowed {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
+.fact-drift {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.drawer-field {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 2);
+  margin-bottom: var(--space);
+}
+
+.drawer-field-label {
+  font-size: 0.85em;
+  color: var(--text-dim);
+}
+
+.drawer-input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.drawer-checkbox {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--space) / 2);
+  margin-bottom: var(--space);
+  font-size: 0.9em;
+}
+
+.drawer-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space);
+}
+
+.drawer-tags .drawer-input { width: auto; flex: 1; min-width: 10ch; }
+
+.drawer-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--space) / 2);
+  padding: 0 calc(var(--space) / 2) 0 var(--space);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.drawer-tag button {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  padding: 0 2px;
+}
+
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space);
+}
+
+/* A chip only becomes a button where something is behind it (ModelChip
+   renders a div otherwise), so the affordance is never a promise the board
+   cannot keep. */
+button.ui-chip:hover:not(:disabled) { border-color: var(--accent); }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ResolvedEntry } from "../api";
+import type { FactsMap, ResolvedEntry } from "../api";
 import {
   buildChips,
   bufferRemove,
@@ -13,6 +13,7 @@ import {
   parseValueText,
   POSITIONAL_KEY,
   scopeKeys,
+  settingsIdentityFor,
   toPuts,
 } from "./settingsView";
 
@@ -347,5 +348,75 @@ describe("isListEdit", () => {
       ? parseValueText("served-model-name", displayValue(value))
       : displayValue(value);
     expect(parsed).toEqual(value);
+  });
+});
+
+describe("settingsIdentityFor", () => {
+  // The real shape the adopt sweep writes (app/routers/settings.py:319) under
+  // the engine-scoped facts key.
+  const facts: FactsMap = {
+    "engine/sparky/vllm": {
+      profile_identities: {
+        value: {
+          heretic: {
+            identity: "Qwen3.6-35B-A3B-heretic-NVFP4",
+            service: "vllm",
+            container_name: "vllm-heretic",
+          },
+        },
+        origin: "derived",
+        source: "compose import",
+        derived_ts: "2026-08-07T12:00:00Z",
+      },
+    },
+  };
+
+  it("translates a spark PROFILE into the checkpoint identity settings live under", () => {
+    // Untranslated, a PUT would land on `sparky/vllm|heretic` — a scope key
+    // nothing resolves (the D11 defect, app/routers/__init__.py:160-215).
+    expect(settingsIdentityFor(facts, "sparky", "vllm", "heretic")).toBe(
+      "Qwen3.6-35B-A3B-heretic-NVFP4",
+    );
+  });
+
+  it("falls back to the placement name for a profile that was never adopted", () => {
+    expect(settingsIdentityFor(facts, "sparky", "vllm", "ornith")).toBe("ornith");
+  });
+
+  it("falls back for a node/engine pair with no facts at all — a local tenant", () => {
+    expect(settingsIdentityFor(facts, "local", "hipfire", "Qwen3-heretic")).toBe("Qwen3-heretic");
+  });
+
+  it("falls back on an empty facts map rather than throwing", () => {
+    expect(settingsIdentityFor({}, "sparky", "vllm", "heretic")).toBe("heretic");
+  });
+
+  it("refuses a malformed identity map instead of reading through it", () => {
+    // FactEntry.value is `unknown` by contract, so every shape has to be
+    // survivable: a scalar, a list, and a null identity are all "no
+    // translation", never a crash mid-render.
+    const entry = { origin: "derived" as const, source: "s", derived_ts: null };
+    expect(
+      settingsIdentityFor(
+        { "engine/sparky/vllm": { profile_identities: { ...entry, value: "heretic" } } },
+        "sparky", "vllm", "heretic",
+      ),
+    ).toBe("heretic");
+    expect(
+      settingsIdentityFor(
+        { "engine/sparky/vllm": { profile_identities: { ...entry, value: ["heretic"] } } },
+        "sparky", "vllm", "heretic",
+      ),
+    ).toBe("heretic");
+    expect(
+      settingsIdentityFor(
+        {
+          "engine/sparky/vllm": {
+            profile_identities: { ...entry, value: { heretic: { identity: null } } },
+          },
+        },
+        "sparky", "vllm", "heretic",
+      ),
+    ).toBe("heretic");
   });
 });
