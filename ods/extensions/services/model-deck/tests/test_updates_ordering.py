@@ -86,6 +86,34 @@ def test_unparseable_pin_under_date_is_reported_not_ranked():
     assert sorted(r["unranked"]) == ["pre-audio", "v0.22.1-pr44389-spark"]
 
 
+def test_zero_parseable_tags_under_semver_is_reported_not_ranked():
+    # Every tag failed to parse. Reporting `newer: []` here would be a false
+    # "you are up to date" produced from having read nothing -- the same
+    # class of defect as an unparseable pin.
+    r = ordering.rank(["pre-audio", "nightly", "edge"], "semver", "v1.0.0")
+    assert r["rankable"] is False
+    assert r["latest"] is None
+    assert r["newer"] == ["edge", "nightly", "pre-audio"]
+    assert sorted(r["unranked"]) == ["edge", "nightly", "pre-audio"]
+
+
+def test_zero_parseable_tags_under_date_is_reported_not_ranked():
+    r = ordering.rank(["pre-audio", "nightly", "edge"], "date", "2026-01-01")
+    assert r["rankable"] is False
+    assert r["latest"] is None
+    assert r["newer"] == ["edge", "nightly", "pre-audio"]
+    assert sorted(r["unranked"]) == ["edge", "nightly", "pre-audio"]
+
+
+def test_an_empty_tag_list_is_a_different_fact_from_unparseable_tags():
+    # "The registry returned no tags at all" is not "I could not parse the
+    # tags it returned" -- this stays `newer: []`, deliberately, and is
+    # handled downstream rather than here.
+    r = ordering.rank([], "semver", "v1.0.0")
+    assert r["rankable"] is False
+    assert r["newer"] == []
+
+
 def test_none_order_refuses_to_rank_and_lists_what_it_saw():
     # The real comfyui-aeon-spark tag set: channel names, no ordering exists.
     r = ordering.rank(["slim", "full", "latest"], "none", "slim")
