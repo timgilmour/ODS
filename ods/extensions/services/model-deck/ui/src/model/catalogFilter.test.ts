@@ -120,6 +120,38 @@ describe("filterCatalog", () => {
     expect(rows.map((r) => r.name)).toEqual(["max-model-len"]);
   });
 
+  it("matches displayed flag form '--host' against no-alias option named 'host'", () => {
+    const c = catalog({
+      "host": option(),
+      "port": option(),
+    });
+
+    const rows = filterCatalog(c, {
+      query: "--host",
+      widgets: [],
+      setOnly: false,
+      setNames: new Set(),
+    });
+
+    expect(rows.map((r) => r.name)).toEqual(["host"]);
+  });
+
+  it("matches displayed flag form '--max-model-len' against no-alias option", () => {
+    const c = catalog({
+      "max-model-len": option(),
+      "min-model-len": option(),
+    });
+
+    const rows = filterCatalog(c, {
+      query: "--max-model-len",
+      widgets: [],
+      setOnly: false,
+      setNames: new Set(),
+    });
+
+    expect(rows.map((r) => r.name)).toEqual(["max-model-len"]);
+  });
+
   it("matches query against help text (case-insensitive substring)", () => {
     const c = catalog({
       "max-len": option({ help: "Maximum context length for inference" }),

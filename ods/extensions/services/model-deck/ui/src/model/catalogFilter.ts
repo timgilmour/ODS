@@ -27,7 +27,7 @@ export interface CatalogRow {
  *
  * @param catalog - The option catalog (from GET /api/settings/catalog/{node}/{engine})
  * @param opts - Filter options
- * @param opts.query - Search query: matches name, aliases (dash-insensitive), and help text, case-insensitive substring. Empty/whitespace matches all.
+ * @param opts.query - Search query: matches name, aliases (dash-insensitive), and help text, case-insensitive substring. Empty/whitespace matches all. Leading dashes are stripped from the query upfront so users can type displayed flag forms (e.g., "--host") and match options named "host". This also affects help-text matching (a query of "--foo" searches help for "foo"), which is accepted since help prose rarely contains flag spellings and finding the option beats matching its mention.
  * @param opts.widgets - Widget type whitelist. Empty array = no filter. Otherwise only options whose widget is in this list.
  * @param opts.setOnly - When true, include only options whose name is in setNames. When false, include all (but still badge isSet).
  * @param opts.setNames - Set of option names to badge as isSet. Used both for filtering (when setOnly=true) and badging (always).
@@ -44,8 +44,10 @@ export function filterCatalog(
 ): CatalogRow[] {
   const { query, widgets, setOnly, setNames } = opts;
 
-  // Normalize query: trim and lowercase for matching.
-  const normalizedQuery = query.trim().toLowerCase();
+  // Normalize query: trim, lowercase, and strip leading dashes. Dashes are stripped
+  // upfront so users can type the displayed flag form (e.g., "--host" or "--ctx-len")
+  // and match options without rescuing aliases.
+  const normalizedQuery = query.trim().toLowerCase().replace(/^-+/, "");
 
   // Filter by query match: name, aliases, or help text.
   const queryMatches = (name: string, option: CatalogOption): boolean => {
@@ -59,11 +61,10 @@ export function filterCatalog(
     if (option.help.toLowerCase().includes(normalizedQuery)) return true;
 
     // Match against aliases (dash-insensitive). Strip leading dashes from
-    // both the query and the aliases before comparing.
-    const queryWithoutDashes = normalizedQuery.replace(/^-+/, "");
+    // aliases before comparing against the already-normalized query.
     for (const alias of option.aliases) {
       const aliasWithoutDashes = alias.replace(/^-+/, "");
-      if (aliasWithoutDashes.includes(queryWithoutDashes)) return true;
+      if (aliasWithoutDashes.includes(normalizedQuery)) return true;
     }
 
     return false;
