@@ -18,6 +18,7 @@ import {
   bufferRemove,
   bufferSet,
   buildChips,
+  discardPendingAdd,
   displayValue,
   emptyBuffer,
   isDirty,
@@ -30,6 +31,7 @@ import {
   toPuts,
   type Buffer,
   type ChipView,
+  type PendingAdd,
 } from "../model/settingsView";
 import Banner from "../ui/Banner";
 import Modal from "../ui/Modal";
@@ -117,6 +119,15 @@ export default function SettingsModal({
   // and blur is what commits — so the cancel is recorded here first and the
   // blur handler defers to it.
   const cancelledEdit = useRef(false);
+
+  // The brand-new add (if any) whose editor has not committed yet. "+ Add
+  // option" must buffer a starting value before the chip — and therefore the
+  // editor — can exist at all, and for the 166-of-274 live options with no
+  // catalog default that value is `""`. Every cancel path below runs it
+  // through `cancelEdit`, so an add the operator walked away from leaves the
+  // buffer exactly as clean as it found it instead of shipping `--flag ''` at
+  // the next Save. See settingsView's `discardPendingAdd`.
+  const pendingAdd = useRef<PendingAdd | null>(null);
 
   const dirty = isDirty(buffer);
 
@@ -219,9 +230,23 @@ export default function SettingsModal({
 
   function startEdit(name: string, value: ArgValue) {
     cancelledEdit.current = false;
+    // Any newly started edit ends the previous add's grace period: whatever
+    // it left in the buffer is now an ordinary pending edit like any other.
+    // handleAddOption re-arms this immediately AFTER calling startEdit.
+    pendingAdd.current = null;
     setPopover(null);
     setEditing(name);
     setDraft(displayValue(value));
+  }
+
+  /** Closes an editor WITHOUT committing, undoing a brand-new add that never
+   * got a value (see `pendingAdd`). Safe on every other edit: with no pending
+   * add recorded it is exactly the old `setEditing(null)`. */
+  function cancelEdit() {
+    const add = pendingAdd.current;
+    pendingAdd.current = null;
+    if (add) setBuffer((b) => discardPendingAdd(b, add));
+    setEditing(null);
   }
 
   /** "+ Add option" — mounts AllOptionsModal, whose search input is
@@ -235,7 +260,7 @@ export default function SettingsModal({
    * commit — before the modal ever mounts. */
   function openAllOptions() {
     cancelledEdit.current = true;
-    setEditing(null);
+    cancelEdit();
     setAllOptionsOpen(true);
   }
 
@@ -249,7 +274,12 @@ export default function SettingsModal({
    * it. It only opens that chip's editor. A genuinely new name gets a
    * starting value derived from the catalog (see startingValueFor) buffered
    * at the panel's current write scope, then its editor opens the same way
-   * — one code path for "add" and "jump to" alike. */
+   * — one code path for "add" and "jump to" alike.
+   *
+   * That buffered set is provisional until the editor commits: it is recorded
+   * in `pendingAdd` so every cancel path can take it back out (final branch
+   * review, 2026-08-07 — F1). Only the ADD needs this, not the "jump to": an
+   * existing chip's buffer entry was already the operator's. */
   function handleAddOption(name: string) {
     setAllOptionsOpen(false);
     const existing = declared.find((c) => c.name === name);
@@ -260,6 +290,12 @@ export default function SettingsModal({
     const value = startingValueFor(catalog?.options[name]);
     setBuffer((b) => bufferSet(b, kind, name, value));
     startEdit(name, value);
+    // AFTER startEdit (which clears it): this buffered set exists only so the
+    // chip and its editor can render, and until the editor commits it is not
+    // an operator decision — `cancelEdit` takes it back out. The kind is
+    // captured with the name because the scope segmented control can move
+    // `kind` on while this editor is open.
+    pendingAdd.current = { name, kind };
   }
 
   /** AllOptionsModal's Refresh got a fresh harvest — refetch the catalog so
@@ -273,6 +309,9 @@ export default function SettingsModal({
   }
 
   function applyEdit(name: string, value: ArgValue) {
+    // A real commit: the add is now the operator's, not this panel's
+    // scaffolding, so it is no longer a candidate for `cancelEdit`.
+    pendingAdd.current = null;
     setBuffer((b) => bufferSet(b, kind, name, value));
     setEditing(null);
   }
@@ -280,6 +319,11 @@ export default function SettingsModal({
   /** Only ever called from a `setAtKind` chip — see the component docstring's
    * remove guard. */
   function removeAt(name: string) {
+    // Clearing this is not optional: the pending set is gone after this call,
+    // so a later `cancelEdit` would turn `discardPendingAdd` into a genuine
+    // `removes` entry naming a key the scope never had — the exact PUT the
+    // component docstring's remove guard exists to prevent.
+    pendingAdd.current = null;
     setBuffer((b) => bufferRemove(b, kind, name));
     setEditing(null);
     setPopover(null);
@@ -361,7 +405,7 @@ export default function SettingsModal({
             onChange={(e) => {
               if (e.target.checked) applyEdit(chip.name, true);
               else if (chip.setAtKind) removeAt(chip.name);
-              else setEditing(null);
+              else cancelEdit();
             }}
           />
         </span>
@@ -383,7 +427,7 @@ export default function SettingsModal({
             value={current}
             onChange={(e) => applyEdit(chip.name, e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setEditing(null);
+              if (e.key === "Escape") cancelEdit();
             }}
           >
             {options.map((c) => (
@@ -401,9 +445,13 @@ export default function SettingsModal({
       // An emptied field is NOT a removal: removal is the ✕ / Revert action,
       // and committing "" would ship `--flag ''` (shlex.quote of the empty
       // string). Cancelling the edit is the honest reading of "I deleted
-      // what was in the box".
+      // what was in the box" — and for a never-committed ADD, whose starting
+      // value was already `""` for an option with no catalog default,
+      // cancelling has to take the buffered set back out with it, or the
+      // panel would keep on Save the very `--flag ''` this branch refuses to
+      // commit.
       if (text === "") {
-        setEditing(null);
+        cancelEdit();
         return;
       }
       // `isListEdit`, not `widget === "list"`: an uncatalogued key (or every
@@ -431,7 +479,7 @@ export default function SettingsModal({
             } else if (e.key === "Escape") {
               e.preventDefault();
               cancelledEdit.current = true;
-              setEditing(null);
+              cancelEdit();
             }
           }}
           onBlur={() => {
@@ -634,7 +682,14 @@ export default function SettingsModal({
                     title={unavailable ? labels.needsModelContext : undefined}
                     onClick={() => {
                       setKind(k);
-                      setEditing(null);
+                      // Also a cancel path for a never-committed add: the
+                      // blur that would have committed a typed draft fires
+                      // first (and clears `pendingAdd` on its way through
+                      // applyEdit), and where it does not fire at all — React
+                      // unmounting the focused input — this is what stops an
+                      // untouched add from being stranded in the OLD kind's
+                      // buffer, which is why `PendingAdd` carries its kind.
+                      cancelEdit();
                       setPopover(null);
                     }}
                   >

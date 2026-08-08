@@ -397,11 +397,36 @@ def _catalog_default(raw):
     shape. ``raw`` being ``None`` (a fixture/test catalog with no repr at
     all, as opposed to the literal repr string ``"None"``) is the same
     "nothing to decode" case and also becomes ``null``.
+
+    Set/tuple normalization — F3, Important (final branch review,
+    2026-08-07). ``ast.literal_eval`` decodes ``"set()"`` and ``"()"`` to a
+    real ``set``/``tuple``, which ``_decode_harvested_default``'s
+    ``decoded in ([], {})`` drop test does NOT match (``set() == []`` is
+    ``False``), so an empty one reached FastAPI's serializer and came back
+    as ``[]`` — a value where ``CatalogOption.default``'s contract (api.ts)
+    promises ``null`` for "nothing to prefill", which is what the UI's
+    ``startingValueFor`` reads. Two of sparky/vllm's 274 live options are
+    exactly this shape (``--cpu-offload-params``, ``--offload-params``, raw
+    default ``"set()"``). So both containers are folded onto the paths their
+    list counterpart already takes: empty is the ``null`` answer, non-empty
+    becomes a JSON list. A set has no order of its own, so its items are
+    sorted for a stable wire value rather than left to hash order (``key=
+    repr`` so a mixed-type set cannot raise); a tuple's order is real and is
+    kept. Deliberately scoped to THIS function: ``_decode_harvested_default``
+    — and therefore ``_resolve``'s engine_defaults layer — is untouched, its
+    pre-existing handling of these two shapes being out of scope for this
+    finding.
     """
     if raw is None:
         return None
     decoded = _decode_harvested_default(raw)
-    return None if decoded is _DROP else decoded
+    if decoded is _DROP:
+        return None
+    if isinstance(decoded, (set, frozenset)):
+        return sorted(decoded, key=repr) or None
+    if isinstance(decoded, tuple):
+        return list(decoded) or None
+    return decoded
 
 
 def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:

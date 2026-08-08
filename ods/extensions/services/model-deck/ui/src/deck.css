@@ -1012,6 +1012,13 @@ input[type="password"] {
   color: var(--text-dim);
 }
 
+/* A MIXED report (journal-bearing namespaces -> rows, pre-journal ones ->
+   names) renders both, names beneath the rows — see driftView's
+   partitionDrift. Only then is a separator needed. */
+.drift-rows + .drift-legacy-list {
+  margin-top: calc(var(--space) / 2);
+}
+
 .drift-card-actions {
   display: flex;
   flex-wrap: wrap;

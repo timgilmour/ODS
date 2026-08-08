@@ -66,3 +66,46 @@ export function driftRows(entries: SettingsDriftEntry[]): DriftRow[] {
     newText: e.new === null ? null : driftValueText(e.new),
   }));
 }
+
+/** A changed key the report named but carries no old→new entry for: the
+ * legacy (pre-journal) path's names-only output. `key` is the qualified key
+ * verbatim (stable React key); `displayKey` is what an operator reads. */
+export interface DriftLegacyKey {
+  key: string;
+  displayKey: string;
+}
+
+export interface DriftPartition {
+  rows: DriftRow[];
+  legacy: DriftLegacyKey[];
+}
+
+/** Splits one drift report into the two things the card can actually show.
+ *
+ * A report is NOT one path or the other: `_settings_drift`
+ * (app/routers/__init__.py) walks up to three scopes × three namespaces and
+ * chooses per namespace — journal present means exact old→new `entries`,
+ * journal absent means C1's every-current-key names, appended to `changed`
+ * with no entry at all. A placement whose engine scope has a journal and
+ * whose model scope predates it (every namespace stamped before Task 1's
+ * journal existed — i.e. live ds4 on its first post-deploy settings edit)
+ * produces exactly that MIXED payload. Rendering rows-or-list exclusively
+ * then hid the journal-less names entirely while the header, which counts
+ * `changed`, still said "3 keys changed" over one visible row.
+ *
+ * Matching is on the DISPLAY key, `displayKeyFor` on both sides, not on the
+ * raw string: both lists are namespace-qualified by the same backend fold, so
+ * this agrees with a raw comparison for every payload the server actually
+ * emits, and an unqualified key on one side only (a hand-written fixture, an
+ * older report) still pairs with its row instead of being printed twice. */
+export function partitionDrift(
+  changed: string[],
+  entries: SettingsDriftEntry[],
+): DriftPartition {
+  const rows = driftRows(entries);
+  const hasRow = new Set(rows.map((r) => r.displayKey));
+  const legacy = changed
+    .map((key) => ({ key, displayKey: displayKeyFor(key) }))
+    .filter((k) => !hasRow.has(k.displayKey));
+  return { rows, legacy };
+}

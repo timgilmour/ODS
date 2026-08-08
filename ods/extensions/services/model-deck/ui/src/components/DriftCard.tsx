@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { getFacts, sparkReload, type SettingsDrift } from "../api";
-import { displayKeyFor, driftRows } from "../model/driftView";
+import { partitionDrift } from "../model/driftView";
 import { humanizeAge, labels, messages } from "../model/messages";
 import { SPARK_SLOT_KEY, type Placement } from "../model/nodes";
 import { settingsIdentityFor } from "../model/settingsView";
@@ -50,7 +50,11 @@ export default function DriftCard({
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
-  const rows = driftRows(drift.entries);
+  // Rows AND names, never one or the other: a report can carry both at once
+  // (see partitionDrift), and the header's count is over `changed`, so a name
+  // dropped here is a key the card claims to be reporting and then does not
+  // show.
+  const { rows, legacy } = partitionDrift(drift.changed, drift.entries);
   const age = humanizeAge(drift.since);
   // Spark is a single-slot node whose lifecycle key is fixed backend-side
   // (app/observe.py SPARK_SLOT_KEY, mirrored in nodes.ts) and the one
@@ -118,7 +122,7 @@ export default function DriftCard({
         />
       )}
 
-      {rows.length > 0 ? (
+      {rows.length > 0 && (
         <div className="drift-rows">
           {rows.map((row) => (
             <div className="drift-row" key={row.key}>
@@ -135,14 +139,18 @@ export default function DriftCard({
             </div>
           ))}
         </div>
-      ) : (
-        // Legacy (pre-journal) path: app/routers/__init__.py's `_settings_drift`
-        // reports every current key of a touched namespace with no per-key
-        // history to diff — names only, never a fabricated old/new pair the
-        // server never sent.
+      )}
+
+      {/* Legacy (pre-journal) path: app/routers/__init__.py's
+          `_settings_drift` reports every current key of a touched namespace
+          with no per-key history to diff — names only, never a fabricated
+          old/new pair the server never sent. Beneath the rows rather than
+          instead of them: the choice is made per namespace backend-side, so
+          one report can hold both. */}
+      {legacy.length > 0 && (
         <ul className="drift-legacy-list">
-          {drift.changed.map((name) => (
-            <li key={name}>{displayKeyFor(name)}</li>
+          {legacy.map((name) => (
+            <li key={name.key}>{name.displayKey}</li>
           ))}
         </ul>
       )}

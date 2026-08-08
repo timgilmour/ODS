@@ -69,6 +69,15 @@ export default function AllOptionsModal({
     setRefreshError(null);
     try {
       const { outcome } = await postHarvest(node, engine);
+      // The four `outcome` strings are produced by exactly one function,
+      // app/arbiter.py's `harvest_catalog_pair`, whose dict this route
+      // (app/routers/settings.py:harvest_now) returns verbatim:
+      // "current" (arbiter.py:419, the version peek; arbiter.py:440, the
+      // post-exec version compare), "failed" (:437), "empty" (:454), and
+      // "harvested" (:458, the only branch that writes a new catalog — hence
+      // the only one worth refetching for). Cited rather than eyeballed:
+      // every defect this branch has shipped in a string comparison came
+      // from copying a mockup's vocabulary instead of the producing line.
       if (outcome === "harvested") {
         // Parent refetches via getCatalog and passes the new `catalog` prop
         // down — this component holds no catalog state of its own.

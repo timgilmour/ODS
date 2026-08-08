@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayKeyFor, driftRows, driftValueText } from "./driftView";
+import { displayKeyFor, driftRows, driftValueText, partitionDrift } from "./driftView";
 
 describe("displayKeyFor", () => {
   it("strips the args: namespace prefix for display", () => {
@@ -88,5 +88,63 @@ describe("driftRows", () => {
 
   it("maps an empty entries list to an empty rows list", () => {
     expect(driftRows([])).toEqual([]);
+  });
+});
+
+describe("partitionDrift", () => {
+  const entry = (key: string) => ({ key, old: "a", new: "b", ts: "2026-08-07T00:00:00Z" });
+
+  it("splits a MIXED payload: rows for entried keys, names for the rest", () => {
+    // F2, final branch review 2026-08-07. app/routers/__init__.py's
+    // `_settings_drift` chooses per (scope, namespace): a journal-bearing
+    // namespace yields exact entries, a pre-journal one yields names in
+    // `changed` only — so one report holds both. Live ds4 hits this on its
+    // first post-deploy settings edit (engine scope journaled, model scope
+    // still carrying pre-journal stamps).
+    const { rows, legacy } = partitionDrift(
+      ["args:max-model-len", "args:gpu-memory-utilization", "env:VLLM_USE_V1"],
+      [entry("args:max-model-len")],
+    );
+
+    expect(rows.map((r) => r.key)).toEqual(["args:max-model-len"]);
+    // Every remaining key the header's "3 keys changed" counts is still
+    // shown — the defect was these vanishing behind the rows.
+    expect(legacy).toEqual([
+      { key: "args:gpu-memory-utilization", displayKey: "gpu-memory-utilization" },
+      { key: "env:VLLM_USE_V1", displayKey: "env:VLLM_USE_V1" },
+    ]);
+    expect(rows.length + legacy.length).toBe(3);
+  });
+
+  it("a fully journaled report has no legacy names", () => {
+    const { rows, legacy } = partitionDrift(
+      ["args:max-model-len", "env:VLLM_USE_V1"],
+      [entry("args:max-model-len"), entry("env:VLLM_USE_V1")],
+    );
+    expect(rows).toHaveLength(2);
+    expect(legacy).toEqual([]);
+  });
+
+  it("a fully legacy report has no rows and keeps every name in order", () => {
+    const { rows, legacy } = partitionDrift(["args:max-model-len", "args:seed"], []);
+    expect(rows).toEqual([]);
+    expect(legacy.map((k) => k.displayKey)).toEqual(["max-model-len", "seed"]);
+  });
+
+  it("pairs on the display key, so an unqualified name is not printed twice", () => {
+    // Defensive: both sides are namespace-qualified by the same backend
+    // fold, so this only differs from a raw comparison for a fixture or an
+    // older report that lost the prefix on one side.
+    const { legacy } = partitionDrift(["max-model-len"], [entry("args:max-model-len")]);
+    expect(legacy).toEqual([]);
+  });
+
+  it("same-named keys in different namespaces stay distinct", () => {
+    const { rows, legacy } = partitionDrift(
+      ["args:seed", "env:seed"],
+      [entry("args:seed")],
+    );
+    expect(rows.map((r) => r.key)).toEqual(["args:seed"]);
+    expect(legacy.map((k) => k.key)).toEqual(["env:seed"]);
   });
 });

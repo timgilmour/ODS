@@ -4,6 +4,7 @@ import {
   buildChips,
   bufferRemove,
   bufferSet,
+  discardPendingAdd,
   displayValue,
   emptyBuffer,
   isDirty,
@@ -101,6 +102,62 @@ describe("buffer primitives", () => {
     let b = bufferSet(emptyBuffer, "engines", "x", "1");
     b = bufferRemove(b, "engines", "x");
     expect(isDirty(b)).toBe(false);
+  });
+});
+
+describe("discardPendingAdd", () => {
+  // F1, final branch review 2026-08-07. "+ Add option" has to buffer a
+  // starting value before the chip (and so the editor) can render, and for
+  // the 166-of-274 live vLLM options with no catalog default that value is
+  // `""` (catalogFilter's startingValueFor). Abandoning that editor —
+  // Escape, an empty blur, opening the all-options list again, switching
+  // write scope — must leave nothing behind, or the next Save ships
+  // `--flag ''`.
+  it("an abandoned brand-new add leaves the buffer clean", () => {
+    const added = bufferSet(emptyBuffer, "engines", "cpu-offload-params", "");
+    expect(isDirty(added)).toBe(true);
+
+    const cancelled = discardPendingAdd(added, {
+      name: "cpu-offload-params",
+      kind: "engines",
+    });
+
+    // It was the only edit, so the panel is undirtied entirely: Save is
+    // disabled again and no PUT is produced for the scope.
+    expect(isDirty(cancelled)).toBe(false);
+    expect(toPuts(cancelled, scopeKeys("sparky", "vllm", "m"))).toEqual([]);
+  });
+
+  it("records no removal for the abandoned key", () => {
+    // The server never saw this set, so telling it to REMOVE the key would
+    // name one that scope never had — the PUT SettingsModal's remove guard
+    // exists to prevent.
+    const b = discardPendingAdd(
+      bufferSet(emptyBuffer, "engine_models", "offload-params", ""),
+      { name: "offload-params", kind: "engine_models" },
+    );
+    expect(b.sets.engine_models?.["offload-params"]).toBeUndefined();
+    expect(b.removes.engine_models ?? []).not.toContain("offload-params");
+  });
+
+  it("keeps every other pending edit, including the same name at another kind", () => {
+    let b = bufferSet(emptyBuffer, "engines", "max-model-len", "8192");
+    b = bufferSet(b, "engine_models", "max-model-len", "");
+    b = bufferRemove(b, "models", "seed");
+
+    // PendingAdd carries the kind it was buffered at because the scope
+    // control can move `kind` on while the editor is open.
+    b = discardPendingAdd(b, { name: "max-model-len", kind: "engine_models" });
+
+    expect(b.sets.engine_models?.["max-model-len"]).toBeUndefined();
+    expect(b.sets.engines?.["max-model-len"]).toBe("8192");
+    expect(b.removes.models).toContain("seed");
+    expect(isDirty(b)).toBe(true);
+  });
+
+  it("is a no-op with no add pending — every non-add cancel path", () => {
+    const b = bufferSet(emptyBuffer, "engines", "max-model-len", "8192");
+    expect(discardPendingAdd(b, null)).toBe(b);
   });
 });
 

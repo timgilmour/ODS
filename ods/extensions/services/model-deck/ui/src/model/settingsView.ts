@@ -207,6 +207,38 @@ export function bufferRemove(b: Buffer, kind: SettingsKind, name: string): Buffe
   return { sets: b.sets, removes: { ...b.removes, [kind]: [...kindRemoves, name] } };
 }
 
+/** A brand-new "+ Add option" whose editor has not committed anything yet —
+ * the name, and the kind it was buffered at (the panel's write scope can be
+ * switched out from under an open editor, so the kind cannot be re-read from
+ * the panel's current state at cancel time). */
+export interface PendingAdd {
+  name: string;
+  kind: SettingsKind;
+}
+
+/** Drops an abandoned brand-new add.
+ *
+ * "+ Add option" has to buffer a starting value immediately — the chip is
+ * rendered FROM the buffer (buildChips's "pending set on a key `resolved`
+ * doesn't have at all" branch), so there is no chip, and therefore no editor,
+ * until the set exists. For the 166-of-274 live vLLM options with no catalog
+ * default that starting value is `""` (catalogFilter's `startingValueFor`),
+ * and the editor's own empty-means-cancel rule (SettingsModal's `commit`)
+ * deliberately does NOT write `""` back — so an operator who adds an option
+ * and then Escapes, blurs, or walks away left the `""` sitting in the buffer,
+ * and the next Save shipped `--flag ''`. This is the undo for that.
+ *
+ * `bufferRemove` is exactly the right operation and not an approximation of
+ * one: on a key with a pending set at the same kind it DELETES the set and
+ * records no removal at all (see its docstring) — which is what an edit the
+ * server never saw deserves. Callers must therefore clear their `PendingAdd`
+ * the moment the add is committed or removed by other means, or this would
+ * turn into a real `removes` entry naming a key that scope never had. */
+export function discardPendingAdd(b: Buffer, add: PendingAdd | null): Buffer {
+  if (add === null) return b;
+  return bufferRemove(b, add.kind, add.name);
+}
+
 export function isDirty(b: Buffer): boolean {
   return (
     Object.values(b.sets).some((m) => m !== undefined && Object.keys(m).length > 0) ||

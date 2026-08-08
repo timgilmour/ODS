@@ -122,9 +122,12 @@ export default function App() {
   //
   // The model detail drawer is deliberately NOT on that list. Its headline is
   // a live status pill over a placement the deck may unload out from under it,
-  // so a paused poll would freeze the one thing it exists to report. Its two
-  // free-text fields are seeded once rather than re-read on every tick, which
-  // is what makes a live refresh safe there (ModelDetailDrawer's `seeded`).
+  // so a paused poll would freeze the one thing it exists to report. Its
+  // free-text fields are seeded once per FACTS KEY rather than re-read on
+  // every tick, which is what makes a live refresh safe there — and, because
+  // the key (not a one-shot flag) is what gates it, a spark swap under a
+  // stable placement id still re-seeds onto the new model
+  // (ModelDetailDrawer's `seededKey`).
   useEffect(() => {
     if (modalOpen || policyModalOpen || settingsTarget) return;
     refreshAll();
@@ -271,8 +274,8 @@ export default function App() {
         // Keyed on the placement id for the same reason SettingsModal is keyed
         // on its target: clicking a second chip while one drawer is open must
         // START the new one, not inherit the first's fetched facts and seeded
-        // text drafts (useState initializers and the `seeded` ref do not re-run
-        // on a prop change).
+        // text drafts (useState initializers and the `seededKey` ref do not
+        // re-run on a prop change).
         //
         // `placement` is the freshly re-derived one wherever the board still
         // carries it, and the last-known object otherwise — which is what

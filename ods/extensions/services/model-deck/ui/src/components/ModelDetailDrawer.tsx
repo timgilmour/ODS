@@ -63,9 +63,12 @@ export interface PlacedOn {
  * that would re-render underneath. This drawer's headline IS a live status
  * pill, and a paused poll would freeze it at whatever it read when the chip
  * was clicked. App re-derives `placement` from each fresh `buildNodes` by id
- * (model/nodes.ts:findPlacement) so the pill tracks reality; the two text
- * fields that ARE typed into are seeded once and never re-seeded (see
- * `seeded` below), so a refetch cannot land in the middle of a sentence.
+ * (model/nodes.ts:findPlacement) so the pill tracks reality; the free-text
+ * fields that ARE typed into are seeded once PER FACTS KEY rather than on
+ * every tick (see `seededKey` below), so a refetch cannot land in the middle
+ * of a sentence — while a swap that changes WHICH model this drawer is
+ * pointed at does re-seed, instead of holding the previous model's text over
+ * the new one's facts.
  */
 export default function ModelDetailDrawer({
   placement,

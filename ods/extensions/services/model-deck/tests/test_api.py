@@ -2024,7 +2024,12 @@ def test_get_catalog_decodes_reprd_defaults_for_the_wire(tmp_path, monkeypatch):
     like "131072" reads back as the JSON number 131072, and every
     nothing-to-prefill shape (the "None" repr, and _decode_harvested_
     default's drop shapes False/[]/{}) comes back as JSON null instead of
-    surviving as text a UI would have to re-parse."""
+    surviving as text a UI would have to re-parse.
+
+    Extended for F3 (Important, final branch review 2026-08-07) with the two
+    container shapes that decode to something `decoded in ([], {})` cannot
+    match: an empty set/tuple must reach the wire as null like every other
+    nothing-to-prefill shape, and a non-empty one as a list."""
     from app.characteristics import CharacteristicsStore
 
     app, deck = make_app(tmp_path, monkeypatch)
@@ -2059,6 +2064,29 @@ def test_get_catalog_decodes_reprd_defaults_for_the_wire(tmp_path, monkeypatch):
                         "default": "True", "nargs": 0, "repeatable": False,
                         "help": "Enable prefix caching.", "widget": "toggle",
                     },
+                    # F3, Important (final branch review 2026-08-07): the two
+                    # container shapes literal_eval produces that
+                    # _decode_harvested_default's `decoded in ([], {})` drop
+                    # test cannot match. `set()` is not hypothetical — it is
+                    # the live raw default of sparky/vllm's
+                    # --cpu-offload-params and --offload-params (2 of 274).
+                    "cpu-offload-params": {
+                        "aliases": [], "type": "str", "choices": None,
+                        "default": "set()", "nargs": None, "repeatable": True,
+                        "help": "Params to offload to CPU.", "widget": "list",
+                    },
+                    "offload-tags": {
+                        "aliases": [], "type": "str", "choices": None,
+                        "default": "{'weights', 'kv'}", "nargs": None,
+                        "repeatable": True, "help": "Offload tags.",
+                        "widget": "list",
+                    },
+                    "trust-hosts": {
+                        "aliases": [], "type": "str", "choices": None,
+                        "default": "('localhost', '127.0.0.1')", "nargs": None,
+                        "repeatable": True, "help": "Trusted hosts.",
+                        "widget": "list",
+                    },
                 },
             },
             "source": "argparse introspection",
@@ -2074,6 +2102,18 @@ def test_get_catalog_decodes_reprd_defaults_for_the_wire(tmp_path, monkeypatch):
     assert options["middleware"]["default"] is None         # "[]" repr -> null (drop shape)
     assert options["block-size"]["default"] == 131072        # "131072" -> real int
     assert options["enable-prefix-caching"]["default"] is True  # "True" -> real bool
+
+    # An EMPTY set is the same "nothing to prefill" answer as [] and {} — not
+    # the `[]` FastAPI would otherwise serialize it as, which reads to the UI
+    # as a real (empty-list) default and violates CatalogOption.default's
+    # documented null contract.
+    assert options["cpu-offload-params"]["default"] is None
+    # A non-empty set/tuple IS a real default, and becomes the one JSON shape
+    # ArgValue has for many values: a list. Sets are sorted (no order of their
+    # own — hash order would make the wire value unstable); a tuple's own
+    # order is kept.
+    assert options["offload-tags"]["default"] == ["kv", "weights"]
+    assert options["trust-hosts"]["default"] == ["localhost", "127.0.0.1"]
 
     # Fields other than `default` pass through unmodified.
     assert options["dtype"]["type"] == "str"
