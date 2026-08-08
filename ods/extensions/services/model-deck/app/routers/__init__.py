@@ -126,7 +126,7 @@ def _settings_drift(
     intent: dict | None,
     identity_map: dict | None = None,
 ) -> dict | None:
-    """``{"changed": ["namespace:key", ...], "since": iso}`` when settings
+    """``{"changed": ["namespace:key", ...], "entries": [...], "since": iso}`` when settings
     recorded for this placement were written more recently than its
     intent's ``updated_ts``, else ``None``.
 
@@ -179,15 +179,28 @@ def _settings_drift(
 
     Each namespace of a scope entry carries its OWN ``updated_ts`` (Task 7
     review round — an entry-level clock made a written env value light up
-    a same-tick-untouched args key too). ``changed`` entries are qualified
-    ``"namespace:key"`` (e.g. ``"args:max-model-len"``, never a bare
-    ``"max-model-len"``) so same-named keys in different namespaces stay
-    distinguishable and never dedupe into one. Within a namespace whose
-    stamp postdates the baseline, every CURRENT key of that namespace is
-    reported — not just the key(s) a single put() actually touched, since
-    this store keeps no per-key write history to diff against. Accepted
-    approximation for C1; C2's set snapshots are expected to make this
-    exact.
+    a same-tick-untouched args key too). Task 2 (journal-driven drift)
+    carries this further: ``entries`` is exact old→new pairs from the
+    per-key journal (Task 1's ``entry["journal"] = {namespace:
+    [{"key","old","new","ts"}, ...]}``), folded over a baseline so
+    ``entries`` carries the net change for each key (first old + last new),
+    net-zero folds (old == new) are honestly no drift at all, and `entries`
+    is suppressed when there is no journal or a legacy path (below).
+    ``changed`` entries are qualified ``"namespace:key"`` (e.g.
+    ``"args:max-model-len"``, never a bare ``"max-model-len"``) so same-
+    named keys in different namespaces stay distinguishable and never
+    dedupe into one.
+
+    When a namespace HAS a journal, the journal path reads exact old→new
+    entries; a net-zero fold is honestly no drift. When there is NO journal
+    (legacy, pre-Task-1 settings), the C1 path reports every CURRENT key of
+    a touched namespace — not just the key(s) a single put() actually
+    touched, since the old store kept no per-key write history to diff
+    against. Accepted approximation for C1; C2's set snapshots are expected
+    to make this exact. The two paths' results are NEVER mixed: if a
+    namespace HAS a journal, ONLY journaled changes (net-zero-suppressed)
+    light up `changed` and `entries` for that namespace; C1's per-key
+    enumeration runs only in the legacy no-journal path.
 
     A pure read: never writes, never consulted by app.reconcile.plan_reconcile
     (which takes `statuses`/`intents` directly, not this view) — settings
@@ -222,25 +235,57 @@ def _settings_drift(
         scopes.append(("engine_models", f"{engine_key}|{model}"))
 
     changed: list[str] = []
+    entries: list[dict] = []
     since: str | None = None
     for kind, scope_key in scopes:
         entry = settings_data.get(kind, {}).get(scope_key, {})
         namespace_ts = entry.get("updated_ts")
         if not isinstance(namespace_ts, dict):
             continue
+        journal = entry.get("journal") if isinstance(entry.get("journal"), dict) else {}
         for namespace in ("args", "env", "container"):
             ts = namespace_ts.get(namespace)
             if ts is None:
                 continue
             if baseline is not None and ts <= baseline:
                 continue
-            for name in entry.get(namespace, {}) or {}:
-                qualified = f"{namespace}:{name}"
-                if qualified not in changed:
-                    changed.append(qualified)
+            ns_journal = journal.get(namespace)
+            if isinstance(ns_journal, list) and ns_journal:
+                # Exact path: fold journal entries since the baseline,
+                # first old + last new per key; a net-zero fold (old ==
+                # new) is honestly no drift at all.
+                folded: dict[str, dict] = {}
+                for change in ns_journal:
+                    if not isinstance(change, dict):
+                        continue
+                    change_ts = change.get("ts") or ""
+                    if baseline is not None and change_ts <= baseline:
+                        continue
+                    qualified = f"{namespace}:{change.get('key')}"
+                    if qualified in folded:
+                        folded[qualified]["new"] = change.get("new")
+                        folded[qualified]["ts"] = change_ts
+                    else:
+                        folded[qualified] = {"key": qualified,
+                                             "old": change.get("old"),
+                                             "new": change.get("new"),
+                                             "ts": change_ts}
+                for qualified, change in folded.items():
+                    if change["old"] == change["new"]:
+                        continue
+                    if qualified not in changed:
+                        changed.append(qualified)
+                        entries.append(change)
+            else:
+                # Legacy path (pre-journal file): C1 behavior verbatim —
+                # every current key of the touched namespace, names only.
+                for name in entry.get(namespace, {}) or {}:
+                    qualified = f"{namespace}:{name}"
+                    if qualified not in changed:
+                        changed.append(qualified)
             if since is None or ts > since:
                 since = ts
 
     if not changed:
         return None
-    return {"changed": changed, "since": since}
+    return {"changed": changed, "entries": entries, "since": since}

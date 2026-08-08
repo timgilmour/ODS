@@ -2582,3 +2582,61 @@ def test_readopt_with_every_profile_failing_keeps_the_whole_map(
     after = deck["characteristics_store"].entry(
         "engine/sparky/vllm")["profile_identities"]["value"]
     assert after == before
+
+
+# --- Journal-driven settings drift (Task 2) ---
+
+
+def test_drift_entries_carry_old_and_new():
+    """The new entries key carries exact old->new changes from the journal."""
+    from app.routers import _settings_drift
+
+    BASE = "2026-08-07T09:00:00+00:00"
+    LATER = "2026-08-07T10:00:00+00:00"
+
+    def _scope(journal_entries, args):
+        return {"args": args, "updated_ts": {"args": LATER},
+                "journal": {"args": journal_entries}}
+
+    data = {"engines": {"local/lemonade": _scope(
+        [{"key": "max-model-len", "old": "262144", "new": "131072", "ts": LATER}],
+        {"max-model-len": "131072"})}}
+    intent = {"engine": "lemonade", "model": None, "updated_ts": BASE}
+    drift = _settings_drift(data, "local/lemonade", intent)
+    assert drift["changed"] == ["args:max-model-len"]
+    assert drift["entries"] == [{"key": "args:max-model-len",
+                                "old": "262144", "new": "131072", "ts": LATER}]
+
+
+def test_drift_net_zero_change_is_no_drift():
+    """A change that folds to old == new is honest no-drift."""
+    from app.routers import _settings_drift
+
+    BASE = "2026-08-07T09:00:00+00:00"
+    LATER = "2026-08-07T10:00:00+00:00"
+
+    def _scope(journal_entries, args):
+        return {"args": args, "updated_ts": {"args": LATER},
+                "journal": {"args": journal_entries}}
+
+    data = {"engines": {"local/lemonade": _scope(
+        [{"key": "seed", "old": "1", "new": "2", "ts": LATER},
+         {"key": "seed", "old": "2", "new": "1", "ts": LATER}],
+        {"seed": "1"})}}
+    intent = {"engine": "lemonade", "model": None, "updated_ts": BASE}
+    assert _settings_drift(data, "local/lemonade", intent) is None
+
+
+def test_drift_without_journal_keeps_c1_shape():
+    """Without a journal, drift keeps C1 shape: changed list, no entries."""
+    from app.routers import _settings_drift
+
+    BASE = "2026-08-07T09:00:00+00:00"
+    LATER = "2026-08-07T10:00:00+00:00"
+
+    data = {"engines": {"local/lemonade": {
+        "args": {"seed": "1", "top-k": "40"}, "updated_ts": {"args": LATER}}}}
+    intent = {"engine": "lemonade", "model": None, "updated_ts": BASE}
+    drift = _settings_drift(data, "local/lemonade", intent)
+    assert sorted(drift["changed"]) == ["args:seed", "args:top-k"]
+    assert drift["entries"] == []

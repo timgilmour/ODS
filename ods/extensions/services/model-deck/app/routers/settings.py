@@ -286,19 +286,20 @@ def put_settings(kind: str, key: str, body: dict, request: Request) -> dict:
     namespace, values = body.get("namespace"), body.get("values")
     if namespace is None or values is None:
         raise ValueError("PUT /settings requires both 'namespace' and 'values'")
-    deck["settings_store"].put(kind, key, namespace, values, note=body.get("note"))
+    deck["settings_store"].put(kind, key, namespace, values, note=body.get("note"), remove=body.get("remove"))
     return _public_scope(deck, kind, key)
 
 
 def _public_scope(deck: dict, kind: str, key: str) -> dict:
-    """``scope()`` minus ``updated_ts`` — internal write-tracking bookkeeping
-    (see module docstring), never part of this response's contract. A
-    fresh dict: ``scope()`` already returns a freshly-loaded object (not a
+    """``scope()`` minus ``updated_ts`` and ``journal`` — internal write-tracking
+    bookkeeping (see module docstring), never part of this response's contract.
+    A fresh dict: ``scope()`` already returns a freshly-loaded object (not a
     live store reference), but popping from a copy here keeps that
     non-aliasing an explicit property of THIS function too, not an
     accident inherited from the store."""
     scope = dict(deck["settings_store"].scope(kind, key))
     scope.pop("updated_ts", None)
+    scope.pop("journal", None)
     return scope
 
 
