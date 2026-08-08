@@ -40,7 +40,18 @@ from fastapi.staticfiles import StaticFiles
 
 from app.engines import BusyError, EngineError, GuardError
 from app.gateway import detect_default_gateway
-from app.routers import control, facts, lifecycle, policy, rename, sets, spark, status, storage
+from app.routers import (
+    control,
+    facts,
+    lifecycle,
+    policy,
+    rename,
+    sets,
+    spark,
+    status,
+    storage,
+)
+from app.routers import provenance as provenance_router
 # Aliased: create_app() below has its own local `settings` (the Settings()
 # instance) and app.settings already owns that name for env config — the
 # router module would silently shadow (or be shadowed by) either otherwise.
@@ -385,6 +396,7 @@ def create_app() -> FastAPI:
     app.include_router(facts.router, prefix="/api")
     app.include_router(settings_router.router, prefix="/api")
     app.include_router(rename.router, prefix="/api")
+    app.include_router(provenance_router.router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when
     # present so the API keeps working standalone until then. Mounted LAST:

@@ -276,7 +276,8 @@ def test_api_state_shape(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle"}
+    assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle",
+                                "provenance"}
     assert body["policy"] == DEFAULT_POLICIES
     assert body["models"] == [{"file": "m.gguf", "size": 1, "footprint": 2}]
     assert body["world"]["default_route"] == "extra.model.gguf"

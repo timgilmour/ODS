@@ -49,8 +49,8 @@ def test_cancel_mid_copy_keeps_source_removes_part(tmp_path):
 def test_verify_mismatch_keeps_source(tmp_path, monkeypatch):
     src, dst = _mk(tmp_path)
     import app.mover as mover_mod
-    real = mover_mod._hash_file
-    monkeypatch.setattr(mover_mod, "_hash_file", lambda p: "corrupted" + real(p))
+    real = mover_mod.hash_file
+    monkeypatch.setattr(mover_mod, "hash_file", lambda p: "corrupted" + real(p))
     with pytest.raises(MoveVerifyError):
         _cross_fs_mover().execute(src, dst, lambda b: None, lambda: False)
     assert src.exists() and not dst.exists()
@@ -318,3 +318,16 @@ def test_progress_callback_rearms_the_suppressor_during_a_long_copy(tmp_path,
     assert q.get(job["id"])["state"] == "done"
     assert (cold / "a.gguf").exists()
     assert suppressor.suppressed() is True       # still armed at t=700
+
+
+def test_hash_file_is_public_and_stable(tmp_path):
+    """Promoted from _hash_file: provenance's on-demand deep check is the
+    second consumer, and reaching into a private name across modules is how
+    a refactor breaks a caller nobody remembers."""
+    from app.mover import hash_file
+
+    p = tmp_path / "f.bin"
+    p.write_bytes(b"abc")
+
+    assert hash_file(p) == hash_file(p)
+    assert len(hash_file(p)) == 64

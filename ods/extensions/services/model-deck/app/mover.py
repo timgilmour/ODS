@@ -38,7 +38,11 @@ class MoveVerifyError(Exception):
     """Destination hash mismatched the in-flight source hash; source kept."""
 
 
-def _hash_file(path: Path) -> str:
+def hash_file(path: Path) -> str:
+    """Streaming sha256 of one file. Two consumers: the move verify path
+    below, and provenance's on-demand deep check — the only thing that can
+    grade a weights artifact `exact`, since a routine provenance pass only
+    ever compares size and mtime."""
     digest = hashlib.sha256()
     with path.open("rb") as f:
         while chunk := f.read(CHUNK_BYTES):
@@ -112,7 +116,7 @@ class Mover:
                     progress_cb(done)
                 fout.flush()
                 os.fsync(fout.fileno())
-            if _hash_file(part) != digest.hexdigest():
+            if hash_file(part) != digest.hexdigest():
                 raise MoveVerifyError(f"verify failed for {dst_final.name}")
         except BaseException:
             part.unlink(missing_ok=True)
