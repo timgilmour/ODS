@@ -1941,6 +1941,105 @@ def test_catalog_absent_is_null_not_an_error(tmp_path, monkeypatch):
     assert resp.json() is None
 
 
+# ===========================================================================
+# Manual force-harvest (Task 3, C2/Phase 3): POST /api/settings/harvest/...
+# and GET /api/settings/catalog/... gaining "harvested_ts". make_app()'s
+# deck.update() (see its docstring) never touches characteristics_store,
+# engine_exec, or configurable_engines, so every test below sets exactly the
+# deck entries it needs — same pattern as the /effective real-catalog tests
+# above.
+# ===========================================================================
+
+
+def test_get_catalog_carries_harvested_ts_from_the_derived_ts_field(tmp_path, monkeypatch):
+    """Additive field on GET /settings/catalog: harvested_ts is the
+    characteristics field's own derived_ts, not a new timestamp — the All-
+    options screen's "as of" display reads this, not option_catalog's
+    internals."""
+    from app.characteristics import CharacteristicsStore
+    from app.harvest import parse_probe_output
+    from tests.test_harvest import PROBE_OUTPUT
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("engine/sparky/vllm", {
+        "option_catalog": parse_probe_output(
+            PROBE_OUTPUT, engine_version="0.26.0", now="2026-08-07T09:00:00+00:00"),
+    })
+    deck["characteristics_store"] = characteristics
+
+    body = TestClient(app).get("/api/settings/catalog/sparky/vllm").json()
+
+    assert body["harvested_ts"] == "2026-08-07T09:00:00+00:00"
+    # ...and validate_settings' consumption (app/validate_settings.py:81,
+    # .get("options") only) is untouched — the additive field sits alongside
+    # the existing shape, not instead of it.
+    assert "options" in body
+
+
+def test_harvest_now_rejects_an_unconfigurable_pair(tmp_path, monkeypatch):
+    """A (node, engine) pair not in deck["configurable_engines"] is a
+    ValueError -> 422, same family as this router's other save-time
+    rejections (module docstring) — matched even with engine_exec wired,
+    proving the pair check runs first."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["configurable_engines"] = [("sparky", "vllm")]
+    deck["engine_exec"] = lambda node, engine, interpreter, source: ("v", "o")
+
+    resp = TestClient(app).post("/api/settings/harvest/local/hipfire")
+
+    assert resp.status_code == 422
+
+
+def test_harvest_now_503s_when_no_engine_exec_is_wired(tmp_path, monkeypatch):
+    """A known pair with no engine_exec configured (no spark on this box,
+    see app.main._build_watcher) is a 503, not a 422 — the pair itself is
+    valid, the wiring to actually harvest it just isn't there."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["configurable_engines"] = [("sparky", "vllm")]
+    deck["engine_exec"] = None
+
+    resp = TestClient(app).post("/api/settings/harvest/sparky/vllm")
+
+    assert resp.status_code == 503
+
+
+def test_harvest_now_forces_a_fresh_harvest_and_returns_the_outcome(tmp_path, monkeypatch):
+    """Happy path, end to end through the router: a cached catalog whose
+    engine_version equals engine_exec's peeked version would report
+    "current" via the watcher's own (force=False) path — the manual route
+    must force past that gate, write the fresh catalog, and echo
+    harvest_catalog_pair's result dict back to the caller."""
+    from app.characteristics import CharacteristicsStore
+    from tests.test_harvest import PROBE_OUTPUT
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("engine/sparky/vllm", {"option_catalog": {
+        "value": {"engine_version": "0.26.0", "options": {}},
+        "source": "argparse introspection", "derived_ts": "t0",
+    }})
+    deck["characteristics_store"] = characteristics
+    deck["configurable_engines"] = [("sparky", "vllm")]
+
+    class _FakeExec:
+        version = "0.26.0"
+
+        def __call__(self, node, engine, interpreter, source):
+            return "0.26.0", PROBE_OUTPUT
+
+    deck["engine_exec"] = _FakeExec()
+
+    resp = TestClient(app).post("/api/settings/harvest/sparky/vllm")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["outcome"] == "harvested"
+    assert body["options"] > 0
+    assert (characteristics.entry("engine/sparky/vllm")["option_catalog"]["value"]["engine_version"]
+            == "0.26.0")
+
+
 def test_settings_change_flags_drift_on_a_loaded_placement(tmp_path, monkeypatch):
     """``changed`` entries are namespace-qualified ("env:KEY", not a bare
     "KEY") — review-round RULING: an unqualified key would make

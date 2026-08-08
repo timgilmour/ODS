@@ -83,9 +83,11 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.arbiter import harvest_catalog_pair
 from app.argline import normalize_args_map, parse_argline, render_argline
 from app.compose_import import import_compose
 from app.engines import EngineError
+from app.events import log_event
 from app.facts import resolve_facts
 from app.ladder import LAYERS, resolve_settings
 from app.observe import spark_node_id
@@ -104,7 +106,35 @@ def get_catalog(node: str, engine: str, request: Request):
     deck = request.app.state.deck
     entry = deck["characteristics_store"].entry(f"engine/{node}/{engine}")
     catalog = entry.get("option_catalog")
-    return catalog["value"] if catalog else None
+    if not catalog:
+        return None
+    # harvested_ts: the field's own derived_ts. Additive — validate_settings
+    # reads only .get("options") (app/validate_settings.py:81).
+    return {**catalog["value"], "harvested_ts": catalog.get("derived_ts")}
+
+
+@router.post("/settings/harvest/{node}/{engine}")
+def harvest_now(node: str, engine: str, request: Request) -> dict:
+    """Manual catalog refresh — the All-options Refresh button. force=True:
+    a human asking again is exactly the case the version gate must not
+    swallow (a broken auto-harvest looks 'current' forever otherwise).
+
+    Uses ``log_event`` directly rather than the Watcher's own ``self._log``
+    dedup wrapper: a human pressing this button is not a spam loop the way
+    a stuck per-tick condition is, so every press should land its own event
+    line, not get silently swallowed as a repeat of the last one.
+    """
+    deck = request.app.state.deck
+    pairs = [tuple(p) for p in deck.get("configurable_engines") or []]
+    if (node, engine) not in pairs:
+        raise ValueError(
+            f"({node}, {engine}) is not a configurable pair; configurable: {pairs}")
+    if deck.get("engine_exec") is None:
+        raise HTTPException(status_code=503, detail="no engine exec wired")
+    return harvest_catalog_pair(
+        deck["engine_exec"], deck["characteristics_store"],
+        lambda kind, detail: log_event(deck["events_path"], kind, detail),
+        node, engine, now=_now_iso(), force=True)
 
 
 @router.get("/settings/effective/{node}/{engine}/{model:path}")

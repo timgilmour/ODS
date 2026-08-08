@@ -1452,3 +1452,28 @@ def test_build_watcher_leaves_harvest_disabled_without_spark(tmp_path, monkeypat
 
     assert watcher._configurable_engines() == []
     assert watcher._engine_exec is None
+
+
+def test_build_watcher_stashes_engine_exec_on_the_shared_deck(tmp_path, monkeypatch):
+    """Task 3 (manual force-harvest route): app.routers.settings.harvest_now
+    reads deck["engine_exec"]/deck["configurable_engines"] off
+    request.app.state.deck — which _build_deck's settings-id cache (see its
+    module docstring) makes the SAME dict _build_watcher builds the real
+    Watcher from. Building the watcher must stash both keys onto that
+    shared dict, not a private copy, or the HTTP route and the watcher's own
+    harvest loop would silently disagree about what's configurable."""
+    from app.engines.docker_ctl import EngineExecRouter
+    from app.main import _build_deck, _build_watcher
+    from app.observe import spark_node_id
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    _spark_env(monkeypatch)
+    settings = Settings()
+
+    watcher = _build_watcher(settings)
+    deck = _build_deck(settings)  # same cached dict, by settings identity
+
+    assert deck["configurable_engines"] == [(spark_node_id(), "vllm")]
+    assert isinstance(deck["engine_exec"], EngineExecRouter)
+    assert deck["engine_exec"] is watcher._engine_exec

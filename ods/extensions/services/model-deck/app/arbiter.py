@@ -362,6 +362,98 @@ def _noop(reason: str) -> dict:
 
 
 # ===========================================================================
+# Catalog harvest — module-level so both Watcher._harvest_catalogs (the
+# per-tick loop, force=False) and the manual force-harvest HTTP route
+# (app.routers.settings.harvest_now, force=True) call the exact same logic.
+# ===========================================================================
+
+
+def harvest_catalog_pair(engine_exec, characteristics_store, log, node, engine,
+                          now, force=False) -> dict:
+    """Harvest one (node, engine) pair's option catalog, once per version.
+
+    Costs a docker exec and a vLLM import, so calling `engine_exec` AT ALL
+    must be avoidable once a version is already cached and nothing has
+    changed -- comparing versions AFTER paying for the exec would defeat
+    the whole point (every derive pass would still pay the cost it exists
+    to avoid). `engine_exec` may expose the engine's currently observed
+    version as a plain `.version` attribute -- a cheap peek (a `docker
+    inspect`, not an exec, in the real DockerCtl-backed implementation)
+    read WITHOUT invoking it -- and when that peek is available and
+    matches what's cached, the exec is skipped entirely. `engine_exec`
+    without a `.version` attribute (or any other caller) still works
+    correctly, just without the early-skip optimization: the post-call
+    version comparison below is the fallback, so a redundant exec never
+    produces a redundant write. `engine_version` (both the peek and the
+    post-call value) is an OPAQUE identity used only for change detection
+    -- the real DockerCtl-backed adapter feeds it the container's resolved
+    image content ID, not a human-readable engine version string; a UI or
+    log line rendering it as "the vLLM version" would be wrong.
+
+    `force=True` (the manual force-harvest route) skips BOTH version gates
+    -- the cheap peek and the post-call compare -- so a human pressing
+    Refresh always pays for a real exec and always gets a fresh write,
+    never "current" for a peek that only LOOKS unchanged.
+
+    An engine that is not running (EngineError/BusyError) or whose
+    container isn't in the deck's own park allowlist (GuardError --
+    deliberately not an EngineError subclass, see app.engines) simply
+    yields no catalog -- a supported state, since validation warns rather
+    than blocks (app.validate_settings). It still logs a deduped
+    ``harvest-failed`` event (F3, final branch review, 2026-08-07): "no
+    catalog" alone can't tell "engine parked" apart from a real, persistent
+    exec failure (e.g. the proxy's ``-allowPOST`` lines missing from a
+    hand-merged live compose -- see the branch's own recorded deploy
+    hazard), and the two need to be distinguishable from the outside. This
+    function must never raise past this point: both callers (the watcher's
+    tick loop and the manual HTTP route) need a foreseeable-failure result,
+    not an exception.
+    """
+    key = f"engine/{node}/{engine}"
+    cached = characteristics_store.entry(key).get("option_catalog")
+    cached_version = cached["value"].get("engine_version") if cached else None
+
+    if not force:
+        peeked_version = getattr(engine_exec, "version", None)
+        if cached_version is not None and peeked_version == cached_version:
+            return {"outcome": "current"}
+
+    try:
+        version, output = engine_exec(node, engine, PROBE_INTERPRETER, PROBE_SOURCE)
+    except (EngineError, BusyError, GuardError) as exc:
+        # F3, Important (final branch review, 2026-08-07): this branch used
+        # to emit nothing at all, which makes it indistinguishable from
+        # "engine parked" forever -- and the branch's own recorded deploy
+        # hazard (a live compose hand-merge losing the proxy's -allowPOST
+        # lines -> 403 on exec) lands EXACTLY here. Deduped like
+        # harvest-empty (by the caller's own _log, for Watcher; log_event
+        # is not deduped for the manual route -- see harvest_now). The
+        # detail is the exception's CLASS only, not its message text: a
+        # real failure's message (a proxy's response body, a transport
+        # error string) is not guaranteed stable call to call, and an
+        # unstable detail would defeat the dedup entirely -- re-logging
+        # every derive_interval_s is the exact spam this exists to avoid.
+        log("harvest-failed", {"key": key, "reason": type(exc).__name__})
+        return {"outcome": "failed", "reason": type(exc).__name__}
+
+    if not force and cached_version is not None and cached_version == version:
+        return {"outcome": "current"}
+
+    field = parse_probe_output(output, engine_version=version, now=now)
+    if not field:
+        # The exec ran (engine reachable, allowlisted) but produced no
+        # parseable catalog -- e.g. a probe crash inside the container.
+        # Without this, "never harvested" and "harvest is broken" look
+        # identical from the outside: no catalog, no error, forever.
+        log("harvest-empty", {"key": key})
+        return {"outcome": "empty"}
+
+    characteristics_store.put_fields(key, {"option_catalog": field})
+    log("catalog-harvested", {"key": key, "engine_version": version})
+    return {"outcome": "harvested", "options": len(field["value"]["options"])}
+
+
+# ===========================================================================
 # Watcher — imperative shell (daemon thread)
 # ===========================================================================
 
@@ -864,89 +956,24 @@ class Watcher:
         self._harvest_catalogs(now)
 
     def _harvest_catalogs(self, now: str) -> None:
-        """Harvest each running engine's option catalog, once per version.
-
-        Costs a docker exec and a vLLM import, so calling `_engine_exec` AT
-        ALL must be avoidable once a version is already cached and nothing
-        has changed -- comparing versions AFTER paying for the exec would
-        defeat the whole point (every derive pass would still pay the cost
-        it exists to avoid). `_engine_exec` may expose the engine's
-        currently observed version as a plain `.version` attribute -- a
-        cheap peek (a `docker inspect`, not an exec, in the real
-        DockerCtl-backed implementation) read WITHOUT invoking it -- and
-        when that peek is available and matches what's cached, the exec is
-        skipped entirely. `_engine_exec` without a `.version` attribute
-        (or any other caller) still works correctly, just without the
-        early-skip optimization: the post-call version comparison below
-        is the fallback, so a redundant exec never produces a redundant
-        write. `engine_version` (both the peek and the post-call value) is
-        an OPAQUE identity used only for change detection -- the real
-        DockerCtl-backed adapter feeds it the container's resolved image
-        content ID, not a human-readable engine version string; a UI or
-        log line rendering it as "the vLLM version" would be wrong.
-
-        An engine that is not running (EngineError/BusyError) or whose
-        container isn't in the deck's own park allowlist (GuardError --
-        deliberately not an EngineError subclass, see app.engines) simply
-        yields no catalog -- a supported state, since validation warns
-        rather than blocks (app.validate_settings). It still logs a
-        deduped ``harvest-failed`` event (F3, final branch review,
-        2026-08-07): "no catalog" alone can't tell "engine parked" apart
-        from a real, persistent exec failure (e.g. the proxy's
-        ``-allowPOST`` lines missing from a hand-merged live compose --
-        see the branch's own recorded deploy hazard), and the two need to
-        be distinguishable from the outside. This pass must never raise
-        past this method: tick()'s broad supervisor catch is not a
+        """Harvest each configured engine's option catalog, once per
+        version -- the per-tick loop over ``harvest_catalog_pair``
+        (module-level, above), always with ``force=False``: the version
+        peek, both `current` gates, and the dedup'd event kinds documented
+        on that function all apply unchanged here. This pass must never
+        raise past this method: tick()'s broad supervisor catch is not a
         substitute for handling foreseeable failures here (see this
-        module's own design notes on that at the top of the file).
+        module's own design notes on that at the top of the file) --
+        ``harvest_catalog_pair`` itself upholds that by construction (see
+        its own docstring).
         """
         if self._engine_exec is None:
             return
 
         for node, engine in self._configurable_engines():
-            key = f"engine/{node}/{engine}"
-            cached = self._characteristics_store.entry(key).get("option_catalog")
-            cached_version = cached["value"].get("engine_version") if cached else None
-
-            peeked_version = getattr(self._engine_exec, "version", None)
-            if cached_version is not None and peeked_version == cached_version:
-                continue
-
-            try:
-                version, output = self._engine_exec(node, engine, PROBE_INTERPRETER, PROBE_SOURCE)
-            except (EngineError, BusyError, GuardError) as exc:
-                # F3, Important (final branch review, 2026-08-07): this
-                # branch used to emit nothing at all, which makes it
-                # indistinguishable from "engine parked" forever -- and the
-                # branch's own recorded deploy hazard (a live compose
-                # hand-merge losing the proxy's -allowPOST lines -> 403 on
-                # exec) lands EXACTLY here. Deduped like harvest-empty. The
-                # detail is the exception's CLASS only, not its message
-                # text: a real failure's message (a proxy's response body,
-                # a transport error string) is not guaranteed stable call
-                # to call, and an unstable detail would defeat the dedup
-                # entirely -- re-logging every derive_interval_s is the
-                # exact spam this exists to avoid.
-                self._log("harvest-failed", {"key": key, "reason": type(exc).__name__})
-                continue
-
-            if cached_version is not None and cached_version == version:
-                continue
-
-            field = parse_probe_output(output, engine_version=version, now=now)
-            if not field:
-                # The exec ran (engine reachable, allowlisted) but produced
-                # no parseable catalog -- e.g. a probe crash inside the
-                # container. Without this, "never harvested" and "harvest
-                # is broken" look identical from the outside: no catalog,
-                # no error, forever. Deduped (_DEDUP_KINDS) since a
-                # persistently broken probe would otherwise re-log every
-                # derive_interval_s.
-                self._log("harvest-empty", {"key": key})
-                continue
-
-            self._characteristics_store.put_fields(key, {"option_catalog": field})
-            self._log("catalog-harvested", {"key": key, "engine_version": version})
+            harvest_catalog_pair(
+                self._engine_exec, self._characteristics_store, self._log,
+                node, engine, now, force=False)
 
     def _configurable_engines(self) -> list[tuple[str, str]]:
         """(node, engine) pairs the Deck can harvest an option catalog from.

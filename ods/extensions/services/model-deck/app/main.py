@@ -243,6 +243,14 @@ def _build_watcher(settings: Settings):
     if deck["spark"] is not None:
         routes[(spark_node_id(), "vllm")] = SparkCatalogExec(deck["spark"])
 
+    # Stashed on the SAME dict `_build_deck`'s settings-id cache hands both
+    # `create_app()` (-> app.state.deck) and this function (see its cache
+    # comment) -- not a private copy -- so the manual force-harvest route
+    # (app.routers.settings.harvest_now) reads exactly what the watcher's
+    # own harvest loop is using, never a second, silently-diverging pair.
+    deck["engine_exec"] = EngineExecRouter(routes) if routes else None
+    deck["configurable_engines"] = sorted(routes)
+
     return Watcher(
         settings=deck["settings"],
         world=deck["world"],
@@ -270,10 +278,11 @@ def _build_watcher(settings: Settings):
         # will read from, and the read-only GGUF mount to scan.
         characteristics_store=deck["characteristics_store"],
         gguf_dir=deck["gguf_dir"],
-        # See the routes comment above: None (harvest fully disabled) on a
-        # box with no spark configured, otherwise the router built from it.
-        engine_exec=EngineExecRouter(routes) if routes else None,
-        configurable_engines=sorted(routes),
+        # Stashed on `deck` just above (same shared dict as app.state.deck):
+        # None (harvest fully disabled) on a box with no spark configured,
+        # otherwise the router built from `routes`.
+        engine_exec=deck["engine_exec"],
+        configurable_engines=deck["configurable_engines"],
     )
 
 
