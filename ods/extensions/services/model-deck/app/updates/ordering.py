@@ -41,8 +41,10 @@ def rank(tags: list[str], order: str, pinned: str) -> dict:
     """Rank `tags` under `order` relative to `pinned`.
 
     Returns `latest` (None when unrankable), `newer` (strictly newer than the
-    pin, or every non-pin tag under `none`), `unranked` (seen but unparseable)
-    and `rankable`.
+    pin in ascending order when rankable; every non-pin tag, sorted
+    alphabetically as a presentation choice, whenever nothing can be
+    compared -- under `none`, or when the pin itself does not parse),
+    `unranked` (seen but unparseable) and `rankable`.
     """
     if order not in ORDERS:
         raise ValueError(f"order must be one of {list(ORDERS)}, got {order!r}")
@@ -71,11 +73,18 @@ def rank(tags: list[str], order: str, pinned: str) -> dict:
     latest = ranked[-1][1]
     pin_key = key(pinned)
     if pin_key is None:
-        # The pin itself is unparseable: report the newest tag as new rather
-        # than pretending to compare against something we could not read.
-        newer = [latest]
-    else:
-        newer = [tag for k, tag in ranked if k > pin_key]
+        # The pin itself is unparseable: this is not "rankable but the pin
+        # is new to us", it is the coercion this module exists to refuse.
+        # Refuse the same way the `none` order does.
+        return {"latest": None,
+                "newer": sorted(t for t in tags if t != pinned),
+                "unranked": sorted(unranked), "rankable": False}
 
-    return {"latest": latest, "newer": sorted(newer),
+    # `ranked` is already in ascending numeric order (that is what
+    # `ranked.sort()` established) -- do not re-sort this alphabetically,
+    # that would throw the numeric order away (e.g. "v1.10.0" < "v1.2.0"
+    # lexically, but not numerically).
+    newer = [tag for k, tag in ranked if k > pin_key]
+
+    return {"latest": latest, "newer": newer,
             "unranked": sorted(unranked), "rankable": True}
