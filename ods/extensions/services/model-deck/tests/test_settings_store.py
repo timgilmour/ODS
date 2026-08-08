@@ -473,6 +473,52 @@ def test_corrupt_journal_heals(tmp_path):
     assert store.get()["engines"]["sparky/vllm"]["journal"] == {}
 
 
+def test_corrupt_per_namespace_journal_heals(tmp_path):
+    """A journal dict that contains a corrupt per-namespace value (not a list)
+    must be healed to an empty list to prevent AttributeError on log.extend()."""
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"engines": {"sparky/vllm": {
+        "args": {"seed": "1"}, "journal": {"args": "corrupt"}}},
+        "models": {}, "engine_models": {}}))
+    store = SettingsStore(path)
+
+    # This put() should not crash when trying to extend a corrupt journal namespace
+    store.put("engines", "sparky/vllm", "args", {"seed": "2"})
+
+    entry = store.get()["engines"]["sparky/vllm"]
+    # The journal namespace should be a proper list with the new entry
+    assert isinstance(entry["journal"]["args"], list)
+    assert len(entry["journal"]["args"]) == 1
+    assert entry["journal"]["args"][0]["old"] == "1"
+    assert entry["journal"]["args"][0]["new"] == "2"
+
+
+def test_restore_merges_journals_not_replaces(tmp_path):
+    """Restore must merge journals with previous entries, not replace them.
+    A put that changed k=A→B followed by restore back to k=A must preserve
+    both the pre-restore entries AND the restore's B→A entry in order."""
+    store = SettingsStore(tmp_path / "settings.json")
+
+    # Initial put: k=A (journals None→A)
+    store.put("engines", "sparky/vllm", "args", {"k": "A"})
+    # Second put: k=B (journals A→B)
+    store.put("engines", "sparky/vllm", "args", {"k": "B"})
+
+    # Take a snapshot and modify it back to A
+    snapshot = store.get()
+    snapshot["engines"]["sparky/vllm"]["args"]["k"] = "A"
+
+    # Restore should merge journals, not replace
+    store.restore(snapshot)
+
+    journal = store.get()["engines"]["sparky/vllm"]["journal"]["args"]
+    # Should have 3 entries: None→A, A→B, B→A
+    assert len(journal) == 3
+    assert journal[0]["old"] is None and journal[0]["new"] == "A"
+    assert journal[1]["old"] == "A" and journal[1]["new"] == "B"
+    assert journal[2]["old"] == "B" and journal[2]["new"] == "A"
+
+
 def test_restore_journals_diff_against_previous(tmp_path):
     store = SettingsStore(tmp_path / "settings.json")
     store.put("engines", "sparky/vllm", "args", {"max-model-len": "262144"})

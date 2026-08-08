@@ -167,10 +167,12 @@ class SettingsStore:
         into it per namespace) — also covers a pre-migration entry that
         still carries the old entry-level string form (Task 7 review round
         2026-08-07), which would otherwise crash ``_settings_drift``'s
-        ``.get(namespace)`` on a str. ``journal`` is guarded the same way
-        since put() extends journal[namespace] — any corrupt present value
-        would crash with a TypeError on list.extend(). Any other key is out
-        of this scope and passes through untouched."""
+        ``.get(namespace)`` on a str. ``journal`` is guarded two levels deep:
+        at the top level, a non-dict journal resets to {}; within a dict
+        journal, any per-namespace value that is not a list resets to []
+        since put() calls log.extend(changes) on journal[namespace] — any
+        corrupt present value would crash with AttributeError on str.extend().
+        Any other key is out of this scope and passes through untouched."""
         if not isinstance(entry, dict):
             return {}
         healed = dict(entry)
@@ -181,8 +183,17 @@ class SettingsStore:
             healed["notes"] = {}
         if "updated_ts" in healed and not isinstance(healed["updated_ts"], dict):
             healed["updated_ts"] = {}
-        if "journal" in healed and not isinstance(healed["journal"], dict):
-            healed["journal"] = {}
+        if "journal" in healed:
+            if not isinstance(healed["journal"], dict):
+                healed["journal"] = {}
+            else:
+                # Two-level healing: within a dict journal, each namespace
+                # value must be a list, else reset to [].
+                healed_journal = dict(healed["journal"])
+                for ns_name in NAMESPACES:
+                    if ns_name in healed_journal and not isinstance(healed_journal[ns_name], list):
+                        healed_journal[ns_name] = []
+                healed["journal"] = healed_journal
         return healed
 
     def _save(self, data: dict) -> None:
@@ -252,11 +263,9 @@ class SettingsStore:
             # 2026-08-07 — an earlier entry-level version made
             # settings_drift's "changed" list report namespaces that were
             # never written whenever any OTHER namespace of the same entry
-            # was touched later). Still not per-key: this store keeps no
-            # history to diff a single key's change against, so
-            # settings_drift's "changed" is "every key of a namespace
-            # written since the baseline," an accepted C1 approximation —
-            # see app.routers._settings_drift.
+            # was touched later). Per-key history is now kept in the journal
+            # for Task 2's drift detection to fold changes; updated_ts remains
+            # per-namespace for timestamp compatibility. See app.routers._settings_drift.
             entry.setdefault("updated_ts", {})[namespace] = now
             self._save(data)
 
@@ -264,7 +273,8 @@ class SettingsStore:
         """Bulk-REPLACE the entire store from ``data`` — a previously
         captured ``get()`` snapshot (e.g. a config set's ``settings_snapshot``,
         app.sets Task 9). Used by app.sets' ``restore_settings`` apply step
-        and nowhere else; a real write, not a merge.
+        and nowhere else; a real write, not a merge of the settings themselves
+        (but a MERGE of the journals).
 
         ``data`` gets the same healing a corrupt file read gets (``_load``'s
         per-kind/per-entry guards) — a snapshot is exactly as untrusted as a
@@ -278,10 +288,14 @@ class SettingsStore:
         so ``settings_drift`` may honestly flag it, even though nothing here
         reloads the running engine (reload stays a human's call). ``notes``
         is carried through unchanged (human rationale, not a write-clock).
-        Each namespace is journaled with its per-key diff against the
-        previous store — a restore is a real write and is recorded as such.
-        Entries removed wholesale by the restore have no surviving scope entry
-        to carry a journal; a vanished scope has no chip to show drift on.
+        Each namespace's journal is MERGED with its previous state, not
+        replaced: the restore's per-key diff entries are appended to the
+        previous journal for that namespace, then capped at _JOURNAL_CAP. This
+        allows the next task's drift detection to correctly fold entries since
+        a baseline. Untouched namespaces of a surviving entry keep their prior
+        journal intact. Entries removed wholesale by the restore have no
+        surviving scope entry to carry a journal; a vanished scope has no
+        chip to show drift on.
         """
         if not isinstance(data, dict):
             data = {}
@@ -306,7 +320,18 @@ class SettingsStore:
             for kind in KINDS:
                 for key, entry in healed[kind].items():
                     prev_entry = previous.get(kind, {}).get(key, {})
-                    journal = {}
+                    # Start with the previous entry's healed journal, or an
+                    # empty dict if there is no previous entry.
+                    prev_journal = prev_entry.get("journal", {})
+                    if not isinstance(prev_journal, dict):
+                        prev_journal = {}
+                    healed_prev_journal = {}
+                    for ns_name in NAMESPACES:
+                        if ns_name in prev_journal and isinstance(prev_journal[ns_name], list):
+                            healed_prev_journal[ns_name] = list(prev_journal[ns_name])
+                    journal = dict(healed_prev_journal)
+                    # Append new changes for each namespace, keeping untouched
+                    # namespaces' prior journal intact.
                     for ns_name in NAMESPACES:
                         before = prev_entry.get(ns_name, {}) or {}
                         after = entry.get(ns_name, {}) or {}
@@ -317,7 +342,10 @@ class SettingsStore:
                             if before.get(name) != after.get(name)
                         ]
                         if changes:
-                            journal[ns_name] = changes[-_JOURNAL_CAP:]
+                            if ns_name not in journal:
+                                journal[ns_name] = []
+                            journal[ns_name].extend(changes)
+                            journal[ns_name] = journal[ns_name][-_JOURNAL_CAP:]
                     if journal:
                         entry["journal"] = journal
             self._save(healed)
