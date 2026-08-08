@@ -104,11 +104,16 @@ export function filterCatalog(
  *   hold (app/argline.py renders `value is True` as the flag alone; there is
  *   no false-valued rendering of one), so starting at `false` would need an
  *   immediate operator click just to reach the one state the flag can mean.
- * - Otherwise the catalog's own default is the honest starting point, EXCEPT
- *   the literal string `"None"`, which is `default`'s spelling of "the
- *   engine has no default for this" (app/harvest.py:81) rather than an
- *   actual value — that starts empty instead of declaring the four
- *   characters "None".
+ * - Otherwise `option.default` is already the DECODED value — never a
+ *   `repr()` string — because `app/routers/settings.py:get_catalog`'s
+ *   `_catalog_default` decodes it before it ever reaches this module (see
+ *   `CatalogOption.default`'s doc comment in api.ts). `null` is that
+ *   decode's "nothing to prefill" answer (the harvested "None" repr, or an
+ *   off-by-default flag's honest absent-flag rendering) and starts empty
+ *   here too. A number becomes its string form (ArgValue has no numeric
+ *   variant — app/argline.py's own normalize axis stringifies numerics the
+ *   same way on write, so this matches what the buffer would hold after a
+ *   round trip anyway); a string or string[] default is used verbatim.
  * - No option (a name absent from the catalog, or a null catalog — a pair
  *   that never harvested, app/routers/settings.py:get_catalog) also starts
  *   empty: there is nothing to derive a default from.
@@ -116,6 +121,8 @@ export function filterCatalog(
 export function startingValueFor(option: CatalogOption | undefined): ArgValue {
   if (!option) return "";
   if (option.widget === "toggle") return true;
-  if (option.default !== "None") return option.default;
-  return "";
+  const def = option.default;
+  if (def === null) return "";
+  if (typeof def === "number") return String(def);
+  return def;
 }

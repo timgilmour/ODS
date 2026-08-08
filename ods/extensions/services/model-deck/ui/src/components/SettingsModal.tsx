@@ -224,6 +224,21 @@ export default function SettingsModal({
     setDraft(displayValue(value));
   }
 
+  /** "+ Add option" — mounts AllOptionsModal, whose search input is
+   * autofocused on open. Review finding (task-9, Minor): left as a bare
+   * `setAllOptionsOpen(true)`, that autofocus steals focus away from
+   * whatever chip editor the operator had open, and blur is what commits a
+   * text-editor draft (see `renderEditor`'s `onBlur`) — abandoning an
+   * in-progress edit to go browse the catalog would silently SAVE
+   * whatever half-typed text was sitting in the box. This cancels the
+   * editor the same way Escape does (`cancelledEdit` above) — discard, not
+   * commit — before the modal ever mounts. */
+  function openAllOptions() {
+    cancelledEdit.current = true;
+    setEditing(null);
+    setAllOptionsOpen(true);
+  }
+
   /** All-options modal's onAdd — fired by both its "+" (unset row) and its
    * "✓" (already-set row), since AllOptionsModal itself has no opinion on
    * what should happen next, only whether `name` was in `setNames`.
@@ -642,11 +657,7 @@ export default function SettingsModal({
             </div>
 
             <div className="settings-actions">
-              <button
-                type="button"
-                title={labels.addOptionTitle}
-                onClick={() => setAllOptionsOpen(true)}
-              >
+              <button type="button" title={labels.addOptionTitle} onClick={openAllOptions}>
                 {labels.addOption}
               </button>
               <button type="button" onClick={() => setImportOpen(true)}>

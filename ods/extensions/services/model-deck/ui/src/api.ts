@@ -161,8 +161,17 @@ export interface CatalogOption {
   aliases: string[];
   type: string | null;
   choices: string[] | null;
-  /** default: string representation of the default value; Python None arrives as literal "None" (app/harvest.py:81). */
-  default: string;
+  /** default: the harvested default, ALREADY DECODED for the wire by
+   * app/routers/settings.py:get_catalog's `_catalog_default` — never the
+   * raw `repr(action.default)` app/harvest.py stores (a string-typed
+   * option's repr is e.g. `"'auto'"`, quotes included). `null` means there
+   * is no default worth prefilling: the harvested "None" repr, and every
+   * `_decode_harvested_default` drop shape (False/None/[]/{} — an
+   * off-by-default option's honest rendering is an absent flag, not a
+   * value) both decode to `null` on this route, per its own docstring
+   * ("Engine-default decoding"). Anything else is the real decoded value —
+   * string, number, boolean, or a list — never re-repr'd here. */
+  default: string | number | boolean | string[] | null;
   nargs: unknown;
   repeatable: boolean;
   help: string;

@@ -182,9 +182,18 @@ export default function AllOptionsModal({
 
 function CatalogRowView({ row, onAdd }: { row: CatalogRow; onAdd: (name: string) => void }) {
   const { name, flag, option, isSet } = row;
-  // "None" is app/harvest.py:81's spelling of "the engine has no default"
-  // (a repr'd Python `None`), not a value — render nothing for it.
-  const defaultText = option.default === "None" ? null : option.default;
+  // `null` is get_catalog's `_catalog_default` decode of "nothing to
+  // prefill" (the harvested "None" repr, or an off-by-default flag's
+  // honest absent-flag rendering — api.ts's CatalogOption.default doc) —
+  // render nothing for it. Everything else is already the real decoded
+  // value (never a repr string), so a number/list just needs stringifying
+  // for display; a decoded string renders verbatim.
+  const defaultText =
+    option.default === null
+      ? null
+      : Array.isArray(option.default)
+        ? option.default.join(" ")
+        : String(option.default);
   const label = isSet ? labels.jumpToOptionLabel(flag) : labels.addOptionRowLabel(flag);
 
   return (

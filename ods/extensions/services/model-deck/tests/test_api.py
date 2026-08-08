@@ -2013,6 +2013,113 @@ def test_get_catalog_carries_harvested_ts_from_the_derived_ts_field(tmp_path, mo
     assert "options" in body
 
 
+def test_get_catalog_decodes_reprd_defaults_for_the_wire(tmp_path, monkeypatch):
+    """F2 follow-up (task-9 review, Critical): app.harvest stores each
+    option's default as ``repr(action.default)`` (module docstring,
+    "Engine-default decoding") — the probe's raw truth, not a value fit to
+    hand a consumer as-is. GET /settings/catalog now decodes it the same
+    way _resolve's engine_defaults layer already does
+    (_decode_harvested_default), so a string-typed option like --dtype
+    reads back "auto", not the repr "'auto'" quotes and all, a real default
+    like "131072" reads back as the JSON number 131072, and every
+    nothing-to-prefill shape (the "None" repr, and _decode_harvested_
+    default's drop shapes False/[]/{}) comes back as JSON null instead of
+    surviving as text a UI would have to re-parse."""
+    from app.characteristics import CharacteristicsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("engine/sparky/vllm", {
+        "option_catalog": {
+            "value": {
+                "engine_version": "sha256:test",
+                "options": {
+                    "dtype": {
+                        "aliases": [], "type": "str", "choices": None,
+                        "default": "'auto'", "nargs": None, "repeatable": False,
+                        "help": "Data type.", "widget": "text",
+                    },
+                    "max-model-len": {
+                        "aliases": [], "type": "int", "choices": None,
+                        "default": "None", "nargs": None, "repeatable": False,
+                        "help": "Model context length.", "widget": "number",
+                    },
+                    "middleware": {
+                        "aliases": [], "type": "str", "choices": None,
+                        "default": "[]", "nargs": None, "repeatable": True,
+                        "help": "ASGI middleware.", "widget": "list",
+                    },
+                    "block-size": {
+                        "aliases": [], "type": "int", "choices": None,
+                        "default": "131072", "nargs": None, "repeatable": False,
+                        "help": "Block size.", "widget": "number",
+                    },
+                    "enable-prefix-caching": {
+                        "aliases": [], "type": None, "choices": None,
+                        "default": "True", "nargs": 0, "repeatable": False,
+                        "help": "Enable prefix caching.", "widget": "toggle",
+                    },
+                },
+            },
+            "source": "argparse introspection",
+            "derived_ts": "2026-08-08T00:00:00+00:00",
+        },
+    })
+    deck["characteristics_store"] = characteristics
+
+    options = TestClient(app).get("/api/settings/catalog/sparky/vllm").json()["options"]
+
+    assert options["dtype"]["default"] == "auto"            # "'auto'" -> "auto"
+    assert options["max-model-len"]["default"] is None      # "None" repr -> null
+    assert options["middleware"]["default"] is None         # "[]" repr -> null (drop shape)
+    assert options["block-size"]["default"] == 131072        # "131072" -> real int
+    assert options["enable-prefix-caching"]["default"] is True  # "True" -> real bool
+
+    # Fields other than `default` pass through unmodified.
+    assert options["dtype"]["type"] == "str"
+    assert options["block-size"]["widget"] == "number"
+
+
+def test_get_catalog_decode_does_not_touch_the_cached_repr(tmp_path, monkeypatch):
+    """The decode in the finding above is a RESPONSE-shape transform only —
+    the characteristics store's cached option_catalog keeps the raw repr,
+    and _resolve/get_effective's engine_defaults layer (which reads that
+    cache directly, not through get_catalog) is unaffected."""
+    from app.characteristics import CharacteristicsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    characteristics = CharacteristicsStore(tmp_path / "c.json")
+    characteristics.put_fields("engine/sparky/vllm", {
+        "option_catalog": {
+            "value": {
+                "engine_version": "sha256:test",
+                "options": {
+                    "dtype": {
+                        "aliases": [], "type": "str", "choices": None,
+                        "default": "'auto'", "nargs": None, "repeatable": False,
+                        "help": "Data type.", "widget": "text",
+                    },
+                },
+            },
+            "source": "argparse introspection",
+            "derived_ts": "2026-08-08T00:00:00+00:00",
+        },
+    })
+    deck["characteristics_store"] = characteristics
+
+    TestClient(app).get("/api/settings/catalog/sparky/vllm")
+
+    cached = characteristics.entry("engine/sparky/vllm")["option_catalog"]["value"]
+    assert cached["options"]["dtype"]["default"] == "'auto'"  # untouched raw repr
+
+    # get_effective's engine_defaults layer decodes dtype to the real
+    # "auto" string via _resolve's own _decode_harvested_default call —
+    # same outcome, independent code path, per the ruling that _resolve is
+    # not touched by this fix.
+    resp = TestClient(app).get("/api/settings/effective/sparky/vllm/")
+    assert resp.json()["resolved"]["dtype"]["value"] == "auto"
+
+
 def test_harvest_now_rejects_an_unconfigurable_pair(tmp_path, monkeypatch):
     """A (node, engine) pair not in deck["configurable_engines"] is a
     ValueError -> 422, same family as this router's other save-time

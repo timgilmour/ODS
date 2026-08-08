@@ -7,7 +7,10 @@ function option(overrides: Partial<CatalogOption> = {}): CatalogOption {
     aliases: [],
     type: "string",
     choices: null,
-    default: "None",
+    // null, not the repr string "None": get_catalog's _catalog_default
+    // already decodes this before it reaches the wire (api.ts's
+    // CatalogOption.default doc comment).
+    default: null,
     nargs: undefined,
     repeatable: false,
     help: "An option",
@@ -354,19 +357,35 @@ describe("filterCatalog", () => {
 
 describe("startingValueFor", () => {
   it("starts a toggle at true — the only value a bare flag can render", () => {
-    expect(startingValueFor(option({ widget: "toggle", default: "None" }))).toBe(true);
+    expect(startingValueFor(option({ widget: "toggle", default: null }))).toBe(true);
   });
 
-  it("starts a toggle at true even when the catalog default is false-ish", () => {
-    expect(startingValueFor(option({ widget: "toggle", default: "False" }))).toBe(true);
+  it("starts a toggle at true even when the catalog has a decoded default", () => {
+    expect(startingValueFor(option({ widget: "toggle", default: true }))).toBe(true);
   });
 
-  it("starts a non-toggle at the catalog's default string", () => {
-    expect(startingValueFor(option({ widget: "number", default: "131072" }))).toBe("131072");
+  it("starts a non-toggle at the catalog's decoded string default, verbatim", () => {
+    // Not the repr "'auto'" — get_catalog's _catalog_default already
+    // decoded it before this ever saw it (api.ts's CatalogOption.default).
+    expect(startingValueFor(option({ widget: "text", default: "auto" }))).toBe("auto");
   });
 
-  it("starts empty when the default is the literal string 'None'", () => {
-    expect(startingValueFor(option({ widget: "text", default: "None" }))).toBe("");
+  it("stringifies a decoded numeric default — ArgValue has no number variant", () => {
+    expect(startingValueFor(option({ widget: "number", default: 131072 }))).toBe("131072");
+  });
+
+  it("uses a decoded list default verbatim", () => {
+    expect(
+      startingValueFor(option({ widget: "list", default: ["a", "b"] })),
+    ).toEqual(["a", "b"]);
+  });
+
+  it("starts empty when the decoded default is null", () => {
+    // null is _catalog_default's "nothing to prefill" answer — the
+    // harvested "None" repr, or an off-by-default flag's honest
+    // absent-flag rendering (False/[]/{} reprs), collapse to this on the
+    // wire; there is no longer a "None" STRING sentinel to check for.
+    expect(startingValueFor(option({ widget: "text", default: null }))).toBe("");
   });
 
   it("starts empty when there is no option at all", () => {

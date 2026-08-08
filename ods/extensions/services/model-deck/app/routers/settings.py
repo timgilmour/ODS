@@ -110,7 +110,24 @@ def get_catalog(node: str, engine: str, request: Request):
         return None
     # harvested_ts: the field's own derived_ts. Additive — validate_settings
     # reads only .get("options") (app/validate_settings.py:81).
-    return {**catalog["value"], "harvested_ts": catalog.get("derived_ts")}
+    value = catalog["value"]
+    # F2 follow-up (task-9 review, Critical): decode each option's default
+    # for the WIRE the same way _resolve already decodes it for the
+    # engine_defaults layer — see this module's docstring, "Engine-default
+    # decoding". Undecoded, ``default`` is ``repr(action.default)``: a
+    # string-typed option like ``--dtype`` harvests as the literal text
+    # ``"'auto'"``, quotes included, which a naive UI consumer would then
+    # inject as-is into a buffer, a <select>'s options, and eventually an
+    # argline — the exact vocabulary-drift this project forbids reproducing
+    # client-side. This is a RESPONSE-shape decode only: the characteristics
+    # store below still caches the raw repr (option_catalog is untouched),
+    # and _resolve/get_effective keep computing engine_defaults from that
+    # same raw cache via their own call to _decode_harvested_default.
+    options = {
+        name: {**option, "default": _catalog_default(option.get("default"))}
+        for name, option in value["options"].items()
+    }
+    return {**value, "options": options, "harvested_ts": catalog.get("derived_ts")}
 
 
 @router.post("/settings/harvest/{node}/{engine}")
@@ -365,6 +382,26 @@ def _decode_harvested_default(raw):
     if decoded is False or decoded is None or decoded in ([], {}):
         return _DROP
     return decoded
+
+
+def _catalog_default(raw):
+    """The wire-facing decode of one harvested option's default, for
+    ``GET /settings/catalog`` (see this module's docstring, "Engine-default
+    decoding"). Same repr()-decode as ``_decode_harvested_default``, but
+    answering a different question: ``_resolve`` asks "does this belong in
+    the resolved engine_defaults layer" (dropping the false/absent-flag
+    shapes entirely); this asks "what should the UI show or prefill",
+    where those same shapes are answered by JSON ``null`` — there IS no
+    default worth prefilling, but the key stays present with a value the
+    UI can render nothing for, rather than vanishing from the option's
+    shape. ``raw`` being ``None`` (a fixture/test catalog with no repr at
+    all, as opposed to the literal repr string ``"None"``) is the same
+    "nothing to decode" case and also becomes ``null``.
+    """
+    if raw is None:
+        return None
+    decoded = _decode_harvested_default(raw)
+    return None if decoded is _DROP else decoded
 
 
 def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:
