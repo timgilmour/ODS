@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  getCatalog,
   getSparkStatus,
   getState,
   getStorageState,
@@ -11,6 +12,7 @@ import Board from "./components/Board";
 import EventsView from "./components/EventsView";
 import PolicyModal from "./components/PolicyModal";
 import SetBuilder from "./components/SetBuilder";
+import SettingsModal, { type SettingsTarget } from "./components/SettingsModal";
 import SetStrip from "./components/SetStrip";
 import StorageView from "./components/StorageView";
 import { labels, messages } from "./model/messages";
@@ -34,6 +36,12 @@ export default function App() {
   const [view, setView] = useState<View>("deck");
   const [modalOpen, setModalOpen] = useState(false);
   const [policyModalOpen, setPolicyModalOpen] = useState(false);
+  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | null>(null);
+  // nodeId -> engine for the nodes that have an engine-level Settings entry.
+  // Presence of a harvested option catalog IS the configurability signal —
+  // there is no separate "configurable" flag anywhere in the backend, by
+  // design — so this is a probe, not a lookup.
+  const [engineSettingsNodes, setEngineSettingsNodes] = useState<Record<string, string>>({});
   // Bumped on every poll tick and after any mutating action; EventsView
   // re-fetches its own window whenever this changes (see EventsView.tsx).
   const [refreshTrigger, setRefreshTrigger] = useState(0);
@@ -92,13 +100,35 @@ export default function App() {
   }, [refreshState]);
 
   // Poll every 3s; paused entirely while an apply confirmation modal (Deck's
-  // SetStrip, SetBuilder's own preview, or the policy editor) is open.
+  // SetStrip, SetBuilder's own preview, the policy editor, or the settings
+  // panel) is open. Settings joins the list for the same reason the others
+  // are on it: it holds uncommitted operator edits, and a refresh underneath
+  // one is a re-render of the surface being typed into.
   useEffect(() => {
-    if (modalOpen || policyModalOpen) return;
+    if (modalOpen || policyModalOpen || settingsTarget) return;
     refreshAll();
     const id = setInterval(refreshAll, POLL_MS);
     return () => clearInterval(id);
-  }, [modalOpen, policyModalOpen, refreshAll]);
+  }, [modalOpen, policyModalOpen, settingsTarget, refreshAll]);
+
+  // One probe, once, on mount. `(spark_node_id(), "vllm")` is the only
+  // configurable engine pair the deck wires today (app/main.py:243-244 builds
+  // `configurable_engines` from exactly that one route), and a non-null
+  // catalog for it is what earns the node its Engine settings button. A null
+  // catalog (never harvested) or a failed probe leaves the map empty, so the
+  // button is absent rather than present-and-broken.
+  useEffect(() => {
+    let alive = true;
+    getCatalog(SPARK_NODE_ID, "vllm").then(
+      (catalog) => {
+        if (alive && catalog) setEngineSettingsNodes({ [SPARK_NODE_ID]: "vllm" });
+      },
+      () => {},
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Resident GGUFs sitting on a location that isn't lemonade's hot mount —
   // i.e. cold from lemonade's point of view. Defaults to [] so the lemonade
@@ -166,6 +196,8 @@ export default function App() {
               // error belongs to. Board stays node-agnostic: it just looks
               // each node up by id.
               nodeErrors={{ [SPARK_NODE_ID]: sparkError }}
+              engineSettingsNodes={engineSettingsNodes}
+              onOpenSettings={setSettingsTarget}
               onRefresh={refreshAll}
             />
           )}
@@ -201,6 +233,14 @@ export default function App() {
           policy={state.policy}
           storageState={storageState}
           onClose={() => setPolicyModalOpen(false)}
+          onSaved={refreshAll}
+        />
+      )}
+
+      {settingsTarget && (
+        <SettingsModal
+          target={settingsTarget}
+          onClose={() => setSettingsTarget(null)}
           onSaved={refreshAll}
         />
       )}

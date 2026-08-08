@@ -3,6 +3,7 @@ import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import type { DeckNode } from "../model/nodes";
 import { applyOrder, loadOrder, reorder, saveOrder } from "../model/nodeOrder";
 import NodeCard from "./NodeCard";
+import type { SettingsTarget } from "./SettingsModal";
 
 /** Nodes stack vertically, arbitrary count. Resources within a node lay out
  * as a responsive grid, so a two-GPU box reads as two columns and a
@@ -15,6 +16,8 @@ export default function Board({
   coldGgufs,
   spark,
   nodeErrors,
+  engineSettingsNodes,
+  onOpenSettings,
   onRefresh,
 }: {
   nodes: DeckNode[];
@@ -27,6 +30,12 @@ export default function Board({
    * reachability verdict in `node.status`. A plain map rather than a
    * spark-shaped prop, so a real node registry needs no change here. */
   nodeErrors: Record<string, string | null>;
+  /** nodeId -> engine, for the nodes whose engine is configurable (App holds
+   * the catalog probe that decides that). Same shape and same reason as
+   * `nodeErrors`: Board stays node-agnostic and just looks each node up by
+   * id, so a real node registry needs no change here. */
+  engineSettingsNodes: Record<string, string>;
+  onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
 }) {
   const [order, setOrder] = useState<string[]>(loadOrder);
@@ -66,6 +75,8 @@ export default function Board({
             coldGgufs={coldGgufs}
             spark={spark}
             fetchError={nodeErrors[node.id] ?? null}
+            settingsEngine={engineSettingsNodes[node.id] ?? null}
+            onOpenSettings={onOpenSettings}
             onRefresh={onRefresh}
           />
         </div>

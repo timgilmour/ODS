@@ -1181,3 +1181,220 @@ input[type="password"] {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .move-route-arrow { color: var(--text-dim); }
+
+/* --- Provenance dot (phase 3) -------------------------------------------- */
+/* One dot per ladder layer (app/ladder.py:48). The two DERIVED layers share
+   the dim grey deliberately — see ProvenanceDot.tsx. */
+.prov-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dim);
+}
+.prov-engine_defaults,
+.prov-checkpoint_recommendations { background: var(--text-dim); }
+.prov-engine { background: var(--chip-loaded-fg); }
+.prov-model { background: var(--chip-idle-fg); }
+.prov-engine_model { background: var(--accent); }
+
+/* --- Settings panel (phase 3) -------------------------------------------- */
+.settings-loading { color: var(--text-dim); }
+
+.settings-scopes {
+  display: flex;
+  gap: var(--space);
+  margin-bottom: calc(var(--space) * 2);
+}
+
+.settings-section { margin-bottom: calc(var(--space) * 2); }
+
+.settings-section-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space);
+  margin: 0 0 var(--space);
+  font-size: 0.8em;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* The rule the heading states — declared ships, derived does not — is the
+   whole reason the panel has two sections, so it is text next to the
+   heading rather than a tooltip nobody opens. */
+.settings-section-hint {
+  letter-spacing: normal;
+  font-size: 0.95em;
+  text-transform: none;
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+
+.settings-empty { color: var(--text-dim); }
+
+.settings-chips {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+}
+
+.settings-chip-wrap { position: relative; }
+
+.settings-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  padding: calc(var(--space) / 2) var(--space);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+/* The dot is its own hit target (the provenance popover), so it gets a
+   button's padding stripped rather than a nested-button layout. */
+.settings-chip-dot {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  line-height: 0;
+}
+.settings-chip-dot:hover:not(:disabled) { border-color: transparent; }
+
+.settings-chip-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+
+.settings-chip-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.settings-chip-value:hover:not(:disabled) { border-color: var(--accent); }
+
+.settings-chip-value-static {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.settings-chip-badge {
+  font-size: 0.8em;
+  color: var(--text-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.settings-chip-x {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+
+/* Amber, per decision 5: a validate_settings warning wants a decision from
+   the operator, it has not failed anything. The warning TEXT below the chip
+   carries the same fact, so colour is never the only signal. */
+.settings-chip-warn { border-color: var(--meter-amber); }
+.settings-chip-warning {
+  color: var(--meter-amber);
+  font-size: 0.9em;
+  margin: calc(var(--space) / 2) 0 0 calc(var(--space) * 2);
+}
+
+.settings-chip-pending { border-color: var(--accent); }
+.settings-chip-removing { opacity: 0.6; }
+.settings-chip-removing .settings-chip-name { text-decoration: line-through; }
+
+.settings-chips-applied .settings-chip { opacity: 0.7; }
+
+.settings-editor { display: flex; align-items: center; }
+.settings-editor-input {
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  min-width: 16ch;
+}
+
+.settings-popover {
+  position: absolute;
+  z-index: 1;
+  top: 100%;
+  left: 0;
+  margin-top: calc(var(--space) / 2);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 2);
+  align-items: flex-start;
+  max-width: 44ch;
+  padding: var(--space);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+}
+.settings-popover-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+}
+.settings-popover-note { color: var(--text-dim); font-size: 0.9em; }
+
+.settings-actions {
+  display: flex;
+  gap: var(--space);
+  margin-bottom: calc(var(--space) * 2);
+}
+
+.settings-warnings {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--meter-amber);
+  font-size: 0.9em;
+}
+
+/* The server-rendered declared-only command line. Wraps rather than
+   scrolling: an operator reading a 274-flag line needs all of it. */
+.argline-preview {
+  margin: 0;
+  padding: var(--space);
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.settings-note {
+  color: var(--text-dim);
+  font-size: 0.9em;
+  margin-top: calc(var(--space) / 2);
+}
+
+.settings-import {
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: var(--space);
+  width: 100%;
+  resize: vertical;
+}

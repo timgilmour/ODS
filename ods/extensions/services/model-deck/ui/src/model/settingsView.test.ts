@@ -4,10 +4,13 @@ import {
   buildChips,
   bufferRemove,
   bufferSet,
+  displayValue,
   emptyBuffer,
   isDirty,
   LAYER_FOR_KIND,
   mergedArgsForPreview,
+  parseValueText,
+  POSITIONAL_KEY,
   scopeKeys,
   toPuts,
 } from "./settingsView";
@@ -272,5 +275,44 @@ describe("mergedArgsForPreview", () => {
     const b = bufferSet(emptyBuffer, "engines", "enable-chunked-prefill", true);
     const merged = mergedArgsForPreview(resolved, b);
     expect(merged["enable-chunked-prefill"]).toBe(true);
+  });
+});
+
+describe("displayValue / parseValueText", () => {
+  it("renders a bare flag as empty text — the flag's presence IS the value", () => {
+    // app/argline.py renders `value is True` as the flag alone; showing
+    // "true" next to it would invent a CLI argument that never gets sent.
+    expect(displayValue(true)).toBe("");
+  });
+
+  it("joins a list on spaces, matching render_argline's multi-value form", () => {
+    expect(displayValue(["a", "b", "c"])).toBe("a b c");
+  });
+
+  it("passes a scalar through verbatim", () => {
+    expect(displayValue("262144")).toBe("262144");
+  });
+
+  it("splits typed text on any run of whitespace", () => {
+    expect(parseValueText("served-model-name", "  a   b\tc ")).toEqual(["a", "b", "c"]);
+  });
+
+  it("collapses a one-token list to a scalar, as the store would on write", () => {
+    expect(parseValueText("served-model-name", "solo")).toBe("solo");
+  });
+
+  it("keeps _positional list-shaped even for a single token", () => {
+    // app/argline.py's F1 fix: a scalar _positional makes render_argline
+    // iterate the string character by character ("s e r v e").
+    expect(parseValueText(POSITIONAL_KEY, "serve")).toEqual(["serve"]);
+  });
+
+  it("round-trips a multi-token positional", () => {
+    expect(parseValueText(POSITIONAL_KEY, "serve /model")).toEqual(["serve", "/model"]);
+  });
+
+  it("makes displayValue and parseValueText inverses for a multi-value flag", () => {
+    const value = ["a", "b"];
+    expect(parseValueText("served-model-name", displayValue(value))).toEqual(value);
   });
 });

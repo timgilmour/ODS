@@ -12,6 +12,8 @@
  * humanized ages.
  */
 
+import type { Layer, SettingsKind } from "../api";
+
 export type Tone = "neutral" | "warning" | "danger";
 
 export interface Message {
@@ -171,6 +173,45 @@ export const messages = {
     title: "Over budget",
     body: "loads may fail.",
   }),
+
+  // Settings panel (phase 3) ------------------------------------------------
+
+  settingsLoadFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Could not load settings",
+    body: detail,
+  }),
+
+  // Danger, and it names the one thing the operator cannot see from here:
+  // Save walks one PUT per touched scope document sequentially, and the deck
+  // has no transaction across them (app/routers/settings.py:put_settings
+  // writes a single scope), so a failure part-way through leaves the earlier
+  // scopes already written. Saying "nothing was saved" would be a guess, and
+  // the wrong one.
+  settingsSaveFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Save failed",
+    body: `${detail} — earlier scopes in this save may already have been written; reopen this panel to see what landed.`,
+  }),
+
+  // The preview is server-rendered, so a failed render means the command
+  // line on screen is the LAST GOOD one, not the current buffer. That
+  // staleness is the fact worth reporting; the panel keeps showing the old
+  // text rather than blanking it.
+  settingsPreviewFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Command preview is out of date",
+    body: detail,
+  }),
+
+  // app/argline.py's parse never raises, so this is a transport/HTTP failure
+  // of POST /settings/preview rather than "your text is malformed" — the
+  // copy must not blame the operator's typing for a server that answered 500.
+  settingsImportFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Could not read that command line",
+    body: detail,
+  }),
 };
 
 /** Short labels — control text, badges, captions and the `title` tooltips
@@ -305,6 +346,87 @@ export const labels = {
   saveDraft: "Save draft",
   previewSteps: "Preview steps",
   place: "Place",
+
+  // Settings panel (phase 3) ------------------------------------------------
+
+  /** One name per ladder layer — the five entries of app/ladder.py:48's
+   * `LAYERS` tuple ("engine_defaults", "checkpoint_recommendations",
+   * "engine", "model", "engine_model"), mirrored as `Layer` in api.ts. Each
+   * name says both WHERE the value came from and, for the two derived
+   * layers, that nothing declared it — which is the whole reason those two
+   * are read-only and never shipped as flags
+   * (app/routers/settings.py:_declared_only). */
+  layerName: (layer: Layer): string =>
+    ({
+      engine_defaults: "engine default — harvested from the engine, not declared",
+      checkpoint_recommendations:
+        "checkpoint recommendation — from the model's generation_config.json, not declared",
+      engine: "declared for this engine on this node",
+      model: "declared for this model, on every node",
+      engine_model: "declared for this model on this engine — the most specific scope",
+    })[layer],
+
+  /** The three write kinds — exactly app/settings_store.py:110's `KINDS`
+   * ("engines", "models", "engine_models"), mirrored as `SettingsKind`.
+   * Labelled by what each one SCOPES rather than by its store name, because
+   * the store name is an implementation detail an operator never types. */
+  kindName: (kind: SettingsKind): string =>
+    ({
+      engines: "ENGINE",
+      models: "MODEL",
+      engine_models: "ENGINE × MODEL",
+    })[kind],
+
+  settingsTitle: (engine: string, node: string) => `Settings — ${engine} on ${node}`,
+  writeScope: "write scope",
+  needsModelContext:
+    "no model in context — open Settings from a model to write these scopes",
+
+  /** Section headings. DECLARED is what the deck writes and ships; APPLIED
+   * BY ENGINE is the two derived layers, which the deck shows but never
+   * re-asserts back at the engine as flags
+   * (app/routers/settings.py:get_effective's declared-only argline rule). */
+  declaredSection: "DECLARED",
+  declaredSectionHint: "the only values shipped to the engine",
+  appliedSection: "APPLIED BY ENGINE",
+  appliedSectionHint:
+    "the engine's own defaults and the checkpoint's recommendations — shown for context, never re-asserted as flags",
+  nothingDeclared: "nothing declared at any scope",
+  nothingApplied: "no harvested defaults or checkpoint recommendations",
+
+  editOption: "edit",
+  removeOverride: "Remove",
+  removeOverrideTitle: "remove this key from the selected scope",
+  revertToInherited: "Revert to inherited",
+  /** /effective resolves ONE winner per key (app/ladder.py:resolve_settings
+   * keeps a single entry per key), so the panel can honestly show the
+   * winning layer and nothing below it. */
+  winningLayerOnly: "the winning layer — lower layers are not resolved server-side",
+  provenance: "provenance",
+  cannotUnsetHere:
+    "not declared at the selected scope — switch scopes to remove it where it is set",
+  unsavedBadge: "unsaved",
+  willBeRemovedBadge: "will be removed",
+  shadowedBadge: "shadowed by a more specific scope",
+  positionalName: "positional",
+  positionalTitle:
+    "the command's leading positional tokens (app/argline.py's _positional) — not a flag",
+
+  addOption: "+ Add option",
+  addOptionTitle: "browse this engine's harvested option catalog — not wired yet",
+  importArgline: "Import argline…",
+  importArglineTitle: "Import argline",
+  importArglinePlaceholder: "--max-model-len 131072 --enable-auto-tool-choice",
+  importArglineHint:
+    "parsed server-side and merged into the selected scope as pending edits — nothing is saved until Save",
+  importApply: "Apply",
+
+  commandPreview: "Command preview",
+  appliesOnReload: "changes apply on reload — saving records intent, it does not restart anything",
+  warningsHeading: "warnings",
+
+  engineSettings: "Engine settings",
+  engineSettingsTitle: "edit the engine-scope flags for this node",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

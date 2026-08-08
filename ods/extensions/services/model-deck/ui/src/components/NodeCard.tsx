@@ -1,9 +1,10 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
-import { humanizeAge, messages } from "../model/messages";
+import { humanizeAge, labels, messages } from "../model/messages";
 import type { DeckNode } from "../model/nodes";
 import Banner from "../ui/Banner";
 import Panel from "../ui/Panel";
 import ResourcePanel from "./ResourcePanel";
+import type { SettingsTarget } from "./SettingsModal";
 
 const DOT: Record<DeckNode["status"], string> = {
   reachable: "ui-pill-good",
@@ -19,6 +20,8 @@ export default function NodeCard({
   coldGgufs,
   spark,
   fetchError,
+  settingsEngine,
+  onOpenSettings,
   onRefresh,
 }: {
   node: DeckNode;
@@ -31,6 +34,12 @@ export default function NodeCard({
    * verdict, and disagreeing with it is exactly the point — everything below
    * is as old as the last successful poll. */
   fetchError: string | null;
+  /** The node's configurable engine, or null when it has none. Non-null is
+   * what puts the Engine settings button in the header; App decided it from
+   * a catalog probe, because the presence of a harvested option catalog IS
+   * the configurability signal (no invented flag anywhere in the payload). */
+  settingsEngine: string | null;
+  onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
 }) {
   const unreachable = node.status === "unreachable";
@@ -54,6 +63,23 @@ export default function NodeCard({
             <span className="node-age">{messages.lastSeen(age).title}</span>
           )}
         </>
+      }
+      actions={
+        // Engine-level entry: no model in context, so the panel opens with
+        // the two model-scoped tabs disabled. Rendered even while the node is
+        // unreachable — settings are the deck's declared intent, which is
+        // exactly what an operator wants to read when a node stops answering.
+        settingsEngine ? (
+          <button
+            type="button"
+            title={labels.engineSettingsTitle}
+            onClick={() =>
+              onOpenSettings({ node: node.id, engine: settingsEngine, model: null })
+            }
+          >
+            {labels.engineSettings}
+          </button>
+        ) : undefined
       }
     >
       {fetchError && <Banner message={messages.nodeFetchFailed(node.label, fetchError)} />}

@@ -15,6 +15,47 @@
 import type { ArgValue, Layer, ResolvedEntry, SettingsKind } from "../api";
 
 // ---------------------------------------------------------------------------
+// Value text — the one place an ArgValue becomes readable text and back
+// ---------------------------------------------------------------------------
+
+/** app/argline.py's `POSITIONAL_KEY` — the reserved key holding a command's
+ * leading positional tokens ("serve /model" leads every adopted vLLM
+ * profile). It is not a flag, and app/argline.py keeps its value
+ * `list[str]`-shaped ALWAYS (the F1 fix: collapsing a one-element positional
+ * to a scalar makes `render_argline` iterate the string character by
+ * character), which is the one exception `parseValueText` below encodes. */
+export const POSITIONAL_KEY = "_positional";
+
+/** An `ArgValue` as an operator reads it.
+ *
+ * `true` is the bare-flag value end-to-end — app/argline.py renders `value is
+ * True` as the flag alone, and `parse_argline` produces `True` for a flag
+ * with no following token — so it renders as empty text: there is no `=` and
+ * no value to show, only the flag's presence. A list joins on spaces because
+ * that is exactly how `render_argline` emits a multi-value flag. */
+export function displayValue(value: ArgValue): string {
+  if (value === true) return "";
+  if (value === false) return String(value);
+  if (Array.isArray(value)) return value.join(" ");
+  return value;
+}
+
+/** The inverse, for the panel's list editor: whitespace-separated tokens,
+ * the same split `parse_argline` performs (via shlex) on a rendered line.
+ *
+ * A one-token list collapses to a scalar because app/argline.py's ruled
+ * normalization (`normalize_args_map`, singleton-list axis) does exactly that
+ * on write anyway — EXCEPT for `POSITIONAL_KEY`, which is exempt from that
+ * axis backend-side and so is kept list-shaped here too, rather than relying
+ * on the store to re-wrap what this module flattened. */
+export function parseValueText(name: string, text: string): ArgValue {
+  const parts = text.trim().split(/\s+/).filter((p) => p !== "");
+  if (name === POSITIONAL_KEY) return parts;
+  if (parts.length === 1) return parts[0];
+  return parts;
+}
+
+// ---------------------------------------------------------------------------
 // Scope keys
 // ---------------------------------------------------------------------------
 
