@@ -21,6 +21,37 @@ def test_undetermined_is_not_unavailable():
     assert updates.UNDETERMINED != updates.UNAVAILABLE
 
 
+def test_rollup_normalizes_an_unrecognized_status_to_unavailable():
+    # provenance.json can be corrupt or hand-edited; rollup must never fail
+    # a tick over it, and must never leak a non-vocabulary value out either.
+    assert updates.rollup(["frobnicate"]) == updates.UNAVAILABLE
+
+
+def test_rollup_normalization_is_order_independent():
+    # Same tied severity either way -- the result must not depend on which
+    # element max() happens to see first.
+    assert updates.rollup(["frobnicate", updates.UNAVAILABLE]) == updates.UNAVAILABLE
+    assert updates.rollup([updates.UNAVAILABLE, "frobnicate"]) == updates.UNAVAILABLE
+
+
+def test_rollup_garbage_status_is_not_masked_by_a_healthy_one():
+    assert updates.rollup([updates.CURRENT, "frobnicate"]) == updates.UNAVAILABLE
+
+
+def test_checks_and_statuses_are_pinned():
+    # Guard the vocabulary itself: an accidental edit here should fail this
+    # test, not surface downstream as a silent behavior change.
+    assert updates.CHECKS == ("oci_channel", "oci_tags", "git_compare", "git_tags")
+    assert updates.STATUSES == ("current", "available", "undetermined", "unavailable")
+
+
+def test_rollup_full_chain_is_worst_regardless_of_order():
+    all_statuses = [updates.CURRENT, updates.AVAILABLE,
+                    updates.UNDETERMINED, updates.UNAVAILABLE]
+    assert updates.rollup(all_statuses) == updates.UNAVAILABLE
+    assert updates.rollup(list(reversed(all_statuses))) == updates.UNAVAILABLE
+
+
 def test_validate_watch_accepts_a_git_compare_source():
     updates.validate_watch({
         "id": "upstream", "check": "git_compare", "label": "HIPFIRE_REF",

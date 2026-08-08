@@ -53,7 +53,21 @@ def validate_watch(source: dict) -> None:
 def rollup(source_statuses: list[str]) -> str:
     """The worst status among `source_statuses`; UNAVAILABLE when empty --
     an artifact with nothing to watch was never checked, which is not the
-    same as being current."""
+    same as being current.
+
+    Always returns a member of STATUSES. A value that is not one of the four
+    (e.g. corrupt or hand-edited provenance.json) normalizes to UNAVAILABLE
+    rather than being raised or returned verbatim: this is called from the
+    update-check pass over stored data, and nothing about update-checking may
+    fail a tick, block a swap, or touch intent. An unreadable status
+    degrading to "we do not know" is both safe and honest -- treating it as
+    the worst case is exactly what UNAVAILABLE already means. Normalizing
+    before ranking (rather than defaulting only the missing severity) also
+    keeps the result order-independent: an unrecognized value and a literal
+    "unavailable" now compare equal, so tied inputs no longer depend on which
+    one happened to come first in the list.
+    """
     if not source_statuses:
         return UNAVAILABLE
-    return max(source_statuses, key=lambda s: _SEVERITY.get(s, 3))
+    normalized = (s if s in STATUSES else UNAVAILABLE for s in source_statuses)
+    return max(normalized, key=lambda s: _SEVERITY[s])
