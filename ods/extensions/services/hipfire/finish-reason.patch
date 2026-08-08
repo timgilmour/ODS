@@ -1,0 +1,151 @@
+diff --git a/cli/finish_reason.test.ts b/cli/finish_reason.test.ts
+new file mode 100644
+index 00000000..7d8a4aef
+--- /dev/null
++++ b/cli/finish_reason.test.ts
+@@ -0,0 +1,64 @@
++// Bun-native test for the terminal finish_reason selection.
++//
++// Regression: with HIPFIRE_QWEN35_GRAMMAR=0 the daemon's own tool-call
++// extraction comes back empty, so its `done` envelope reports
++// finish_reason="stop". The CLI then successfully recovers the call from
++// text (parseToolCalls, the #111 stopgap), streams tool_call deltas — and
++// used to close the stream with `daemonFR ?? "tool_calls"`, which takes the
++// daemon's stale "stop" because it is non-null. Clients received tool calls
++// alongside finish_reason="stop".
++//
++// The daemon's field answers "what did I extract"; it is not "what is this
++// response". Once we have emitted tool_call deltas the response IS a
++// tool-call response, and the only daemon verdict that may override that is
++// "length" — a call truncated by the token budget really is a length stop.
++// That precedence is the daemon's own documented rule
++// (crates/hipfire-runtime/examples/daemon.rs: "Length-cap wins over
++// tool_calls").
++//
++// Run: bun test cli/finish_reason.test.ts
++
++import { test, expect } from "bun:test";
++import { terminalFinishReason } from "./finish_reason";
++
++test("daemon says stop but we emitted tool calls -> tool_calls", () => {
++  // The live bug, exactly.
++  expect(terminalFinishReason("stop", true)).toBe("tool_calls");
++});
++
++test("daemon says length and we emitted tool calls -> length wins", () => {
++  // A tool call cut off by max_tokens is a length stop; the client needs to
++  // tell that apart from a complete call and retry with a bigger budget.
++  expect(terminalFinishReason("length", true)).toBe("length");
++});
++
++test("daemon reported nothing and we emitted tool calls -> tool_calls", () => {
++  // Older daemon builds omit the field entirely.
++  expect(terminalFinishReason(null, true)).toBe("tool_calls");
++  expect(terminalFinishReason(undefined, true)).toBe("tool_calls");
++});
++
++test("daemon agrees we emitted tool calls -> tool_calls", () => {
++  expect(terminalFinishReason("tool_calls", true)).toBe("tool_calls");
++});
++
++test("no tool calls emitted -> stop", () => {
++  expect(terminalFinishReason("stop", false)).toBe("stop");
++  expect(terminalFinishReason(null, false)).toBe("stop");
++});
++
++test("no tool calls emitted but daemon says length -> length", () => {
++  expect(terminalFinishReason("length", false)).toBe("length");
++});
++
++test("never claims tool_calls when we emitted none", () => {
++  // The inverse of the bug: we may only report tool_calls when tool_calls
++  // actually went out on the wire, whatever the daemon believes.
++  expect(terminalFinishReason("tool_calls", false)).toBe("stop");
++});
++
++test("an unrecognised daemon value is clamped, not passed through", () => {
++  // Only stop | length | tool_calls are OpenAI-valid.
++  expect(terminalFinishReason("banana", false)).toBe("stop");
++  expect(terminalFinishReason("banana", true)).toBe("tool_calls");
++});
+diff --git a/cli/finish_reason.ts b/cli/finish_reason.ts
+new file mode 100644
+index 00000000..5a7f99c8
+--- /dev/null
++++ b/cli/finish_reason.ts
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright (c) 2026 Kaden Schutt
++
++//! Terminal `finish_reason` selection for the OpenAI-compatible stream.
++//
++// Side-effect free and dependency-free on purpose: index.ts has top-level
++// side effects, so anything defined there is unreachable from a test. The
++// existing cli/parse_tool_calls.test.ts works around that by DUPLICATING the
++// parser under a "keep in sync" comment — a second copy that can drift
++// silently. This module exists so the rule below has exactly one home.
++
++export type FinishReason = "stop" | "length" | "tool_calls";
++
++/**
++ * Decide the `finish_reason` for the chunk that closes a chat-completion
++ * stream.
++ *
++ * `daemonFinishReason` is what the Rust daemon reported in its `done`
++ * envelope, which answers "what did *I* extract from the generated text" —
++ * NOT "what is this response". The distinction is load-bearing: with the
++ * qwen35 grammar disabled the daemon's own extraction finds nothing and it
++ * reports `stop`, while the CLI still recovers the call from text and
++ * streams tool_call deltas. Preferring the daemon there (`daemonFR ??
++ * "tool_calls"`) shipped tool calls to clients under `finish_reason: "stop"`.
++ *
++ * So: once tool calls have gone out on the wire, the response is a tool-call
++ * response. The single exception is `length` — a call truncated by the token
++ * budget really is a length stop, and the client needs to tell that apart
++ * from a complete call so it can retry with a larger budget. That precedence
++ * mirrors the daemon's own documented rule ("Length-cap wins over
++ * tool_calls", crates/hipfire-runtime/examples/daemon.rs).
++ *
++ * The converse also holds and is enforced here: we never claim `tool_calls`
++ * when none were emitted, whatever the daemon believes. Any value outside
++ * the OpenAI-valid set is clamped rather than passed through.
++ */
++export function terminalFinishReason(
++  daemonFinishReason: string | null | undefined,
++  emittedToolCalls: boolean,
++): FinishReason {
++  if (daemonFinishReason === "length") {
++    return "length";
++  }
++  return emittedToolCalls ? "tool_calls" : "stop";
++}
+diff --git a/cli/index.ts b/cli/index.ts
+index 50a75565..68bc99fa 100644
+--- a/cli/index.ts
++++ b/cli/index.ts
+@@ -8,6 +8,7 @@
+ //   hipfire sidecar-gen <model>       → generate TriAttention calibration sidecar
+ 
+ import { spawn } from "bun";
++import { terminalFinishReason } from "./finish_reason";
+ import { existsSync, readdirSync, statSync, unlinkSync, mkdirSync, copyFileSync, cpSync, rmSync, renameSync, readFileSync, writeFileSync } from "fs";
+ import { join, resolve, basename, dirname } from "path";
+ import { homedir } from "os";
+@@ -4418,7 +4419,7 @@ async function serve(port: number, host: string) {
+                     if (structuredToolCallsEmitted) {
+                       ctrl.enqueue(enc.encode(`data: ${JSON.stringify({
+                         id: reqId, object: "chat.completion.chunk", created, model: modelName,
+-                        choices: [{ index: 0, delta: {}, finish_reason: daemonFR ?? "tool_calls" }],
++                        choices: [{ index: 0, delta: {}, finish_reason: terminalFinishReason(daemonFR, true) }],
+                         ...includeUsage && { usage: buildUsage(msg, completionTokens) },
+                         timings: buildTimings(msg),
+                       })}\n\n`));
+@@ -4452,7 +4453,7 @@ async function serve(port: number, host: string) {
+                         }
+                         ctrl.enqueue(enc.encode(`data: ${JSON.stringify({
+                           id: reqId, object: "chat.completion.chunk", created, model: modelName,
+-                          choices: [{ index: 0, delta: {}, finish_reason: daemonFR ?? "tool_calls" }],
++                          choices: [{ index: 0, delta: {}, finish_reason: terminalFinishReason(daemonFR, true) }],
+                           ...includeUsage && { usage: buildUsage(msg, completionTokens) },
+                           timings: buildTimings(msg),
+                         })}\n\n`));

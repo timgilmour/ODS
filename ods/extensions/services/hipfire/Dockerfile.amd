@@ -99,6 +99,29 @@ COPY --from=builder /src/cli /opt/hipfire/.hipfire/cli
 
 RUN cd /opt/hipfire/.hipfire/cli && bun install --frozen-lockfile
 
+# ── Local patch: terminal finish_reason ─────────────────────────────
+#
+# The CLI closed a tool-call stream with `daemonFR ?? "tool_calls"`. The
+# daemon's field answers "what did I extract from the text", not "what is
+# this response" — and with HIPFIRE_QWEN35_GRAMMAR=0 its own extraction
+# comes back empty, so it reports "stop". That is non-null, so `??` took
+# it, and clients received tool_call deltas under finish_reason "stop".
+# omp tolerates that; anything checking `=== "tool_calls"` strictly does
+# not. See ~/notes/reports/2026-08-08.md.
+#
+# Applied as a PATCH rather than a copied index.ts on purpose: if upstream
+# ever changes these lines, `patch` exits non-zero and the build FAILS
+# LOUDLY. A whole-file copy would silently revert the fix on the next
+# HIPFIRE_REF bump — the same silent-revert trap that nearly ate the
+# HIPFIRE_QWEN35_GRAMMAR line when it lived only in the un-versioned ~/ods.
+#
+# Applied after `bun install` so the dependency layer stays cached, and in
+# the runtime stage only, so neither the Rust build nor the 450-kernel
+# compile is invalidated.
+COPY finish-reason.patch /tmp/finish-reason.patch
+RUN cd /opt/hipfire/.hipfire && patch -p1 < /tmp/finish-reason.patch \
+ && rm /tmp/finish-reason.patch
+
 # Upstream's own wrapper: probes for bun, then runs the TS CLI.
 RUN printf '%s\n' \
       '#!/bin/bash' \
