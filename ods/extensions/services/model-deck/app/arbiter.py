@@ -445,6 +445,11 @@ def harvest_catalog_pair(engine_exec, characteristics_store, log, node, engine,
         # parseable catalog -- e.g. a probe crash inside the container.
         # Without this, "never harvested" and "harvest is broken" look
         # identical from the outside: no catalog, no error, forever.
+        # Deduped (_DEDUP_KINDS) on the Watcher path -- a persistently
+        # broken probe would otherwise re-log every derive_interval_s --
+        # but NOT on the manual route, whose log_event is undeduped by
+        # design (see harvest_now): a human pressing Refresh twice wants
+        # two events, not the second one silently swallowed.
         log("harvest-empty", {"key": key})
         return {"outcome": "empty"}
 

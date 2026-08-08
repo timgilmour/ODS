@@ -1477,3 +1477,54 @@ def test_build_watcher_stashes_engine_exec_on_the_shared_deck(tmp_path, monkeypa
     assert deck["configurable_engines"] == [(spark_node_id(), "vllm")]
     assert isinstance(deck["engine_exec"], EngineExecRouter)
     assert deck["engine_exec"] is watcher._engine_exec
+
+
+def test_build_deck_wires_engine_exec_without_build_watcher(tmp_path, monkeypatch):
+    """FINDING 1 fix (task 3 review, 2026-08-08): deck["engine_exec"]/
+    deck["configurable_engines"] used to be stashed only inside
+    _build_watcher -- which lifespan() SKIPS ENTIRELY under
+    MODEL_DECK_NO_WATCHER=1 (main.py's own documented "bare-uvicorn runs
+    that don't want the background loop" support). In that mode both keys
+    were absent from app.state.deck, and since harvest_now checks the pair
+    before the exec, POST /settings/harvest/... always 422'd "not a
+    configurable pair" even with a real spark configured -- misdiagnosing
+    "watcher never wired" as "pair not configured". _build_deck runs in
+    EVERY mode (create_app() always calls it; _build_watcher does not), so
+    it must wire both keys itself -- proven here by calling _build_deck
+    alone, _build_watcher never invoked at all."""
+    from app.engines.docker_ctl import EngineExecRouter
+    from app.main import _build_deck
+    from app.observe import spark_node_id
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    _spark_env(monkeypatch)
+    settings = Settings()
+
+    deck = _build_deck(settings)
+
+    assert deck["configurable_engines"] == [(spark_node_id(), "vllm")]
+    assert isinstance(deck["engine_exec"], EngineExecRouter)
+
+
+def test_no_watcher_app_state_deck_still_has_engine_exec_when_spark_is_configured(
+    tmp_path, monkeypatch
+):
+    """Symptom-level repro of the FINDING 1 fix above: a fully-assembled
+    create_app() under MODEL_DECK_NO_WATCHER=1 (lifespan never calls
+    _build_watcher) must still expose engine_exec/configurable_engines on
+    app.state.deck when spark is configured -- the manual force-harvest
+    route (app.routers.settings.harvest_now) reads off
+    request.app.state.deck, not off any watcher instance."""
+    from app.engines.docker_ctl import EngineExecRouter
+    from app.main import create_app
+    from app.observe import spark_node_id
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    _spark_env(monkeypatch)
+
+    app = create_app()
+
+    assert app.state.deck["configurable_engines"] == [(spark_node_id(), "vllm")]
+    assert isinstance(app.state.deck["engine_exec"], EngineExecRouter)

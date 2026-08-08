@@ -210,22 +210,8 @@ def _build_deck(settings: Settings) -> dict:
 
     deck["spark_observer"] = SparkObserver(lambda: deck["spark"])
 
-    _deck_by_settings_id[id(settings)] = (settings, deck)
-    return deck
-
-
-def _build_watcher(settings: Settings):
-    """Construct the arbiter Watcher from the same shared deck _build_deck
-    hands the HTTP routers (see the cache comment above) — real clients +
-    stores + World, wired from Settings."""
-    from app.arbiter import Watcher
-    from app.engines.docker_ctl import EngineExecRouter
-    from app.engines.spark import SparkCatalogExec
-    from app.observe import spark_node_id
-
-    deck = _build_deck(settings)
-
-    # Catalog harvest (app.arbiter.Watcher._harvest_catalogs): routes maps
+    # Catalog harvest (app.arbiter.Watcher._harvest_catalogs, and the manual
+    # force-harvest route app.routers.settings.harvest_now): routes maps
     # each configurable (node, engine) pair to the one adapter that can
     # actually produce a catalog for it. Spark is this box's one real
     # vLLM-backed target (live-verified 2026-08-07 — see
@@ -239,17 +225,38 @@ def _build_watcher(settings: Settings):
     # comes from spark_node_id(), never settings.node_label or
     # settings.spark_node_name (see _configurable_engines' docstring for
     # the historical bug that rule guards against).
+    #
+    # Built HERE, in _build_deck, not in _build_watcher (moved 2026-08-08,
+    # task 3 review finding 1): _build_deck runs in EVERY mode, including
+    # MODEL_DECK_NO_WATCHER=1 (this module's own documented "bare-uvicorn
+    # runs that don't want the background loop" support, see the module
+    # docstring) — lifespan() skips _build_watcher ENTIRELY under that env
+    # var. Building the routes here means deck["engine_exec"]/
+    # deck["configurable_engines"] (and therefore app.state.deck, the same
+    # dict via the cache above) are always populated whenever spark is
+    # configured, watcher running or not, so harvest_now's pair check can
+    # never misdiagnose "watcher never wired" as "pair not configured".
+    from app.engines.docker_ctl import EngineExecRouter
+    from app.engines.spark import SparkCatalogExec
+    from app.observe import spark_node_id
+
     routes = {}
     if deck["spark"] is not None:
         routes[(spark_node_id(), "vllm")] = SparkCatalogExec(deck["spark"])
-
-    # Stashed on the SAME dict `_build_deck`'s settings-id cache hands both
-    # `create_app()` (-> app.state.deck) and this function (see its cache
-    # comment) -- not a private copy -- so the manual force-harvest route
-    # (app.routers.settings.harvest_now) reads exactly what the watcher's
-    # own harvest loop is using, never a second, silently-diverging pair.
     deck["engine_exec"] = EngineExecRouter(routes) if routes else None
     deck["configurable_engines"] = sorted(routes)
+
+    _deck_by_settings_id[id(settings)] = (settings, deck)
+    return deck
+
+
+def _build_watcher(settings: Settings):
+    """Construct the arbiter Watcher from the same shared deck _build_deck
+    hands the HTTP routers (see the cache comment above) — real clients +
+    stores + World, wired from Settings."""
+    from app.arbiter import Watcher
+
+    deck = _build_deck(settings)
 
     return Watcher(
         settings=deck["settings"],
@@ -278,9 +285,10 @@ def _build_watcher(settings: Settings):
         # will read from, and the read-only GGUF mount to scan.
         characteristics_store=deck["characteristics_store"],
         gguf_dir=deck["gguf_dir"],
-        # Stashed on `deck` just above (same shared dict as app.state.deck):
-        # None (harvest fully disabled) on a box with no spark configured,
-        # otherwise the router built from `routes`.
+        # Built in _build_deck (same shared dict as app.state.deck), not
+        # here — see that function's routes comment: None (harvest fully
+        # disabled) on a box with no spark configured, otherwise the
+        # router built from the one real (spark_node_id(), "vllm") route.
         engine_exec=deck["engine_exec"],
         configurable_engines=deck["configurable_engines"],
     )
