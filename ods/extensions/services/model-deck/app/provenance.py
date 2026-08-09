@@ -54,21 +54,46 @@ def _blank_entry(artifact_id: str, kind: str, node: str, role: str) -> dict:
             "update_path": None, "notes": None, "watch": [], "update": None}
 
 
-def _by_id(sources: list[dict]) -> list[dict]:
-    """A stable, order-independent form of a source list for equality
-    comparison. Missing ids sort together at the front rather than raising --
-    the same read-time tolerance the corrupt-source-id handling below needs.
+def _stored_list(value) -> list[dict]:
+    """A value read back from `provenance.json` as a list of dicts, tolerant
+    of anything JSON allows.
 
-    `sources` is asymmetric in trust: the incoming argument to set_watch has
-    already passed validate_watch, so every element is a dict with a real
-    id. `before` is read straight off disk and gets no such guarantee -- a
-    hand-edited watch list can contain anything JSON allows, including a
-    bare `None` or a string, and `.get` on those raises. A non-dict element
-    is treated the same as a dict with no id: sorted deterministically here,
-    and left for the "id"-based filters elsewhere to drop.
+    THE ONE GATE FOR UNTRUSTED NESTED DATA. `_load()` only validates that
+    the top-level document is a dict (D13's quarantine); everything nested
+    inside an entry -- `watch`, `update["sources"]`, and any future stored
+    list -- is unvalidated past that point, because `provenance.json` is
+    hand-editable and this module has already been through three rounds of
+    a reviewer finding one more un-isinstance-checked `.get()` on that data
+    (missing "id", a non-dict element, a non-list container). Routing every
+    stored list through this function, instead of guarding each call site
+    separately, is what makes the tolerance a property of the TYPE rather
+    than something each new read has to remember: a non-list becomes `[]`,
+    and non-dict elements are dropped, once, here.
+
+    Do not use this on `sources` arguments that arrive already validated by
+    `updates.validate_watch` -- those are trusted input, not stored data,
+    and calling this on them is harmless (it is idempotent on a clean list)
+    but is not where the guarantee is needed.
     """
-    return sorted(sources,
-                  key=lambda s: (s.get("id") or "") if isinstance(s, dict) else "")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _stored_dict(value) -> dict:
+    """A value read back from `provenance.json` as a dict, tolerant of
+    anything JSON allows. Sibling of `_stored_list`, same reasoning: `None`,
+    a bare scalar, or a list all become `{}` instead of raising on the
+    first `.get()` a caller makes against them."""
+    return value if isinstance(value, dict) else {}
+
+
+def _by_id(sources) -> list[dict]:
+    """A stable, order-independent form of a source list for equality
+    comparison. Routes through `_stored_list` itself so it is safe on ANY
+    input -- a raw disk read or an already-validated `sources` argument --
+    regardless of what the caller remembered to sanitize first."""
+    return sorted(_stored_list(sources), key=lambda s: s.get("id") or "")
 
 
 def _validate(artifact_id: str, kind: str, node: str, role: str) -> None:
@@ -273,7 +298,7 @@ class ProvenanceStore:
         with self._lock:
             data = self._load()
             entry = data.get(artifact_id)
-            before = list((entry or {}).get("watch") or [])
+            before = _stored_list((entry or {}).get("watch"))
             if _by_id(before) == _by_id(sources):
                 return
             if entry is None:
@@ -282,10 +307,10 @@ class ProvenanceStore:
             entry["watch"] = sources
 
             live = {s["id"] for s in sources}
-            update = entry.get("update")
-            if isinstance(update, dict):
-                kept = [s for s in update.get("sources", [])
-                       if isinstance(s, dict) and s.get("id") in live]
+            update = _stored_dict(entry.get("update"))
+            if update:
+                kept = [s for s in _stored_list(update.get("sources"))
+                       if s.get("id") in live]
                 entry["update"] = {**update, "sources": kept,
                                    "status": updates.rollup(
                                        [s.get("status") for s in kept])}
@@ -317,17 +342,18 @@ class ProvenanceStore:
             if entry is None:
                 return updates.UNAVAILABLE
 
-            # isinstance + .get(), not [] -- a stored item missing "id", or
-            # not even a dict (a hand-edited watch/sources list can hold
-            # anything JSON allows), must be dropped rather than raising or
-            # being treated as a source literally named None: an incoming
-            # result that also lacks "id" (source_id is then also None)
-            # would otherwise spuriously match it via `None in live`.
-            live = {s.get("id") for s in (entry.get("watch") or [])
-                    if isinstance(s, dict) and s.get("id")}
+            # _stored_list/_stored_dict, not a raw .get() -- "id" missing,
+            # an element that isn't even a dict, or a container that isn't
+            # even a list, must all be dropped rather than raising or being
+            # treated as a source literally named None: an incoming result
+            # that also lacks "id" (source_id is then also None) would
+            # otherwise spuriously match it via `None in live`.
+            live = {s.get("id") for s in _stored_list(entry.get("watch"))
+                    if s.get("id")}
+            stored_update = _stored_dict(entry.get("update"))
             previous = {s.get("id"): s
-                        for s in ((entry.get("update") or {}).get("sources") or [])
-                        if isinstance(s, dict) and s.get("id")}
+                        for s in _stored_list(stored_update.get("sources"))
+                        if s.get("id")}
 
             merged = []
             for result in source_results:
@@ -343,7 +369,7 @@ class ProvenanceStore:
                                    "stale_note": None})
 
             status = updates.rollup([s.get("status") for s in merged])
-            before = (entry.get("update") or {}).get("status")
+            before = stored_update.get("status")
             entry["update"] = {"status": status, "sources": merged,
                                "checked_at": now}
             data[artifact_id] = entry
@@ -419,14 +445,17 @@ def describe(data: dict, *, now: str, stale_s: float) -> list[dict]:
         if verification in (origins.EXACT, origins.CONSISTENT) and _is_stale(
                 current.get("verified_at"), now, stale_s):
             verification = origins.STALE
+        # Passed through unmodified in shape -- but routed through the same
+        # stored-container gate as set_watch/record_update, so an entry
+        # written before watch/update existed (live on two machines), or
+        # one carrying corrupted watch/update data, reads back the same
+        # clean shape as a well-formed one rather than leaking a raw
+        # scalar/list into an API response.
+        update = _stored_dict(entry.get("update")) or None
         out.append({**entry, "current": current,
                     "version_drift": drift, "verification": verification,
-                    # Passed through unmodified -- but defaulted here so an
-                    # entry written before watch/update existed (live on two
-                    # machines) reads back the same shape as one written
-                    # after, rather than simply omitting the keys.
-                    "watch": entry.get("watch") or [],
-                    "update": entry.get("update")})
+                    "watch": _stored_list(entry.get("watch")),
+                    "update": update})
     return out
 
 
@@ -439,7 +468,8 @@ def gaps(data: dict) -> list[str]:
 def updates_available(data: dict) -> list[str]:
     """Artifact ids whose rollup says a newer version exists."""
     return sorted(k for k, v in data.items()
-                  if ((v or {}).get("update") or {}).get("status") == updates.AVAILABLE)
+                  if _stored_dict(_stored_dict(v).get("update")).get("status")
+                  == updates.AVAILABLE)
 
 
 def _is_stale(verified_at: str | None, now: str, stale_s: float) -> bool:

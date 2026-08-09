@@ -738,3 +738,108 @@ def test_record_update_survives_a_non_dict_element_in_stored_update_sources(tmp_
     assert status == updates.CURRENT
     ids = [s["id"] for s in store.entry("oci:local:x")["update"]["sources"]]
     assert ids == ["a"]
+
+
+# --- fix round 3: whole-container corruption (non-dict `update`, ---------
+# --- non-list `watch`/`update.sources`) ------------------------------------
+
+@pytest.mark.parametrize("garbage_update", ["corrupted", [1, 2, 3], 42, True])
+def test_record_update_survives_a_non_dict_stored_update_field(tmp_path, garbage_update):
+    """`update` itself -- not just its "sources" list -- can be hand-edited
+    into any JSON scalar or a list."""
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["update"] = garbage_update
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])                        # must not raise
+    assert status == updates.CURRENT
+    assert store.entry("oci:local:x")["update"]["sources"][0]["id"] == "a"
+
+
+@pytest.mark.parametrize("garbage_watch", [5, True])
+def test_set_watch_survives_a_truthy_non_list_stored_watch(tmp_path, garbage_watch):
+    """The deeper pre-existing shape: a truthy non-list `watch` (`5`,
+    `true`) must not raise TypeError from iterating it before any
+    per-element check runs."""
+    store = _store(tmp_path)
+    store.declare_origin(
+        "oci:local:x", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "x", "reference": "x:1",
+                "build": None, "archive": None}, now=T0)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["watch"] = garbage_watch
+    path.write_text(json.dumps(data))
+
+    new_sources = [{"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+                    "pinned": "v1", "order": "semver"}]
+    store.set_watch("oci:local:x", new_sources)                # must not raise
+    assert store.entry("oci:local:x")["watch"] == new_sources
+
+
+@pytest.mark.parametrize("garbage_watch", [5, True])
+def test_record_update_survives_a_truthy_non_list_stored_watch(tmp_path, garbage_watch):
+    store = _store(tmp_path)
+    store.declare_origin(
+        "oci:local:x", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "x", "reference": "x:1",
+                "build": None, "archive": None}, now=T0)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["watch"] = garbage_watch
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])                        # must not raise
+    assert status == updates.UNAVAILABLE          # nothing usable was watched
+    assert store.entry("oci:local:x")["update"]["sources"] == []
+
+
+def test_record_update_survives_a_non_list_stored_update_sources(tmp_path):
+    """`update.sources` itself can be hand-edited to a non-list, not just
+    contain non-dict elements."""
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["update"]["sources"] = "not-a-list"
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.UNAVAILABLE, "current": "v1", "latest": None,
+         "detail": {}, "note": "network"}])                   # must not raise
+    # The corrupted container means "a"'s real prior (CURRENT) is unreadable,
+    # so the fresh unavailable result is recorded as-is -- honest, not a crash.
+    assert status == updates.UNAVAILABLE
+    assert store.entry("oci:local:x")["update"]["sources"][0]["id"] == "a"
+
+
+def test_describe_survives_corrupted_watch_and_update_fields():
+    """describe() reads watch/update through the same gate -- a corrupted
+    container must not leak a raw scalar into an API response, and must not
+    raise while building one."""
+    data = {"oci:local:x": {**_entry(), "watch": "corrupted", "update": [1, 2]}}
+    described = provenance.describe(data, now=T0, stale_s=3600)[0]
+    assert described["watch"] == []
+    assert described["update"] is None
+
+
+def test_updates_available_survives_a_non_dict_entry():
+    """A whole entry (not just a nested field) can be hand-edited into a
+    non-dict; updates_available must skip it, not raise."""
+    data = {"oci:local:x": "corrupted",
+            "oci:local:y": {"update": {"status": updates.AVAILABLE}}}
+    assert provenance.updates_available(data) == ["oci:local:y"]
