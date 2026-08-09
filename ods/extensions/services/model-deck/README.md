@@ -36,16 +36,18 @@ Environment variables (set in `.env`):
 | `MODEL_DECK_SPARK_SERVING_URL` | *(empty)* | Spark serving URL (OpenAI-compatible) |
 | `MODEL_DECK_SPARK_NODE_NAME` | `sparky` | Friendly name for the Spark node in the deck UI |
 | `ODS_REMOTE_NODE_KEYS` | *(empty)* | JSON dict of `{node_name: api_key, ...}` for remote nodes |
+| `MODEL_DECK_UPDATE_CHECK_ENABLED` | `true` | Kill switch for update-checking — see [Update checking](#update-checking) |
+| `MODEL_DECK_UPDATE_INTERVAL_S` | `21600` (6 h) | Update-check cadence, on its own thread, never the watcher tick |
 
-Settings (Python `MODEL_DECK_*` env prefix, or defaults in `app/settings.py`):
+Settings read from the environment but **not** passed through `compose.yaml`'s
+`environment:` allowlist — changing one means editing that list, not just
+`.env` (Python `MODEL_DECK_*` env prefix, or defaults in `app/settings.py`):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MODEL_DECK_STORAGE_WATCH_INTERVAL` | `60` | Watermark check cadence (seconds) |
 | `MODEL_DECK_STORAGE_SLACK_BYTES` | `2e9` | Headroom to reserve when planning moves (2 GB) |
 | `MODEL_DECK_LEMONADE_CONTAINER` | `ods-llama-server` | Docker container name for lemonade (needed to restart for model registration) |
-| `MODEL_DECK_UPDATE_CHECK_ENABLED` | `true` | Kill switch for update-checking — see [Update checking](#update-checking) |
-| `MODEL_DECK_UPDATE_INTERVAL_S` | `21600` (6 h) | Update-check cadence, on its own thread, never the watcher tick |
 
 ## API Endpoints
 
@@ -682,7 +684,7 @@ already establishes for the rest of provenance.
 |---|---|
 | `current` | Checked; the pinned value is the newest the declared order can see. |
 | `available` | Checked; something ranked newer than the pin exists. |
-| `undetermined` | **Reached** the upstream, but its answer **cannot be ranked** — an `order: "none"` tag set, or a pin that itself doesn't parse under the declared order. |
+| `undetermined` | **Reached** the upstream, but its answer cannot be ranked **and something other than the pin is out there** — an `order: "none"` tag set, or a pin that itself doesn't parse under the declared order. An unrankable set whose only tag *is* the pin is `current`, not `undetermined`: nothing unexplained was seen (`app/updates/oci.py:138`, `app/updates/git.py:176`). |
 | `unavailable` | Could **not** reach the upstream, or could not even ask (rate-limited, network error, malformed response, a remote that has moved). |
 
 `undetermined` and `unavailable` get confused because both mean "no verdict,"
@@ -702,14 +704,15 @@ source can never mask a sibling that is failing or unrankable.
 
 ### Ranking is declared per source, never inferred
 
-Three of the four check types never rank anything — `git_compare` walks an
+Two of the four check types never rank anything — `git_compare` walks an
 exact ahead/behind count against a pinned commit, and `oci_channel` compares
 the digest a moving tag (`:slim`, `:latest`) currently resolves to against the
 pinned digest. Neither needs an opinion about "newer."
 
-The fourth kind, a tag **set**, is where "newer" stops being exact and becomes
-a convention — and the convention is written down per source, never guessed
-from the tag strings themselves:
+The other two kinds, tag **sets** (`oci_tags` and `git_tags` — the
+`_TAG_CHECKS` pair in `app/updates/__init__.py`), are where "newer" stops
+being exact and becomes a convention — and the convention is written down per
+source, never guessed from the tag strings themselves:
 
 | Check | Needs | `order` | Ranks by |
 |---|---|---|---|
@@ -757,8 +760,21 @@ thread from ever starting, and makes `POST /api/provenance/check` a harmless
 no-op (`{"checked": 0, "available": 0}`, no upstream contacted) instead of
 running a pass. This is the only part of the deck that talks to the public
 internet, so turning it off is one flag, not a rebuild or a network policy
-change. (`POST /api/provenance/check` answering `503` is a different case —
+change: set it in `ods/.env` and recreate the container — `compose.yaml`
+passes it (and `MODEL_DECK_UPDATE_INTERVAL_S`) through, and both are declared
+in `ods/.env.schema.json`. (`POST /api/provenance/check` answering `503` is a different case —
 no `UpdateChecker` was constructed at all, e.g. `MODEL_DECK_NO_WATCHER=1`.)
+
+One consequence to know before flipping it. The collector derives a `channel`
+watch source from any digest-pinned `origin` on its own, and the only thing
+that distinguishes "the operator cleared this deliberately" from "nobody has
+looked at it yet" is whether the artifact has ever been checked — i.e.
+whether `entry.update` exists, which **only a check pass writes**. With
+checking disabled nothing ever writes it, so a watch cleared with
+`PUT /watch {"sources": []}` is re-derived on the *next* collector pass, and
+every pass after that. To make a clear stick while checking is off, withdraw
+the origin instead (`PUT /api/provenance/origin` with `"origin": null`) —
+with nothing to derive from, nothing comes back.
 
 ### `PUT /api/provenance/watch`
 
@@ -790,6 +806,7 @@ id is dropped with it (retention is bounded by what is still watched). A
 malformed source is rejected **whole** (422, nothing written) rather than
 partially applied — see `app.updates.validate_watch`.
 
+## Safety invariants (12–17): storage
 
 The storage feature enforces six safety invariants (continuing the deck's numbered safety list):
 
