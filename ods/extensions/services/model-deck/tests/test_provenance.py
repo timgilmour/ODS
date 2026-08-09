@@ -458,6 +458,23 @@ def test_set_watch_is_a_no_op_when_the_sources_are_unchanged(tmp_path):
     assert len(records) == 1
 
 
+def test_set_watch_is_a_no_op_when_the_same_sources_arrive_in_a_different_order(tmp_path):
+    """Task 9's collector builds its watch list from a dict-derived merge; if
+    element order ever varies between passes an order-sensitive comparison
+    would silently defeat the anti-spam guard and history would spam again."""
+    store = _store(tmp_path)
+    a = {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}
+    b = {"id": "b", "check": "git_tags", "remote": "https://github.com/c/d",
+         "pinned": "v2", "order": "semver"}
+    store.set_watch("oci:local:x", [a, b], now=T0)
+    store.set_watch("oci:local:x", [b, a], now=T1)   # same sources, reordered
+
+    records = [r for r in provenance_history.history_for(
+        tmp_path / "history.jsonl", "oci:local:x") if r["field"] == "watch"]
+    assert len(records) == 1
+
+
 def test_set_watch_records_a_new_history_line_when_sources_actually_change(tmp_path):
     store = _store(tmp_path)
     store.set_watch("oci:local:x", [
@@ -549,3 +566,72 @@ def test_a_corrupt_stored_status_does_not_corrupt_the_rollup(tmp_path):
     status = store.entry("oci:local:x")["update"]["status"]
     assert status in updates.STATUSES
     assert status == updates.UNAVAILABLE
+
+
+def test_a_first_ever_unavailable_result_is_recorded_not_dropped(store):
+    """No prior verdict exists yet, so the unavailable result IS the only
+    information there is: it must be stored with a real checked_at, not
+    silently dropped and not backdated to a verdict that never existed."""
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.UNAVAILABLE, "current": "v1", "latest": None,
+         "detail": {}, "note": "dns failure"}], now=T0)
+
+    assert status == updates.UNAVAILABLE
+    source = store.entry("oci:local:x")["update"]["sources"][0]
+    assert source["status"] == updates.UNAVAILABLE
+    assert source["checked_at"] == T0
+    assert source["note"] == "dns failure"
+    assert source["stale_note"] is None
+
+
+def test_record_update_skips_a_stored_watch_item_missing_an_id(tmp_path):
+    """A corrupted/hand-edited watch entry with no id must be dropped, never
+    treated as a source literally named None -- which would let a result
+    that ALSO lacks an id (also None) spuriously match it."""
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["watch"].append(
+        {"check": "git_tags", "remote": "https://github.com/x/y",
+         "pinned": "v1", "order": "semver"})            # no "id" at all
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None},
+        {"status": updates.AVAILABLE, "current": "x", "latest": "y",
+         "detail": {}, "note": None},                    # also no "id"
+    ])
+    ids = [s["id"] for s in store.entry("oci:local:x")["update"]["sources"]]
+    assert ids == ["a"]
+    assert status == updates.CURRENT
+
+
+def test_record_update_ignores_a_prior_verdict_missing_an_id(tmp_path):
+    """A corrupted prior verdict with no id must not crash the merge, and
+    must not be treated as the id-less incoming result's prior either."""
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    del data["oci:local:x"]["update"]["sources"][0]["id"]
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.UNAVAILABLE, "current": "v1", "latest": None,
+         "detail": {}, "note": "network"}])
+    assert status == updates.UNAVAILABLE
+    source = store.entry("oci:local:x")["update"]["sources"][0]
+    assert source["id"] == "a"
+    assert source["status"] == updates.UNAVAILABLE   # no id-less prior to preserve

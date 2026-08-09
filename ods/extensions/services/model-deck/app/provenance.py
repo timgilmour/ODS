@@ -54,6 +54,13 @@ def _blank_entry(artifact_id: str, kind: str, node: str, role: str) -> dict:
             "update_path": None, "notes": None, "watch": [], "update": None}
 
 
+def _by_id(sources: list[dict]) -> list[dict]:
+    """A stable, order-independent form of a source list for equality
+    comparison. Missing ids sort together at the front rather than raising --
+    the same read-time tolerance the corrupt-source-id handling below needs."""
+    return sorted(sources, key=lambda s: s.get("id") or "")
+
+
 def _validate(artifact_id: str, kind: str, node: str, role: str) -> None:
     parsed_kind, parsed_node, _ = origins.parse_artifact_id(artifact_id)
     if parsed_kind != kind or parsed_node != node:
@@ -257,7 +264,7 @@ class ProvenanceStore:
             data = self._load()
             entry = data.get(artifact_id)
             before = list((entry or {}).get("watch") or [])
-            if before == sources:
+            if _by_id(before) == _by_id(sources):
                 return
             if entry is None:
                 kind, node, _ = origins.parse_artifact_id(artifact_id)
@@ -300,9 +307,14 @@ class ProvenanceStore:
             if entry is None:
                 return updates.UNAVAILABLE
 
-            live = {s["id"] for s in (entry.get("watch") or [])}
-            previous = {s["id"]: s
-                        for s in ((entry.get("update") or {}).get("sources") or [])}
+            # .get(), not [] -- a stored item missing "id" must be dropped,
+            # never treated as a source literally named None: an incoming
+            # result that also lacks "id" (source_id is then also None)
+            # would otherwise spuriously match it via `None in live`.
+            live = {s.get("id") for s in (entry.get("watch") or []) if s.get("id")}
+            previous = {s.get("id"): s
+                        for s in ((entry.get("update") or {}).get("sources") or [])
+                        if s.get("id")}
 
             merged = []
             for result in source_results:
