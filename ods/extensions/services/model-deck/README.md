@@ -673,7 +673,7 @@ without ever fetching, pulling, or building it. It reads whatever upstream an
 operator **declared** for an artifact, compares it to the pinned value already
 on file, and writes the verdict back onto that artifact's `update` field. It
 never actuates: `app.reconcile` remains the only thing that changes what is
-actually running, exactly as [Nothing converges](#provenance-where-every-artifact-came-from)
+actually running, exactly as [Nothing converges](#nothing-converges)
 already establishes for the rest of provenance.
 
 ### Four status words, and two of them are not synonyms
@@ -742,7 +742,7 @@ same per-source/per-artifact failure isolation, just not on a timer.
 A pass **reads** upstreams and **writes** the provenance ledger only. It never
 imports `app.reconcile` or `app.intent`, so it cannot become a second
 actuator even by accident — the same class of guarantee [Nothing
-converges](#provenance-where-every-artifact-came-from) states for the rest of
+converges](#nothing-converges) states for the rest of
 provenance, here true structurally rather than merely by convention.
 
 ### Kill switch
