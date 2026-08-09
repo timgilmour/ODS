@@ -20,6 +20,22 @@ file is not: it is the only home of operator-declared origins. So a corrupt
 document is renamed to ``provenance.json.corrupt-<ts>`` first, and the
 history JSONL remains the rebuild path.
 
+EVERYTHING BELOW THE TOP LEVEL IS UNTRUSTED INPUT, AND IS GATED ONCE, AT
+``_load()``. ``provenance.json`` is hand-editable and the quarantine above
+only proves the document is a mapping — every entry inside it, every field
+inside an entry, and every element inside those fields is whatever a text
+editor left behind. Four review rounds each generalised one more level of
+that (a missing key, a non-dict element, a non-list container, a whole entry
+that is a bare string) and each time the level above it was still open. So
+the tolerance is no longer a thing each read remembers: ``_load()`` — the
+one door stored data comes through — runs every entry through
+``_stored_entry``, and the three pure read helpers gate the document they are
+handed the same way. Downstream code may then read ``entry["watch"]`` and
+``entry["current"]`` as the types ``_blank_entry`` declares, because nothing
+else can reach it. The gate normalises SHAPE only: a value whose type is
+unreadable becomes the "not recorded" value of its declared type, and every
+other value — including keys from a future version — is passed through.
+
 Provenance NEVER actuates (D4/D11). It records desired state as data and
 reports drift; app.reconcile stays the only restorer, and convergence — which
 would need `docker pull` + container create, or a compose write on sparky —
@@ -54,46 +70,158 @@ def _blank_entry(artifact_id: str, kind: str, node: str, role: str) -> dict:
             "update_path": None, "notes": None, "watch": [], "update": None}
 
 
+# --- the gate: stored shapes, normalised once ------------------------------
+#
+# These are the primitives. `_stored_entry` composes them into the whole
+# entry, `_load()` applies it to the whole document, and nothing downstream
+# repeats them -- see the module docstring for why the tolerance lives here
+# and not at each read.
+
 def _stored_list(value) -> list[dict]:
-    """A value read back from `provenance.json` as a list of dicts, tolerant
-    of anything JSON allows.
-
-    THE ONE GATE FOR UNTRUSTED NESTED DATA. `_load()` only validates that
-    the top-level document is a dict (D13's quarantine); everything nested
-    inside an entry -- `watch`, `update["sources"]`, and any future stored
-    list -- is unvalidated past that point, because `provenance.json` is
-    hand-editable and this module has already been through three rounds of
-    a reviewer finding one more un-isinstance-checked `.get()` on that data
-    (missing "id", a non-dict element, a non-list container). Routing every
-    stored list through this function, instead of guarding each call site
-    separately, is what makes the tolerance a property of the TYPE rather
-    than something each new read has to remember: a non-list becomes `[]`,
-    and non-dict elements are dropped, once, here.
-
-    Do not use this on `sources` arguments that arrive already validated by
-    `updates.validate_watch` -- those are trusted input, not stored data,
-    and calling this on them is harmless (it is idempotent on a clean list)
-    but is not where the guarantee is needed.
-    """
+    """A stored list of objects: a non-list becomes `[]`, and elements that
+    are not objects are dropped."""
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
 
 
 def _stored_dict(value) -> dict:
-    """A value read back from `provenance.json` as a dict, tolerant of
-    anything JSON allows. Sibling of `_stored_list`, same reasoning: `None`,
-    a bare scalar, or a list all become `{}` instead of raising on the
-    first `.get()` a caller makes against them."""
+    """A stored object that must exist: `None`, a scalar, or a list all
+    become `{}` instead of raising on the first `.get()` against them."""
     return value if isinstance(value, dict) else {}
+
+
+def _stored_object(value) -> dict | None:
+    """A stored object that may legitimately be absent (`origin`,
+    `desired`, `update`). An unreadable shape reads as "not recorded",
+    which is the honest answer AND the one that puts the artifact back on
+    the operator's work queue: `gaps()` lists it, so the fix is visible
+    rather than silently papered over with an empty object."""
+    return value if isinstance(value, dict) else None
+
+
+# JSON types that can key a dict or join a set. A source id outside these is
+# not an id, whatever a text editor put there.
+_ID_TYPES = (str, int, float)
+
+
+def _keyed_sources(value) -> list[dict]:
+    """A stored source list narrowed to the elements that can be KEYED BY
+    ID — `record_update` builds a set and a dict out of these ids, and an
+    id that is itself a list or an object is unhashable (`TypeError` from
+    the set comprehension, not a `.get()` away), while an id-less element
+    read as `None` would spuriously match an incoming result that also has
+    no id.
+
+    DECLARED AND DERIVED ARE NOT GATED THE SAME WAY, and the difference is
+    the same one `_SOURCE_DECLARED`/`_SOURCE_DERIVED` draws one field up.
+    `update["sources"]` is DERIVED — a verdict map the next check pass
+    rewrites — so an unkeyable verdict is dropped at the gate and nothing is
+    lost. `watch` is DECLARED: an operator wrote it, this is its only home,
+    and every write re-serialises the whole document, so dropping a source
+    at the gate would erase it from disk on the next unrelated save and hide
+    the mistake from the UI that could show it. Watch keeps what it was
+    given; only the places that turn a watch source into a KEY narrow it
+    through this function.
+    """
+    return [s for s in _stored_list(value)
+            if isinstance(s.get("id"), _ID_TYPES) and s.get("id")]
+
+
+def _stored_current(value) -> dict:
+    """`current` is the one field this module INDEXES rather than `.get()`s
+    (`entry["current"]["verification"] = ...`), so it is completed against
+    `_empty_current()` rather than merely type-checked."""
+    return {**_empty_current(), **_stored_dict(value)}
+
+
+def _stored_update(value) -> dict | None:
+    """`update` carries a nested container of its own. `sources` is forced
+    to exist so that a caller may write `update["sources"]`; `status` and
+    `checked_at` are scalars and stay `.get()`-able absences."""
+    update = _stored_object(value)
+    if update is None:
+        return None
+    return {**update, "sources": _keyed_sources(update.get("sources"))}
+
+
+# Every field of an entry whose TYPE this module depends on, and the gate
+# that guarantees it. Keyed by `_blank_entry`'s own vocabulary: a new field
+# with a container default belongs here the day it is added, and
+# tests/test_provenance.py asserts exactly that.
+_ENTRY_SHAPE = {
+    "current": _stored_current,
+    "origin": _stored_object,
+    "desired": _stored_object,
+    "watch": _stored_list,
+    "update": _stored_update,
+}
+
+
+def _identity_from(artifact_id: str) -> tuple[str | None, str | None]:
+    """`kind`/`node` as the id itself declares them, or a pair of `None`
+    when the key is not a well-formed id — which a hand-edited file can
+    also produce."""
+    try:
+        kind, node, _ = origins.parse_artifact_id(artifact_id)
+    except origins.BadArtifactId:
+        return None, None
+    return kind, node
+
+
+def _stored_entry(artifact_id: str, value) -> dict:
+    """One entry read back from disk, as the shape `_blank_entry` declares.
+
+    THE ENTRY IS UNTRUSTED TOO -- that is the level three earlier rounds of
+    this fix each stopped one short of. A hand-edited file can put a bare
+    string where an entry belongs, and `(entry or {}).get(...)` does not
+    save you: a truthy non-dict passes the `or {}` untouched and `.get` on a
+    string still raises. So the entry is rebuilt on top of a blank one:
+    every declared key exists, every container has its declared type, and
+    every readable stored value wins over the blank default.
+
+    THE KEY IS THE IDENTITY. `artifact_id`, and the `kind`/`node` derivable
+    from it, come from the mapping key -- that is not a guess (D8), it is
+    the same derivation `_validate` enforces on every write. `role` is not
+    derivable and is never invented; a corrupt entry gets `_blank_entry`'s
+    "other", the same unknown `set_watch` uses.
+
+    NORMALISING COSTS THE CORRUPT VALUE ITS PLACE ON DISK: the next write of
+    any artifact re-serialises the whole document, so a field that could not
+    be read is not preserved. That is the deliberate boundary between this
+    and D13's quarantine -- quarantine protects a document that cannot be
+    read AT ALL, where refusing to guess is the only safe move; a single
+    unreadable field inside a readable document has no content to protect
+    (a scalar where an object belongs holds no origin, no version and no
+    watch list), and leaving it in place would keep the entry unreadable
+    forever. The entry itself is never dropped: `delete()` stays the only
+    way one leaves the store.
+    """
+    kind, node = _identity_from(artifact_id)
+    entry = {**_blank_entry(artifact_id, kind, node, "other"),
+             **_stored_dict(value), "artifact_id": artifact_id}
+    for field, gate in _ENTRY_SHAPE.items():
+        entry[field] = gate(entry[field])
+    return entry
+
+
+def _stored_document(data) -> dict[str, dict]:
+    """The whole `{artifact_id: entry}` mapping, gated. Non-string keys
+    cannot survive a JSON round trip and would break `sorted(data)` against
+    a mixed document, so they are dropped here rather than at each reader."""
+    if not isinstance(data, dict):
+        return {}
+    return {artifact_id: _stored_entry(artifact_id, entry)
+            for artifact_id, entry in data.items()
+            if isinstance(artifact_id, str)}
 
 
 def _by_id(sources) -> list[dict]:
     """A stable, order-independent form of a source list for equality
-    comparison. Routes through `_stored_list` itself so it is safe on ANY
-    input -- a raw disk read or an already-validated `sources` argument --
-    regardless of what the caller remembered to sanitize first."""
-    return sorted(_stored_list(sources), key=lambda s: s.get("id") or "")
+    comparison. Safe on ANY input -- a raw disk read or an already-validated
+    `sources` argument -- so the unchanged-watch guard cannot be the one
+    place that crashes on a shape everything else tolerates."""
+    return sorted(_stored_list(sources), key=lambda s: str(s.get("id") or ""))
 
 
 def _validate(artifact_id: str, kind: str, node: str, role: str) -> None:
@@ -117,6 +245,13 @@ class ProvenanceStore:
     # --- persistence -------------------------------------------------------
 
     def _load(self) -> dict[str, dict]:
+        """THE ONLY DOOR STORED DATA COMES THROUGH, and therefore the only
+        place that has to know the file is hand-editable. An unreadable
+        DOCUMENT is quarantined (D13); a readable document with unreadable
+        contents is gated by `_stored_document`, so every method below --
+        including ones nobody has written yet -- reads an entry whose fields
+        have the types `_blank_entry` declares. No method may read the file
+        itself; tests/test_provenance.py asserts that."""
         try:
             text = self._path.read_text()
         except OSError:
@@ -129,7 +264,7 @@ class ProvenanceStore:
         if not isinstance(data, dict):
             self._quarantine()
             return {}
-        return data
+        return _stored_document(data)
 
     def _quarantine(self) -> None:
         """Preserve an unreadable document before starting empty (D13)."""
@@ -298,7 +433,7 @@ class ProvenanceStore:
         with self._lock:
             data = self._load()
             entry = data.get(artifact_id)
-            before = _stored_list((entry or {}).get("watch"))
+            before = entry["watch"] if entry is not None else []
             if _by_id(before) == _by_id(sources):
                 return
             if entry is None:
@@ -307,10 +442,9 @@ class ProvenanceStore:
             entry["watch"] = sources
 
             live = {s["id"] for s in sources}
-            update = _stored_dict(entry.get("update"))
+            update = entry["update"]
             if update:
-                kept = [s for s in _stored_list(update.get("sources"))
-                       if s.get("id") in live]
+                kept = [s for s in update["sources"] if s["id"] in live]
                 entry["update"] = {**update, "sources": kept,
                                    "status": updates.rollup(
                                        [s.get("status") for s in kept])}
@@ -342,18 +476,17 @@ class ProvenanceStore:
             if entry is None:
                 return updates.UNAVAILABLE
 
-            # _stored_list/_stored_dict, not a raw .get() -- "id" missing,
-            # an element that isn't even a dict, or a container that isn't
-            # even a list, must all be dropped rather than raising or being
-            # treated as a source literally named None: an incoming result
-            # that also lacks "id" (source_id is then also None) would
-            # otherwise spuriously match it via `None in live`.
-            live = {s.get("id") for s in _stored_list(entry.get("watch"))
-                    if s.get("id")}
-            stored_update = _stored_dict(entry.get("update"))
-            previous = {s.get("id"): s
-                        for s in _stored_list(stored_update.get("sources"))
-                        if s.get("id")}
+            # Declared types, no per-site type guards: `_load`'s gate has
+            # settled the shape of `watch` and of `update["sources"]`
+            # already. `_keyed_sources` here is the DECLARED half of that
+            # split (see its docstring) -- the stored watch list keeps what
+            # the operator wrote, and this is the one place that turns it
+            # into keys, so it is the one place that must narrow it to ids
+            # that can be keys. An id-less source reaching here as `None`
+            # would spuriously match an incoming result that also lacks one.
+            live = {s["id"] for s in _keyed_sources(entry["watch"])}
+            stored_update = entry["update"] or {}
+            previous = {s["id"]: s for s in stored_update.get("sources", [])}
 
             merged = []
             for result in source_results:
@@ -433,43 +566,45 @@ def describe(data: dict, *, now: str, stale_s: float) -> list[dict]:
     that happened to pick the nested one would never see STALE at all, which
     is precisely the copy-the-wrong-vocabulary bug this codebase has shipped
     before. The stored file is untouched.
+
+    `data` IS UNTRUSTED. In production it arrives from `ProvenanceStore.get()`
+    and is already gated, but this is a public pure function reachable with
+    any mapping, so it gates its own argument rather than inheriting a
+    guarantee from whoever called it. Same for `gaps` and
+    `updates_available` — the three of them are the module's read-side
+    boundary, exactly as `_load()` is the store's.
     """
+    data = _stored_document(data)
     out = []
     for artifact_id in sorted(data):
         entry = data[artifact_id]
-        current = dict(entry.get("current") or {})
-        desired = entry.get("desired")
+        current = dict(entry["current"])
+        desired = entry["desired"]
         drift = bool(desired and current.get("version") and desired.get("version")
                      and current["version"] != desired["version"])
         verification = current.pop("verification", origins.UNKNOWN)
         if verification in (origins.EXACT, origins.CONSISTENT) and _is_stale(
                 current.get("verified_at"), now, stale_s):
             verification = origins.STALE
-        # Passed through unmodified in shape -- but routed through the same
-        # stored-container gate as set_watch/record_update, so an entry
-        # written before watch/update existed (live on two machines), or
-        # one carrying corrupted watch/update data, reads back the same
-        # clean shape as a well-formed one rather than leaking a raw
-        # scalar/list into an API response.
-        update = _stored_dict(entry.get("update")) or None
+        # `watch`/`update` are passed through with no transformation of their
+        # own -- the gate above is the only thing that has touched them.
         out.append({**entry, "current": current,
-                    "version_drift": drift, "verification": verification,
-                    "watch": _stored_list(entry.get("watch")),
-                    "update": update})
+                    "version_drift": drift, "verification": verification})
     return out
 
 
 def gaps(data: dict) -> list[str]:
     """Artifact ids with no recorded origin — the work queue for what D8
-    refuses to guess."""
-    return sorted(k for k, v in data.items() if (v or {}).get("origin") is None)
+    refuses to guess. An origin that cannot be read is no origin: a corrupt
+    entry belongs on the work queue, not silently off it."""
+    return sorted(k for k, v in _stored_document(data).items()
+                  if v["origin"] is None)
 
 
 def updates_available(data: dict) -> list[str]:
     """Artifact ids whose rollup says a newer version exists."""
-    return sorted(k for k, v in data.items()
-                  if _stored_dict(_stored_dict(v).get("update")).get("status")
-                  == updates.AVAILABLE)
+    return sorted(k for k, v in _stored_document(data).items()
+                  if (v["update"] or {}).get("status") == updates.AVAILABLE)
 
 
 def _is_stale(verified_at: str | None, now: str, stale_s: float) -> bool:

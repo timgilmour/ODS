@@ -1,5 +1,7 @@
 """The provenance store: atomic current+desired state, drift, gaps."""
 
+import copy
+import inspect
 import json
 
 import pytest
@@ -328,12 +330,20 @@ def test_describe_defaults_watch_and_update_for_pre_migration_entries():
 
 
 def test_describe_passes_watch_and_update_through_unmodified():
-    entry = {**_entry(), "watch": [{"id": "a"}],
-             "update": {"status": updates.CURRENT}}
+    """No transformation of its own: whatever `record_update` wrote is what
+    a consumer reads. (Round 4 note: the stored `update` here is the shape
+    `record_update` actually writes -- status/sources/checked_at. It used to
+    be an artificial `{"status": ...}` with no `sources` key at all, which
+    the gate now completes; asserting that a hand-truncated update STAYS
+    truncated was testing the absence of the guarantee, not the passthrough
+    this test is named for.)"""
+    stored_update = {"status": updates.CURRENT, "sources": [{"id": "a"}],
+                     "checked_at": T0}
+    entry = {**_entry(), "watch": [{"id": "a"}], "update": stored_update}
     data = {"oci:local:x": entry}
     described = provenance.describe(data, now=T0, stale_s=3600)[0]
     assert described["watch"] == [{"id": "a"}]
-    assert described["update"] == {"status": updates.CURRENT}
+    assert described["update"] == stored_update
 
 
 # --- watch / update ---------------------------------------------------------
@@ -843,3 +853,367 @@ def test_updates_available_survives_a_non_dict_entry():
     data = {"oci:local:x": "corrupted",
             "oci:local:y": {"update": {"status": updates.AVAILABLE}}}
     assert provenance.updates_available(data) == ["oci:local:y"]
+
+
+# --- fix round 4: the ENTRY itself, and the gate that makes the next -------
+# --- level structurally impossible -----------------------------------------
+
+_AID = "oci:local:gated"
+_NEIGHBOUR = "oci:local:healthy"
+_SOURCE = {"id": "s", "check": "git_tags", "remote": "https://github.com/a/b",
+           "pinned": "v1", "order": "semver"}
+_RESULT = {"id": "s", "status": updates.AVAILABLE, "current": "v1",
+           "latest": "v2", "detail": {}, "note": None}
+
+# Every JSON shape except `null`, which several fields legitimately hold and
+# which the old `(x or {})` idiom already handled. The last one is an object
+# with nothing this module recognises in it -- a hand-edit, or a field from a
+# version that has not been written yet.
+_GARBAGE = ("corrupted", 42, True, ["not", "an", "object"], {"unexpected": True})
+
+# The subset that is not an object at all: the shape three earlier rounds left
+# reachable at the ENTRY level.
+_NOT_AN_OBJECT = ("corrupted", 42, True, ["not", "an", "entry"])
+
+
+def _origin(repository="a/b"):
+    return {"registry": "ghcr.io", "repository": repository, "reference": None,
+            "build": None, "archive": None}
+
+
+@pytest.mark.parametrize("garbage", _NOT_AN_OBJECT)
+def test_a_whole_entry_that_is_not_an_object_reads_as_an_empty_entry(tmp_path, garbage):
+    """Required coverage 1, read side. `_load()` validates only the top-level
+    document (D13); a hand-edited file can hold a bare scalar where an entry
+    belongs. Every read path must degrade to "nothing recorded" -- and the id
+    must survive, because an unidentifiable row in an API response is its own
+    bug."""
+    (tmp_path / "provenance.json").write_text(json.dumps({_AID: garbage}))
+    data = _store(tmp_path).get()
+
+    assert provenance.gaps(data) == [_AID]        # no readable origin: it IS a gap
+    assert provenance.updates_available(data) == []
+    described = provenance.describe(data, now=T0, stale_s=3600)
+    assert [e["artifact_id"] for e in described] == [_AID]
+    assert described[0]["watch"] == []
+    assert described[0]["update"] is None
+    assert described[0]["version_drift"] is False
+    assert described[0]["verification"] == origins.UNKNOWN
+
+
+@pytest.mark.parametrize("garbage", _NOT_AN_OBJECT)
+def test_both_write_paths_survive_a_whole_entry_that_is_not_an_object(tmp_path, garbage):
+    """Required coverage 1, write side: `set_watch` and `record_update` both
+    read the entry with a bare `.get()` before this round, and both raised
+    `AttributeError: 'str' object has no attribute 'get'` on this file."""
+    (tmp_path / "provenance.json").write_text(json.dumps({_AID: garbage}))
+    store = _store(tmp_path)
+
+    store.set_watch(_AID, [_SOURCE], now=T0)
+    assert store.record_update(_AID, [_RESULT], now=T1) == updates.AVAILABLE
+
+    entry = store.entry(_AID)
+    assert entry["artifact_id"] == _AID
+    assert entry["kind"] == "oci" and entry["node"] == "local"
+    assert entry["watch"] == [_SOURCE]
+    assert entry["update"]["status"] == updates.AVAILABLE
+
+
+def test_a_corrupt_entry_never_blocks_its_well_formed_neighbours(tmp_path):
+    """Required coverage 2 -- the one that matters most. Three differently
+    corrupted entries share the document with a healthy one; the healthy one
+    must still read AND write exactly as if they were not there, and the
+    corrupt ones must still be listed as gaps rather than disappearing."""
+    store = _store(tmp_path)
+    store.observe(_NEIGHBOUR, kind="oci", node="local", role="engine",
+                  current=_identity(), now=T0)
+    store.declare_origin(_NEIGHBOUR, kind="oci", node="local", role="engine",
+                         origin=_origin(), now=T0)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:scalar"] = "corrupted"
+    data["oci:local:list"] = ["not", "an", "entry"]
+    data["oci:local:number"] = 42
+    path.write_text(json.dumps(data))
+
+    store.set_watch(_NEIGHBOUR, [_SOURCE], now=T1)
+    assert store.record_update(_NEIGHBOUR, [_RESULT], now=T1) == updates.AVAILABLE
+
+    entry = store.entry(_NEIGHBOUR)
+    assert entry["origin"] == _origin()                  # untouched
+    assert entry["current"]["version"] == "sha256:a"     # untouched
+    assert [s["id"] for s in entry["watch"]] == ["s"]
+    assert entry["update"]["status"] == updates.AVAILABLE
+
+    data = store.get()
+    described = {e["artifact_id"]: e for e in provenance.describe(
+        data, now=T1, stale_s=3600)}
+    assert set(described) == {_NEIGHBOUR, "oci:local:scalar", "oci:local:list",
+                              "oci:local:number"}
+    assert described[_NEIGHBOUR]["update"]["status"] == updates.AVAILABLE
+    assert provenance.updates_available(data) == [_NEIGHBOUR]
+    assert provenance.gaps(data) == ["oci:local:list", "oci:local:number",
+                                     "oci:local:scalar"]
+
+
+def test_a_corrupt_entry_is_repaired_in_place_not_deleted(tmp_path):
+    """The gate normalizes; it never drops. `delete()` stays the only way an
+    entry leaves the store, so a corrupt entry survives a neighbour's write
+    as a readable empty entry rather than vanishing from the ledger."""
+    store = _store(tmp_path)
+    store.declare_origin(_NEIGHBOUR, kind="oci", node="local", role="engine",
+                         origin=_origin(), now=T0)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data[_AID] = "corrupted"
+    path.write_text(json.dumps(data))
+
+    store.set_desired(_NEIGHBOUR, version="sha256:b", label="v2", now=T1)
+
+    on_disk = json.loads(path.read_text())
+    assert set(on_disk) == {_NEIGHBOUR, _AID}
+    assert on_disk[_AID]["artifact_id"] == _AID
+    assert on_disk[_AID]["origin"] is None
+
+
+# --- the structural guarantees themselves ----------------------------------
+
+def _store_calls(store):
+    """Every public ProvenanceStore method, with arguments that reach the
+    stored entry for `_AID`. Keyed by name so the matrix below can assert the
+    table is COMPLETE: a future method with no entry here fails the test
+    rather than silently escaping the corruption matrix."""
+    return {
+        "get": lambda: store.get(),
+        "entry": lambda: store.entry(_AID),
+        "observe": lambda: store.observe(_AID, kind="oci", node="local",
+                                         role="engine", current=_identity(),
+                                         now=T1),
+        "mark_unavailable": lambda: store.mark_unavailable(_AID, now=T1),
+        "declare_origin": lambda: store.declare_origin(
+            _AID, kind="oci", node="local", role="engine", origin=_origin(),
+            update_path="docker pull", notes="hand declared", now=T1),
+        "set_desired": lambda: store.set_desired(_AID, version="sha256:b",
+                                                 label="v2", now=T1),
+        "clear_desired": lambda: store.clear_desired(_AID, now=T1),
+        "set_watch": lambda: store.set_watch(_AID, [_SOURCE], now=T1),
+        "record_update": lambda: store.record_update(_AID, [_RESULT], now=T1),
+        "record_deep_verify": lambda: store.record_deep_verify(
+            _AID, "sha256:deadbeef", now=T1),
+        "delete": lambda: store.delete(_AID),
+    }
+
+
+def _document_readers():
+    """Every public module-level function that takes a stored document as its
+    first argument, with the rest of its arguments. Same completeness trick as
+    `_store_calls`: a new pure reader that forgets the gate fails the test."""
+    return {"describe": {"now": T1, "stale_s": 3600},
+            "gaps": {}, "updates_available": {}}
+
+
+def _populated(tmp_path):
+    """A store whose entry exercises every field the module can write."""
+    store = _store(tmp_path)
+    store.observe(_AID, kind="oci", node="local", role="engine",
+                  current=_identity(), now=T0)
+    store.declare_origin(_AID, kind="oci", node="local", role="engine",
+                         origin=_origin(), update_path="docker pull",
+                         notes="from the sparky-vllm README", now=T0)
+    store.set_desired(_AID, version="sha256:b", label="v0.5.6", now=T0)
+    store.set_watch(_AID, [_SOURCE], now=T0)
+    store.record_update(_AID, [_RESULT], now=T0)
+    store.observe(_NEIGHBOUR, kind="oci", node="local", role="engine",
+                  current=_identity(version="sha256:n", label="v1"), now=T0)
+    return store
+
+
+def _paths(value, prefix=()):
+    """Every addressable position inside `value`, itself included."""
+    yield prefix
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _paths(item, (*prefix, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _paths(item, (*prefix, index))
+
+
+def _with_garbage_at(document, path, garbage):
+    document = copy.deepcopy(document)
+    target = document[_AID]
+    if not path:
+        document[_AID] = garbage
+        return document
+    for step in path[:-1]:
+        target = target[step]
+    target[path[-1]] = garbage
+    return document
+
+
+def test_the_corruption_matrix_covers_every_public_store_method(tmp_path):
+    """THE COMPLETENESS GUARD. A method added to ProvenanceStore without a
+    line in `_store_calls` fails here, which is what stops a fifth round of
+    "one more un-gated read" from reaching production untested."""
+    assert set(_store_calls(_store(tmp_path))) == {
+        name for name in dir(ProvenanceStore) if not name.startswith("_")}
+
+
+def test_the_document_reader_table_covers_every_public_pure_helper():
+    """Same guard for the module-level read side: `describe`/`gaps`/
+    `updates_available` take a document straight from a caller, so each has
+    to gate its own argument -- and a fourth one has to be added here."""
+    found = {name for name, fn in vars(provenance).items()
+             if inspect.isfunction(fn) and not name.startswith("_")
+             and fn.__module__ == provenance.__name__
+             and next(iter(inspect.signature(fn).parameters), None) == "data"}
+    assert found == set(_document_readers())
+
+
+@pytest.mark.parametrize("garbage", _GARBAGE)
+def test_no_read_or_write_path_raises_on_any_corrupted_position(tmp_path, garbage):
+    """THE MATRIX. Every addressable position in a fully-populated entry --
+    the entry itself, every field, every list element, every nested field --
+    replaced by garbage in turn, against every public method of the store and
+    every public module-level reader.
+
+    It is driven by a REAL populated entry rather than a hand-written list of
+    positions, so a field added later (nested or not) is corrupted by this
+    test the day it is first written, without anyone remembering to."""
+    path = tmp_path / "provenance.json"
+    _populated(tmp_path)
+    healthy = json.loads(path.read_text())
+
+    for position in _paths(healthy[_AID]):
+        for name, call in _store_calls(_store(tmp_path)).items():
+            path.write_text(json.dumps(_with_garbage_at(healthy, position, garbage)))
+            try:
+                call()
+            except Exception as exc:   # noqa: BLE001 -- re-raised with a locator
+                raise AssertionError(
+                    f"{name}() raised on {list(position)} = {garbage!r}: {exc!r}"
+                ) from exc
+
+        path.write_text(json.dumps(_with_garbage_at(healthy, position, garbage)))
+        data = _store(tmp_path).get()
+        for name, kwargs in _document_readers().items():
+            try:
+                getattr(provenance, name)(data, **kwargs)
+            except Exception as exc:   # noqa: BLE001 -- re-raised with a locator
+                raise AssertionError(
+                    f"{name}() raised on {list(position)} = {garbage!r}: {exc!r}"
+                ) from exc
+
+
+@pytest.mark.parametrize("garbage", _GARBAGE)
+def test_the_healthy_neighbour_is_untouched_by_every_corrupted_position(
+        tmp_path, garbage):
+    """Required coverage 2, generalized over the whole matrix: whatever is
+    corrupted in one entry, the entry beside it still reads back exactly."""
+    path = tmp_path / "provenance.json"
+    _populated(tmp_path)
+    healthy = json.loads(path.read_text())
+    expected = healthy[_NEIGHBOUR]
+
+    for position in _paths(healthy[_AID]):
+        path.write_text(json.dumps(_with_garbage_at(healthy, position, garbage)))
+        store = _store(tmp_path)
+        assert store.entry(_NEIGHBOUR) == expected, position
+        store.set_watch(_NEIGHBOUR, [_SOURCE], now=T1)
+        assert store.record_update(_NEIGHBOUR, [_RESULT], now=T1) == updates.AVAILABLE
+        assert store.entry(_NEIGHBOUR)["current"]["version"] == "sha256:n"
+
+
+def test_only_load_reads_the_stored_document(tmp_path):
+    """WHY THE GATE HOLDS: `_load()` is the single door stored data comes
+    through, so gating it gates every method that will ever exist. This test
+    fails if a future method reads the file itself and walks around the
+    gate."""
+    for name, member in vars(ProvenanceStore).items():
+        if name == "_load" or not inspect.isfunction(member):
+            continue
+        source = inspect.getsource(member)
+        assert "read_text" not in source, name
+        assert "json.loads" not in source, name
+
+
+def test_the_shape_table_declares_every_container_field_of_an_entry():
+    """The gate's field table is keyed off `_blank_entry`'s own vocabulary.
+    A future entry field whose default is a container must be declared in it,
+    or a stored value of the wrong type reaches a caller un-normalized."""
+    blank = provenance._blank_entry("oci:local:x", "oci", "local", "other")
+    containers = {k for k, v in blank.items() if isinstance(v, (dict, list))}
+    assert containers <= set(provenance._ENTRY_SHAPE)
+    assert set(provenance._ENTRY_SHAPE) <= set(blank)
+
+
+def test_load_gates_every_entry_including_unparseable_ids():
+    """The gate cannot assume the KEY is a well-formed artifact id either --
+    the file is hand-editable all the way up."""
+    document = {"not-an-artifact-id": "corrupted",
+                "oci:local:x": {"watch": 5, "update": "x", "current": 7,
+                                "desired": True, "origin": ["nope"]}}
+    gated = provenance._stored_document(document)
+
+    assert set(gated) == set(document)
+    assert gated["not-an-artifact-id"]["kind"] is None      # never guessed
+    assert gated["oci:local:x"]["kind"] == "oci"            # derived from the key
+    assert gated["oci:local:x"]["watch"] == []
+    assert gated["oci:local:x"]["update"] is None
+    assert gated["oci:local:x"]["current"] == provenance._empty_current()
+    assert gated["oci:local:x"]["desired"] is None
+    assert gated["oci:local:x"]["origin"] is None
+
+
+def test_the_gate_keeps_every_readable_value_it_is_given():
+    """NOT TOO AGGRESSIVE. Only a value whose stored shape cannot be read at
+    all is replaced; everything else -- including keys this module has never
+    heard of -- survives byte for byte."""
+    stored = {"artifact_id": "oci:local:x", "kind": "oci", "node": "local",
+              "role": "engine", "origin": _origin(), "current": _identity(),
+              "desired": {"version": "v2"}, "update_path": "docker pull",
+              "notes": "n", "watch": [_SOURCE],
+              "update": {"status": updates.CURRENT, "sources": [_RESULT],
+                         "checked_at": T0},
+              "a_field_from_a_later_version": {"kept": True}}
+    gated = provenance._stored_document({"oci:local:x": stored})["oci:local:x"]
+
+    for field, value in stored.items():
+        if field == "current":
+            continue           # merged onto the empty-current defaults, below
+        assert gated[field] == value, field
+    assert gated["current"] == {**provenance._empty_current(), **_identity()}
+
+
+def test_a_verdict_that_cannot_be_keyed_is_dropped_but_a_declared_source_is_kept():
+    """DECLARED vs DERIVED. An id is what `record_update` builds a set and a
+    dict from, and an id that is itself a container is unhashable --
+    `{s["id"] for s in ...}` raises TypeError on it, not AttributeError.
+    Derived verdicts with no usable id are dropped at the gate (the next
+    pass rewrites them anyway); a DECLARED watch source is kept, because
+    this file is its only home and every write re-serialises the document --
+    dropping it here would erase an operator's typo instead of showing it."""
+    document = {"oci:local:x": {"watch": [{"id": ["a"]}, {"id": "b"},
+                                          {"no": "id"}],
+                                "update": {"sources": [{"id": {"a": 1}},
+                                                       {"id": "b"}]}}}
+    gated = provenance._stored_document(document)["oci:local:x"]
+
+    assert gated["watch"] == [{"id": ["a"]}, {"id": "b"}, {"no": "id"}]
+    assert [s["id"] for s in gated["update"]["sources"]] == ["b"]
+
+
+def test_an_unkeyable_declared_source_still_cannot_reach_a_set_comprehension(tmp_path):
+    """The other half of that asymmetry: keeping the source visible must not
+    put an unhashable id in front of `record_update`'s `live` set."""
+    store = _store(tmp_path)
+    store.set_watch(_AID, [_SOURCE], now=T0)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data[_AID]["watch"] += [{"id": ["unhashable"]}, {"no": "id at all"}]
+    path.write_text(json.dumps(data))
+
+    assert store.record_update(_AID, [_RESULT], now=T1) == updates.AVAILABLE
+    entry = store.entry(_AID)
+    assert [s["id"] for s in entry["update"]["sources"]] == ["s"]
+    assert len(entry["watch"]) == 3            # the operator's own text, kept
