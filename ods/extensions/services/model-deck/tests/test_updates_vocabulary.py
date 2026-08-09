@@ -88,6 +88,109 @@ def test_validate_watch_requires_an_id_and_a_pin():
         updates.validate_watch({"id": "x", "check": "git_tags", "order": "semver"})
 
 
+# --- per-check required fields ---------------------------------------------
+#
+# `validate_watch` used to check `id`/`check`/`pinned`/`order` and stop, so a
+# source no checker could execute was ACCEPTED (HTTP 200, written to disk)
+# and turned into a permanent `unavailable` with note "checker raised
+# KeyError" -- the KeyError swallowed by dispatch's per-source try
+# (app/update_check.py:58-60). Ambiguous input is refused, not coerced.
+#
+# The table below is derived from what each checker actually reads:
+#   oci_channel  app/updates/oci.py:53-55  repository, reference, pinned
+#   oci_tags     app/updates/oci.py:80-81  repository, pinned
+#   git_compare  app/updates/git.py:93,98-99  remote, pinned, ref
+#   git_tags     app/updates/git.py:127,130   remote, pinned
+# `registry` is NOT required: app/updates/oci.py:52,79 default it to ghcr.io.
+
+_VALID = {
+    "oci_channel": {"id": "c", "check": "oci_channel", "registry": "ghcr.io",
+                    "repository": "a/b", "reference": "slim",
+                    "pinned": "sha256:aa", "order": None},
+    "oci_tags": {"id": "t", "check": "oci_tags", "registry": "ghcr.io",
+                 "repository": "a/b", "pinned": "v1.0.0", "order": "semver"},
+    "git_compare": {"id": "g", "check": "git_compare",
+                    "remote": "https://github.com/a/b", "ref": "main",
+                    "pinned": "abc123", "order": None},
+    "git_tags": {"id": "gt", "check": "git_tags",
+                 "remote": "https://github.com/a/b",
+                 "pinned": "v1.0.0", "order": "none"},
+}
+
+
+def test_every_check_kind_declares_what_its_checker_needs():
+    """COMPLETENESS GUARD. A fifth check added to CHECKS with no required
+    fields declared would silently accept anything again."""
+    assert set(updates._REQUIRED) == set(updates.CHECKS)
+    assert set(_VALID) == set(updates.CHECKS)
+
+
+@pytest.mark.parametrize("check", sorted(_VALID))
+def test_a_valid_source_of_every_check_kind_is_accepted(check):
+    updates.validate_watch(dict(_VALID[check]))
+
+
+@pytest.mark.parametrize("check,field", [
+    (check, field) for check, fields in [
+        ("oci_channel", ("repository", "reference", "pinned")),
+        ("oci_tags", ("repository", "pinned")),
+        ("git_compare", ("remote", "ref", "pinned")),
+        ("git_tags", ("remote", "pinned")),
+    ] for field in fields])
+def test_a_source_missing_a_field_its_checker_indexes_is_refused(check, field):
+    source = dict(_VALID[check])
+    source.pop(field)
+    with pytest.raises(updates.BadWatch):
+        updates.validate_watch(source)
+
+
+def test_the_oci_channel_source_from_the_review_is_refused_not_stored():
+    """The exact body the final review confirmed reached disk: accepted with
+    200, then permanently `unavailable` because check_channel indexes
+    `source["repository"]` (app/updates/oci.py:53)."""
+    with pytest.raises(updates.BadWatch):
+        updates.validate_watch({"id": "x", "check": "oci_channel",
+                                "pinned": "sha256:aa", "order": None})
+
+
+@pytest.mark.parametrize("bad", [42, ["a/b"], {"a": 1}, None, ""])
+def test_a_required_field_that_is_not_a_non_empty_string_is_refused(bad):
+    source = {**_VALID["oci_channel"], "repository": bad}
+    with pytest.raises(updates.BadWatch):
+        updates.validate_watch(source)
+
+
+def test_registry_stays_optional_because_the_checker_defaults_it():
+    """app/updates/oci.py:52,79 -- `source.get("registry") or "ghcr.io"`. A
+    field the checker defaults is not a field the operator must supply."""
+    source = dict(_VALID["oci_channel"])
+    source.pop("registry")
+    updates.validate_watch(source)
+
+
+# --- uniqueness is a property of the LIST, not of one source ----------------
+
+def test_validate_watch_sources_accepts_distinct_ids():
+    updates.validate_watch_sources([_VALID["oci_channel"], _VALID["git_tags"]])
+
+
+def test_a_duplicate_source_id_is_refused():
+    """`record_update` merges results into `{s["id"]: s}`
+    (app/provenance.py:489), so a second source with the same id silently
+    suppresses the first one's verdict. README published `id` as "unique
+    within the artifact"; nothing enforced it."""
+    with pytest.raises(updates.BadWatch):
+        updates.validate_watch_sources([
+            dict(_VALID["oci_tags"], id="dupe"),
+            dict(_VALID["git_tags"], id="dupe")])
+
+
+def test_validate_watch_sources_still_validates_each_source():
+    with pytest.raises(updates.BadWatch):
+        updates.validate_watch_sources([{"id": "x", "check": "oci_channel",
+                                         "pinned": "sha256:aa", "order": None}])
+
+
 def test_validate_watch_rejects_a_non_string_id():
     # Task 9's PUT /watch route takes `id` straight off an untyped request
     # body. Truthiness alone lets a list or object through here, and

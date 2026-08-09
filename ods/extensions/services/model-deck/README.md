@@ -720,6 +720,11 @@ from the tag strings themselves:
 
 \* `registry` defaults to `ghcr.io` when omitted.
 
+Every column entry above except the starred one is **enforced** by
+`app.updates.validate_watch`, as a non-empty string: a source whose checker
+could not execute it is refused at the door (422, nothing written) rather
+than accepted and then reported permanently `unavailable`.
+
 `order: "none"` is not "not yet configured" — it is the **honest** choice for
 a tag set with no sane order at all (llama.cpp's `b8763` build tags; a channel
 name is handled by `oci_channel` instead and never reaches ranking). A tag
@@ -774,9 +779,12 @@ PUT /api/provenance/watch
 }
 ```
 
-Every source needs a non-empty `id` (unique within the artifact — it is the
-key `record_update` merges results on), a `check` from the table above, and a
-truthy `pinned` value to compare against. `sources: []` clears the watch —
+Every source needs a non-empty **string** `id`, unique within the artifact —
+it is the key `record_update` merges results on, so a duplicate is refused
+(422) rather than letting one source's verdict silently suppress the other's.
+It also needs a `check` from the table above, plus every field that table
+lists for that check (including `pinned`), each a non-empty string.
+`sources: []` clears the watch —
 the artifact stops being checked, and any prior verdict for a dropped source
 id is dropped with it (retention is bounded by what is still watched). A
 malformed source is rejected **whole** (422, nothing written) rather than

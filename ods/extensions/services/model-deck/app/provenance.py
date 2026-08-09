@@ -426,8 +426,7 @@ class ProvenanceStore:
         transition on every one of those calls would grow the history file
         forever for a value that never changed.
         """
-        for source in sources:
-            updates.validate_watch(source)
+        updates.validate_watch_sources(sources)
         sources = list(sources)
         now = now or _now_iso()
         with self._lock:

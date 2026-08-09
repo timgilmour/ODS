@@ -22,6 +22,28 @@ STATUSES = (CURRENT, AVAILABLE, UNDETERMINED, UNAVAILABLE)
 CHECKS = ("oci_channel", "oci_tags", "git_compare", "git_tags")
 _TAG_CHECKS = ("oci_tags", "git_tags")
 
+# WHAT EACH CHECKER ACTUALLY READS -- derived by reading the checkers, never
+# from the docs, because a table that disagrees with them is worse than no
+# table. `registry` is deliberately absent: both oci checkers default it
+# (app/updates/oci.py:52,79 -- `source.get("registry") or "ghcr.io"`), and a
+# field the checker defaults is not a field the operator must supply.
+#
+#   oci_channel  app/updates/oci.py:53-55   repository / reference / pinned
+#   oci_tags     app/updates/oci.py:80-81   repository / pinned  (+ order, below)
+#   git_compare  app/updates/git.py:93,98-99  remote / pinned / ref
+#   git_tags     app/updates/git.py:127,130   remote / pinned      (+ order, below)
+#
+# `remote` is `.get("remote", "")` rather than an index, so it never raises --
+# it produces a PERMANENT "remote is not on github.com; no checker available"
+# instead (app/updates/git.py:44-46,95). Same category: a source no checker
+# can execute, refused at the door rather than written to disk.
+_REQUIRED = {
+    "oci_channel": ("repository", "reference", "pinned"),
+    "oci_tags": ("repository", "pinned"),
+    "git_compare": ("remote", "ref", "pinned"),
+    "git_tags": ("remote", "pinned"),
+}
+
 # Worst-first. A rollup is the worst of its sources so that one healthy input
 # cannot mask a sibling -- lemonade has two that drift independently.
 _SEVERITY = {UNAVAILABLE: 3, UNDETERMINED: 2, AVAILABLE: 1, CURRENT: 0}
@@ -29,6 +51,27 @@ _SEVERITY = {UNAVAILABLE: 3, UNDETERMINED: 2, AVAILABLE: 1, CURRENT: 0}
 
 class BadWatch(ValueError):
     """A watch source that cannot be checked as written."""
+
+
+def validate_watch_sources(sources: list[dict]) -> None:
+    """Raise BadWatch unless `sources` is a checkable REPLACEMENT watch list.
+
+    UNIQUENESS IS A PROPERTY OF THE LIST, so it cannot live in
+    `validate_watch`, which only ever sees one source. `record_update` merges
+    a pass's results into `{s["id"]: s}` (app/provenance.py:489) and
+    `set_watch` narrows the list to a set of ids (app/provenance.py:444), so
+    two sources sharing an id means one of them silently has no verdict --
+    the README published `id` as "unique within the artifact" and nothing
+    enforced it. Refused, not deduped: which of the two the operator meant is
+    exactly the ambiguity this project does not guess at.
+    """
+    seen: set[str] = set()
+    for source in sources:
+        validate_watch(source)
+        source_id = source["id"]         # a str by now: validate_watch said so
+        if source_id in seen:
+            raise BadWatch(f"duplicate watch source id {source_id!r}")
+        seen.add(source_id)
 
 
 def validate_watch(source: dict) -> None:
@@ -46,8 +89,20 @@ def validate_watch(source: dict) -> None:
     check = source.get("check")
     if check not in CHECKS:
         raise BadWatch(f"check must be one of {list(CHECKS)}, got {check!r}")
-    if not source.get("pinned"):
-        raise BadWatch(f"watch source {source['id']!r} needs a pinned value")
+
+    # A source whose checker cannot execute it is refused HERE, not accepted
+    # with a 200 and turned into a permanent `unavailable` carrying "checker
+    # raised KeyError" -- dispatch's per-source try (app/update_check.py:58)
+    # swallows the KeyError, so nothing downstream can ever tell an operator
+    # their body was wrong. Non-string is refused for the same reason a
+    # non-string `id` is: `ordering.rank` regexes the pin and `parse_remote`
+    # strips the remote, both of which raise on anything else.
+    for field in _REQUIRED[check]:
+        value = source.get(field)
+        if not isinstance(value, str) or not value:
+            raise BadWatch(
+                f"{check} source {source_id!r} needs a non-empty string "
+                f"{field!r}, got {value!r}")
 
     order = source.get("order")
     if check in _TAG_CHECKS:

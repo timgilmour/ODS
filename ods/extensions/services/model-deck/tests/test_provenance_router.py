@@ -406,6 +406,37 @@ def test_put_watch_rejects_a_non_string_source_id_with_422_not_500(app_client):
     assert response.status_code == 422
 
 
+def test_put_watch_rejects_a_source_its_checker_cannot_execute_with_422(app_client):
+    """Verified reachable in the final review: this exact body answered 200
+    and was written to disk, then reported a permanent `unavailable` with
+    note "checker raised KeyError" -- check_channel indexes
+    `source["repository"]` (app/updates/oci.py:53). README's "Needs" column
+    published it as a contract; nothing enforced it."""
+    client, _deck = app_client
+    response = client.put("/api/provenance/watch", json={
+        "artifact_id": "oci:local:x",
+        "sources": [{"id": "x", "check": "oci_channel",
+                     "pinned": "sha256:aa", "order": None}]})
+    assert response.status_code == 422
+    assert client.get("/api/provenance").json()["artifacts"] == []
+
+
+def test_put_watch_rejects_duplicate_source_ids_with_422(app_client):
+    """`record_update` merges on the id (app/provenance.py:489), so the
+    second source silently suppressed the first one's verdict."""
+    client, _deck = app_client
+    response = client.put("/api/provenance/watch", json={
+        "artifact_id": "oci:local:x",
+        "sources": [{"id": "same", "check": "git_tags",
+                     "remote": "https://github.com/a/b",
+                     "pinned": "v1.0.0", "order": "semver"},
+                    {"id": "same", "check": "git_tags",
+                     "remote": "https://github.com/c/d",
+                     "pinned": "v2.0.0", "order": "semver"}]})
+    assert response.status_code == 422
+    assert client.get("/api/provenance").json()["artifacts"] == []
+
+
 def test_put_watch_with_a_malformed_artifact_id_is_422_even_with_no_sources(app_client):
     """set_watch's own equality guard no-ops before ever validating the id
     when sources is `[]` and nothing is stored -- this route validates the
