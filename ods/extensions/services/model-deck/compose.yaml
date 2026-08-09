@@ -13,6 +13,16 @@ services:
       - HOST_AGENT_KEY=${ODS_AGENT_KEY:-} # live installs name the agent key ODS_AGENT_KEY
       # What this box is called on the deck board. Unset ⇒ "local".
       - MODEL_DECK_NODE_LABEL=${MODEL_DECK_NODE_LABEL:-local}
+      # Update checking (app/update_check.py) — the ONLY part of the deck
+      # that talks to the public internet. Default ON: a stock install
+      # declares no origins, so nothing is watched and no request is made.
+      # The `:-true`/`:-21600` fallbacks are load-bearing, not cosmetic —
+      # a bare `${VAR:-}` ships an EMPTY value rather than an absent one,
+      # and only app/settings.py:25's `env_ignore_empty=True` would then
+      # keep the field default; spelling the default here means the compose
+      # file states it too, exactly as MODEL_DECK_NODE_LABEL above does.
+      - MODEL_DECK_UPDATE_CHECK_ENABLED=${MODEL_DECK_UPDATE_CHECK_ENABLED:-true}
+      - MODEL_DECK_UPDATE_INTERVAL_S=${MODEL_DECK_UPDATE_INTERVAL_S:-21600}
       # Spark (remote single-slot node) — engine stays unbuilt unless the
       # URLs are set AND ODS_REMOTE_NODE_KEYS carries an entry for the node
       # (same credential dashboard-api's remote-node poller uses).
