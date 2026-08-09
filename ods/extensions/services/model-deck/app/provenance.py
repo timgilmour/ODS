@@ -57,8 +57,18 @@ def _blank_entry(artifact_id: str, kind: str, node: str, role: str) -> dict:
 def _by_id(sources: list[dict]) -> list[dict]:
     """A stable, order-independent form of a source list for equality
     comparison. Missing ids sort together at the front rather than raising --
-    the same read-time tolerance the corrupt-source-id handling below needs."""
-    return sorted(sources, key=lambda s: s.get("id") or "")
+    the same read-time tolerance the corrupt-source-id handling below needs.
+
+    `sources` is asymmetric in trust: the incoming argument to set_watch has
+    already passed validate_watch, so every element is a dict with a real
+    id. `before` is read straight off disk and gets no such guarantee -- a
+    hand-edited watch list can contain anything JSON allows, including a
+    bare `None` or a string, and `.get` on those raises. A non-dict element
+    is treated the same as a dict with no id: sorted deterministically here,
+    and left for the "id"-based filters elsewhere to drop.
+    """
+    return sorted(sources,
+                  key=lambda s: (s.get("id") or "") if isinstance(s, dict) else "")
 
 
 def _validate(artifact_id: str, kind: str, node: str, role: str) -> None:
@@ -273,9 +283,9 @@ class ProvenanceStore:
 
             live = {s["id"] for s in sources}
             update = entry.get("update")
-            if update:
+            if isinstance(update, dict):
                 kept = [s for s in update.get("sources", [])
-                       if s.get("id") in live]
+                       if isinstance(s, dict) and s.get("id") in live]
                 entry["update"] = {**update, "sources": kept,
                                    "status": updates.rollup(
                                        [s.get("status") for s in kept])}
@@ -307,14 +317,17 @@ class ProvenanceStore:
             if entry is None:
                 return updates.UNAVAILABLE
 
-            # .get(), not [] -- a stored item missing "id" must be dropped,
-            # never treated as a source literally named None: an incoming
+            # isinstance + .get(), not [] -- a stored item missing "id", or
+            # not even a dict (a hand-edited watch/sources list can hold
+            # anything JSON allows), must be dropped rather than raising or
+            # being treated as a source literally named None: an incoming
             # result that also lacks "id" (source_id is then also None)
             # would otherwise spuriously match it via `None in live`.
-            live = {s.get("id") for s in (entry.get("watch") or []) if s.get("id")}
+            live = {s.get("id") for s in (entry.get("watch") or [])
+                    if isinstance(s, dict) and s.get("id")}
             previous = {s.get("id"): s
                         for s in ((entry.get("update") or {}).get("sources") or [])
-                        if s.get("id")}
+                        if isinstance(s, dict) and s.get("id")}
 
             merged = []
             for result in source_results:

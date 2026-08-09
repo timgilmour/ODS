@@ -635,3 +635,106 @@ def test_record_update_ignores_a_prior_verdict_missing_an_id(tmp_path):
     source = store.entry("oci:local:x")["update"]["sources"][0]
     assert source["id"] == "a"
     assert source["status"] == updates.UNAVAILABLE   # no id-less prior to preserve
+
+
+# --- fix round 2: non-dict elements in stored (untrusted) lists ------------
+
+def test_set_watch_survives_a_non_dict_element_in_the_stored_watch_list(tmp_path):
+    """`before` comes straight off disk and gets none of validate_watch's
+    guarantees -- a hand-edited watch list can hold a bare `None` or string.
+    _by_id must sort it deterministically rather than crashing on `.get`."""
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["watch"] = [None, "garbage"]
+    path.write_text(json.dumps(data))
+
+    new_sources = [{"id": "b", "check": "git_tags", "remote": "https://github.com/c/d",
+                    "pinned": "v1", "order": "semver"}]
+    store.set_watch("oci:local:x", new_sources)          # must not raise
+
+    entry = store.entry("oci:local:x")
+    assert entry["watch"] == new_sources
+
+
+def test_set_watch_order_insensitive_no_op_still_works_for_well_formed_input(tmp_path):
+    """Regression guard for last round's fix: making _by_id tolerate
+    non-dict elements must not break the ordinary case -- a genuinely
+    unchanged, well-formed list (just reordered) must still no-op."""
+    store = _store(tmp_path)
+    sources = [{"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+                "pinned": "v1", "order": "semver"},
+               {"id": "b", "check": "git_tags", "remote": "https://github.com/c/d",
+                "pinned": "v1", "order": "semver"}]
+    store.set_watch("oci:local:x", sources, now=T0)
+    store.set_watch("oci:local:x", list(reversed(sources)), now=T1)
+
+    records = [r for r in provenance_history.history_for(
+        tmp_path / "history.jsonl", "oci:local:x") if r["field"] == "watch"]
+    assert len(records) == 1
+
+
+def test_set_watch_retention_trim_survives_a_non_dict_element_in_stored_update_sources(tmp_path):
+    """Same defect class, different stored list: update.sources read back
+    during set_watch's retention trim can also be corrupted."""
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["update"]["sources"] = [None, "garbage"]
+    path.write_text(json.dumps(data))
+
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"},
+        {"id": "b", "check": "git_tags", "remote": "https://github.com/c/d",
+         "pinned": "v1", "order": "semver"}])                # must not raise
+
+    assert store.entry("oci:local:x")["update"]["sources"] == []
+
+
+def test_record_update_survives_a_non_dict_element_in_stored_watch(tmp_path):
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["watch"].append(None)
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])                        # must not raise
+    assert status == updates.CURRENT
+
+
+def test_record_update_survives_a_non_dict_element_in_stored_update_sources(tmp_path):
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["update"]["sources"].append(None)
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.UNAVAILABLE, "current": "v1", "latest": None,
+         "detail": {}, "note": "network"}])                   # must not raise
+    # The garbage element is excluded from `previous`, so "a"'s real prior
+    # (CURRENT) is still found and kept -- the unavailable result yields to it.
+    assert status == updates.CURRENT
+    ids = [s["id"] for s in store.entry("oci:local:x")["update"]["sources"]]
+    assert ids == ["a"]
