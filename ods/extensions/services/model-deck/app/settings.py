@@ -111,6 +111,17 @@ class Settings(BaseSettings):
     # read time, the way app.locations.describe computes `available`.
     provenance_stale_s: float = 3600.0
 
+    # Update-checking cadence. Upstream releases land on the order of weeks,
+    # and the anonymous GitHub ceiling (60 requests/hour per IP, shared with
+    # everything else on this box) is the real constraint -- so this is
+    # throttled far harder than any other pass. Runs on its own thread, never
+    # on the watcher tick, because a network call there would stall the
+    # reconciler.
+    update_interval_s: float = 21600.0
+    # Kill switch. This is the only part of the deck that talks to the public
+    # internet; turning it off must be one flag, not a rebuild.
+    update_check_enabled: bool = True
+
     # Seconds a deliberate lemonade unload (manual, set-apply, or the
     # watcher's own idle release) suppresses contention healing's pending-load
     # inference, so healing can't immediately revert it. A subsequent load
