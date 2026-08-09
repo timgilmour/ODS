@@ -684,7 +684,7 @@ already establishes for the rest of provenance.
 |---|---|
 | `current` | Checked; the pinned value is the newest the declared order can see. |
 | `available` | Checked; something ranked newer than the pin exists. |
-| `undetermined` | **Reached** the upstream, but its answer cannot be ranked **and something other than the pin is out there** — an `order: "none"` tag set, or a pin that itself doesn't parse under the declared order. An unrankable set whose only tag *is* the pin is `current`, not `undetermined`: nothing unexplained was seen (`app/updates/oci.py:138`, `app/updates/git.py:176`). |
+| `undetermined` | **Reached** the upstream, but its answer cannot be ranked **and something other than the pin is out there** — an `order: "none"` tag set, or a pin that itself doesn't parse under the declared order. An unrankable set whose only tag *is* the pin is `current`, not `undetermined`: nothing unexplained was seen (`app/updates/oci.py:145`, `app/updates/git.py:184`). |
 | `unavailable` | Could **not** reach the upstream, or could not even ask (rate-limited, network error, malformed response, a remote that has moved). |
 
 `undetermined` and `unavailable` get confused because both mean "no verdict,"

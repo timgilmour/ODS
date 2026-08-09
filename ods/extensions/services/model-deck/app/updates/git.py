@@ -58,7 +58,7 @@ def _failure(source, response):
                        note="github rate limit exhausted")
     if code in (301, 302, 307, 308):
         # THE REMEDY NAMES THE RIGHT ROUTE. For a git check the remote lives
-        # on the WATCH SOURCE (`source["remote"]`, read at :93/:127), not on
+        # on the WATCH SOURCE (`source["remote"]`, read at :101/:135), not on
         # the artifact's `origin`, so PUT /api/provenance/origin fixes
         # nothing here -- PUT /api/provenance/watch does. This is the exact
         # live case the design cites (Kaden-Schutt/hipfire -> warpfront/

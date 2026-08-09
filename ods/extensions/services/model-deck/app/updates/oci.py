@@ -43,7 +43,7 @@ def _token(registry: str, repository: str, fetch) -> str | None:
     # same as "no token" rather than crashing on `.get`.
     #
     # THE VALUE IS CHECKED TOO, not just the container. A non-string token
-    # f-strings into `Bearer 42` at `_auth` below -- a WRONG Authorization
+    # f-strings into `Bearer 42` at `_auth` (:55) -- a WRONG Authorization
     # header instead of no header at all, which is strictly worse than
     # falling back to an unauthenticated request. Same gap the tags VALUE
     # (not just the tags body) already had fixed in check_tags.

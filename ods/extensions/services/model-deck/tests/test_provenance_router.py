@@ -410,7 +410,7 @@ def test_put_watch_rejects_a_source_its_checker_cannot_execute_with_422(app_clie
     """Verified reachable in the final review: this exact body answered 200
     and was written to disk, then reported a permanent `unavailable` with
     note "checker raised KeyError" -- check_channel indexes
-    `source["repository"]` (app/updates/oci.py:53). README's "Needs" column
+    `source["repository"]` (app/updates/oci.py:60). README's "Needs" column
     published it as a contract; nothing enforced it."""
     client, _deck = app_client
     response = client.put("/api/provenance/watch", json={
@@ -422,7 +422,7 @@ def test_put_watch_rejects_a_source_its_checker_cannot_execute_with_422(app_clie
 
 
 def test_put_watch_rejects_duplicate_source_ids_with_422(app_client):
-    """`record_update` merges on the id (app/provenance.py:489), so the
+    """`record_update` merges on the id (app/provenance.py:511), so the
     second source silently suppressed the first one's verdict."""
     client, _deck = app_client
     response = client.put("/api/provenance/watch", json={

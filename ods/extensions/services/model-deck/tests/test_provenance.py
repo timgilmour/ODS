@@ -1166,7 +1166,7 @@ def test_a_stored_entry_can_never_present_a_kind_or_node_that_disagrees_with_its
     """`_stored_entry`'s docstring claimed `kind`/`node` come from the key
     too; only `artifact_id` was actually forced, so `**_stored_dict(value)`
     let a hand-edited pair win. `_validate` guarantees agreement on every
-    WRITE path (app/provenance.py:227-231), so forcing them on the read path
+    WRITE path (`_validate`, app/provenance.py:250-256), so forcing them on the read path
     costs nothing and closes the one door left open."""
     gated = provenance._stored_document(
         {"oci:local:x": {"kind": "file", "node": "sparky", "role": "weights"}})

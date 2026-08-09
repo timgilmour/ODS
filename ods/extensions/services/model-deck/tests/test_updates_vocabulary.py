@@ -94,14 +94,14 @@ def test_validate_watch_requires_an_id_and_a_pin():
 # source no checker could execute was ACCEPTED (HTTP 200, written to disk)
 # and turned into a permanent `unavailable` with note "checker raised
 # KeyError" -- the KeyError swallowed by dispatch's per-source try
-# (app/update_check.py:58-60). Ambiguous input is refused, not coerced.
+# (app/update_check.py:64-66). Ambiguous input is refused, not coerced.
 #
 # The table below is derived from what each checker actually reads:
-#   oci_channel  app/updates/oci.py:53-55  repository, reference, pinned
-#   oci_tags     app/updates/oci.py:80-81  repository, pinned
-#   git_compare  app/updates/git.py:93,98-99  remote, pinned, ref
-#   git_tags     app/updates/git.py:127,130   remote, pinned
-# `registry` is NOT required: app/updates/oci.py:52,79 default it to ghcr.io.
+#   oci_channel  app/updates/oci.py:60-62  repository, reference, pinned
+#   oci_tags     app/updates/oci.py:87-88  repository, pinned
+#   git_compare  app/updates/git.py:101,105,107  remote, pinned, ref
+#   git_tags     app/updates/git.py:135,139   remote, pinned
+# `registry` is NOT required: app/updates/oci.py:59,86 default it to ghcr.io.
 
 _VALID = {
     "oci_channel": {"id": "c", "check": "oci_channel", "registry": "ghcr.io",
@@ -147,7 +147,7 @@ def test_a_source_missing_a_field_its_checker_indexes_is_refused(check, field):
 def test_the_oci_channel_source_from_the_review_is_refused_not_stored():
     """The exact body the final review confirmed reached disk: accepted with
     200, then permanently `unavailable` because check_channel indexes
-    `source["repository"]` (app/updates/oci.py:53)."""
+    `source["repository"]` (app/updates/oci.py:60)."""
     with pytest.raises(updates.BadWatch):
         updates.validate_watch({"id": "x", "check": "oci_channel",
                                 "pinned": "sha256:aa", "order": None})
@@ -161,7 +161,7 @@ def test_a_required_field_that_is_not_a_non_empty_string_is_refused(bad):
 
 
 def test_registry_stays_optional_because_the_checker_defaults_it():
-    """app/updates/oci.py:52,79 -- `source.get("registry") or "ghcr.io"`. A
+    """app/updates/oci.py:59,86 -- `source.get("registry") or "ghcr.io"`. A
     field the checker defaults is not a field the operator must supply."""
     source = dict(_VALID["oci_channel"])
     source.pop("registry")
@@ -176,7 +176,7 @@ def test_validate_watch_sources_accepts_distinct_ids():
 
 def test_a_duplicate_source_id_is_refused():
     """`record_update` merges results into `{s["id"]: s}`
-    (app/provenance.py:489), so a second source with the same id silently
+    (app/provenance.py:511), so a second source with the same id silently
     suppresses the first one's verdict. README published `id` as "unique
     within the artifact"; nothing enforced it."""
     with pytest.raises(updates.BadWatch):

@@ -1222,7 +1222,7 @@ class Watcher:
             self._provenance_store.set_watch(artifact_id, merged, now)
         except ValueError as exc:
             # BEST-EFFORT PER ARTIFACT, as this pass's docstring promises.
-            # `set_watch` validates every source (app/provenance.py:429), and
+            # `set_watch` validates every source (app/provenance.py:452), and
             # a hand-edited `provenance.json` can hold one no write path could
             # have produced -- BadWatch and BadArtifactId are both
             # ValueErrors. Unhandled, that escaped into _provenance_pass's

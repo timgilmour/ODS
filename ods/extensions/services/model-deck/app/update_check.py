@@ -122,7 +122,7 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
        `store` is any object with `.get()`/`.record_update()`, and a
        hand-edited `provenance.json` no longer produces this shape:
        `ProvenanceStore._load()` rebuilds every entry through `_stored_entry`
-       (app/provenance.py:172-205, Task 5 round 4). The guard stays because
+       (app/provenance.py:181-228, Task 5 round 4). The guard stays because
        it defends this function's own contract, not the store's.
 
     2. The dispatch/record/log body for one artifact is wrapped in its own
@@ -202,7 +202,7 @@ def _log_transitions(events_path, artifact_id, result, dedup) -> None:
     """
     # A TUPLE KEY, NOT A JOINED STRING. `f"{artifact_id}/{result['id']}"` had
     # a real collision surface: weights artifact ids legitimately contain "/"
-    # (the relpath -- app/provenance_collect.py:92) and source ids are
+    # (the relpath -- app/provenance_collect.py:110) and source ids are
     # free-form operator strings, so ("oci:local:a/b", "c") and
     # ("oci:local:a", "b/c") produced the same key and one artifact's event
     # silently suppressed the other's. A tuple removes the class rather than
@@ -327,7 +327,7 @@ class UpdateChecker:
             except Exception as exc:  # noqa: BLE001 — supervisor loop, never silent
                 # `update-check-error`, NOT `update-check-failed`: that kind
                 # is the per-source verdict and carries
-                # {"artifact_id","source","note"} (_log_transitions, above).
+                # {"artifact_id","source","note"} (:245-248, _log_transitions).
                 # One kind with two incompatible detail shapes is the exact
                 # vocabulary defect this codebase has already shipped four
                 # times. Both end in a suffix ui/src/model/eventSeverity.ts

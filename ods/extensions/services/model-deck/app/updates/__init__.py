@@ -25,17 +25,17 @@ _TAG_CHECKS = ("oci_tags", "git_tags")
 # WHAT EACH CHECKER ACTUALLY READS -- derived by reading the checkers, never
 # from the docs, because a table that disagrees with them is worse than no
 # table. `registry` is deliberately absent: both oci checkers default it
-# (app/updates/oci.py:52,79 -- `source.get("registry") or "ghcr.io"`), and a
+# (app/updates/oci.py:59,86 -- `source.get("registry") or "ghcr.io"`), and a
 # field the checker defaults is not a field the operator must supply.
 #
-#   oci_channel  app/updates/oci.py:53-55   repository / reference / pinned
-#   oci_tags     app/updates/oci.py:80-81   repository / pinned  (+ order, below)
-#   git_compare  app/updates/git.py:93,98-99  remote / pinned / ref
-#   git_tags     app/updates/git.py:127,130   remote / pinned      (+ order, below)
+#   oci_channel  app/updates/oci.py:60-62   repository / reference / pinned
+#   oci_tags     app/updates/oci.py:87-88   repository / pinned  (+ order, below)
+#   git_compare  app/updates/git.py:101,105,107  remote / pinned / ref
+#   git_tags     app/updates/git.py:135,139   remote / pinned      (+ order, below)
 #
 # `remote` is `.get("remote", "")` rather than an index, so it never raises --
 # it produces a PERMANENT "remote is not on github.com; no checker available"
-# instead (app/updates/git.py:44-46,95). Same category: a source no checker
+# instead (app/updates/git.py:44-46,102-103). Same category: a source no checker
 # can execute, refused at the door rather than written to disk.
 _REQUIRED = {
     "oci_channel": ("repository", "reference", "pinned"),
@@ -58,8 +58,8 @@ def validate_watch_sources(sources: list[dict]) -> None:
 
     UNIQUENESS IS A PROPERTY OF THE LIST, so it cannot live in
     `validate_watch`, which only ever sees one source. `record_update` merges
-    a pass's results into `{s["id"]: s}` (app/provenance.py:489) and
-    `set_watch` narrows the list to a set of ids (app/provenance.py:444), so
+    a pass's results into `{s["id"]: s}` (app/provenance.py:511) and
+    `set_watch` narrows the list to a set of ids (app/provenance.py:466), so
     two sources sharing an id means one of them silently has no verdict --
     the README published `id` as "unique within the artifact" and nothing
     enforced it. Refused, not deduped: which of the two the operator meant is
@@ -92,7 +92,7 @@ def validate_watch(source: dict) -> None:
 
     # A source whose checker cannot execute it is refused HERE, not accepted
     # with a 200 and turned into a permanent `unavailable` carrying "checker
-    # raised KeyError" -- dispatch's per-source try (app/update_check.py:58)
+    # raised KeyError" -- dispatch's per-source try (app/update_check.py:64-66)
     # swallows the KeyError, so nothing downstream can ever tell an operator
     # their body was wrong. Non-string is refused for the same reason a
     # non-string `id` is: `ordering.rank` regexes the pin and `parse_remote`

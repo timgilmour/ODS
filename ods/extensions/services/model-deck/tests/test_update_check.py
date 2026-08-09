@@ -497,7 +497,7 @@ def test_run_pass_tolerates_a_non_dict_entry_from_an_ungated_store(tmp_path):
 def test_the_dedup_key_cannot_collide_across_an_artifact_and_a_source_id(
         store, tmp_path):
     """The dedup key was `f"{artifact_id}/{result['id']}"`. Weights artifact
-    ids legitimately contain "/" (a relpath -- app/provenance_collect.py:92)
+    ids legitimately contain "/" (a relpath -- app/provenance_collect.py:110)
     and source ids are free-form operator strings, so
     ("oci:local:a/b", "c") and ("oci:local:a", "b/c") produced the SAME key:
     whichever ran first suppressed the other's update-available event. A
@@ -582,7 +582,7 @@ def test_one_event_kind_never_carries_two_detail_shapes(store, tmp_path):
     """The defect class this codebase has shipped four times, caught before
     it shipped a fifth: the tick-level supervisor catch emitted `{"error"}`
     under the SAME kind the per-source path emits `{"artifact_id","source",
-    "note"}` under (app/update_check.py:223-225). A consumer that keys off
+    "note"}` under (app/update_check.py:245-248). A consumer that keys off
     the kind then has to guess which shape it got. Two facts, two kinds.
 
     Both still classify as failures in the Events tab -- `-error` and

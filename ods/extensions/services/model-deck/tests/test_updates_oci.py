@@ -222,7 +222,7 @@ def test_tags_survives_a_malformed_token_body_instead_of_crashing():
 def test_a_non_string_token_value_falls_back_to_unauthenticated():
     """`_token` checked the BODY was a dict but not that `body["token"]` was
     a string, so a numeric or object token f-stringed straight into
-    `Authorization: Bearer 42` (app/updates/oci.py:48) -- a wrong header
+    `Authorization: Bearer 42` (app/updates/oci.py:55) -- a wrong header
     instead of no header. Symmetric with the tags-VALUE gap already fixed
     two tests up: validating the container is not validating the value."""
     src = {"id": "tags", "check": "oci_tags", "registry": "ghcr.io",
