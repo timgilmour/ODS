@@ -2767,3 +2767,114 @@ def test_provenance_pass_does_not_resurrect_a_deliberately_cleared_watch(tmp_pat
     assert store.entry("oci:local:aeon-7/ods-hipfire")["watch"] == [], (
         "a deliberately cleared, already-checked watch must not be "
         "resurrected by the next collector pass")
+
+
+# --- provenance pass: the SPARK half of watch seeding -----------------------
+#
+# app/arbiter.py:1182 (the spark call to _provenance_seed_watch) had ZERO
+# coverage: deleting the line left the whole suite green, while deleting the
+# local equivalent at :1130 is killed by three tests. Sparky's images are the
+# digest-pinned ones this feature was designed around, so the untested half
+# was the important half.
+
+
+class _FakeSpark:
+    """The three node-agent reads Watcher._provenance_spark makes
+    (app/arbiter.py:1166, 1172, 1176) and nothing else."""
+
+    def __init__(self, composes, catalog=None):
+        self.composes = composes
+        self.catalog = catalog
+
+    def status(self):
+        return {"profiles": [{"name": name} for name in sorted(self.composes)]}
+
+    def get_compose(self, profile):
+        return self.composes[profile]
+
+    def get_catalog(self):
+        return {"catalog": self.catalog}
+
+
+def _spark_compose(image):
+    return f"services:\n  vllm:\n    image: {image}\n"
+
+
+_SPARK_REFERENCE = "ghcr.io/aeon-7/aeon-vllm-ultimate:v0.26.0@sha256:deadbeef"
+_SPARK_ARTIFACT = "oci:sparky:aeon-7/aeon-vllm-ultimate"
+
+
+def _spark_watcher(tmp_path, **kwargs):
+    store = _prov_store(tmp_path)
+    spark = _FakeSpark({"heretic": _spark_compose(_SPARK_REFERENCE)})
+    watcher = _watcher(tmp_path, provenance_store=store, spark=spark, **kwargs)
+    return watcher, store
+
+
+def test_provenance_pass_seeds_a_watch_for_a_spark_artifact_too(tmp_path):
+    """Same guarantee as the local path, on the node it matters most for."""
+    watcher, store = _spark_watcher(tmp_path)
+    store.declare_origin(
+        _SPARK_ARTIFACT, kind="oci", node="sparky", role="engine",
+        origin={"registry": "ghcr.io",
+                "repository": "aeon-7/aeon-vllm-ultimate",
+                "reference": _SPARK_REFERENCE})
+
+    watcher.tick()
+
+    watch = store.entry(_SPARK_ARTIFACT)["watch"]
+    assert [s["id"] for s in watch] == ["channel"]
+    assert watch[0]["pinned"] == "sha256:deadbeef"
+    assert watch[0]["registry"] == "ghcr.io"
+
+
+def test_provenance_pass_derives_no_spark_watch_without_a_declared_origin(tmp_path):
+    """D8 on the spark path too: an observed image is not an origin."""
+    watcher, store = _spark_watcher(tmp_path)
+
+    watcher.tick()
+
+    assert store.entry(_SPARK_ARTIFACT)["watch"] == []
+
+
+def test_a_watch_source_set_watch_refuses_does_not_abandon_the_rest_of_the_pass(
+        tmp_path):
+    """`_provenance_seed_watch` -> `set_watch` -> `validate_watch` raises
+    BadWatch on a hand-edited source (here: a tag check with no `order`).
+    Unhandled, that escaped into `_provenance_pass`'s catch-all
+    (app/arbiter.py:1106) and abandoned everything after it -- local weights
+    plus the entire sparky sweep -- once every provenance_interval_s,
+    forever. That contradicts the method's own docstring at
+    app/arbiter.py:1077-1080 ("best-effort per source ... never blanks the
+    others").
+
+    The oci collector runs FIRST (app/arbiter.py:1103-1105), so the weights
+    entry existing at all is the proof the pass carried on."""
+    reference = "ghcr.io/aeon-7/ods-hipfire:slim@sha256:deadbeef"
+    artifact_id = "oci:local:aeon-7/ods-hipfire"
+    catalog = _FakeCatalogUnits([{
+        "id": "hot:m.gguf", "name": "m.gguf", "relpath": "m.gguf",
+        "location": "hot", "size": 4096, "mtime": 2.0, "state": "resident"}])
+    watcher, store, _docker = _one_container(
+        tmp_path, catalog=catalog,
+        bodies={"ods-hipfire": {"Image": "sha256:a", "Config": {"Image": reference}}})
+    store.declare_origin(
+        artifact_id, kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "aeon-7/ods-hipfire",
+                "reference": reference})
+
+    # A source no write path could have produced: `git_tags` with no `order`.
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data[artifact_id]["watch"] = [{"id": "hand", "check": "git_tags",
+                                   "remote": "https://github.com/a/b",
+                                   "pinned": "v1.0.0"}]
+    path.write_text(json.dumps(data))
+
+    watcher.tick()
+
+    assert store.entry("file:local:m.gguf") is not None, (
+        "one unvalidatable watch source abandoned the rest of the pass")
+    kinds = [e["kind"] for e in tail_events(tmp_path / "events.jsonl")]
+    assert "provenance-seed-watch-failed" in kinds, "refused, but silently"
+    assert "provenance-pass-error" not in kinds

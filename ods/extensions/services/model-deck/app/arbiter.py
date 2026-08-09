@@ -1216,8 +1216,23 @@ class Watcher:
         if entry is None:
             return
         merged = provenance_collect.merge_seeded_watch(entry)
-        if merged != entry["watch"]:
+        if merged == entry["watch"]:
+            return
+        try:
             self._provenance_store.set_watch(artifact_id, merged, now)
+        except ValueError as exc:
+            # BEST-EFFORT PER ARTIFACT, as this pass's docstring promises.
+            # `set_watch` validates every source (app/provenance.py:429), and
+            # a hand-edited `provenance.json` can hold one no write path could
+            # have produced -- BadWatch and BadArtifactId are both
+            # ValueErrors. Unhandled, that escaped into _provenance_pass's
+            # catch-all above and abandoned everything after this artifact:
+            # local weights AND the whole sparky sweep, once per
+            # provenance_interval_s, forever. Logged, never swallowed --
+            # nothing else on this path can tell the operator their file is
+            # unusable.
+            self._log("provenance-seed-watch-failed",
+                      {"artifact_id": artifact_id, "error": str(exc)})
 
     # Event kinds whose consecutive identical repeats are collapsed to a
     # single log line, so a persistent state (a stuck 'wont-fit', a crashing
@@ -1227,7 +1242,7 @@ class Watcher:
     # loads) are NEVER deduped and always logged.
     _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced", "host-agent-busy",
                           "lifecycle-spark-unreachable", "harvest-empty",
-                          "harvest-failed"})
+                          "harvest-failed", "provenance-seed-watch-failed"})
 
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))
