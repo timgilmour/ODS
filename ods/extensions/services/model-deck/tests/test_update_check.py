@@ -363,11 +363,18 @@ def test_run_pass_tolerates_non_dict_elements_in_a_stored_watch_list(store, tmp_
 
 
 def test_run_pass_tolerates_a_per_artifact_entry_that_is_not_a_dict(store, tmp_path):
-    """Required coverage 2: `provenance._load()` only guards the top-level
-    document shape (a dict of entries), never each entry's own shape -- a
-    hand-edited file can hold a bare string where an entry should be.
-    `(entry or {}).get(...)` does not save this: a truthy non-dict entry
-    passes the `or {}` unchanged and `.get` on a string still raises."""
+    """Required coverage 2, END TO END. A hand-edited file can hold a bare
+    string where an entry belongs; the pass must skip it and check nothing.
+
+    STALE DOCSTRING CORRECTED (this fix wave). This used to claim
+    `provenance._load()` guards only the top-level document shape. That
+    stopped being true when Task 5 round 4 (5e22d9eb) moved shape
+    normalisation into `_load()`: the bare string is now rebuilt into a blank
+    entry with `watch: []` before run_pass ever sees it, so what this pins is
+    the OUTCOME through a real store, not run_pass's own isinstance guard.
+    That guard is exercised directly by
+    test_run_pass_tolerates_a_non_dict_entry_from_an_ungated_store below --
+    mutating it away left this test green."""
     store.declare_origin("file:local:legacy.gguf", kind="file", node="local",
                          role="weights", origin=None)
     path = tmp_path / "provenance.json"
@@ -383,11 +390,17 @@ def test_run_pass_tolerates_a_per_artifact_entry_that_is_not_a_dict(store, tmp_p
 
 
 def test_a_malformed_sibling_artifact_does_not_block_a_healthy_one(store, tmp_path):
-    """Required coverage 3, the one that matters most: a corrupt
-    per-artifact entry AND a corrupt watch list, sitting alongside a
-    healthy watched artifact in the same store, must not prevent the
-    healthy artifact from being checked and its verdict recorded in the
-    same pass."""
+    """Required coverage 3: a corrupt per-artifact entry AND a corrupt watch
+    list, sitting alongside a healthy watched artifact in the same store,
+    must not prevent the healthy artifact from being checked and its verdict
+    recorded in the same pass.
+
+    STALE DOCSTRING CORRECTED (this fix wave): since Task 5 round 4
+    (5e22d9eb) the gate normalises both corruptions in `_load()`, so this is
+    an end-to-end outcome test, not a test of run_pass's own tolerance. The
+    per-artifact try/except it was believed to cover is exercised by
+    test_a_record_update_failure_on_one_artifact_does_not_stop_the_pass
+    below -- mutating that except away left this test green."""
     watched(store, "oci:local:good", {
         "id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
         "pinned": "v1.0.0", "order": "semver"})
@@ -401,6 +414,103 @@ def test_a_malformed_sibling_artifact_does_not_block_a_healthy_one(store, tmp_pa
                                    tmp_path / "e.jsonl", dedup={})
     assert store.entry("oci:local:good")["update"]["status"] == updates.AVAILABLE
     assert result["checked"] >= 1
+
+
+_TAGS_SOURCE = {"id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
+                "pinned": "v1.0.0", "order": "semver"}
+
+
+def test_a_record_update_failure_on_one_artifact_does_not_stop_the_pass(
+        store, tmp_path):
+    """THE PER-ARTIFACT try/except, exercised at last.
+
+    Mutating `except Exception` to `except ZeroDivisionError` left the whole
+    suite green before this test existed: every other "malformed sibling"
+    fixture is now absorbed by `provenance._load()`'s gate (Task 5 round 4,
+    5e22d9eb), so nothing reached the body of the try at all. The one thing
+    that genuinely still can raise inside it is `store.record_update`, which
+    re-reads the file under its own lock -- a value that changes shape
+    between this loop's snapshot and that fresh read.
+
+    The corrupt artifact sorts FIRST, so a healthy sibling being checked
+    afterwards is the proof the pass continued rather than unwound."""
+    watched(store, "oci:local:bad", _TAGS_SOURCE)
+    watched(store, "oci:local:good", _TAGS_SOURCE)
+    real_record = store.record_update
+
+    def _record(artifact_id, results, now=None):
+        if artifact_id == "oci:local:bad":
+            raise RuntimeError("the file changed shape under us")
+        return real_record(artifact_id, results, now)
+
+    store.record_update = _record
+    result = update_check.run_pass(store, ok_fetch([{"name": "v2.0.0"}]),
+                                   tmp_path / "e.jsonl", dedup={})
+
+    assert store.entry("oci:local:good")["update"]["status"] == updates.AVAILABLE
+    assert store.entry("oci:local:bad")["update"] is None
+    assert result["available"] == 1
+
+
+def test_an_artifact_whose_verdict_could_not_be_recorded_is_not_counted(
+        store, tmp_path):
+    """`checked` used to be incremented BEFORE the try, so a raising
+    `record_update` counted an artifact that got no verdict and no event --
+    the count said "I checked this" about the one artifact nobody can see a
+    result for. It now counts only what was actually recorded."""
+    watched(store, "oci:local:x", _TAGS_SOURCE)
+
+    def _record(artifact_id, results, now=None):
+        raise RuntimeError("boom")
+
+    store.record_update = _record
+    result = update_check.run_pass(store, ok_fetch([{"name": "v2.0.0"}]),
+                                   tmp_path / "e.jsonl", dedup={})
+    assert result == {"checked": 0, "available": 0}
+
+
+def test_run_pass_tolerates_a_non_dict_entry_from_an_ungated_store(tmp_path):
+    """`run_pass` takes anything with `.get()`/`.record_update()`, not only a
+    gated ProvenanceStore -- the isinstance guard is what makes that contract
+    safe, and `entry.get("watch")` runs OUTSIDE the per-artifact try, so an
+    ungated non-dict entry escapes the whole pass rather than one artifact.
+
+    This is the direct test the end-to-end fixtures above stopped being once
+    `_load()` started normalising entries."""
+    recorded = []
+
+    class _UngatedStore:
+        def get(self):
+            return {"oci:local:corrupt": "not a dict at all",
+                    "oci:local:x": {"watch": [_TAGS_SOURCE]}}
+
+        def record_update(self, artifact_id, results, now=None):
+            recorded.append(artifact_id)
+            return updates.AVAILABLE
+
+    result = update_check.run_pass(_UngatedStore(), ok_fetch([{"name": "v2.0.0"}]),
+                                   tmp_path / "e.jsonl", dedup={})
+    assert recorded == ["oci:local:x"]
+    assert result == {"checked": 1, "available": 1}
+
+
+def test_the_dedup_key_cannot_collide_across_an_artifact_and_a_source_id(
+        store, tmp_path):
+    """The dedup key was `f"{artifact_id}/{result['id']}"`. Weights artifact
+    ids legitimately contain "/" (a relpath -- app/provenance_collect.py:92)
+    and source ids are free-form operator strings, so
+    ("oci:local:a/b", "c") and ("oci:local:a", "b/c") produced the SAME key:
+    whichever ran first suppressed the other's update-available event. A
+    tuple key removes the class rather than escaping the separator."""
+    watched(store, "oci:local:a/b", {**_TAGS_SOURCE, "id": "c"})
+    watched(store, "oci:local:a", {**_TAGS_SOURCE, "id": "b/c"})
+    path = tmp_path / "events.jsonl"
+
+    update_check.run_pass(store, ok_fetch([{"name": "v2.0.0"}]), path, dedup={})
+
+    logged = [e for e in events.tail_events(path) if e["kind"] == "update-available"]
+    assert sorted(e["detail"]["artifact_id"] for e in logged) == \
+        ["oci:local:a", "oci:local:a/b"]
 
 
 def test_moved_dedup_clears_on_recovery_so_a_later_move_to_the_same_place_relogs(
@@ -463,7 +573,76 @@ def test_tick_survives_a_pass_that_raises(store, tmp_path):
     checker.tick()          # supervisor catch: must not propagate
 
     kinds = [e["kind"] for e in events.tail_events(tmp_path / "e.jsonl")]
-    assert "update-check-failed" in kinds
+    # `update-check-error`, NOT `update-check-failed`: see
+    # test_one_event_kind_never_carries_two_detail_shapes below.
+    assert "update-check-error" in kinds
+
+
+def test_one_event_kind_never_carries_two_detail_shapes(store, tmp_path):
+    """The defect class this codebase has shipped four times, caught before
+    it shipped a fifth: the tick-level supervisor catch emitted `{"error"}`
+    under the SAME kind the per-source path emits `{"artifact_id","source",
+    "note"}` under (app/update_check.py:223-225). A consumer that keys off
+    the kind then has to guess which shape it got. Two facts, two kinds.
+
+    Both still classify as failures in the Events tab -- `-error` and
+    `-failed` are both in ui/src/model/eventSeverity.ts's FAILURE_SUFFIXES."""
+    path = tmp_path / "e.jsonl"
+    watched(store, "oci:local:x", _TAGS_SOURCE)
+
+    def _always_fails(url, **kwargs):
+        raise RuntimeError("boom")
+
+    checker = update_check.UpdateChecker(settings=_settings(),
+                                         provenance_store=store,
+                                         events_path=path)
+    checker._fetch_factory = lambda: _always_fails
+    checker.tick()                      # per-source failure, pass succeeds
+
+    checker._fetch_factory = lambda: (_ for _ in ()).throw(RuntimeError("kaboom"))
+    checker.tick()                      # the pass itself could not run
+
+    by_kind = {}
+    for event in events.tail_events(path):
+        by_kind.setdefault(event["kind"], []).append(event["detail"])
+    assert set(by_kind["update-check-failed"][0]) == {"artifact_id", "source", "note"}
+    assert set(by_kind["update-check-error"][0]) == {"error"}
+
+
+def test_two_ticks_never_run_a_pass_at_the_same_time(store, tmp_path):
+    """POST /api/provenance/check runs `tick()` on the request thread
+    (app/routers/provenance.py:210) while the checker's own thread may be
+    mid-pass. They share `self._dedup` and `self._etags` unsynchronised (so
+    an event can double-log) and each builds a FRESH fetch closure, making
+    the 40-request budget per-PASS rather than per-hour -- which is what
+    app/updates/fetch.py:8-14 says the budget exists to protect against on
+    GitHub's 60/hour anonymous per-IP ceiling.
+
+    Deterministic, not timing-sampled: if two passes can be inside the body
+    at once the barrier releases; if they are serialised it can only ever
+    break."""
+    checker = update_check.UpdateChecker(settings=_settings(),
+                                         provenance_store=store,
+                                         events_path=tmp_path / "e.jsonl")
+    barrier = threading.Barrier(2, timeout=0.5)
+    overlapped = []
+
+    def _factory():
+        try:
+            barrier.wait()
+            overlapped.append(True)
+        except threading.BrokenBarrierError:
+            pass
+        return ok_fetch([])
+
+    checker._fetch_factory = _factory
+    threads = [threading.Thread(target=checker.tick) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not any(t.is_alive() for t in threads)
+    assert overlapped == []
 
 
 def test_start_and_stop_are_clean(store, tmp_path):
@@ -555,7 +734,7 @@ def test_tick_survives_run_pass_itself_raising(store, tmp_path, monkeypatch):
 
     assert checker.tick() is None
     kinds = [e["kind"] for e in events.tail_events(tmp_path / "e.jsonl")]
-    assert "update-check-failed" in kinds
+    assert "update-check-error" in kinds
 
 
 def test_fetch_factory_reuses_one_http_client_across_ticks(store, tmp_path, monkeypatch):

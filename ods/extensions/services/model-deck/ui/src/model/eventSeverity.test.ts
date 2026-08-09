@@ -102,6 +102,15 @@ describe("update-checking kinds", () => {
     expect(eventSeverity("update-check-failed")).toBe("failure");
   });
 
+  // Two kinds, because they carry two different detail shapes:
+  // `update-check-failed` is per source ({artifact_id, source, note},
+  // app/update_check.py's _log_transitions); `update-check-error` is the
+  // tick-level supervisor catch ({error}, UpdateChecker.tick). Both must
+  // still read as failures in the Events tab.
+  it("classifies the tick-level check error as a failure too", () => {
+    expect(eventSeverity("update-check-error")).toBe("failure");
+  });
+
   it("leaves an available update neutral — informational, not an alarm", () => {
     expect(eventSeverity("update-available")).toBe("neutral");
   });

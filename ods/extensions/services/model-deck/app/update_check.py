@@ -41,12 +41,18 @@ def dispatch(source: dict, fetch) -> dict:
         # DEVIATION, ruled Important by the coordinator (task-6-report.md's
         # second "Fix round"): nothing may execute before this guard.
         # `source.get("check")` on the very next line raised AttributeError
-        # for anything that isn't a dict -- confirmed reachable via
-        # `dispatch(None, fetch)` and via a hand-edited `provenance.json`
-        # watch list holding a bare string or number. That escaped this
-        # function's own try/except entirely (the exception happens before
-        # the `try` even starts), taking down the whole `run_pass` call.
-        # Same fallback shape the "no checker" branch below already returns.
+        # for anything that isn't a dict, and that escapes this function's
+        # own try/except entirely (the exception happens before the `try`
+        # even starts), taking down the whole `run_pass` call.
+        #
+        # WHAT MAKES IT REACHABLE TODAY IS THE DIRECT CALL, not stored data.
+        # `dispatch` is public and `dispatch(None, fetch)` is a supported
+        # call. The original motivation -- a hand-edited `provenance.json`
+        # watch list holding a bare string or number -- no longer reaches
+        # here: `provenance._stored_list` drops non-object elements at the
+        # read boundary (app/provenance.py:80-85, Task 5 round 4). The guard
+        # stays because the contract it defends is `dispatch`'s own, not the
+        # store's. Same fallback shape the "no checker" branch below returns.
         return {"id": "?", "status": updates.UNAVAILABLE, "current": None,
                 "latest": None, "detail": {},
                 "note": f"watch source is not a mapping: {type(source).__name__}"}
@@ -94,24 +100,33 @@ def dispatch(source: dict, fetch) -> dict:
 
 def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
     """Check every watched artifact once. `dedup` maps
-    "artifact_id/source_id" -> last logged `latest`, and is mutated in place
-    so the caller owns its lifetime (a process restart re-announces, which is
-    the honest behaviour -- we cannot know what was read).
+    `(artifact_id, source_id[, "moved"|"failed"])` -> last logged value, and
+    is mutated in place so the caller owns its lifetime (a process restart
+    re-announces, which is the honest behaviour -- we cannot know what was
+    read).
+
+    `checked` COUNTS RECORDED VERDICTS, not attempts. It is incremented after
+    `record_update` returns, so an artifact whose verdict could not be
+    written is not reported as checked -- the count would otherwise claim to
+    have checked the one artifact nobody can see a result for.
 
     DEVIATION, ruled Important by the coordinator (task-6-report.md's second
-    "Fix round"): two hardenings against a hand-edited/corrupt
-    `provenance.json`, both confirmed reachable and both fixed here rather
-    than in `app.provenance` (out of this task's file scope; a sibling fix
-    there -- commit 3b632096 -- covers elements *within* a stored list, this
-    fix covers a top-level per-artifact ENTRY that isn't a dict at all).
+    "Fix round"): two hardenings, both confirmed reachable at the time.
 
     1. `isinstance(entry, dict)` is checked before `entry.get("watch")` --
        `(entry or {}).get(...)` only substitutes `{}` for a falsy entry
-       (`None`, `""`, `{}`); a truthy non-dict entry (e.g. a bare string
-       written by hand) passed straight through and raised AttributeError.
+       (`None`, `""`, `{}`); a truthy non-dict entry passes straight through
+       and raises AttributeError, outside the per-artifact try below.
+
+       WHAT MAKES IT REACHABLE TODAY IS THE STORE ARGUMENT, not the file.
+       `store` is any object with `.get()`/`.record_update()`, and a
+       hand-edited `provenance.json` no longer produces this shape:
+       `ProvenanceStore._load()` rebuilds every entry through `_stored_entry`
+       (app/provenance.py:172-205, Task 5 round 4). The guard stays because
+       it defends this function's own contract, not the store's.
 
     2. The dispatch/record/log body for one artifact is wrapped in its own
-       try/except. `dispatch()` guards every individual source now, but
+       try/except. `dispatch()` guards every individual source, but
        `store.record_update` re-reads the file itself under its own lock,
        so a value that changes shape between this loop's snapshot and that
        fresh read (or any other future failure on this path) must not take
@@ -128,11 +143,11 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
         sources = entry.get("watch") or []
         if not sources:
             continue                     # no origin, nothing to watch (U10)
-        checked += 1
 
         try:
             results = [dispatch(source, fetch) for source in sources]
             status = store.record_update(artifact_id, results)
+            checked += 1
             if status == updates.AVAILABLE:
                 available += 1
             for result in results:
@@ -185,26 +200,35 @@ def _log_transitions(events_path, artifact_id, result, dedup) -> None:
        `origin-moved`, the identical "flapping becomes invisible" failure
        mode left asymmetric for this key.
     """
-    key = f"{artifact_id}/{result['id']}"
+    # A TUPLE KEY, NOT A JOINED STRING. `f"{artifact_id}/{result['id']}"` had
+    # a real collision surface: weights artifact ids legitimately contain "/"
+    # (the relpath -- app/provenance_collect.py:92) and source ids are
+    # free-form operator strings, so ("oci:local:a/b", "c") and
+    # ("oci:local:a", "b/c") produced the same key and one artifact's event
+    # silently suppressed the other's. A tuple removes the class rather than
+    # picking a separator nobody can use.
+    key = (artifact_id, result["id"])
+    moved_key = (*key, "moved")
+    failed_key = (*key, "failed")
     status = result["status"]
     moved = bool(result.get("detail", {}).get("moved"))
 
     if moved:
         location = result["detail"].get("location")
-        if dedup.get(f"{key}#moved") != location:
-            dedup[f"{key}#moved"] = location
+        if dedup.get(moved_key) != location:
+            dedup[moved_key] = location
             events.log_event(events_path, "origin-moved", {
                 "artifact_id": artifact_id, "source": result["id"],
                 "location": location})
     else:
-        dedup.pop(f"{key}#moved", None)
+        dedup.pop(moved_key, None)
 
     if status != updates.UNAVAILABLE:
         # Any successful read -- CURRENT, AVAILABLE, or UNDETERMINED --
         # clears the remembered failure so a later recurrence of the exact
         # same note logs again instead of being silently swallowed by
         # stale dedup state from before the source recovered.
-        dedup.pop(f"{key}#failed", None)
+        dedup.pop(failed_key, None)
 
     if status == updates.AVAILABLE:
         if dedup.get(key) != result["latest"]:
@@ -218,8 +242,8 @@ def _log_transitions(events_path, artifact_id, result, dedup) -> None:
         # more generic "no verdict" line for the identical fact is exactly
         # the double-logging ruling 1 removed.
         if not moved and result.get("note"):
-            if dedup.get(f"{key}#failed") != result["note"]:
-                dedup[f"{key}#failed"] = result["note"]
+            if dedup.get(failed_key) != result["note"]:
+                dedup[failed_key] = result["note"]
                 events.log_event(events_path, "update-check-failed", {
                     "artifact_id": artifact_id, "source": result["id"],
                     "note": result["note"]})
@@ -248,6 +272,16 @@ class UpdateChecker:
         self._thread: threading.Thread | None = None
         self._dedup: dict = {}
         self._etags: dict = {}
+        # ONE PASS AT A TIME. POST /api/provenance/check runs tick() on the
+        # request thread (app/routers/provenance.py:210) while this object's
+        # own thread may already be mid-pass. They share `_dedup` and
+        # `_etags` with no synchronisation of their own -- concurrent passes
+        # can double-log the same transition -- and each builds a FRESH
+        # `fetch` closure, so the 40-request budget is per PASS. Two
+        # overlapping passes spend it twice against GitHub's 60/hour
+        # anonymous per-IP ceiling, which app/updates/fetch.py:8-14 names as
+        # the reason the budget exists at all.
+        self._tick_lock = threading.Lock()
         # DEVIATION FROM THE BRIEF: app/updates/fetch.py's own module
         # docstring explicitly directs this thread to build ONE httpx.Client
         # and pass it into every pass's `make_fetch(client=...)` call rather
@@ -285,11 +319,19 @@ class UpdateChecker:
     def tick(self) -> dict | None:
         if not self._enabled or self._store is None:
             return None
-        try:
-            fetch = self._fetch_factory()
-            return run_pass(self._store, fetch, self._events_path,
-                            dedup=self._dedup)
-        except Exception as exc:  # noqa: BLE001 — supervisor loop, never silent
-            events.log_event(self._events_path, "update-check-failed",
-                             {"error": f"{type(exc).__name__}: {exc}"})
-            return None
+        with self._tick_lock:            # see _tick_lock's comment in __init__
+            try:
+                fetch = self._fetch_factory()
+                return run_pass(self._store, fetch, self._events_path,
+                                dedup=self._dedup)
+            except Exception as exc:  # noqa: BLE001 — supervisor loop, never silent
+                # `update-check-error`, NOT `update-check-failed`: that kind
+                # is the per-source verdict and carries
+                # {"artifact_id","source","note"} (_log_transitions, above).
+                # One kind with two incompatible detail shapes is the exact
+                # vocabulary defect this codebase has already shipped four
+                # times. Both end in a suffix ui/src/model/eventSeverity.ts
+                # classifies as a failure, so the Events tab is unchanged.
+                events.log_event(self._events_path, "update-check-error",
+                                 {"error": f"{type(exc).__name__}: {exc}"})
+                return None
