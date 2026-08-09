@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app import origins, provenance, provenance_history
+from app import origins, provenance, provenance_history, updates
 from app.provenance import ProvenanceStore
 
 T0 = "2026-08-01T00:00:00+00:00"
@@ -13,6 +13,11 @@ T1 = "2026-08-02T00:00:00+00:00"
 
 def _store(tmp_path):
     return ProvenanceStore(tmp_path / "provenance.json", tmp_path / "history.jsonl")
+
+
+@pytest.fixture
+def store(tmp_path):
+    return _store(tmp_path)
 
 
 def _identity(version="sha256:a", label="ds4-spark:v0.5.6"):
@@ -311,3 +316,236 @@ def test_describe_leaves_exactly_one_place_to_read_the_verification():
     assert "verification" not in described["current"]
     # ...and the stored document is untouched.
     assert data["oci:local:x"]["current"]["verification"] == origins.EXACT
+
+
+def test_describe_defaults_watch_and_update_for_pre_migration_entries():
+    # _entry() predates this task and carries no "watch"/"update" keys at
+    # all -- exactly the shape of the live provenance.json on two machines.
+    data = {"oci:local:x": _entry()}
+    described = provenance.describe(data, now=T0, stale_s=3600)[0]
+    assert described["watch"] == []
+    assert described["update"] is None
+
+
+def test_describe_passes_watch_and_update_through_unmodified():
+    entry = {**_entry(), "watch": [{"id": "a"}],
+             "update": {"status": updates.CURRENT}}
+    data = {"oci:local:x": entry}
+    described = provenance.describe(data, now=T0, stale_s=3600)[0]
+    assert described["watch"] == [{"id": "a"}]
+    assert described["update"] == {"status": updates.CURRENT}
+
+
+# --- watch / update ---------------------------------------------------------
+
+def test_set_watch_validates_every_source(store):
+    with pytest.raises(updates.BadWatch):
+        store.set_watch("oci:local:x", [{"id": "a", "check": "nope", "pinned": "p"}])
+
+
+def test_record_update_stores_the_rollup_and_the_sources(store):
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1.0.0", "order": "semver"},
+        {"id": "b", "check": "git_tags", "remote": "https://github.com/c/d",
+         "pinned": "v2.0.0", "order": "semver"},
+    ])
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1.0.0",
+         "latest": "v1.0.0", "detail": {}, "note": None},
+        {"id": "b", "status": updates.AVAILABLE, "current": "v2.0.0",
+         "latest": "v2.1.0", "detail": {}, "note": None},
+    ])
+    assert status == updates.AVAILABLE          # worst of the two
+    entry = store.entry("oci:local:x")
+    assert entry["update"]["status"] == updates.AVAILABLE
+    assert len(entry["update"]["sources"]) == 2
+    assert entry["update"]["checked_at"] is not None
+
+
+def test_a_result_for_an_unwatched_source_is_dropped_not_retained(store):
+    """Retention is bounded by watch. A verdict whose source no longer exists
+    answers a question nobody is asking."""
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1.0.0", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None},
+        {"id": "ghost", "status": updates.AVAILABLE, "current": "x",
+         "latest": "y", "detail": {}, "note": None},
+    ])
+    ids = [s["id"] for s in store.entry("oci:local:x")["update"]["sources"]]
+    assert ids == ["a"]
+
+
+def test_shrinking_watch_drops_the_orphaned_verdict(store):
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"},
+        {"id": "b", "check": "git_tags", "remote": "https://github.com/c/d",
+         "pinned": "v2", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None},
+        {"id": "b", "status": updates.AVAILABLE, "current": "v2", "latest": "v3",
+         "detail": {}, "note": None}])
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    entry = store.entry("oci:local:x")
+    assert [s["id"] for s in entry["update"]["sources"]] == ["a"]
+    assert entry["update"]["status"] == updates.CURRENT
+
+
+def test_an_unavailable_source_keeps_its_previous_checked_at(store):
+    """A transient outage must not erase yesterday's true answer."""
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.AVAILABLE, "current": "v1", "latest": "v2",
+         "detail": {}, "note": None}], now="2026-08-01T00:00:00+00:00")
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.UNAVAILABLE, "current": "v1", "latest": None,
+         "detail": {}, "note": "network"}], now="2026-08-02T00:00:00+00:00")
+
+    source = store.entry("oci:local:x")["update"]["sources"][0]
+    assert source["status"] == updates.AVAILABLE           # kept
+    assert source["latest"] == "v2"
+    assert source["checked_at"] == "2026-08-01T00:00:00+00:00"
+    assert source["stale_note"] == "network"
+
+
+def test_updates_available_lists_only_available_artifacts(store):
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.AVAILABLE, "current": "v1", "latest": "v2",
+         "detail": {}, "note": None}])
+    assert provenance.updates_available(store.get()) == ["oci:local:x"]
+
+
+def test_updates_available_tolerates_entries_missing_the_update_key():
+    # No "update" key at all -- a pre-migration entry, or one that has never
+    # had a watch pass run against it.
+    data = {"oci:local:x": {"artifact_id": "oci:local:x"}}
+    assert provenance.updates_available(data) == []
+
+
+def test_record_update_on_an_unknown_artifact_is_a_no_op(store):
+    status = store.record_update("oci:local:ghost", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])
+    assert status == updates.UNAVAILABLE
+    assert store.get() == {}
+
+
+def test_set_watch_is_a_no_op_when_the_sources_are_unchanged(tmp_path):
+    """Task 9 calls this every collector pass with the same computed list.
+    An unconditional record would grow the history file forever for a value
+    that never moved -- the same non-action clear_desired already applies to
+    an already-absent desired version."""
+    store = _store(tmp_path)
+    sources = [{"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+                "pinned": "v1", "order": "semver"}]
+    store.set_watch("oci:local:x", sources, now=T0)
+    store.set_watch("oci:local:x", list(sources), now=T1)
+
+    records = [r for r in provenance_history.history_for(
+        tmp_path / "history.jsonl", "oci:local:x") if r["field"] == "watch"]
+    assert len(records) == 1
+
+
+def test_set_watch_records_a_new_history_line_when_sources_actually_change(tmp_path):
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}], now=T0)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v2", "order": "semver"}], now=T1)
+
+    records = [r for r in provenance_history.history_for(
+        tmp_path / "history.jsonl", "oci:local:x") if r["field"] == "watch"]
+    assert len(records) == 2
+
+
+def test_set_watch_with_an_empty_list_on_an_unknown_artifact_is_a_true_no_op(tmp_path):
+    store = _store(tmp_path)
+    store.set_watch("oci:local:ghost", [])
+    assert store.get() == {}
+    assert provenance_history.history_for(tmp_path / "history.jsonl",
+                                          "oci:local:ghost") == []
+
+
+def test_set_watch_tolerates_a_pre_migration_entry_missing_watch_and_update(tmp_path):
+    """Entries written before this task lack `watch`/`update` entirely --
+    live production data is in exactly this shape on two machines."""
+    store = _store(tmp_path)
+    store.declare_origin(
+        "oci:local:x", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "x", "reference": "x:1",
+                "build": None, "archive": None}, now=T0)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    del data["oci:local:x"]["watch"]
+    del data["oci:local:x"]["update"]
+    path.write_text(json.dumps(data))
+
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    entry = store.entry("oci:local:x")
+    assert entry["watch"][0]["id"] == "a"
+    assert entry["origin"]["repository"] == "x"   # untouched
+
+
+def test_record_update_tolerates_a_pre_migration_entry_missing_watch(tmp_path):
+    store = _store(tmp_path)
+    store.declare_origin(
+        "oci:local:x", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "x", "reference": "x:1",
+                "build": None, "archive": None}, now=T0)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    del data["oci:local:x"]["watch"]
+    del data["oci:local:x"]["update"]
+    path.write_text(json.dumps(data))
+
+    status = store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])
+    assert status == updates.UNAVAILABLE          # nothing is watched: "a" is an orphan
+    assert store.entry("oci:local:x")["update"]["sources"] == []
+
+
+def test_a_corrupt_stored_status_does_not_corrupt_the_rollup(tmp_path):
+    """A stored per-source status outside STATUSES (hand-edited or from a
+    future format this code has never seen) must not leak past the rollup
+    that reads it back."""
+    store = _store(tmp_path)
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"}])
+    store.record_update("oci:local:x", [
+        {"id": "a", "status": updates.CURRENT, "current": "v1", "latest": "v1",
+         "detail": {}, "note": None}])
+
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["update"]["sources"][0]["status"] = "not-a-real-status"
+    path.write_text(json.dumps(data))
+
+    # Changing the watch list forces set_watch to recompute the rollup off
+    # the (now corrupt) stored sources.
+    store.set_watch("oci:local:x", [
+        {"id": "a", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1", "order": "semver"},
+        {"id": "b", "check": "git_tags", "remote": "https://github.com/c/d",
+         "pinned": "v1", "order": "semver"}])
+
+    status = store.entry("oci:local:x")["update"]["status"]
+    assert status in updates.STATUSES
+    assert status == updates.UNAVAILABLE

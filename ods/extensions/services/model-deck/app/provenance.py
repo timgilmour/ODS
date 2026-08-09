@@ -32,7 +32,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app import origins, provenance_history
+from app import origins, provenance_history, updates
 
 _SOURCE_DERIVED = "derived"
 _SOURCE_DECLARED = "declared"
@@ -51,7 +51,7 @@ def _empty_current() -> dict:
 def _blank_entry(artifact_id: str, kind: str, node: str, role: str) -> dict:
     return {"artifact_id": artifact_id, "kind": kind, "node": node, "role": role,
             "origin": None, "current": _empty_current(), "desired": None,
-            "update_path": None, "notes": None}
+            "update_path": None, "notes": None, "watch": [], "update": None}
 
 
 def _validate(artifact_id: str, kind: str, node: str, role: str) -> None:
@@ -232,6 +232,102 @@ class ProvenanceStore:
             self._save(data)
             self._record(artifact_id, "desired", before, None, "declared", "api", now)
 
+    def set_watch(self, artifact_id: str, sources: list[dict],
+                  now: str | None = None) -> None:
+        """Replace the watch list. Every source is validated first, so a bad
+        entry is rejected whole rather than half-written.
+
+        RETENTION IS BOUNDED BY WATCH: any recorded verdict whose source id is
+        no longer watched is dropped here, not carried. A verdict for a
+        source nobody watches answers a question nobody is asking -- the same
+        orphaning the ledger's retention-by-absence rule exists to prevent.
+
+        AN UNCHANGED WATCH LIST IS A NON-ACTION: no write, no history, the
+        same treatment clear_desired gives an already-absent desired version.
+        Task 9 calls this every collector pass with the same freshly-computed
+        sources when nothing upstream has moved; recording a "declared"
+        transition on every one of those calls would grow the history file
+        forever for a value that never changed.
+        """
+        for source in sources:
+            updates.validate_watch(source)
+        sources = list(sources)
+        now = now or _now_iso()
+        with self._lock:
+            data = self._load()
+            entry = data.get(artifact_id)
+            before = list((entry or {}).get("watch") or [])
+            if before == sources:
+                return
+            if entry is None:
+                kind, node, _ = origins.parse_artifact_id(artifact_id)
+                entry = _blank_entry(artifact_id, kind, node, "other")
+            entry["watch"] = sources
+
+            live = {s["id"] for s in sources}
+            update = entry.get("update")
+            if update:
+                kept = [s for s in update.get("sources", [])
+                       if s.get("id") in live]
+                entry["update"] = {**update, "sources": kept,
+                                   "status": updates.rollup(
+                                       [s.get("status") for s in kept])}
+
+            data[artifact_id] = entry
+            self._save(data)
+            self._record(artifact_id, "watch", before, sources,
+                         "declared", "operator", now)
+
+    def record_update(self, artifact_id: str, source_results: list[dict],
+                      now: str | None = None) -> str:
+        """Merge this pass's per-source results and return the rollup.
+
+        AN UNAVAILABLE RESULT NEVER OVERWRITES A GOOD ONE. A source that could
+        not be reached keeps its previous verdict AND its previous
+        `checked_at`, with the failure recorded as `stale_note`. A
+        stale-but-true answer beats a fresh unknown, and the alternative is
+        that one network blip erases what we correctly learned yesterday.
+
+        RETENTION IS BOUNDED BY WATCH here too: a result for a source id no
+        longer watched is dropped, never retained. An unknown artifact id is
+        a no-op -- it creates nothing and never raises, because nothing about
+        update-checking may fail a collector tick.
+        """
+        now = now or _now_iso()
+        with self._lock:
+            data = self._load()
+            entry = data.get(artifact_id)
+            if entry is None:
+                return updates.UNAVAILABLE
+
+            live = {s["id"] for s in (entry.get("watch") or [])}
+            previous = {s["id"]: s
+                        for s in ((entry.get("update") or {}).get("sources") or [])}
+
+            merged = []
+            for result in source_results:
+                source_id = result.get("id")
+                if source_id not in live:
+                    continue                      # orphan: never retained
+                prior = previous.get(source_id)
+                if result.get("status") == updates.UNAVAILABLE and prior and \
+                        prior.get("status") != updates.UNAVAILABLE:
+                    merged.append({**prior, "stale_note": result.get("note")})
+                else:
+                    merged.append({**result, "checked_at": now,
+                                   "stale_note": None})
+
+            status = updates.rollup([s.get("status") for s in merged])
+            before = (entry.get("update") or {}).get("status")
+            entry["update"] = {"status": status, "sources": merged,
+                               "checked_at": now}
+            data[artifact_id] = entry
+            self._save(data)
+            if before != status:
+                self._record(artifact_id, "update.status", before, status,
+                             "checked", "update-checker", now)
+            return status
+
     def record_deep_verify(self, artifact_id: str, sha256: str,
                            now: str | None = None) -> dict:
         """The on-demand hash landed. This is the ONLY path that can make a
@@ -299,7 +395,13 @@ def describe(data: dict, *, now: str, stale_s: float) -> list[dict]:
                 current.get("verified_at"), now, stale_s):
             verification = origins.STALE
         out.append({**entry, "current": current,
-                    "version_drift": drift, "verification": verification})
+                    "version_drift": drift, "verification": verification,
+                    # Passed through unmodified -- but defaulted here so an
+                    # entry written before watch/update existed (live on two
+                    # machines) reads back the same shape as one written
+                    # after, rather than simply omitting the keys.
+                    "watch": entry.get("watch") or [],
+                    "update": entry.get("update")})
     return out
 
 
@@ -307,6 +409,12 @@ def gaps(data: dict) -> list[str]:
     """Artifact ids with no recorded origin — the work queue for what D8
     refuses to guess."""
     return sorted(k for k, v in data.items() if (v or {}).get("origin") is None)
+
+
+def updates_available(data: dict) -> list[str]:
+    """Artifact ids whose rollup says a newer version exists."""
+    return sorted(k for k, v in data.items()
+                  if ((v or {}).get("update") or {}).get("status") == updates.AVAILABLE)
 
 
 def _is_stale(verified_at: str | None, now: str, stale_s: float) -> bool:
