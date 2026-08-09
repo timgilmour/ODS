@@ -44,6 +44,8 @@ Settings (Python `MODEL_DECK_*` env prefix, or defaults in `app/settings.py`):
 | `MODEL_DECK_STORAGE_WATCH_INTERVAL` | `60` | Watermark check cadence (seconds) |
 | `MODEL_DECK_STORAGE_SLACK_BYTES` | `2e9` | Headroom to reserve when planning moves (2 GB) |
 | `MODEL_DECK_LEMONADE_CONTAINER` | `ods-llama-server` | Docker container name for lemonade (needed to restart for model registration) |
+| `MODEL_DECK_UPDATE_CHECK_ENABLED` | `true` | Kill switch for update-checking — see [Update checking](#update-checking) |
+| `MODEL_DECK_UPDATE_INTERVAL_S` | `21600` (6 h) | Update-check cadence, on its own thread, never the watcher tick |
 
 ## API Endpoints
 
@@ -535,8 +537,10 @@ Unit rows cover intent, status derivation, reconcile planning, observation, the 
 The deck records the upstream origin and current version of every artifact it
 can see — engine images, model weights, source repos, ComfyUI node packs — so
 that "what was ds4 running last Tuesday, and where did it come from" has an
-answer. This is the **ledger only**. Recipes, backup export, and
-update-checking are later specs that read it.
+answer. This is the **ledger only** — provenance records, it never actuates.
+Update-checking (below) is the first spec built on top of it: it reads the
+declared `watch` list off each entry and writes back a verdict. Recipes and
+backup export remain later specs.
 
 ### Three kinds, not four
 
@@ -649,15 +653,135 @@ PUT    /api/provenance/desired              # record what it SHOULD be (data onl
 DELETE /api/provenance/desired?artifact_id= # "no opinion"
 POST   /api/provenance/verify               # deep sha256 (file artifacts only)
 DELETE /api/provenance?artifact_id=         # remove an entry (history survives)
+PUT    /api/provenance/watch                # declare an artifact's upstream(s) to check
+POST   /api/provenance/check                # run the update-check pass now (see below)
 ```
 
 `artifact_id` is never a URL path segment — it contains `:` and can contain
 `/` and `~`, so it travels as a query parameter or a body field.
 
 `GET /api/state` carries a summary block:
-`{"provenance": {"drift": [...], "gaps": <int>}}`.
+`{"provenance": {"drift": [...], "gaps": <int>, "updates": <int>}}`.
+`updates` is the count of artifacts whose latest check rolled up to
+`available` — see [Update checking](#update-checking) below.
 
-## Safety invariants (12–17): storage
+## Update checking
+
+Provenance (above) answers "what is here now and where did it come from."
+Update checking answers the next question — "is there something newer" —
+without ever fetching, pulling, or building it. It reads whatever upstream an
+operator **declared** for an artifact, compares it to the pinned value already
+on file, and writes the verdict back onto that artifact's `update` field. It
+never actuates: `app.reconcile` remains the only thing that changes what is
+actually running, exactly as [Nothing converges](#provenance-where-every-artifact-came-from)
+already establishes for the rest of provenance.
+
+### Four status words, and two of them are not synonyms
+
+| Status | Meaning |
+|---|---|
+| `current` | Checked; the pinned value is the newest the declared order can see. |
+| `available` | Checked; something ranked newer than the pin exists. |
+| `undetermined` | **Reached** the upstream, but its answer **cannot be ranked** — an `order: "none"` tag set, or a pin that itself doesn't parse under the declared order. |
+| `unavailable` | Could **not** reach the upstream, or could not even ask (rate-limited, network error, malformed response, a remote that has moved). |
+
+`undetermined` and `unavailable` get confused because both mean "no verdict,"
+but they point an operator in opposite directions. `undetermined` says *the
+read succeeded — go look at the tag list yourself*, e.g. comfyui-aeon-spark's
+`slim`/`full`/`latest` or llama.cpp's `b8763`-style build tags, neither of
+which has an order this code is willing to invent. `unavailable` says *the
+read itself failed* — a rate limit, a timeout, a moved repository — and the
+last known-good verdict is retained rather than overwritten, the same
+retention-over-erasure rule the rest of provenance already applies to a
+locations/weights read that can't be reached.
+
+A rollup (the `status` shown on an artifact with more than one watch source,
+e.g. `ods-lemonade-server` below) is the **worst** of its sources
+(`unavailable` > `undetermined` > `available` > `current`), so one healthy
+source can never mask a sibling that is failing or unrankable.
+
+### Ranking is declared per source, never inferred
+
+Three of the four check types never rank anything — `git_compare` walks an
+exact ahead/behind count against a pinned commit, and `oci_channel` compares
+the digest a moving tag (`:slim`, `:latest`) currently resolves to against the
+pinned digest. Neither needs an opinion about "newer."
+
+The fourth kind, a tag **set**, is where "newer" stops being exact and becomes
+a convention — and the convention is written down per source, never guessed
+from the tag strings themselves:
+
+| Check | Needs | `order` | Ranks by |
+|---|---|---|---|
+| `git_compare` | `remote`, `ref`, `pinned` | must be `null` | ahead/behind count (exact) |
+| `oci_channel` | `registry`\*, `repository`, `reference`, `pinned` | must be `null` | digest equality (exact) |
+| `git_tags` | `remote`, `pinned`, `order` | `"semver"` \| `"date"` \| `"none"` | parsed tag comparison |
+| `oci_tags` | `registry`\*, `repository`, `pinned`, `order` | `"semver"` \| `"date"` \| `"none"` | parsed tag comparison |
+
+\* `registry` defaults to `ghcr.io` when omitted.
+
+`order: "none"` is not "not yet configured" — it is the **honest** choice for
+a tag set with no sane order at all (llama.cpp's `b8763` build tags; a channel
+name is handled by `oci_channel` instead and never reaches ranking). A tag
+that doesn't parse under the declared order is excluded from ranking and
+listed in `detail.unranked`, never coerced into a comparison — the one place
+in this whole package that could be *wrong* rather than merely unavailable,
+so it refuses to guess.
+
+### Its own thread, never the watcher tick
+
+The watcher tick that drives arbitration/reconciliation runs every ~2 s and
+must stay fast — a stalled tick is a stalled reconciler, which is what keeps
+models loaded. `UpdateChecker` runs on its **own** daemon thread instead, at
+`update_interval_s` (default 6 h — upstream releases land on the order of
+weeks, and it shares GitHub's 60 requests/hour anonymous ceiling with
+everything else on the box). `POST /api/provenance/check` runs the identical
+pass synchronously, on the request thread, for "check now" — same code,
+same per-source/per-artifact failure isolation, just not on a timer.
+
+A pass **reads** upstreams and **writes** the provenance ledger only. It never
+imports `app.reconcile` or `app.intent`, so it cannot become a second
+actuator even by accident — the same class of guarantee [Nothing
+converges](#provenance-where-every-artifact-came-from) states for the rest of
+provenance, here true structurally rather than merely by convention.
+
+### Kill switch
+
+`MODEL_DECK_UPDATE_CHECK_ENABLED=false` (default `true`) stops the background
+thread from ever starting, and makes `POST /api/provenance/check` a harmless
+no-op (`{"checked": 0, "available": 0}`, no upstream contacted) instead of
+running a pass. This is the only part of the deck that talks to the public
+internet, so turning it off is one flag, not a rebuild or a network policy
+change. (`POST /api/provenance/check` answering `503` is a different case —
+no `UpdateChecker` was constructed at all, e.g. `MODEL_DECK_NO_WATCHER=1`.)
+
+### `PUT /api/provenance/watch`
+
+Declares (replaces, whole-list) the upstream sources checked for one artifact:
+
+```json
+PUT /api/provenance/watch
+{
+  "artifact_id": "oci:local:ods-lemonade-server",
+  "sources": [
+    {"id": "sdk", "check": "oci_tags", "registry": "ghcr.io",
+     "repository": "lemonade-sdk/lemonade-server",
+     "pinned": "v10.2.0", "order": "semver"},
+    {"id": "llama-cpp", "check": "git_tags",
+     "remote": "https://github.com/ggml-org/llama.cpp",
+     "pinned": "b8763", "order": "none"}
+  ]
+}
+```
+
+Every source needs a non-empty `id` (unique within the artifact — it is the
+key `record_update` merges results on), a `check` from the table above, and a
+truthy `pinned` value to compare against. `sources: []` clears the watch —
+the artifact stops being checked, and any prior verdict for a dropped source
+id is dropped with it (retention is bounded by what is still watched). A
+malformed source is rejected **whole** (422, nothing written) rather than
+partially applied — see `app.updates.validate_watch`.
+
 
 The storage feature enforces six safety invariants (continuing the deck's numbered safety list):
 
