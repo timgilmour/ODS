@@ -322,3 +322,109 @@ def test_a_flapping_exception_message_does_not_defeat_the_failed_dedup(store, tm
 
     kinds = [e["kind"] for e in events.tail_events(path)]
     assert kinds.count("update-check-failed") == 1
+
+
+# --- Fix round 2: an exception could still escape run_pass -- both paths --
+# --- flagged Important by the coordinator, both confirmed reachable ------
+# --- before the fix, plus the bundled #moved recovery Minor. -------------
+
+def test_dispatch_survives_a_non_dict_source():
+    """`dispatch(None, fetch)` raised AttributeError before this guard --
+    `source.get("check")` on a non-dict executes before `dispatch`'s own
+    try/except even starts, so the exception escaped dispatch entirely."""
+    assert update_check.dispatch(None, ok_fetch([]))["status"] == updates.UNAVAILABLE
+    assert update_check.dispatch("oops", ok_fetch([]))["status"] == updates.UNAVAILABLE
+    assert update_check.dispatch(42, ok_fetch([]))["status"] == updates.UNAVAILABLE
+
+
+def test_run_pass_tolerates_non_dict_elements_in_a_stored_watch_list(store, tmp_path):
+    """Required coverage 1: a stored `watch` list containing `None` and a
+    bare string (the same hand-edited-provenance.json threat model as the
+    missing-"id" tests) must not crash the pass -- it should still record
+    a verdict for the artifact's well-formed sibling source."""
+    store.set_watch("oci:local:x", [
+        {"id": "s1", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1.0.0", "order": "semver"}])
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:x"]["watch"].append(None)
+    data["oci:local:x"]["watch"].append("not-a-source")
+    path.write_text(json.dumps(data))
+
+    result = update_check.run_pass(store, ok_fetch([{"name": "v2.0.0"}]),
+                                   tmp_path / "e.jsonl", dedup={})
+    assert result["checked"] == 1
+    entry = store.entry("oci:local:x")
+    assert entry["update"] is not None
+    assert entry["update"]["status"] == updates.AVAILABLE
+
+
+def test_run_pass_tolerates_a_per_artifact_entry_that_is_not_a_dict(store, tmp_path):
+    """Required coverage 2: `provenance._load()` only guards the top-level
+    document shape (a dict of entries), never each entry's own shape -- a
+    hand-edited file can hold a bare string where an entry should be.
+    `(entry or {}).get(...)` does not save this: a truthy non-dict entry
+    passes the `or {}` unchanged and `.get` on a string still raises."""
+    store.declare_origin("file:local:legacy.gguf", kind="file", node="local",
+                         role="weights", origin=None)
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:corrupt"] = "not a dict at all"
+    path.write_text(json.dumps(data))
+
+    def _fetch(url, **kwargs):
+        raise AssertionError("must not be called")
+
+    result = update_check.run_pass(store, _fetch, tmp_path / "e.jsonl", dedup={})
+    assert result["checked"] == 0
+
+
+def test_a_malformed_sibling_artifact_does_not_block_a_healthy_one(store, tmp_path):
+    """Required coverage 3, the one that matters most: a corrupt
+    per-artifact entry AND a corrupt watch list, sitting alongside a
+    healthy watched artifact in the same store, must not prevent the
+    healthy artifact from being checked and its verdict recorded in the
+    same pass."""
+    watched(store, "oci:local:good", {
+        "id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
+        "pinned": "v1.0.0", "order": "semver"})
+    path = tmp_path / "provenance.json"
+    data = json.loads(path.read_text())
+    data["oci:local:bad-entry"] = "not a dict"
+    data["oci:local:bad-watch"] = {"watch": [None, 42, "oops"]}
+    path.write_text(json.dumps(data))
+
+    result = update_check.run_pass(store, ok_fetch([{"name": "v2.0.0"}]),
+                                   tmp_path / "e.jsonl", dedup={})
+    assert store.entry("oci:local:good")["update"]["status"] == updates.AVAILABLE
+    assert result["checked"] >= 1
+
+
+def test_moved_dedup_clears_on_recovery_so_a_later_move_to_the_same_place_relogs(
+        store, tmp_path):
+    """Bundled Minor: `#moved` must clear whenever a result stops reporting
+    `detail.moved`, the same asymmetry fix already applied to `#failed` --
+    otherwise move to X, get re-declared/fixed, then move to X again would
+    not re-log `origin-moved`."""
+    source = {"id": "t", "check": "git_compare",
+              "remote": "https://github.com/Kaden-Schutt/hipfire",
+              "ref": "master", "pinned": "5d3683a7", "order": None}
+    watched(store, "oci:local:x", source)
+    path = tmp_path / "events.jsonl"
+    dedup = {}
+
+    def _moved(url, *, headers=None, method="GET"):
+        return {"status_code": 301,
+                "headers": {"Location": "https://api.github.com/repositories/1"},
+                "json": None}
+
+    def _fixed(url, *, headers=None, method="GET"):
+        return {"status_code": 200, "headers": {},
+                "json": {"ahead_by": 0, "behind_by": 0, "status": "identical"}}
+
+    update_check.run_pass(store, _moved, path, dedup=dedup)   # moved -> X
+    update_check.run_pass(store, _fixed, path, dedup=dedup)   # re-declared/fixed
+    update_check.run_pass(store, _moved, path, dedup=dedup)   # moved again -> SAME X
+
+    kinds = [e["kind"] for e in events.tail_events(path)]
+    assert kinds.count("origin-moved") == 2

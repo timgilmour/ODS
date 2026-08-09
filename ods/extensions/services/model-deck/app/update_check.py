@@ -32,6 +32,19 @@ def dispatch(source: dict, fetch) -> dict:
     """Route one watch source to its checker. Any failure becomes an
     UNAVAILABLE result for THAT source -- siblings are unaffected, and the
     pass never raises."""
+    if not isinstance(source, dict):
+        # DEVIATION, ruled Important by the coordinator (task-6-report.md's
+        # second "Fix round"): nothing may execute before this guard.
+        # `source.get("check")` on the very next line raised AttributeError
+        # for anything that isn't a dict -- confirmed reachable via
+        # `dispatch(None, fetch)` and via a hand-edited `provenance.json`
+        # watch list holding a bare string or number. That escaped this
+        # function's own try/except entirely (the exception happens before
+        # the `try` even starts), taking down the whole `run_pass` call.
+        # Same fallback shape the "no checker" branch below already returns.
+        return {"id": "?", "status": updates.UNAVAILABLE, "current": None,
+                "latest": None, "detail": {},
+                "note": f"watch source is not a mapping: {type(source).__name__}"}
     checker = _DISPATCH.get(source.get("check"))
     if checker is None:
         return {"id": source.get("id", "?"), "status": updates.UNAVAILABLE,
@@ -78,23 +91,49 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
     """Check every watched artifact once. `dedup` maps
     "artifact_id/source_id" -> last logged `latest`, and is mutated in place
     so the caller owns its lifetime (a process restart re-announces, which is
-    the honest behaviour -- we cannot know what was read)."""
+    the honest behaviour -- we cannot know what was read).
+
+    DEVIATION, ruled Important by the coordinator (task-6-report.md's second
+    "Fix round"): two hardenings against a hand-edited/corrupt
+    `provenance.json`, both confirmed reachable and both fixed here rather
+    than in `app.provenance` (out of this task's file scope; a sibling fix
+    there -- commit 3b632096 -- covers elements *within* a stored list, this
+    fix covers a top-level per-artifact ENTRY that isn't a dict at all).
+
+    1. `isinstance(entry, dict)` is checked before `entry.get("watch")` --
+       `(entry or {}).get(...)` only substitutes `{}` for a falsy entry
+       (`None`, `""`, `{}`); a truthy non-dict entry (e.g. a bare string
+       written by hand) passed straight through and raised AttributeError.
+
+    2. The dispatch/record/log body for one artifact is wrapped in its own
+       try/except. `dispatch()` guards every individual source now, but
+       `store.record_update` re-reads the file itself under its own lock,
+       so a value that changes shape between this loop's snapshot and that
+       fresh read (or any other future failure on this path) must not take
+       a SIBLING artifact down with it -- the requirement this task exists
+       to guarantee ("one failing source/artifact must not stop the pass")
+       stated for the artifact loop, not just the source loop.
+    """
     checked = 0
     available = 0
 
     for artifact_id, entry in sorted(store.get().items()):
-        sources = (entry or {}).get("watch") or []
+        if not isinstance(entry, dict):
+            continue                     # corrupt entry: nothing to watch, never crash
+        sources = entry.get("watch") or []
         if not sources:
             continue                     # no origin, nothing to watch (U10)
         checked += 1
 
-        results = [dispatch(source, fetch) for source in sources]
-        status = store.record_update(artifact_id, results)
-        if status == updates.AVAILABLE:
-            available += 1
-
-        for result in results:
-            _log_transitions(events_path, artifact_id, result, dedup)
+        try:
+            results = [dispatch(source, fetch) for source in sources]
+            status = store.record_update(artifact_id, results)
+            if status == updates.AVAILABLE:
+                available += 1
+            for result in results:
+                _log_transitions(events_path, artifact_id, result, dedup)
+        except Exception:  # noqa: BLE001 — per-artifact isolation, see docstring
+            continue
 
     return {"checked": checked, "available": available}
 
@@ -131,6 +170,15 @@ def _log_transitions(events_path, artifact_id, result, dedup) -> None:
        key too rather than holding it as pending -- it was never set for an
        UNDETERMINED result in the first place, since only the `if status ==
        AVAILABLE` branch ever writes `dedup[key]`.
+
+    3. (Bundled Minor, same review round as 1/2 above) `#moved` now clears
+       whenever a result does NOT report `detail.moved`, the same asymmetry
+       fix ruling 2 already applied to `#failed`. As written it was only
+       ever OVERWRITTEN when a new location differed from the stored one,
+       never POPPED when a source stopped reporting moved -- so move to X,
+       get re-declared/fixed, then move to X again would not re-log
+       `origin-moved`, the identical "flapping becomes invisible" failure
+       mode left asymmetric for this key.
     """
     key = f"{artifact_id}/{result['id']}"
     status = result["status"]
@@ -143,6 +191,8 @@ def _log_transitions(events_path, artifact_id, result, dedup) -> None:
             events.log_event(events_path, "origin-moved", {
                 "artifact_id": artifact_id, "source": result["id"],
                 "location": location})
+    else:
+        dedup.pop(f"{key}#moved", None)
 
     if status != updates.UNAVAILABLE:
         # Any successful read -- CURRENT, AVAILABLE, or UNDETERMINED --
