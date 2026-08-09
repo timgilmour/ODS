@@ -4,6 +4,9 @@ docstring for why that invariant holds structurally, not by convention.
 """
 
 import json
+import pathlib
+import threading
+import types
 
 import pytest
 
@@ -428,3 +431,152 @@ def test_moved_dedup_clears_on_recovery_so_a_later_move_to_the_same_place_relogs
 
     kinds = [e["kind"] for e in events.tail_events(path)]
     assert kinds.count("origin-moved") == 2
+
+
+# --- Task 8: UpdateChecker, its own thread, wired outside arbiter.tick() ---
+
+
+def _settings(**kwargs):
+    base = {"update_interval_s": 3600.0, "update_check_enabled": True}
+    base.update(kwargs)
+    return types.SimpleNamespace(**base)
+
+
+def test_disabled_checker_never_runs_a_pass(store, tmp_path):
+    checker = update_check.UpdateChecker(
+        settings=_settings(update_check_enabled=False),
+        provenance_store=store, events_path=tmp_path / "e.jsonl")
+    checker._fetch_factory = lambda: (_ for _ in ()).throw(
+        AssertionError("must not build a fetcher"))
+    checker.tick()          # must be a clean no-op
+
+
+def test_tick_survives_a_pass_that_raises(store, tmp_path):
+    checker = update_check.UpdateChecker(
+        settings=_settings(), provenance_store=store,
+        events_path=tmp_path / "e.jsonl")
+
+    def boom():
+        raise RuntimeError("kaboom")
+
+    checker._fetch_factory = boom
+    checker.tick()          # supervisor catch: must not propagate
+
+    kinds = [e["kind"] for e in events.tail_events(tmp_path / "e.jsonl")]
+    assert "update-check-failed" in kinds
+
+
+def test_start_and_stop_are_clean(store, tmp_path):
+    checker = update_check.UpdateChecker(
+        settings=_settings(update_interval_s=0.05), provenance_store=store,
+        events_path=tmp_path / "e.jsonl")
+    checker._fetch_factory = lambda: (lambda url, **kw: {
+        "status_code": 200, "headers": {}, "json": []})
+    checker.start()
+    checker.stop()
+    assert checker._thread is not None
+    assert isinstance(checker._thread, threading.Thread)
+    assert not checker._thread.is_alive()
+
+
+def test_the_checker_is_not_reachable_from_the_watcher_tick():
+    """U8, asserted structurally: arbiter must not import or call this.
+
+    FIXED FROM THE BRIEF: the brief's version read `pathlib.Path
+    ("app/arbiter.py")`, a path relative to the process's CWD -- it only
+    resolves correctly when pytest happens to be invoked from the service
+    root, and silently passes-for-the-wrong-reason (or raises FileNotFound,
+    which is at least loud) otherwise. Anchored on this test file's own
+    location instead, so the assertion is correct regardless of the
+    invocation directory."""
+    service_root = pathlib.Path(__file__).resolve().parents[1]
+    source = (service_root / "app" / "arbiter.py").read_text()
+    assert "update_check" not in source
+    assert "UpdateChecker" not in source
+
+
+# --- additional coverage for the "Specific risks to handle deliberately" ---
+# --- section of task-8-brief.md, none of which the brief's own 4 tests ----
+# --- above actually exercise. -----------------------------------------------
+
+
+def test_stop_without_start_is_safe_and_does_not_hang(store, tmp_path):
+    """stop() must tolerate never having had start() called at all -- not
+    just the disabled-settings case, the general one (e.g. a caller that
+    constructs a checker and tears it down before ever starting it)."""
+    checker = update_check.UpdateChecker(
+        settings=_settings(), provenance_store=store,
+        events_path=tmp_path / "e.jsonl")
+    checker.stop()          # must not raise, hang, or require start() first
+    assert checker._thread is None
+
+
+def test_disabled_checker_start_spawns_no_thread(store, tmp_path):
+    """With update_check_enabled=False, start() itself must be a no-op --
+    not merely tick(), which the brief's own test already covers."""
+    checker = update_check.UpdateChecker(
+        settings=_settings(update_check_enabled=False), provenance_store=store,
+        events_path=tmp_path / "e.jsonl")
+    checker.start()
+    assert checker._thread is None
+    checker.stop()          # still must be safe/clean afterwards
+
+
+def test_tick_with_no_provenance_store_is_a_clean_noop(tmp_path):
+    """Confirms the checker behaves sanely when constructed without a
+    provenance store (app.main's `_build_update_checker` uses
+    `deck.get("provenance_store")`, which is None if that key is ever
+    absent) -- tick() must no-op cleanly, the same as the disabled case,
+    and must never attempt to build a fetcher."""
+    checker = update_check.UpdateChecker(
+        settings=_settings(), provenance_store=None,
+        events_path=tmp_path / "e.jsonl")
+    checker._fetch_factory = lambda: (_ for _ in ()).throw(
+        AssertionError("must not build a fetcher without a store"))
+    assert checker.tick() is None
+
+
+def test_tick_survives_run_pass_itself_raising(store, tmp_path, monkeypatch):
+    """The brief's own test only proves a raising `_fetch_factory` is
+    caught. `run_pass` itself can also raise outside its own per-artifact
+    try/except -- `store.get()` is called before that loop's guard, e.g. on
+    a corrupt on-disk shape -- and tick() is the supervisor's last line of
+    defense against that too."""
+    checker = update_check.UpdateChecker(
+        settings=_settings(), provenance_store=store,
+        events_path=tmp_path / "e.jsonl")
+    checker._fetch_factory = lambda: (lambda url, **kw: {
+        "status_code": 200, "headers": {}, "json": []})
+
+    def _boom():
+        raise RuntimeError("store broke")
+
+    monkeypatch.setattr(store, "get", _boom)
+
+    assert checker.tick() is None
+    kinds = [e["kind"] for e in events.tail_events(tmp_path / "e.jsonl")]
+    assert "update-check-failed" in kinds
+
+
+def test_fetch_factory_reuses_one_http_client_across_ticks(store, tmp_path, monkeypatch):
+    """app/updates/fetch.py's own module docstring explicitly directs Task 8
+    to build ONE client and reuse it across passes on the six-hour cadence,
+    rather than have `make_fetch` open a fresh one every tick. Verified by
+    spying on `update_check.make_fetch` rather than opening real sockets."""
+    calls = []
+
+    def _fake_make_fetch(*, timeout_s=8.0, budget=40, etags=None, client=None):
+        calls.append(client)
+        return lambda url, **kw: {"status_code": 200, "headers": {}, "json": []}
+
+    monkeypatch.setattr(update_check, "make_fetch", _fake_make_fetch)
+
+    checker = update_check.UpdateChecker(
+        settings=_settings(), provenance_store=store,
+        events_path=tmp_path / "e.jsonl")
+    checker.tick()
+    checker.tick()
+
+    assert len(calls) == 2
+    assert calls[0] is not None
+    assert calls[0] is calls[1]

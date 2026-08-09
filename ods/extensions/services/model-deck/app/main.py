@@ -334,6 +334,26 @@ def _build_storage_watcher(settings: Settings):
                           events_path=deck["events_path"])
 
 
+def _build_update_checker(deck: dict):
+    """Construct the UpdateChecker from the already-built deck (unlike
+    _build_watcher/_build_storage_watcher, this one is only ever called from
+    inside lifespan, where `deck` is already in scope — no standalone/swap
+    test requires a bare `_build_update_checker(settings)` entry point the
+    way test_health.py's `monkeypatch.setattr(main, "_build_watcher", ...)`
+    does for the watcher).
+
+    `deck.get("provenance_store")`, not `deck["provenance_store"]`: this
+    thread must behave sanely (construct cleanly, `tick()` a clean no-op)
+    even on a deck that has no provenance store, even though every real
+    `_build_deck` call populates one today (see UpdateChecker.tick`'s own
+    `self._store is None` guard)."""
+    from app.update_check import UpdateChecker
+
+    return UpdateChecker(settings=deck["settings"],
+                         provenance_store=deck.get("provenance_store"),
+                         events_path=deck["events_path"])
+
+
 def create_app() -> FastAPI:
     """Build the Model Deck FastAPI app. Requires no environment variables."""
     settings = Settings()
@@ -348,14 +368,21 @@ def create_app() -> FastAPI:
         deck["job_queue"].start()
         watcher = None
         storage_watcher = None
+        update_checker = None
         if os.environ.get("MODEL_DECK_NO_WATCHER") != "1":
             watcher = _build_watcher(settings)
             watcher.start()
             storage_watcher = _build_storage_watcher(settings)
             storage_watcher.start()
+            update_checker = _build_update_checker(deck)
+            deck["update_checker"] = update_checker
+            update_checker.start()
         try:
             yield
         finally:
+            # Reverse start order: update_checker started last, stops first.
+            if update_checker is not None:
+                update_checker.stop()
             if storage_watcher is not None:
                 storage_watcher.stop()
             if watcher is not None:

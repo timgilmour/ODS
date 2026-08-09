@@ -16,9 +16,14 @@ EVENTS ARE LOGGED ON TRANSITION. A pending update that re-logged every pass
 would be exactly the spam app/arbiter.py:438 already calls out.
 """
 
+import threading
+
+import httpx
+
 from app import events, updates
 from app.updates import git as git_checks
 from app.updates import oci as oci_checks
+from app.updates.fetch import make_fetch
 
 _DISPATCH = {
     "oci_channel": oci_checks.check_channel,
@@ -220,3 +225,71 @@ def _log_transitions(events_path, artifact_id, result, dedup) -> None:
                     "note": result["note"]})
     else:
         dedup.pop(key, None)             # back to current/undetermined: re-announce next time
+
+
+class UpdateChecker:
+    """Slow-cadence upstream check on its OWN thread (arbiter.Watcher and
+    storage.StorageWatcher idiom: stop event, daemon thread, ticks catch-all
+    so the loop survives).
+
+    It is a separate thread rather than another pass on the watcher tick for
+    one blunt reason: that tick is synchronous and runs the reconciler, so a
+    slow upstream would stall the machinery that keeps models loaded. The
+    handoff is ProvenanceStore, which already locks and writes atomically.
+    """
+
+    def __init__(self, settings, provenance_store, events_path):
+        self._settings = settings
+        self._store = provenance_store
+        self._events_path = events_path
+        self._interval = getattr(settings, "update_interval_s", 21600.0)
+        self._enabled = getattr(settings, "update_check_enabled", True)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._dedup: dict = {}
+        self._etags: dict = {}
+        # DEVIATION FROM THE BRIEF: app/updates/fetch.py's own module
+        # docstring explicitly directs this thread to build ONE httpx.Client
+        # and pass it into every pass's `make_fetch(client=...)` call rather
+        # than let `make_fetch` open a fresh default client every tick, purely
+        # to reuse TCP/TLS connections across the six-hour cadence. The
+        # brief's `_fetch_factory` builds a fresh client every call instead
+        # (`make_fetch(etags=self._etags)`, no `client=`), which contradicts
+        # that guidance from the very module it depends on. Never explicitly
+        # closed -- fetch.py's docstring establishes plain refcounting is
+        # fine for this, and here the client's lifetime matches the
+        # checker's own anyway, which is the whole point of holding it.
+        self._client = httpx.Client(follow_redirects=False)
+        self._fetch_factory = lambda: make_fetch(etags=self._etags, client=self._client)
+
+    def start(self) -> None:
+        if not self._enabled:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run,
+                                        name="model-deck-update-checker",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=min(self._interval, 10.0) + 5.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.tick()
+            if self._stop.wait(self._interval):
+                break
+
+    def tick(self) -> dict | None:
+        if not self._enabled or self._store is None:
+            return None
+        try:
+            fetch = self._fetch_factory()
+            return run_pass(self._store, fetch, self._events_path,
+                            dedup=self._dedup)
+        except Exception as exc:  # noqa: BLE001 — supervisor loop, never silent
+            events.log_event(self._events_path, "update-check-failed",
+                             {"error": f"{type(exc).__name__}: {exc}"})
+            return None
