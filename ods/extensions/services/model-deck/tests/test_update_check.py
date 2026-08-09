@@ -558,7 +558,14 @@ def test_disabled_checker_never_runs_a_pass(store, tmp_path):
         provenance_store=store, events_path=tmp_path / "e.jsonl")
     checker._fetch_factory = lambda: (_ for _ in ()).throw(
         AssertionError("must not build a fetcher"))
-    checker.tick()          # must be a clean no-op
+
+    # The raising _fetch_factory alone does NOT bind: tick()'s supervisor
+    # `except Exception` catches AssertionError too, so without the
+    # `not self._enabled` guard this test still passed while logging
+    # `update-check-error`. The discriminator is the EVENT LOG — a disabled
+    # checker is a silent no-op, a crashed one is not.
+    assert checker.tick() is None
+    assert events.tail_events(tmp_path / "e.jsonl") == []
 
 
 def test_tick_survives_a_pass_that_raises(store, tmp_path):
