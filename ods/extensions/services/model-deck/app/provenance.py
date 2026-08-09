@@ -117,12 +117,21 @@ def _keyed_sources(value) -> list[dict]:
     the same one `_SOURCE_DECLARED`/`_SOURCE_DERIVED` draws one field up.
     `update["sources"]` is DERIVED — a verdict map the next check pass
     rewrites — so an unkeyable verdict is dropped at the gate and nothing is
-    lost. `watch` is DECLARED: an operator wrote it, this is its only home,
-    and every write re-serialises the whole document, so dropping a source
-    at the gate would erase it from disk on the next unrelated save and hide
-    the mistake from the UI that could show it. Watch keeps what it was
-    given; only the places that turn a watch source into a KEY narrow it
-    through this function.
+    lost. `watch` is DECLARED: an operator wrote it and this is its only
+    home, so a source whose id merely cannot be USED as a key is kept
+    visible rather than deleted, and only the places that turn a watch
+    source into a key narrow it through this function.
+
+    THAT PROTECTION IS PARTIAL, AND KNOWINGLY SO. `_ENTRY_SHAPE["watch"]` is
+    `_stored_list`, which already drops any element that is not an object at
+    all — and since every write re-serialises the whole document, such an
+    element IS erased from disk on the next unrelated save. So the rule this
+    function implements is not "declared data is never dropped"; it is "an
+    element that could still be shown to an operator is not dropped merely
+    for being unkeyable". A bare string where a source belongs carries no
+    id, no check and no pin: there is nothing to display and nothing to fix.
+    Accepted deferral (final review), written down here so this docstring
+    stops arguing for a guarantee the level below does not make.
     """
     return [s for s in _stored_list(value)
             if isinstance(s.get("id"), _ID_TYPES) and s.get("id")]
@@ -182,9 +191,21 @@ def _stored_entry(artifact_id: str, value) -> dict:
 
     THE KEY IS THE IDENTITY. `artifact_id`, and the `kind`/`node` derivable
     from it, come from the mapping key -- that is not a guess (D8), it is
-    the same derivation `_validate` enforces on every write. `role` is not
-    derivable and is never invented; a corrupt entry gets `_blank_entry`'s
-    "other", the same unknown `set_watch` uses.
+    the same derivation `_validate` enforces on every write. All three are
+    FORCED over whatever was stored, not merely defaulted: `_validate`
+    guarantees the three agree on every write path (below), so a stored pair
+    that disagrees can only be a hand edit, and leaving it in place would let
+    one entry be served under one key while announcing another id/kind/node
+    through /api/provenance and /api/state.
+
+    Forcing `kind`/`node` is conditional on the key actually declaring them,
+    because you can only disagree with an id that exists: when the key is not
+    a well-formed artifact id, `_identity_from` derives nothing and a stored
+    pair is left alone rather than blanked. The gate normalises shape; it
+    does not destroy a readable value it has nothing to replace with.
+
+    `role` is not derivable and is never invented; a corrupt entry gets
+    `_blank_entry`'s "other", the same unknown `set_watch` uses.
 
     NORMALISING COSTS THE CORRUPT VALUE ITS PLACE ON DISK: the next write of
     any artifact re-serialises the whole document, so a field that could not
@@ -200,6 +221,8 @@ def _stored_entry(artifact_id: str, value) -> dict:
     kind, node = _identity_from(artifact_id)
     entry = {**_blank_entry(artifact_id, kind, node, "other"),
              **_stored_dict(value), "artifact_id": artifact_id}
+    if kind is not None:
+        entry["kind"], entry["node"] = kind, node
     for field, gate in _ENTRY_SHAPE.items():
         entry[field] = gate(entry[field])
     return entry

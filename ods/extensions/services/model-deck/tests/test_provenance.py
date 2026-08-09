@@ -1124,6 +1124,68 @@ def test_the_healthy_neighbour_is_untouched_by_every_corrupted_position(
         assert store.entry(_NEIGHBOUR)["current"]["version"] == "sha256:n"
 
 
+@pytest.mark.parametrize("garbage", _GARBAGE)
+def test_every_public_reader_gates_the_raw_document_it_was_handed(garbage):
+    """THE READ-SIDE BOUNDARY, TESTED AS ONE. The matrix above feeds the
+    three pure readers a document `ProvenanceStore.get()` has ALREADY gated,
+    so it cannot tell whether each reader gates its own argument -- removing
+    `_stored_document(...)` from `gaps()` left all 1370 tests green. These
+    are public functions reachable with any mapping, so they are handed a raw
+    one here.
+
+    Driven by `_document_readers()` for the same reason the matrix is: a
+    fourth reader that forgets the gate is corrupted by this test the day it
+    is added."""
+    document = {"oci:local:corrupt": garbage,
+                _NEIGHBOUR: {"origin": _origin(),
+                             "update": {"status": updates.AVAILABLE}}}
+    for name, kwargs in _document_readers().items():
+        result = getattr(provenance, name)(document, **kwargs)
+        assert result is not None, name
+    # And the corrupt entry is still ACCOUNTED FOR, not silently skipped:
+    # an origin that cannot be read is no origin, so it belongs on the work
+    # queue rather than quietly off it.
+    assert "oci:local:corrupt" in provenance.gaps(document)
+
+
+def test_a_stored_entry_can_never_present_an_artifact_id_other_than_its_key():
+    """THE KEY IS THE IDENTITY (D8). The existing corrupt-entry test passes
+    vacuously here: its stored value is a STRING, so `_stored_dict` yields
+    `{}` and the blank entry's `artifact_id` is already right. A stored
+    entry carrying a WRONG id is the case that matters -- it would be served
+    through /api/provenance and /api/state under one key while announcing
+    another. Removing the forced `artifact_id` left the whole suite green."""
+    gated = provenance._stored_document(
+        {"oci:local:x": {"artifact_id": "oci:sparky:somewhere-else",
+                         "origin": _origin()}})
+    assert gated["oci:local:x"]["artifact_id"] == "oci:local:x"
+    assert gated["oci:local:x"]["origin"] == _origin()   # nothing else disturbed
+
+
+def test_a_stored_entry_can_never_present_a_kind_or_node_that_disagrees_with_its_id():
+    """`_stored_entry`'s docstring claimed `kind`/`node` come from the key
+    too; only `artifact_id` was actually forced, so `**_stored_dict(value)`
+    let a hand-edited pair win. `_validate` guarantees agreement on every
+    WRITE path (app/provenance.py:227-231), so forcing them on the read path
+    costs nothing and closes the one door left open."""
+    gated = provenance._stored_document(
+        {"oci:local:x": {"kind": "file", "node": "sparky", "role": "weights"}})
+    assert gated["oci:local:x"]["kind"] == "oci"
+    assert gated["oci:local:x"]["node"] == "local"
+    assert gated["oci:local:x"]["role"] == "weights"     # NOT derivable, not forced
+
+
+def test_an_unparseable_key_declares_no_identity_so_none_is_forced():
+    """You can only disagree with an id that exists. When the key is not a
+    well-formed artifact id there is nothing to derive, so a stored
+    `kind`/`node` is left alone rather than blanked -- the gate normalises
+    shape and never destroys a readable value it cannot replace."""
+    gated = provenance._stored_document(
+        {"not-an-artifact-id": {"kind": "oci", "node": "local"}})
+    assert gated["not-an-artifact-id"]["kind"] == "oci"
+    assert gated["not-an-artifact-id"]["artifact_id"] == "not-an-artifact-id"
+
+
 def test_only_load_reads_the_stored_document(tmp_path):
     """WHY THE GATE HOLDS: `_load()` is the single door stored data comes
     through, so gating it gates every method that will ever exist. This test
