@@ -49,6 +49,11 @@ class ArtifactBody(BaseModel):
     artifact_id: str
 
 
+class WatchBody(BaseModel):
+    artifact_id: str
+    sources: list[dict]
+
+
 def _store(request: Request):
     return request.app.state.deck["provenance_store"]
 
@@ -159,6 +164,50 @@ def delete_desired(request: Request, artifact_id: str) -> dict:
     """'No opinion' — app.intent.forget's semantics for a desired version."""
     _store(request).clear_desired(artifact_id)
     return {"artifact_id": artifact_id, "desired": None}
+
+
+@router.put("/watch")
+def put_watch(request: Request, body: WatchBody) -> dict:
+    """Replace an artifact's watch list.
+
+    `artifact_id` is validated up front, the same upfront check
+    put_origin/put_desired already make -- and here it is not merely
+    consistent, it is NECESSARY: ProvenanceStore.set_watch's unchanged-watch
+    guard (`_by_id(before) == _by_id(sources)`) returns before ever calling
+    `parse_artifact_id` when `sources: []` is sent against an id with no
+    stored entry, so without this line a malformed id paired with an empty
+    body would silently succeed instead of being refused. Both this and
+    validate_watch's BadWatch are ValueError subclasses that app.main's
+    exception_handler(ValueError) already turns into 422 (see this module's
+    docstring) -- no local try/except needed, matching put_origin/
+    put_desired's own treatment of the identical call.
+    """
+    store = _store(request)
+    origins.parse_artifact_id(body.artifact_id)
+    store.set_watch(body.artifact_id, body.sources, _now())
+    entry = store.entry(body.artifact_id)
+    # `entry` can still be None here: set_watch no-ops (no entry created) on
+    # an empty `sources` list against an artifact this store has never seen.
+    # `[]` is the honest answer either way -- nothing is watched.
+    return {"ok": True, "watch": entry["watch"] if entry is not None else []}
+
+
+@router.post("/check")
+def check_updates(request: Request) -> dict:
+    """Run the update-check pass now, on the request thread -- the same
+    code path app.update_check.UpdateChecker's own thread runs, bounded by
+    the same per-source/per-artifact failure isolation (dispatch/run_pass
+    never raise; see their docstrings).
+
+    The checker is absent under MODEL_DECK_NO_WATCHER=1 (and in any bare
+    lifespan-less TestClient app): `deck.get(...)`, never `deck[...]`, so a
+    missing key is a clean 503 rather than an unhandled KeyError.
+    """
+    deck = request.app.state.deck
+    checker = deck.get("update_checker")
+    if checker is None:
+        raise HTTPException(status_code=503, detail="update checker not configured")
+    return checker.tick() or {"checked": 0, "available": 0}
 
 
 @router.post("/verify")

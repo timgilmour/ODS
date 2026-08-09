@@ -272,3 +272,138 @@ def test_spark_skips_a_multi_service_compose():
 def test_spark_role_is_engine():
     entries = collect.spark_oci_entries({"ds4": _COMPOSE_DS4}, None, node="sparky")
     assert entries[0]["role"] == "engine"
+
+
+# --- seed_watch (Task 9) ----------------------------------------------------
+#
+# ONLY a digest-pinned oci origin qualifies -- everything needed (registry,
+# repository, pinned digest) is structured data already on the origin. A
+# locally-built image with no registry, or any reference that is not
+# digest-pinned, gets nothing: parsing `build` prose is the inference D8
+# forbids (U4), and a floating tag with no digest has no exact point to
+# compare a future digest against.
+
+def test_seed_watch_derives_a_channel_source_from_a_digest_pinned_reference():
+    entry = {"artifact_id": "oci:sparky:aeon-7/comfyui-aeon-spark", "kind": "oci",
+             "origin": {"registry": "ghcr.io",
+                        "repository": "aeon-7/comfyui-aeon-spark",
+                        "reference": "ghcr.io/aeon-7/comfyui-aeon-spark:slim@sha256:7fda"}}
+    sources = collect.seed_watch(entry)
+    assert len(sources) == 1
+    assert sources[0]["check"] == "oci_channel"
+    assert sources[0]["reference"] == "slim"
+    assert sources[0]["pinned"] == "sha256:7fda"
+    assert sources[0]["derived"] is True
+
+
+def test_seed_watch_returns_nothing_without_a_registry():
+    # A locally built image has no upstream registry; its watch must be
+    # DECLARED against its build inputs, never guessed from prose (U4).
+    entry = {"artifact_id": "oci:local:ods-hipfire", "kind": "oci",
+             "origin": {"repository": "ods-hipfire", "build": "built on autarch…"}}
+    assert collect.seed_watch(entry) == []
+
+
+def test_seed_watch_returns_nothing_for_an_artifact_with_no_origin():
+    assert collect.seed_watch(
+        {"artifact_id": "file:local:m.gguf", "kind": "file", "origin": None}) == []
+
+
+def test_seed_watch_returns_nothing_for_a_non_oci_kind_even_with_a_matching_origin():
+    """kind gates this before the reference is even parsed -- a file or git
+    artifact has no registry/repository/reference vocabulary at all."""
+    entry = {"artifact_id": "file:local:x", "kind": "file",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:dd"}}
+    assert collect.seed_watch(entry) == []
+
+
+def test_seed_watch_returns_nothing_for_a_floating_reference_with_no_digest():
+    """Risk 1: not digest-pinned. A moving tag alone has no exact point to
+    compare a future reading against -- returning a half-built source here
+    would silently watch nothing meaningful."""
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim"}}
+    assert collect.seed_watch(entry) == []
+
+
+def test_seed_watch_returns_nothing_for_a_malformed_reference():
+    """Risk 1: malformed. Garbage in the reference field (hand-edited or a
+    future origin shape) must degrade to 'nothing derivable', never raise
+    and never half-populate a source."""
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "not-even-a-reference"}}
+    assert collect.seed_watch(entry) == []
+
+
+# --- merge_seeded_watch (Task 9) --------------------------------------------
+
+def test_seeding_never_replaces_a_declared_source():
+    """declared-over-derived, the precedence declared.json already uses."""
+    existing = [{"id": "upstream", "check": "git_compare",
+                 "remote": "https://github.com/a/b", "ref": "main",
+                 "pinned": "abc", "order": None}]
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:dd"},
+             "watch": existing}
+    assert collect.merge_seeded_watch(entry) == existing
+
+
+def test_merge_seeded_watch_seeds_a_genuinely_untouched_gap():
+    """No watch, never checked (`update` absent/None) -- the ordinary gap
+    seed_watch exists to fill on the very first pass that sees a derivable
+    origin."""
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:dd"},
+             "watch": [], "update": None}
+    sources = collect.merge_seeded_watch(entry)
+    assert len(sources) == 1
+    assert sources[0]["id"] == "channel"
+
+
+def test_merge_seeded_watch_does_not_duplicate_on_repeated_passes():
+    """Risk 2, half A: feeding the previous pass's own output back in must
+    be a fixed point, not a second 'channel' entry."""
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:dd"},
+             "watch": []}
+    first = collect.merge_seeded_watch(entry)
+    entry["watch"] = first
+    second = collect.merge_seeded_watch(entry)
+    assert second == first
+    assert len(second) == 1
+
+
+def test_merge_seeded_watch_does_not_resurrect_a_deliberately_cleared_source():
+    """Risk 2, half B -- the one the brief's own reference code gets wrong.
+
+    `watch: []` is ALSO the blank-entry default, so on its own it cannot
+    distinguish "nobody has looked at this yet" from "an operator watched
+    it, then explicitly cleared it via PUT /watch {sources: []}". The
+    second case must stick: re-deriving here would resurrect exactly what
+    was deleted, forever, on every collector pass.
+
+    `update` is not None precisely when this artifact's watch was checked
+    at least once (app.provenance.record_update is the only writer, and it
+    only runs for artifacts with a non-empty watch) -- the one bit of
+    existing state that tells the two apart without a schema change.
+    """
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:dd"},
+             "watch": [],
+             "update": {"status": "unavailable", "sources": [],
+                        "checked_at": "2026-08-01T00:00:00+00:00"}}
+    assert collect.merge_seeded_watch(entry) == []
+
+
+def test_merge_seeded_watch_returns_nothing_when_neither_declared_nor_derivable():
+    entry = {"artifact_id": "oci:local:ods-hipfire", "kind": "oci",
+             "origin": {"repository": "ods-hipfire", "build": "built on autarch…"},
+             "watch": []}
+    assert collect.merge_seeded_watch(entry) == []

@@ -1127,6 +1127,7 @@ class Watcher:
             observed.add(entry["artifact_id"])
             current = entry.pop("current")
             self._provenance_store.observe(**entry, current=current, now=now)
+            self._provenance_seed_watch(entry["artifact_id"], now)
 
         # Retention by ABSENCE, not by container name. Identity is the image
         # repository, so a failed inspect no longer tells us which artifact
@@ -1178,6 +1179,45 @@ class Watcher:
         for entry in provenance_collect.spark_oci_entries(texts, catalog, node):
             current = entry.pop("current")
             self._provenance_store.observe(**entry, current=current, now=now)
+            self._provenance_seed_watch(entry["artifact_id"], now)
+
+    def _provenance_seed_watch(self, artifact_id: str, now: str) -> None:
+        """A derivable origin gains its watch entry without an operator
+        typing it (Task 9's ``provenance_collect.merge_seeded_watch``).
+
+        Called for every oci artifact this pass just observed above — NOT
+        for weights (``_provenance_local_weights``): ``seed_watch`` only
+        ever derives from an oci origin, so calling this there would only
+        ever recompute ``[]`` against ``[]``, one extra store read per
+        catalog unit for no possible effect.
+
+        ``merge_seeded_watch`` needs the STORED entry, not the one this
+        pass just built: the collector's own entry dict (``local_oci_entries``
+        / ``spark_oci_entries``) carries no ``origin`` at all (that is
+        exclusively operator-declared, via ``PUT /origin``) and no ``watch``
+        by the time ``current`` has been popped off it for ``observe()``.
+        Only ``store.entry()`` — read fresh, after ``observe()`` above has
+        landed this pass's identity — has both.
+
+        DOUBLE PROTECTION AGAINST HISTORY SPAM ON UNCHANGED DATA, and they
+        are not equally load-bearing. ``ProvenanceStore.set_watch`` is the
+        authoritative one: an unchanged watch list (compared order-
+        independently by id) is a true no-op there — no write, no history —
+        by design, precisely because this task calls it every pass with the
+        same freshly-computed sources (see its docstring). The equality
+        check below is defense-in-depth only: it saves the lock/load/save
+        round trip on the overwhelmingly common "nothing changed" case, but
+        if it ever missed a spurious difference (e.g. dict key order — none
+        exists today since ``merge_seeded_watch`` derives at most one
+        source), correctness would still hold because ``set_watch`` itself
+        would no-op.
+        """
+        entry = self._provenance_store.entry(artifact_id)
+        if entry is None:
+            return
+        merged = provenance_collect.merge_seeded_watch(entry)
+        if merged != entry["watch"]:
+            self._provenance_store.set_watch(artifact_id, merged, now)
 
     # Event kinds whose consecutive identical repeats are collapsed to a
     # single log line, so a persistent state (a stuck 'wont-fit', a crashing

@@ -285,6 +285,13 @@ def test_api_state_shape(tmp_path, monkeypatch):
     assert body["world"]["placement"]["hipfire"] == 0
 
 
+def test_state_provenance_block_carries_an_updates_count(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+    block = TestClient(app).get("/api/state").json()["provenance"]
+    assert set(block) == {"drift", "gaps", "updates"}
+    assert isinstance(block["updates"], int)
+
+
 def test_api_state_calls_read_gpus_fresh_each_request(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     client = TestClient(app)

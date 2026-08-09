@@ -2632,3 +2632,132 @@ def test_provenance_unavailable_marking_uses_the_same_id_the_entry_was_created_w
 
     assert set(store.get()) == created
     assert store.entry(next(iter(created)))["current"]["verification"] == "unavailable"
+
+
+# --- provenance pass: watch seeding (Task 9) --------------------------------
+#
+# Wiring for provenance_collect.merge_seeded_watch into _provenance_pass.
+# The brief only says, in prose, to call set_watch "where _provenance_pass
+# writes each oci artifact" -- these tests pin the two things prose left
+# open: the entry merge_seeded_watch needs is the STORED entry (with
+# `origin`/`watch`, neither of which a freshly-observed collector entry
+# carries), fetched via store.entry() AFTER observe(), and the call must not
+# grow the history file on a pass where nothing changed.
+
+def test_provenance_pass_seeds_a_watch_from_a_derivable_declared_origin(tmp_path):
+    """An operator declares a digest-pinned origin (PUT /origin, simulated
+    here as a direct store call); the very next collector pass must add the
+    channel watch without the operator also typing PUT /watch.
+
+    ``ods-hipfire`` observes as repository ``aeon-7/ods-hipfire`` here (a
+    registry-qualified reference, unlike ``_one_container``'s bareword
+    default) -- identity is the repository (see this file's THE ARTIFACT IS
+    THE IMAGE section), so the artifact id follows the reference, not the
+    container name.
+    """
+    reference = "ghcr.io/aeon-7/ods-hipfire:slim@sha256:deadbeef"
+    watcher, store, _docker = _one_container(tmp_path, bodies={
+        "ods-hipfire": {"Image": "sha256:a", "Config": {"Image": reference}}})
+    store.declare_origin(
+        "oci:local:aeon-7/ods-hipfire", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "aeon-7/ods-hipfire",
+                "reference": reference})
+
+    watcher.tick()
+
+    watch = store.entry("oci:local:aeon-7/ods-hipfire")["watch"]
+    assert len(watch) == 1
+    assert watch[0] == {"id": "channel", "check": "oci_channel", "derived": True,
+                        "label": "slim", "registry": "ghcr.io",
+                        "repository": "aeon-7/ods-hipfire", "reference": "slim",
+                        "pinned": "sha256:deadbeef", "order": None}
+
+
+def test_provenance_pass_derives_no_watch_without_a_declared_origin(tmp_path):
+    """The ordinary case (no PUT /origin yet, D8's gap): nothing to derive
+    from, so watch stays empty -- never a guess from the observed label."""
+    watcher, store, _docker = _one_container(tmp_path)
+    watcher.tick()
+    assert store.entry("oci:local:ods-hipfire")["watch"] == []
+
+
+def test_provenance_pass_leaves_a_declared_watch_source_alone(tmp_path):
+    """declared-over-derived through the real collector pass: a hand-put
+    source must survive repeated ticks even though the origin is derivable."""
+    reference = "ghcr.io/aeon-7/ods-hipfire:slim@sha256:deadbeef"
+    watcher, store, _docker = _one_container(tmp_path, bodies={
+        "ods-hipfire": {"Image": "sha256:a", "Config": {"Image": reference}}})
+    store.declare_origin(
+        "oci:local:aeon-7/ods-hipfire", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "aeon-7/ods-hipfire",
+                "reference": reference})
+    declared = [{"id": "upstream", "check": "git_compare",
+                "remote": "https://github.com/a/b", "ref": "main",
+                "pinned": "abc", "order": None}]
+    store.set_watch("oci:local:aeon-7/ods-hipfire", declared)
+
+    watcher.tick()
+
+    assert store.entry("oci:local:aeon-7/ods-hipfire")["watch"] == declared
+
+
+def test_provenance_pass_does_not_append_history_for_an_unchanged_seeded_watch(tmp_path):
+    """Risk 3: an unconditional set_watch call every pass would append a
+    'declared' history line every provenance_interval_s forever for a watch
+    that never changes. Two ticks over an unchanged, already-seeded origin
+    must leave exactly one 'watch' record."""
+    clock = _FakeClock()
+    reference = "ghcr.io/aeon-7/ods-hipfire:slim@sha256:deadbeef"
+    watcher, store, _docker = _one_container(
+        tmp_path, clock=clock,
+        bodies={"ods-hipfire": {"Image": "sha256:a", "Config": {"Image": reference}}})
+    store.declare_origin(
+        "oci:local:aeon-7/ods-hipfire", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "aeon-7/ods-hipfire",
+                "reference": reference})
+
+    watcher.tick()
+    clock.advance(10_000)
+    watcher.tick()
+    clock.advance(10_000)
+    watcher.tick()
+
+    from app import provenance_history
+    records = provenance_history.history_for(
+        tmp_path / "prov-history.jsonl", "oci:local:aeon-7/ods-hipfire")
+    watch_records = [r for r in records if r["field"] == "watch"]
+    assert len(watch_records) == 1
+
+
+def test_provenance_pass_does_not_resurrect_a_deliberately_cleared_watch(tmp_path):
+    """The end-to-end version of the resurrection risk: an operator watches,
+    gets checked at least once (recorded via record_update, the only writer
+    of `update`), then explicitly clears the watch. The next collector pass
+    must leave it cleared, not silently re-add the derived source."""
+    clock = _FakeClock()
+    reference = "ghcr.io/aeon-7/ods-hipfire:slim@sha256:deadbeef"
+    watcher, store, _docker = _one_container(
+        tmp_path, clock=clock,
+        bodies={"ods-hipfire": {"Image": "sha256:a", "Config": {"Image": reference}}})
+    store.declare_origin(
+        "oci:local:aeon-7/ods-hipfire", kind="oci", node="local", role="engine",
+        origin={"registry": "ghcr.io", "repository": "aeon-7/ods-hipfire",
+                "reference": reference})
+
+    watcher.tick()   # seeds "channel"
+    assert store.entry("oci:local:aeon-7/ods-hipfire")["watch"] != []
+
+    # Simulate an update-check pass having run at least once, then the
+    # operator clearing the watch via PUT /watch {sources: []}.
+    store.record_update("oci:local:aeon-7/ods-hipfire", [
+        {"id": "channel", "status": "current", "current": "sha256:deadbeef",
+         "latest": "sha256:deadbeef", "detail": {}, "note": None}])
+    store.set_watch("oci:local:aeon-7/ods-hipfire", [])
+    assert store.entry("oci:local:aeon-7/ods-hipfire")["watch"] == []
+
+    clock.advance(10_000)
+    watcher.tick()
+
+    assert store.entry("oci:local:aeon-7/ods-hipfire")["watch"] == [], (
+        "a deliberately cleared, already-checked watch must not be "
+        "resurrected by the next collector pass")

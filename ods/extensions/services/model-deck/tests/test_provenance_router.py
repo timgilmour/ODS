@@ -368,3 +368,143 @@ def test_backfill_skips_a_container_it_cannot_read(tmp_path, monkeypatch):
     client, _deck = _app(tmp_path, monkeypatch, units=(), bodies={})
     body = client.post("/api/provenance/backfill").json()
     assert body["total"] == 0      # no entry invented for an unreadable container
+
+
+# --- watch (Task 9) ---------------------------------------------------------
+
+def test_put_watch_stores_sources(app_client):
+    client, _deck = app_client
+    response = client.put("/api/provenance/watch", json={
+        "artifact_id": "oci:local:x",
+        "sources": [{"id": "t", "check": "git_tags",
+                     "remote": "https://github.com/a/b",
+                     "pinned": "v1.0.0", "order": "semver"}]})
+    assert response.status_code == 200
+    assert response.json()["watch"][0]["id"] == "t"
+
+
+def test_put_watch_rejects_an_invalid_source_with_422(app_client):
+    client, _deck = app_client
+    response = client.put("/api/provenance/watch", json={
+        "artifact_id": "oci:local:x",
+        "sources": [{"id": "t", "check": "git_tags",
+                     "remote": "https://github.com/a/b", "pinned": "v1"}]})
+    assert response.status_code == 422
+
+
+def test_put_watch_rejects_a_non_string_source_id_with_422_not_500(app_client):
+    """The one-line updates.validate_watch fix: a bare truthiness check let
+    a list `id` through here, and set_watch's set comprehension over source
+    ids would then raise an unhandled TypeError (500) rather than the clean
+    422 every other malformed watch body gets."""
+    client, _deck = app_client
+    response = client.put("/api/provenance/watch", json={
+        "artifact_id": "oci:local:x",
+        "sources": [{"id": ["not", "a", "string"], "check": "git_tags",
+                     "remote": "https://github.com/a/b",
+                     "pinned": "v1.0.0", "order": "semver"}]})
+    assert response.status_code == 422
+
+
+def test_put_watch_with_a_malformed_artifact_id_is_422_even_with_no_sources(app_client):
+    """set_watch's own equality guard no-ops before ever validating the id
+    when sources is `[]` and nothing is stored -- this route validates the
+    id itself first, the same upfront check put_origin/put_desired already
+    make, so a malformed id is refused regardless of what else is in the
+    body."""
+    client, _deck = app_client
+    response = client.put("/api/provenance/watch", json={
+        "artifact_id": "nonsense", "sources": []})
+    assert response.status_code == 422
+
+
+def test_put_watch_with_empty_sources_on_a_never_seen_artifact_does_not_crash(app_client):
+    """set_watch is a true no-op for `sources: []` against an id with no
+    stored entry (nothing to compare, nothing written) -- store.entry(...)
+    then returns None, and the brief's literal `...["watch"]` would raise a
+    TypeError the caller sees as an ISE. The honest answer is 'nothing is
+    watched', the same shape a stored empty watch list would report."""
+    client, _deck = app_client
+    response = client.put("/api/provenance/watch", json={
+        "artifact_id": "oci:local:never-seen", "sources": []})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "watch": []}
+
+
+def test_put_watch_declared_source_survives_a_derivable_origin(app_client):
+    """End-to-end: declaring an origin the collector could derive a channel
+    watch from must not clobber a source an operator already hand-declared
+    via this route (declared-over-derived, exercised through the HTTP
+    surface rather than the pure function)."""
+    client, deck = app_client
+    client.put("/api/provenance/origin", json={
+        "artifact_id": "oci:local:x", "role": "engine",
+        "origin": {"registry": "ghcr.io", "repository": "a/b",
+                   "reference": "ghcr.io/a/b:slim@sha256:dd"}})
+    client.put("/api/provenance/watch", json={
+        "artifact_id": "oci:local:x",
+        "sources": [{"id": "upstream", "check": "git_compare",
+                     "remote": "https://github.com/a/b", "ref": "main",
+                     "pinned": "abc", "order": None}]})
+    assert deck["provenance_store"].entry("oci:local:x")["watch"] == [
+        {"id": "upstream", "check": "git_compare",
+         "remote": "https://github.com/a/b", "ref": "main",
+         "pinned": "abc", "order": None}]
+
+
+# --- check (Task 9) ----------------------------------------------------------
+
+class _FakeChecker:
+    def __init__(self, result=None):
+        self._result = result
+        self.calls = 0
+
+    def tick(self):
+        self.calls += 1
+        return self._result
+
+
+def test_post_check_runs_a_pass_and_reports_counts(app_client):
+    client, deck = app_client
+    checker = _FakeChecker({"checked": 2, "available": 1})
+    deck["update_checker"] = checker
+    response = client.post("/api/provenance/check")
+    assert response.status_code == 200
+    assert response.json() == {"checked": 2, "available": 1}
+    assert checker.calls == 1
+
+
+def test_post_check_normalizes_a_disabled_checkers_none_to_zero_counts(app_client):
+    """UpdateChecker.tick() returns None when disabled or storeless -- the
+    route must still answer the documented {checked, available} shape."""
+    client, deck = app_client
+    deck["update_checker"] = _FakeChecker(None)
+    response = client.post("/api/provenance/check")
+    assert response.status_code == 200
+    assert response.json() == {"checked": 0, "available": 0}
+
+
+def test_post_check_without_a_registered_checker_is_a_clean_error(app_client):
+    """Risk 4: MODEL_DECK_NO_WATCHER=1 (this fixture's default, like every
+    other test in this file) never populates deck['update_checker'] --
+    app.main only builds one when the watcher starts. `deck.get(...)` must
+    yield a clean, documented error here, never a bare KeyError."""
+    client, _deck = app_client
+    response = client.post("/api/provenance/check")
+    assert response.status_code == 503
+
+
+# --- /api/state updates count (Task 9) --------------------------------------
+
+def test_state_updates_count_reflects_a_recorded_available_status(app_client):
+    client, deck = app_client
+    _observe(deck)
+    deck["provenance_store"].set_watch("oci:local:x", [
+        {"id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
+         "pinned": "v1.0.0", "order": "semver"}])
+    deck["provenance_store"].record_update("oci:local:x", [
+        {"id": "t", "status": "available", "current": "v1.0.0",
+         "latest": "v1.1.0", "detail": {}, "note": None}])
+
+    block = client.get("/api/state").json()["provenance"]
+    assert block["updates"] == 1

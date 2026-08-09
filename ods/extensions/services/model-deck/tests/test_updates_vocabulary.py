@@ -86,3 +86,17 @@ def test_validate_watch_requires_an_id_and_a_pin():
                                 "order": "semver"})
     with pytest.raises(updates.BadWatch):
         updates.validate_watch({"id": "x", "check": "git_tags", "order": "semver"})
+
+
+def test_validate_watch_rejects_a_non_string_id():
+    # Task 9's PUT /watch route takes `id` straight off an untyped request
+    # body. Truthiness alone lets a list or object through here, and
+    # set_watch's `{s["id"] for s in sources}` then raises an unhandled
+    # TypeError (unhashable type) -- a 500, not the clean 422 an operator
+    # putting a malformed body should get.
+    with pytest.raises(updates.BadWatch):
+        updates.validate_watch({"id": ["a"], "check": "git_tags",
+                                "pinned": "v1", "order": "semver"})
+    with pytest.raises(updates.BadWatch):
+        updates.validate_watch({"id": {"a": 1}, "check": "git_tags",
+                                "pinned": "v1", "order": "semver"})

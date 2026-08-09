@@ -43,13 +43,14 @@ def get_state(request: Request) -> dict:
 def _provenance_block(deck: dict) -> dict:
     store = deck.get("provenance_store")
     if store is None:
-        return {"drift": [], "gaps": 0}
+        return {"drift": [], "gaps": 0, "updates": 0}
     data = store.get()
     described = provenance.describe(
         data, now=datetime.now(UTC).isoformat(),
         stale_s=deck["settings"].provenance_stale_s)
     return {"drift": [a for a in described if a["version_drift"]],
-            "gaps": len(provenance.gaps(data))}
+            "gaps": len(provenance.gaps(data)),
+            "updates": len(provenance.updates_available(data))}
 
 
 @router.get("/events")

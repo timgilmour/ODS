@@ -33,7 +33,15 @@ class BadWatch(ValueError):
 
 def validate_watch(source: dict) -> None:
     """Raise BadWatch unless `source` is a checkable watch entry."""
-    if not source.get("id"):
+    source_id = source.get("id")
+    if not isinstance(source_id, str) or not source_id:
+        # Truthiness alone (the original check) let a list or dict `id`
+        # through -- valid JSON, invalid as a key. ProvenanceStore.set_watch
+        # builds `{s["id"] for s in sources}` right after this validates, and
+        # an unhashable id there is an unhandled TypeError (500), not the
+        # clean 422 every other malformed watch body gets. Task 9 owns the
+        # route that surfaces it, so the fix belongs here at the one
+        # validator every write path already calls.
         raise BadWatch("watch source needs an id")
     check = source.get("check")
     if check not in CHECKS:

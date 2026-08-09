@@ -21,6 +21,8 @@ node-agent, a mismatched profile, or a missing stamp, the version is absent
 rather than wrong. A confidently wrong version is worse than no version.
 """
 
+import re
+
 import yaml
 
 from app import origins
@@ -168,6 +170,68 @@ def spark_oci_entries(compose_texts: dict, catalog: dict | None,
             "profiles": sorted(profiles_by_artifact[artifact_id]),
         }
     return [merged[k] for k in sorted(merged)]
+
+
+_REFERENCE_RE = re.compile(
+    r"^(?:[^/]+/)?(?P<repo>.+?):(?P<tag>[^:@]+)@(?P<digest>sha256:[0-9a-f]+)$")
+
+
+def seed_watch(entry: dict) -> list[dict]:
+    """Watch sources derivable from the origin ALONE (Task 9).
+
+    Only an oci origin that already names a registry, a repository and a
+    digest-pinned reference qualifies -- everything needed is present as
+    structured data. A locally built image gets nothing here: its upstream
+    lives in build inputs recorded as English prose, and parsing that prose
+    is the inference D8 forbids (U4). Those are declared by hand. A
+    floating (non-digest-pinned) reference also gets nothing: there is no
+    exact point to compare a future reading against, and returning a
+    half-built source would silently watch nothing meaningful.
+    """
+    origin = entry.get("origin") or {}
+    registry = origin.get("registry")
+    repository = origin.get("repository")
+    reference = origin.get("reference") or ""
+    if entry.get("kind") != "oci" or not registry or not repository:
+        return []
+
+    match = _REFERENCE_RE.match(reference)
+    if not match:
+        return []
+    return [{"id": "channel", "check": "oci_channel", "derived": True,
+             "label": match["tag"], "registry": registry,
+             "repository": repository, "reference": match["tag"],
+             "pinned": match["digest"], "order": None}]
+
+
+def merge_seeded_watch(entry: dict) -> list[dict]:
+    """Declared-over-derived: a hand-declared source always wins, and a
+    derived one is only added where no source with that id exists.
+
+    RESURRECTION GUARD. `watch: []` is ALSO the blank-entry default, so on
+    its own it cannot distinguish "nobody has looked at this yet" from "an
+    operator watched it, then explicitly cleared it via
+    PUT /watch {sources: []}". Re-deriving in the second case would put the
+    same source back on every future collector pass -- the one thing a
+    delete can never do here would be to stick.
+
+    `entry["update"]` is not None exactly when this artifact's watch was
+    checked at least once: app.provenance.record_update is its only writer,
+    and app.update_check.run_pass only calls it for artifacts whose watch
+    was non-empty at the time. So an empty watch alongside a non-None
+    `update` can only mean "it was watched, then cleared" -- the one bit of
+    existing state that tells the two empty-watch cases apart without a
+    provenance.json schema change.
+    """
+    existing = entry.get("watch") or []
+    if any(not s.get("derived") for s in existing):
+        return existing
+    if not existing and entry.get("update") is not None:
+        return existing
+    seeded = seed_watch(entry)
+    by_id = {s["id"]: s for s in seeded}
+    by_id.update({s["id"]: s for s in existing})
+    return list(by_id.values())
 
 
 def _image_reference(text: str) -> str | None:
