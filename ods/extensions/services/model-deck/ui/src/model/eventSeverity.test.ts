@@ -92,3 +92,17 @@ describe("eventSeverity — neutral", () => {
     expect(eventSeverity("some-future-kind-nobody-wrote-yet")).toBe("neutral");
   });
 });
+
+describe("update-checking kinds", () => {
+  it("classifies a moved origin as attention", () => {
+    expect(eventSeverity("origin-moved")).toBe("attention");
+  });
+
+  it("classifies a failed check as a failure via the existing suffix", () => {
+    expect(eventSeverity("update-check-failed")).toBe("failure");
+  });
+
+  it("leaves an available update neutral — informational, not an alarm", () => {
+    expect(eventSeverity("update-available")).toBe("neutral");
+  });
+});

@@ -30,7 +30,7 @@ const ATTENTION_SUFFIXES = ["-warn"];
 
 // Kinds that carry a severity but don't follow the suffix convention.
 const SUCCESS_EXACT = new Set(["reconciled"]);
-const ATTENTION_EXACT = new Set(["storage-shortfall", "host-agent-busy", "free-raced"]);
+const ATTENTION_EXACT = new Set(["storage-shortfall", "host-agent-busy", "free-raced", "origin-moved"]);
 
 function normalize(kind: string): string {
   return kind.replace(/_/g, "-");
