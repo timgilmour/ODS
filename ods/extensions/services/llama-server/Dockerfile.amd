@@ -18,7 +18,7 @@
 # ── Stage 1: Build llama.cpp with ROCm + rocWMMA + patches ──────────────────
 
 ARG ROCM_VERSION=7.2
-ARG LEMONADE_SERVER_IMAGE=ghcr.io/lemonade-sdk/lemonade-server:v10.10.0
+ARG LEMONADE_SERVER_IMAGE=ghcr.io/lemonade-sdk/lemonade-server:v10.2.0
 FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete AS builder
 
 ARG AMDGPU_TARGET=gfx1151
