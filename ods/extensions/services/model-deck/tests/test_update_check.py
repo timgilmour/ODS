@@ -110,7 +110,12 @@ def test_a_moved_repository_logs_origin_moved(store, tmp_path):
 
     update_check.run_pass(store, _fetch, path, dedup={})
     kinds = [e["kind"] for e in events.tail_events(path)]
-    assert "origin-moved" in kinds
+    # Ruling 1 (post-review): a moved result logs origin-moved ONLY -- the
+    # generic "no verdict" line adds nothing once the specific diagnosis
+    # and remedy are already on record, and double-logging the same fact
+    # reads as noise in the Events tab.
+    assert kinds.count("origin-moved") == 1
+    assert "update-check-failed" not in kinds
 
 
 def test_one_failing_source_does_not_stop_the_pass(store, tmp_path):
@@ -204,6 +209,36 @@ def test_a_transition_through_undetermined_clears_dedup_for_a_later_recurrence(
 
     kinds = [e["kind"] for e in events.tail_events(path)]
     assert kinds.count("update-available") == 2
+    # UNDETERMINED is a successful read, not a failure -- it must not have
+    # produced a spurious update-check-failed line along the way.
+    assert "update-check-failed" not in kinds
+
+
+def test_a_recovered_failure_that_recurs_with_an_identical_note_logs_again(
+        store, tmp_path):
+    """Ruling 2 (post-review), a latent bug not a defensible choice: as
+    originally implemented, the `#failed` dedup key never cleared on
+    recovery, so fail -> recover -> fail again with the SAME note was
+    silently suppressed forever -- exactly the recurring/flapping failure
+    an operator most needs to see, made invisible after its first
+    occurrence. `#failed` must clear whenever a source reports anything
+    other than UNAVAILABLE, symmetric with how the AVAILABLE key already
+    clears on any non-available status."""
+    source = {"id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
+              "pinned": "v1.0.0", "order": "semver"}
+    watched(store, "oci:local:x", source)
+    path = tmp_path / "events.jsonl"
+    dedup = {}
+
+    def _fails(url, **kwargs):
+        raise RuntimeError("boom")
+
+    update_check.run_pass(store, _fails, path, dedup=dedup)                       # fail #1
+    update_check.run_pass(store, ok_fetch([{"name": "v1.0.0"}]), path, dedup=dedup)  # recovers to CURRENT
+    update_check.run_pass(store, _fails, path, dedup=dedup)                       # fail #2, identical note
+
+    kinds = [e["kind"] for e in events.tail_events(path)]
+    assert kinds.count("update-check-failed") == 2
 
 
 def test_dispatch_survives_a_source_missing_an_id():

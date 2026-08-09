@@ -100,27 +100,73 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
 
 
 def _log_transitions(events_path, artifact_id, result, dedup) -> None:
-    key = f"{artifact_id}/{result['id']}"
+    """DEVIATION FROM THE BRIEF, ruled on by the task coordinator after
+    review (see task-6-report.md's "Fix round" addendum for the full
+    writeup) -- two changes from what Step 3 originally shipped:
 
-    if result.get("detail", {}).get("moved"):
-        if dedup.get(f"{key}#moved") != result["detail"].get("location"):
-            dedup[f"{key}#moved"] = result["detail"].get("location")
+    1. A MOVED result logs `origin-moved` ONLY, never also
+       `update-check-failed`. The two events describe the same fact at two
+       levels of usefulness -- `origin-moved` is the specific diagnosis and
+       the exact remedy (re-declare the remote); `update-check-failed` adds
+       only "and therefore no verdict", which `origin-moved` already
+       implies. Emitting both put two lines in the Events tab for one fact,
+       with the less useful one indistinguishable from an ordinary network
+       blip. The artifact still records UNAVAILABLE as its status --
+       unchanged, this is purely about which event line fires.
+
+    2. The `#failed` dedup key now clears whenever a source reports
+       anything OTHER than UNAVAILABLE (not only when the brief's original
+       `else` fired). Previously: fail, log once; recover; fail again with
+       the identical note; permanently suppressed, because nothing ever
+       cleared `#failed` on recovery. That makes a recurring or flapping
+       failure -- exactly what an operator most needs to see -- invisible
+       after its first occurrence, which is worse than the spam the dedup
+       exists to prevent. Symmetric with how the AVAILABLE dedup key
+       already clears on any non-available status.
+
+       UNDETERMINED specifically: it is a successful read that could not be
+       ranked, not a failure and not a pending "available". It clears
+       `#failed` (via the same "anything other than UNAVAILABLE" rule) and
+       falls through to the `else` branch below, which clears the AVAILABLE
+       key too rather than holding it as pending -- it was never set for an
+       UNDETERMINED result in the first place, since only the `if status ==
+       AVAILABLE` branch ever writes `dedup[key]`.
+    """
+    key = f"{artifact_id}/{result['id']}"
+    status = result["status"]
+    moved = bool(result.get("detail", {}).get("moved"))
+
+    if moved:
+        location = result["detail"].get("location")
+        if dedup.get(f"{key}#moved") != location:
+            dedup[f"{key}#moved"] = location
             events.log_event(events_path, "origin-moved", {
                 "artifact_id": artifact_id, "source": result["id"],
-                "location": result["detail"].get("location")})
+                "location": location})
 
-    if result["status"] == updates.AVAILABLE:
+    if status != updates.UNAVAILABLE:
+        # Any successful read -- CURRENT, AVAILABLE, or UNDETERMINED --
+        # clears the remembered failure so a later recurrence of the exact
+        # same note logs again instead of being silently swallowed by
+        # stale dedup state from before the source recovered.
+        dedup.pop(f"{key}#failed", None)
+
+    if status == updates.AVAILABLE:
         if dedup.get(key) != result["latest"]:
             dedup[key] = result["latest"]
             events.log_event(events_path, "update-available", {
                 "artifact_id": artifact_id, "source": result["id"],
                 "current": result["current"], "latest": result["latest"],
                 "detail": result["detail"]})
-    elif result["status"] == updates.UNAVAILABLE and result.get("note"):
-        if dedup.get(f"{key}#failed") != result["note"]:
-            dedup[f"{key}#failed"] = result["note"]
-            events.log_event(events_path, "update-check-failed", {
-                "artifact_id": artifact_id, "source": result["id"],
-                "note": result["note"]})
+    elif status == updates.UNAVAILABLE:
+        # A moved repository already got its one event above; a second,
+        # more generic "no verdict" line for the identical fact is exactly
+        # the double-logging ruling 1 removed.
+        if not moved and result.get("note"):
+            if dedup.get(f"{key}#failed") != result["note"]:
+                dedup[f"{key}#failed"] = result["note"]
+                events.log_event(events_path, "update-check-failed", {
+                    "artifact_id": artifact_id, "source": result["id"],
+                    "note": result["note"]})
     else:
-        dedup.pop(key, None)             # back to current: re-announce next time
+        dedup.pop(key, None)             # back to current/undetermined: re-announce next time
