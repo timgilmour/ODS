@@ -102,3 +102,44 @@ def test_records_are_written_one_per_line(tmp_path):
     lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
     assert len(lines) == 2
     assert all(json.loads(ln)["artifact_id"] == "oci:local:x" for ln in lines)
+
+
+# --- the vocabulary this file documents -------------------------------------
+
+def test_the_documented_vocabulary_matches_what_the_store_actually_writes():
+    """FIELDS/CAUSES/ACTORS are documentation with no consumer, which is
+    exactly why they rot: this branch added `watch`, `update.status`,
+    `checked`, `operator` and `update-checker` without touching them, and
+    nothing failed. `ProvenanceStore._record` is the sole producer
+    (app/provenance.py:307-310), so its call sites ARE the vocabulary --
+    parsed here rather than re-typed, so a future producer cannot drift.
+
+    Exact equality in both directions: an entry nothing writes (this file
+    listed `adopted` and `backfill`, which no code path has ever produced)
+    is as much a lie as a missing one."""
+    import ast
+    import pathlib
+
+    source = (pathlib.Path(__file__).resolve().parents[1]
+              / "app" / "provenance.py").read_text()
+    # self._record(artifact_id, field, before, after, cause, actor, now)
+    positions = {"field": 1, "cause": 4, "actor": 5}
+    written = {name: set() for name in positions}
+    calls = 0
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_record"):
+            continue
+        calls += 1
+        for name, index in positions.items():
+            argument = node.args[index]
+            assert isinstance(argument, ast.Constant), (
+                f"_record's {name} argument is not a literal; this test can no "
+                f"longer read the vocabulary out of the source")
+            written[name].add(argument.value)
+
+    assert calls >= 6, "no _record call sites found -- the parse went wrong"
+    assert written["field"] == set(history.FIELDS)
+    assert written["cause"] == set(history.CAUSES)
+    assert written["actor"] == set(history.ACTORS)

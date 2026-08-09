@@ -57,9 +57,17 @@ def _failure(source, response):
         return _result(source, updates.UNAVAILABLE, current=source.get("pinned"),
                        note="github rate limit exhausted")
     if code in (301, 302, 307, 308):
+        # THE REMEDY NAMES THE RIGHT ROUTE. For a git check the remote lives
+        # on the WATCH SOURCE (`source["remote"]`, read at :93/:127), not on
+        # the artifact's `origin`, so PUT /api/provenance/origin fixes
+        # nothing here -- PUT /api/provenance/watch does. This is the exact
+        # live case the design cites (Kaden-Schutt/hipfire -> warpfront/
+        # hipfire), and an operator following the old wording would edit the
+        # one field the checker never reads.
         return _result(source, updates.UNAVAILABLE, current=source.get("pinned"),
                        detail={"moved": True, "location": headers.get("Location")},
-                       note="repository has moved; re-declare the origin remote")
+                       note="repository has moved; re-declare the watch "
+                            "source's remote (PUT /api/provenance/watch)")
     return _result(source, updates.UNAVAILABLE, current=source.get("pinned"),
                    note=f"github returned {code}")
 

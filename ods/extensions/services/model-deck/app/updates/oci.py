@@ -41,7 +41,14 @@ def _token(registry: str, repository: str, fetch) -> str | None:
     # `json` is typed dict | list | None; a token endpoint answering with
     # anything but a dict is a malformed read, not a token -- treat it the
     # same as "no token" rather than crashing on `.get`.
-    return body.get("token") if isinstance(body, dict) else None
+    #
+    # THE VALUE IS CHECKED TOO, not just the container. A non-string token
+    # f-strings into `Bearer 42` at `_auth` below -- a WRONG Authorization
+    # header instead of no header at all, which is strictly worse than
+    # falling back to an unauthenticated request. Same gap the tags VALUE
+    # (not just the tags body) already had fixed in check_tags.
+    token = body.get("token") if isinstance(body, dict) else None
+    return token if isinstance(token, str) and token else None
 
 
 def _auth(token: str | None) -> dict:

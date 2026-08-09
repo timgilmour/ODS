@@ -29,9 +29,16 @@ import json
 import os
 from pathlib import Path
 
-FIELDS = ("current", "desired", "origin")
-CAUSES = ("observed", "declared", "adopted", "backfill")
-ACTORS = ("watcher", "api")
+# THE VOCABULARY THIS FILE RECORDS. Documentation, not enforcement: nothing
+# reads these tuples (grep-verified), `append` writes whatever it is handed,
+# and a reader must tolerate a value from a future version anyway. They exist
+# so the one file that IS the record also says what the record can contain --
+# which means a producer added without updating them makes this file lie.
+# tests/test_provenance_history.py parses ProvenanceStore._record's call
+# sites and asserts these three cover them exactly, so the lie cannot last.
+FIELDS = ("current", "desired", "origin", "watch", "update.status")
+CAUSES = ("observed", "declared", "checked")
+ACTORS = ("watcher", "api", "operator", "update-checker")
 
 
 def append(path: Path, record: dict) -> None:

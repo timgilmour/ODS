@@ -219,6 +219,25 @@ def test_tags_survives_a_malformed_token_body_instead_of_crashing():
     assert r["latest"] == "v1.1.0"
 
 
+def test_a_non_string_token_value_falls_back_to_unauthenticated():
+    """`_token` checked the BODY was a dict but not that `body["token"]` was
+    a string, so a numeric or object token f-stringed straight into
+    `Authorization: Bearer 42` (app/updates/oci.py:48) -- a wrong header
+    instead of no header. Symmetric with the tags-VALUE gap already fixed
+    two tests up: validating the container is not validating the value."""
+    src = {"id": "tags", "check": "oci_tags", "registry": "ghcr.io",
+           "repository": "a/b", "pinned": "v1.0.0", "order": "semver"}
+    fetch = fake_fetch({
+        "/token": {"status_code": 200, "headers": {}, "json": {"token": 42}},
+        "/tags/list": {"status_code": 200, "headers": {},
+                       "json": {"tags": ["v1.0.0", "v1.1.0"]}},
+    })
+    r = oci.check_tags(src, fetch)
+    assert r["status"] == updates.AVAILABLE
+    tags_call = next(c for c in fetch.calls if "/tags/list" in c["url"])
+    assert tags_call["headers"] == {}, "sent a Bearer header built from a non-string"
+
+
 def test_tags_with_non_string_tag_values_is_unavailable_not_crashing():
     # Reported by the coordinator: {"tags": [1, 2, 3]} previously propagated
     # a bare TypeError out of ordering.rank (regex match against an int).
