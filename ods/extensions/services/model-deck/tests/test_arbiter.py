@@ -2683,7 +2683,11 @@ def test_provenance_pass_derives_no_watch_without_a_declared_origin(tmp_path):
 
 def test_provenance_pass_leaves_a_declared_watch_source_alone(tmp_path):
     """declared-over-derived through the real collector pass: a hand-put
-    source must survive repeated ticks even though the origin is derivable."""
+    source must survive repeated ticks even though the origin is derivable.
+
+    It does NOT suppress the derived source beside it -- the two answer
+    different questions (a git tag set vs. the digest a channel resolves to)
+    and the live seed data pairs exactly that way on aeon-vllm."""
     reference = "ghcr.io/aeon-7/ods-hipfire:slim@sha256:deadbeef"
     watcher, store, _docker = _one_container(tmp_path, bodies={
         "ods-hipfire": {"Image": "sha256:a", "Config": {"Image": reference}}})
@@ -2698,7 +2702,9 @@ def test_provenance_pass_leaves_a_declared_watch_source_alone(tmp_path):
 
     watcher.tick()
 
-    assert store.entry("oci:local:aeon-7/ods-hipfire")["watch"] == declared
+    watch = store.entry("oci:local:aeon-7/ods-hipfire")["watch"]
+    assert watch[0] == declared[0], "the declared source must survive verbatim"
+    assert [s["id"] for s in watch] == ["upstream", "channel"]
 
 
 def test_provenance_pass_does_not_append_history_for_an_unchanged_seeded_watch(tmp_path):

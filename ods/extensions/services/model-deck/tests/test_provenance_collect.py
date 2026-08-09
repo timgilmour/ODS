@@ -340,16 +340,78 @@ def test_seed_watch_returns_nothing_for_a_malformed_reference():
 
 # --- merge_seeded_watch (Task 9) --------------------------------------------
 
-def test_seeding_never_replaces_a_declared_source():
-    """declared-over-derived, the precedence declared.json already uses."""
-    existing = [{"id": "upstream", "check": "git_compare",
-                 "remote": "https://github.com/a/b", "ref": "main",
-                 "pinned": "abc", "order": None}]
+def test_seeding_never_replaces_a_declared_source_on_the_same_id():
+    """declared-over-derived, the precedence declared.json already uses --
+    scoped to the ID the derived source would occupy, which is the only
+    place the two can actually collide."""
+    existing = [{"id": "channel", "check": "oci_channel", "registry": "ghcr.io",
+                 "repository": "a/b", "reference": "stable",
+                 "pinned": "sha256:hand", "order": None}]
     entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
              "origin": {"registry": "ghcr.io", "repository": "a/b",
                         "reference": "ghcr.io/a/b:slim@sha256:dd"},
              "watch": existing}
     assert collect.merge_seeded_watch(entry) == existing
+
+
+def test_a_declared_source_on_another_id_does_not_suppress_derivation():
+    """A declaration is not a veto on everything else. The seed data
+    declares `tags` on aeon-vllm; suppressing its derived `channel` digest
+    check there silently disabled the very detector that declaration's own
+    notes rely on."""
+    declared = {"id": "upstream", "check": "git_compare",
+                "remote": "https://github.com/a/b", "ref": "main",
+                "pinned": "abc", "order": None}
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:dd"},
+             "watch": [declared]}
+    merged = collect.merge_seeded_watch(entry)
+    assert [s["id"] for s in merged] == ["upstream", "channel"]
+    assert merged[0] == declared
+
+
+def test_a_derived_pin_is_refreshed_when_the_origin_is_re_declared():
+    """THE FEATURE'S OWN CORE LOOP. Deck reports `available` -> operator
+    pulls -> operator re-declares the origin (the documented remedy) ->
+    the derived pin must follow, or check_channel keeps comparing against
+    the OLD digest and reports a permanent false `available` that never
+    self-heals."""
+    stale = {"id": "channel", "check": "oci_channel", "derived": True,
+             "label": "slim", "registry": "ghcr.io", "repository": "a/b",
+             "reference": "slim", "pinned": "sha256:0ddd", "order": None}
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:beef"},
+             "watch": [stale]}
+    assert [s["pinned"] for s in collect.merge_seeded_watch(entry)] == ["sha256:beef"]
+
+
+def test_a_derived_source_is_dropped_once_its_origin_stops_being_derivable():
+    """The other side of re-deriving every pass: a derived source is only
+    ever as good as the origin it came from. When the origin is withdrawn
+    (PUT /origin with `null`), the source it produced goes with it rather
+    than lingering as an unfalsifiable pin nobody declared."""
+    derived = {"id": "channel", "check": "oci_channel", "derived": True,
+               "label": "slim", "registry": "ghcr.io", "repository": "a/b",
+               "reference": "slim", "pinned": "sha256:old", "order": None}
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci", "origin": None,
+             "watch": [derived]}
+    assert collect.merge_seeded_watch(entry) == []
+
+
+def test_merging_tolerates_a_hand_edited_source_with_no_id():
+    """`_stored_list` keeps a dict-shaped watch element even with no `id`
+    (app/provenance.py:80-85, pinned by test_provenance.py's DECLARED-vs-
+    DERIVED test), so the merge may never index `s["id"]` on stored data --
+    a KeyError here escapes into Watcher._provenance_pass."""
+    entry = {"artifact_id": "oci:sparky:x", "kind": "oci",
+             "origin": {"registry": "ghcr.io", "repository": "a/b",
+                        "reference": "ghcr.io/a/b:slim@sha256:dd"},
+             "watch": [{"no": "id"}]}
+    merged = collect.merge_seeded_watch(entry)
+    assert merged[0] == {"no": "id"}
+    assert [s.get("id") for s in merged] == [None, "channel"]
 
 
 def test_merge_seeded_watch_seeds_a_genuinely_untouched_gap():

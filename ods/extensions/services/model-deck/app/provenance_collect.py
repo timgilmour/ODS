@@ -205,8 +205,25 @@ def seed_watch(entry: dict) -> list[dict]:
 
 
 def merge_seeded_watch(entry: dict) -> list[dict]:
-    """Declared-over-derived: a hand-declared source always wins, and a
-    derived one is only added where no source with that id exists.
+    """Declared-over-derived, PER ID: a hand-declared source wins the id it
+    occupies, and every derivable source whose id nobody declared is added
+    beside it.
+
+    A DECLARATION IS NOT A VETO ON EVERYTHING ELSE. Returning early on the
+    presence of any declared source made one declaration suppress every
+    derived one -- live, the seed data declares `tags` on aeon-vllm, which
+    silently disabled its derived `channel` digest check, the exact detector
+    that declaration's own notes rely on.
+
+    DERIVED SOURCES ARE RE-DERIVED, NEVER PRESERVED. A derived source is a
+    function of the origin, so the stored copy is discarded and rebuilt every
+    pass. That is what makes the feature's core loop close: deck reports
+    `available` -> operator pulls -> operator re-declares the origin (the
+    documented remedy) -> the pin follows. Keeping the stored copy instead
+    left `check_channel` comparing against the OLD digest forever, a false
+    `available` that could never self-heal. The same rule means a derived
+    source disappears when its origin stops being derivable -- it was only
+    ever as good as the origin behind it, and nobody declared it.
 
     RESURRECTION GUARD. `watch: []` is ALSO the blank-entry default, so on
     its own it cannot distinguish "nobody has looked at this yet" from "an
@@ -224,14 +241,15 @@ def merge_seeded_watch(entry: dict) -> list[dict]:
     provenance.json schema change.
     """
     existing = entry.get("watch") or []
-    if any(not s.get("derived") for s in existing):
-        return existing
     if not existing and entry.get("update") is not None:
         return existing
-    seeded = seed_watch(entry)
-    by_id = {s["id"]: s for s in seeded}
-    by_id.update({s["id"]: s for s in existing})
-    return list(by_id.values())
+    # `s.get("id")`, never `s["id"]`: `_stored_list` keeps a dict-shaped
+    # watch element even with no id at all (app/provenance.py:80-85 -- the
+    # DECLARED half of the gate's split), and a KeyError here escapes into
+    # Watcher._provenance_pass.
+    declared = [s for s in existing if not s.get("derived")]
+    taken = {s.get("id") for s in declared}
+    return declared + [s for s in seed_watch(entry) if s["id"] not in taken]
 
 
 def _image_reference(text: str) -> str | None:
