@@ -13,7 +13,7 @@ services:
       args:
         AMDGPU_TARGET: ${AMDGPU_TARGET:-gfx1151}
         LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b8763}
-        LEMONADE_SERVER_IMAGE: ${LEMONADE_SERVER_IMAGE:-ghcr.io/lemonade-sdk/lemonade-server:v10.2.0}
+        LEMONADE_SERVER_IMAGE: ${LEMONADE_SERVER_IMAGE:-ghcr.io/lemonade-sdk/lemonade-server:v10.10.0}
     image: ods-lemonade-server:latest
     # Wrapper entrypoint syncs ctx_size from LEMONADE_CTX_SIZE env into
     # Lemonade's cached config.json before launch. Without this, Lemonade
@@ -22,19 +22,15 @@ services:
     # Bind-mounted from the source tree so updating the script doesn't
     # require an image rebuild.
     entrypoint: ["/bin/sh", "/opt/lemonade-entrypoint.sh"]
+    # `lemond` (v10.10.0+) accepts ONLY --host/--port plus an optional cache_dir.
+    # The former `serve` subcommand and the --no-tray / --llamacpp / --llamacpp-args /
+    # --extra-models-dir flags are gone; those settings now reach Lemonade through
+    # config.json, which lemonade-entrypoint.sh syncs from the LEMONADE_* env below.
     command:
-      - serve
       - --port
       - "8080"
       - --host
       - "0.0.0.0"
-      - --no-tray
-      - --llamacpp
-      - "${LEMONADE_LLAMACPP:-rocm}"
-      - --llamacpp-args
-      - "--metrics --host 0.0.0.0 -fa on -b 2048 -ub 256"
-      - --extra-models-dir
-      - /models
     expose:
       - "8001"
     volumes:
@@ -90,6 +86,16 @@ services:
       - LEMONADE_LLAMACPP=${LEMONADE_LLAMACPP:-rocm}
       - LEMONADE_LLAMACPP_ROCM_BIN=${LEMONADE_LLAMACPP_ROCM_BIN:-}
       - LEMONADE_CTX_SIZE=${CTX_SIZE:-131072}
+      # Formerly the --extra-models-dir and --llamacpp-args CLI flags, which v10.10.0
+      # removed along with the lemonade-server binary. They are env vars now so the
+      # entrypoint can put them in config.json; a fresh cache volume would otherwise
+      # come up with no /models and no llama.cpp args, silently.
+      - LEMONADE_EXTRA_MODELS_DIR=${LEMONADE_EXTRA_MODELS_DIR:-/models}
+      # v10.10.0 downloads a TheRock ROCm runtime for whatever gfx its name-based
+      # detection guesses — on this host the iGPU (gfx1036), 3.4 GB, wrong arch.
+      # We ship a self-contained ROCm stack at /opt/llama-custom; block the fetch.
+      - LEMONADE_NO_FETCH_EXECUTABLES=${LEMONADE_NO_FETCH_EXECUTABLES:-true}
+      - LEMONADE_LLAMACPP_ARGS=${LEMONADE_LLAMACPP_ARGS:---host 0.0.0.0 -fa on -b 2048 -ub 256}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/api/v1/health"]
       interval: 15s

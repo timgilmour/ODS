@@ -20,21 +20,19 @@
 services:
   llama-server:
     # devices and group_add inherited from docker-compose.amd.yml
+    # See docker-compose.amd.yml: v10.10.0 dropped the lemonade-server CLI, so `lemond`
+    # takes only --host/--port and the rest travels via config.json. This overlay still
+    # needs its own `command:` because compose REPLACES the list rather than merging —
+    # leaving it off would silently fall back to the base file's.
     command:
-      - serve
       - --port
       - "8080"
       - --host
       - "0.0.0.0"
-      - --no-tray
-      - --llamacpp
-      - "${LEMONADE_LLAMACPP:-auto}"
-      - --llamacpp-args
-      - "--metrics --host 0.0.0.0 --split-mode ${LLAMA_ARG_SPLIT_MODE:-layer}"
-      - --extra-models-dir
-      - /models
     environment:
       LEMONADE_LLAMACPP: "${LEMONADE_LLAMACPP:-auto}"
+      # Multi-GPU keeps --split-mode; single-GPU (amd.yml) does not.
+      LEMONADE_LLAMACPP_ARGS: "--host 0.0.0.0 --split-mode ${LLAMA_ARG_SPLIT_MODE:-layer}"
       ROCR_VISIBLE_DEVICES: "${LLAMA_SERVER_GPU_INDICES:-}"
       # Tensor split ratio (e.g. "0.5,0.5") — passed via env var because it may
       # be empty (auto-split). Inherited by inner llama-server via fork()+execv().
