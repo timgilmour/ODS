@@ -89,13 +89,12 @@ def test_s17_apply_and_previous_revert_roundtrip(deck, lemonade_direct, lemonade
     assert [s["step"] for s in report["completed"]] == ["unload_lemonade"]
     assert lemonade_direct.loaded() is None
 
-    # _previous records load STATE, not model identity: its load step resolves
-    # to the durable route model (sets cannot express "an off-route model was
-    # resident"). So the revert reloads the ROUTE model, or the drill model
-    # only when no route is set.
-    route = deck.get("/api/state").json()["world"]["default_route"]
+    # _previous records the model that was ACTUALLY resident (max-review #11,
+    # `LemonadeEphemeral.model` — plan_apply's precedence is declared-explicit
+    # over durable over route), so the revert reloads the DRILL model even
+    # when it is off-route. The pre-fix contract asserted here — "revert
+    # reloads the ROUTE model" — was the honest-revert bug itself.
     revert = deck.post("/api/sets/_previous/apply", timeout=240.0).json()
     assert revert["failed"] is None
-    expected = route or f"{EXTRA}{drill_model}"
-    assert lemonade_direct.loaded() == expected, \
-        f"revert did not reload the route model; report={revert}"
+    assert lemonade_direct.loaded() == f"{EXTRA}{drill_model}", \
+        f"revert did not reload the actually-resident model; report={revert}"
