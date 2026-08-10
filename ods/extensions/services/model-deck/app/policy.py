@@ -9,11 +9,20 @@ idle_ttl}}``, persisted next to no other state — this module owns the whole
 file. Writes are atomic (temp file + ``os.replace``) since the supervisor
 may crash mid-write; a missing or corrupt file is treated as absent rather
 than raised, and self-heals by materializing and persisting the defaults on
-the next ``get()``. A parseable file that is merely missing or malformed for
-one tenant self-heals the same way, one level down: ``PolicyStore._gated``
-is an element-level boundary gate (NodeStore._load's pattern) run by both
-``get()`` and ``put()`` — a missing or malformed known tenant is replaced by
-its default, and a runtime tenant survives only if it validates.
+the next ``get()``.
+
+Malformed-record gating lives HERE, at ``_load()``, and nowhere else
+(NodeStore's pattern, app/node_store.py:18-30): a parseable file that is
+missing or malformed for one tenant self-heals the same way as the
+whole-file case, one level down. ``_load()`` runs every record through
+``_gated()`` and persists the heal immediately if anything changed, so
+``get()``/``put()``/``set_auto()`` all consume an already-guaranteed shape
+and gate nothing themselves. A missing or malformed known tenant is
+replaced by its default; a runtime tenant (accepted since 1ee64611)
+survives only if it validates — there is no default to heal it to. A
+malformed ``_auto`` record (wrong shape, or a non-bool ``enabled``) is
+dropped rather than kept, healing to ``auto_enabled()``'s default-True
+reading instead of crashing the tick.
 
 This is single-process, in-process state only — no cross-process locking.
 The supervisor is the sole owner of policy.json.
@@ -69,37 +78,24 @@ class PolicyStore:
     def __init__(self, path: Path):
         self._path = path
 
-    def _load(self) -> dict[str, TenantPolicy] | None:
-        try:
-            text = self._path.read_text()
-        except OSError:
-            return None
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(data, dict):
-            return None
-        return data
-
-    def _save(self, data: dict[str, TenantPolicy]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(data))
-        os.replace(tmp_path, self._path)
-
     def _gated(self, data: dict) -> dict:
-        """Element-level boundary gate (NodeStore._load's pattern): every
-        DEFAULT_POLICIES tenant present and valid — decide() and the UI's
-        per-tenant destructure (ui/src/model/nodes.ts:186) index them
-        unconditionally. Malformed records are replaced by their default
-        (defaults are seed data); a runtime tenant (accepted since 1ee64611)
-        survives only if it validates — there is no default to heal it to.
-        ``_auto`` passes through untouched (auto_enabled reads it)."""
+        """Element-level boundary gate (NodeStore._load's pattern), run
+        exclusively by `_load()` — see the module docstring. Every
+        DEFAULT_POLICIES tenant ends up present and valid, since decide()
+        and the UI's per-tenant destructure (ui/src/model/nodes.ts:186)
+        index them unconditionally. Malformed tenant records are replaced
+        by their default (defaults are seed data); a runtime tenant
+        (accepted since 1ee64611) survives only if it validates — there is
+        no default to heal it to. `_auto` survives only as a dict with a
+        real bool `enabled`; a malformed one (wrong shape, or a non-bool
+        `enabled`) is dropped, healing to `auto_enabled()`'s own
+        default-True reading rather than crashing the tick with an
+        AttributeError."""
         gated: dict = {}
         for tenant, policy in data.items():
             if tenant == _AUTO_KEY:
-                gated[tenant] = policy
+                if isinstance(policy, dict) and isinstance(policy.get("enabled"), bool):
+                    gated[tenant] = policy
                 continue
             if not isinstance(policy, dict):
                 continue
@@ -113,24 +109,49 @@ class PolicyStore:
                 gated[tenant] = dict(default)
         return gated
 
+    def _load(self) -> dict[str, TenantPolicy] | None:
+        """Missing/corrupt file -> None, the shared "absent" signal every
+        caller below falls back on. Otherwise every record is run through
+        the boundary gate (`_gated`) and the heal is persisted immediately
+        if anything changed — the sole gating site (module docstring); no
+        consumer below re-gates its result."""
+        try:
+            text = self._path.read_text()
+        except OSError:
+            return None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        gated = self._gated(data)
+        if gated != data:
+            self._save(gated)        # persist the heal, like the missing-file path
+        return gated
+
+    def _save(self, data: dict[str, TenantPolicy]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(data))
+        os.replace(tmp_path, self._path)
+
     def get(self) -> dict[str, TenantPolicy]:
         """Full tenant->policy mapping, excluding reserved config keys.
 
         On first read (file missing or corrupt), materializes the default
-        policies and persists them before returning. A parseable file that
-        is missing or malformed for one tenant is healed the same way, at
-        the element level (see `_gated`), and the heal is persisted too —
-        a hand-edit must never leave a tenant `decide()` will KeyError on.
+        policies and persists them before returning. Every other shape
+        concern — a partial or malformed file — is already healed by
+        `_load()` (the sole boundary gate; see the module docstring), so
+        this method does nothing but filter the reserved `_auto` key back
+        out.
         """
         data = self._load()
         if data is None:
             data = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
             self._save(data)
             return dict(data)
-        gated = self._gated(data)
-        if gated != data:
-            self._save(gated)        # persist the heal, like the missing-file path
-        return {k: v for k, v in gated.items() if k != _AUTO_KEY}
+        return {k: v for k, v in data.items() if k != _AUTO_KEY}
 
     def put(self, policies: dict[str, TenantPolicy]) -> None:
         """Partial update by tenant: replaces the whole record for each tenant
@@ -151,15 +172,12 @@ class PolicyStore:
 
         # _load() rather than get(): get() filters the reserved _auto key, so
         # reading through it would silently drop the automation setting on
-        # every policy write. A missing/corrupt file still seeds the defaults,
-        # matching get()'s self-heal, so a put on a fresh deck doesn't leave
-        # the untouched tenants unpolicied. _gated() runs after that fallback
-        # too, so a put merging onto a partial hand-edit heals it in the same
-        # write rather than waiting for the next get().
+        # every policy write. _load() is the sole boundary gate (module
+        # docstring), so a missing/corrupt file, or a partial hand-edited
+        # one, is already healed by the time this merge runs.
         current = self._load()
         if current is None:
             current = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
-        current = self._gated(current)
         current.update({tenant: dict(policy) for tenant, policy in policies.items()})
         self._save(current)
 
@@ -176,12 +194,14 @@ class PolicyStore:
 
     def set_auto(self, enabled: bool) -> None:
         """Persist the automation toggle, seeding tenant defaults if the file
-        does not exist yet.
+        has never been written.
 
-        The seeding matters: get() self-heals only when the file is missing or
-        corrupt, so a policy.json containing nothing but ``_auto`` would read
-        as valid and leave every tenant unpolicied forever. Writing the
-        toggle first must not be able to cost the deck its defaults.
+        The seeding matters: `_load()` self-heals a file that already
+        exists — even a partial or malformed one, tenant records included
+        (module docstring) — but a file that has never been written
+        returns None from `_load()`, the same "absent" signal every other
+        consumer falls back on. Writing the toggle first must not be able
+        to cost the deck its defaults.
         """
         data = self._load()
         if data is None:

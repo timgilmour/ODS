@@ -27,7 +27,7 @@ def put_policy(body: dict, request: Request) -> dict:
     unknown = sorted(set(body) - set(DEFAULT_POLICIES))
     if unknown:
         # Deliberately accepted (defaults are seed data, not an allowlist —
-        # policy.py:103-105); the event is the feedback that was lost when
+        # policy.py:160-161); the event is the feedback that was lost when
         # the pre-1ee64611 rejection was removed: a typo'd tenant name now
         # shows up in Events instead of silently policying nothing.
         log_event(deck["events_path"], "policy-unknown-tenant", {"tenants": unknown})

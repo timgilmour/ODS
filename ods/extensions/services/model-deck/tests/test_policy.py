@@ -288,9 +288,10 @@ def test_auto_key_is_not_returned_as_a_tenant(tmp_path):
 
 def test_set_auto_on_a_fresh_file_still_seeds_the_tenant_defaults(tmp_path):
     """set_auto must not be able to create a policy.json that permanently
-    suppresses default seeding: get() self-heals only when the file is
-    missing or corrupt, so a file containing just _auto would look valid
-    and leave every tenant unpolicied forever."""
+    suppresses default seeding: `_load()` only heals an existing file
+    (policy.py:195-205), so a file that has never been written still needs
+    set_auto's own fallback, or a file containing just _auto would look
+    valid and leave every tenant unpolicied forever."""
     path = tmp_path / "policy.json"
 
     PolicyStore(path).set_auto(False)
@@ -339,7 +340,7 @@ def test_get_keeps_a_valid_runtime_tenant_and_drops_a_malformed_one(tmp_path):
 
 
 def test_get_preserves_auto_key_through_the_gate(tmp_path):
-    """set_auto's warning (policy.py:139-145): the gate must not cost the
+    """set_auto's warning (policy.py:195-205): the gate must not cost the
     file its _auto record."""
     path = tmp_path / "policy.json"
     data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
@@ -351,9 +352,9 @@ def test_get_preserves_auto_key_through_the_gate(tmp_path):
 
 
 def test_put_onto_a_partial_file_also_heals(tmp_path):
-    """put()'s merge runs current = self._gated(current) after its own
-    _load() fallback, so a hand-edit missing a tenant heals on the very
-    put that touches an unrelated tenant, not just on the next get()."""
+    """put()'s merge reads through `_load()` (the sole boundary gate), so a
+    hand-edit missing a tenant heals on the very put that touches an
+    unrelated tenant, not just on the next get()."""
     path = tmp_path / "policy.json"
     data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
     del data["comfyui"]
@@ -364,3 +365,89 @@ def test_put_onto_a_partial_file_also_heals(tmp_path):
     on_disk = json.loads(path.read_text())
     assert on_disk["comfyui"] == DEFAULT_POLICIES["comfyui"]
     assert on_disk["lemonade"] == {"priority": 5, "pinned": True, "idle_ttl": 0}
+
+
+def test_set_auto_onto_a_partial_file_also_heals(tmp_path):
+    """set_auto() also reads through `_load()`, so it inherits the same
+    heal as get()/put() — a hand-edit missing a tenant does not survive a
+    set_auto() call untouched."""
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    del data["comfyui"]
+    path.write_text(json.dumps(data))
+
+    PolicyStore(path).set_auto(False)
+
+    on_disk = json.loads(path.read_text())
+    assert on_disk["comfyui"] == DEFAULT_POLICIES["comfyui"]
+    assert on_disk["_auto"] == {"enabled": False}
+
+
+def test_get_drops_a_non_dict_auto_record(tmp_path):
+    """Probed defect: "_auto": true is not a dict, so the old pass-through
+    handed auto_enabled() a bool to call .get() on -> AttributeError every
+    tick. The gate now drops a malformed _auto instead of preserving it,
+    healing to auto_enabled()'s own default-True reading."""
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data["_auto"] = True
+    path.write_text(json.dumps(data))
+
+    store = PolicyStore(path)
+    assert store.auto_enabled() is True
+    assert "_auto" not in json.loads(path.read_text())
+
+
+def test_get_drops_an_auto_record_with_a_non_bool_enabled(tmp_path):
+    """Probed defect: {"enabled": "no"} is a dict, so the old pass-through
+    preserved it verbatim, and bool("no") is True regardless of the
+    string's content -- "no" silently meant "on". The gate now drops it."""
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data["_auto"] = {"enabled": "no"}
+    path.write_text(json.dumps(data))
+
+    store = PolicyStore(path)
+    assert store.auto_enabled() is True
+    assert "_auto" not in json.loads(path.read_text())
+
+
+# ===========================================================================
+# Write suppression — get() must not touch an already well-formed file
+# ===========================================================================
+
+
+def test_get_does_not_rewrite_an_already_well_formed_file(tmp_path):
+    """Restores the intent behind test_get_does_not_rewrite_file_once_it_exists's
+    name, checked at the filesystem level rather than by content: mutating
+    the gate's `if gated != data: self._save(...)` suppression to `if True:`
+    leaves every content-based assertion in this file green (the resaved
+    bytes are identical), so only an mtime check catches it."""
+    path = tmp_path / "policy.json"
+    store = PolicyStore(path)
+    store.get()  # materializes + persists the defaults once
+
+    before = path.stat().st_mtime_ns
+    store.get()
+    after = path.stat().st_mtime_ns
+
+    assert after == before
+
+
+def test_get_rewrites_a_healed_file_exactly_once(tmp_path):
+    """The other half of the suppression property: a partial file DOES get
+    rewritten by the get() that heals it, but never again after that."""
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    del data["comfyui"]
+    path.write_text(json.dumps(data))
+    store = PolicyStore(path)
+    before_heal = path.stat().st_mtime_ns
+
+    store.get()
+    after_heal = path.stat().st_mtime_ns
+    assert after_heal != before_heal        # first get() heals + persists
+
+    store.get()
+    after_second_get = path.stat().st_mtime_ns
+    assert after_second_get == after_heal   # second get() is a no-op
