@@ -244,7 +244,8 @@ class SparkObserver:
             self._cached = dict(_UNREACHABLE_SPARK)
             self._next_probe_at = now + min(
                 # Exponent capped: 2**(failures-1) is a Python bignum and
-                # overflows float multiplication near failure #1022 (~3.5
+                # overflows float multiplication at failure #1025 (2**1024
+                # is the first power of two too large for a float; ~3.5
                 # days of a powered-off sparky at the 300 s cap). 2**16
                 # already exceeds every real backoff_max_s.
                 self._backoff_base_s * 2 ** min(self._failures - 1, 16),

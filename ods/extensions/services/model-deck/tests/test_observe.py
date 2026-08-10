@@ -297,7 +297,7 @@ def test_spark_observer_backoff_grows_and_is_capped():
 
 
 def test_spark_observer_backoff_survives_days_of_failures():
-    """~3.5 days of failed probes (>1022 at the 300 s cap) must keep
+    """~3.5 days of failed probes (>1024 at the 300 s cap) must keep
     returning the unreachable placeholder, not raise OverflowError from
     15.0 * 2**huge — 2**(failures-1) is a Python bignum and float
     multiplication against it overflows well before a real node stays down
@@ -313,6 +313,40 @@ def test_spark_observer_backoff_survives_days_of_failures():
         assert status == {"profile": None, "serving": None,
                           "reachable": False, "swap_in_progress": False}
         clock.advance(301.0)         # past every possible backoff
+
+
+def test_spark_observer_backoff_schedule_matches_production_defaults():
+    """Pins the exponent cap (16) against PRODUCTION's real
+    backoff_base_s=15/backoff_max_s=300 -- every other backoff test in this
+    file uses small custom base/max values that never come near the cap, so
+    a mutant like ``min(self._failures - 1, 1)`` would leave the whole
+    suite green. The 5th failure's own wait is 15 * 2**4 = 240 s
+    (uncapped); the 6th's would be 15 * 2**5 = 480 s, capped to 300 s."""
+    from app.engines import EngineError
+
+    clock = _Clock()
+    spark = _CountingSpark(raises=EngineError("down"))
+    obs = _observer(spark, clock=clock)   # production defaults: base 15, max 300
+
+    for wait in (15.0, 30.0, 60.0, 120.0):   # failures 1 -> 4, uncapped 15*2**(n-1)
+        obs.status()
+        clock.advance(wait)
+    obs.status()                          # failure #5
+    assert spark.calls == 5
+
+    clock.advance(239.0)
+    obs.status()                          # not yet due -- still the 5th probe's cache
+    assert spark.calls == 5
+    clock.advance(1.0)                    # the 5th failure's 240 s wait, exactly elapsed
+    obs.status()                          # failure #6
+    assert spark.calls == 6
+
+    clock.advance(299.0)
+    obs.status()                          # not yet due -- still the 6th probe's cache
+    assert spark.calls == 6
+    clock.advance(1.0)                    # the capped 300 s wait, exactly elapsed
+    obs.status()
+    assert spark.calls == 7
 
 
 def test_spark_observer_recovers_immediately_after_a_success():

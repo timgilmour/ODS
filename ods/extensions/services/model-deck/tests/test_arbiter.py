@@ -2436,6 +2436,32 @@ def test_watcher_version_skip_prevents_refetch_after_store(tmp_path):
     assert len(writes) == 1  # ...but the post-call compare stops the 2nd write
 
 
+def test_harvest_skips_the_spark_pair_while_observer_says_unreachable(tmp_path):
+    """The spark pair's harvest_catalog_pair routes to
+    SparkCatalogExec.__call__ -> SparkClient.get_catalog() — the identical
+    node-agent GET _provenance_spark's guard already avoids. A derive pass
+    must not block on it (or run engine_exec at all for that pair) while
+    sparky is down; a non-spark pair would still be unaffected (none is
+    exercised here, since production's only remote pair IS spark's --
+    see _configurable_engines' docstring)."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    spark = FakeSpark(raises=EngineError("connection refused"))
+    calls = []
+
+    def exec_fn(node, engine, interpreter, source):
+        calls.append((node, engine))
+        return "sha256:remote", _sentinel_probe_output()
+
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, spark=spark,
+                       engine_exec=exec_fn,
+                       configurable_engines=[("sparky", "vllm")])
+
+    watcher._spark_observer.status()  # seed the cache: unreachable
+    watcher._derive_pass()
+
+    assert calls == []
+
+
 # --- provenance pass -------------------------------------------------------
 
 class _FakeDockerCtl:
@@ -2883,7 +2909,7 @@ def test_provenance_spark_skips_probes_while_observer_says_unreachable(tmp_path)
     costs nothing between provenance passes either."""
     store = _prov_store(tmp_path)
     spark = _FakeSpark({"heretic": _spark_compose(_SPARK_REFERENCE)},
-                        raises=EngineError("down"))
+                       raises=EngineError("down"))
     watcher = _watcher(tmp_path, provenance_store=store, spark=spark)
 
     watcher._spark_observer.status()  # seed the cache: unreachable

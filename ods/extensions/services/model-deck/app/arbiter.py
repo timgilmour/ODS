@@ -1003,6 +1003,17 @@ class Watcher:
             return
 
         for node, engine in self._configurable_engines():
+            # Same guard as the live-facts loop and _provenance_spark: the
+            # spark pair's harvest_catalog_pair routes to
+            # SparkCatalogExec.__call__ -> SparkClient.get_catalog(), the
+            # identical node-agent GET _provenance_spark's guard already
+            # avoids (app/engines/spark.py:399-400). Only the spark node is
+            # gated -- other (node, engine) pairs have no SparkObserver
+            # verdict to consult and must still be harvested every pass.
+            if node == spark_node_id():
+                view = self._spark_observer.status()
+                if view is not None and not view.get("reachable", False):
+                    continue
             harvest_catalog_pair(
                 self._engine_exec, self._characteristics_store, self._log,
                 node, engine, now, force=False)
