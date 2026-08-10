@@ -168,6 +168,13 @@ class Mover:
 
 _TERMINAL = frozenset({"done", "failed", "cancelled"})
 
+# Terminal jobs are HISTORY, not state. jobs() copies and re-sorts the whole
+# dict on every /api/storage/state poll (3 s), so keeping them all made a
+# long-lived deck pay a growing cost to render a list nobody scrolls
+# [max-review c14]. Live jobs are never pruned at any count — dropping one
+# would strand its catalog entry in "moving" forever.
+_MAX_TERMINAL_JOBS = 50
+
 
 class JobQueue:
     """One-at-a-time move executor (spec #15: serialize disk I/O; queue the
@@ -213,7 +220,26 @@ class JobQueue:
             self._pending.append({**job, "_on_success": on_success,
                                   "_on_progress": on_progress})
             self._wake.set()
+            self._prune_terminal_jobs()
         return dict(job)
+
+    def _prune_terminal_jobs(self) -> None:
+        """Drop all but the newest _MAX_TERMINAL_JOBS terminal jobs. Caller
+        holds self._lock.
+
+        Pruned on SUBMIT rather than on completion: submit is the only path
+        that grows the dict, so this bounds it at the one place it can
+        exceed the cap, and a deck sitting idle never does bookkeeping.
+        """
+        terminal = [j for j in self._jobs.values() if j["state"] in _TERMINAL]
+        if len(terminal) <= _MAX_TERMINAL_JOBS:
+            return
+        oldest_first = sorted(terminal, key=lambda j: j["created_ts"])
+        for stale in oldest_first[:-_MAX_TERMINAL_JOBS]:
+            self._jobs.pop(stale["id"], None)
+            # Goes with the job: otherwise this dict is the same unbounded
+            # growth one attribute over.
+            self._cancel_flags.pop(stale["id"], None)
 
     def jobs(self) -> list[dict]:
         with self._lock:

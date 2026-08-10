@@ -107,7 +107,7 @@ from pathlib import Path
 from app.catalog import Catalog
 from app.events import tail_events
 from app.locations import LocationStore
-from app.mover import JobQueue
+from app.mover import _MAX_TERMINAL_JOBS, _TERMINAL, JobQueue
 
 
 def _queue_env(tmp_path):
@@ -331,3 +331,58 @@ def test_hash_file_is_public_and_stable(tmp_path):
 
     assert hash_file(p) == hash_file(p)
     assert len(hash_file(p)) == 64
+
+
+def test_terminal_jobs_are_pruned_beyond_the_cap(tmp_path):
+    """[max-review c14] Every terminal job was kept forever, and jobs()
+    copies AND re-sorts the whole dict on each 3 s /api/storage/state poll —
+    so a long-lived deck paid a growing cost to render a list nobody scrolls.
+    Terminal jobs are history, not state: keep a bounded, newest-first tail.
+    """
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+
+    # Seed straight into the store: driving real copies would test the mover,
+    # not the retention rule, and each one needs its own source file.
+    with q._lock:
+        for i in range(_MAX_TERMINAL_JOBS + 10):
+            job_id = f"job{i:04d}"
+            q._jobs[job_id] = {"id": job_id, "unit_id": "hot:a.gguf",
+                               "from": "hot", "to": "cold", "label": "m",
+                               "state": "done", "bytes_done": 1, "bytes_total": 1,
+                               "error": None, "created_ts": float(i)}
+            q._cancel_flags[job_id] = False
+
+    q.submit(plan, label="the prune trigger")
+
+    jobs = q.jobs()
+    terminal = [j for j in jobs if j["state"] in _TERMINAL]
+    assert len(terminal) == _MAX_TERMINAL_JOBS
+    # The NEWEST survive: job0000..job0009 are the oldest by created_ts.
+    surviving = {j["id"] for j in terminal}
+    assert "job0000" not in surviving
+    assert f"job{_MAX_TERMINAL_JOBS + 9:04d}" in surviving
+    # Bookkeeping for a pruned job goes with it — otherwise _cancel_flags is
+    # the same unbounded leak one dict over.
+    assert "job0000" not in q._cancel_flags
+    # ...and the live job is untouched by the prune.
+    assert any(j["state"] not in _TERMINAL for j in jobs)
+
+
+def test_pruning_never_drops_a_live_job(tmp_path):
+    """The cap applies to TERMINAL jobs only. A deck with more than the cap's
+    worth of queued/running work must keep every one of them — dropping a
+    live job would strand its catalog entry in 'moving' forever."""
+    q, cat, plan, events, hot, cold = _queue_env(tmp_path)
+
+    with q._lock:
+        for i in range(_MAX_TERMINAL_JOBS + 10):
+            job_id = f"live{i:04d}"
+            q._jobs[job_id] = {"id": job_id, "unit_id": "hot:a.gguf",
+                               "from": "hot", "to": "cold", "label": "m",
+                               "state": "running", "bytes_done": 0, "bytes_total": 1,
+                               "error": None, "created_ts": float(i)}
+
+    q.submit(plan, label="another live one")
+
+    live = [j for j in q.jobs() if j["state"] not in _TERMINAL]
+    assert len(live) == _MAX_TERMINAL_JOBS + 11
