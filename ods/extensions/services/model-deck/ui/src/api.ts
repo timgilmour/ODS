@@ -754,11 +754,31 @@ export interface NodeTestResult {
   gpu_count?: number;
 }
 
+/** The CRUD wire shape — what `app/routers/nodes.py::_public` actually
+ * returns for create/update, over `NodeStore.add()`/`.update()`
+ * (app/node_store.py:104-139): the stored spec (id, label, agent_kind,
+ * address, serving_address, added_ts) plus `credential_set`. Deliberately
+ * NOT `DeckNodeEntry`: that type mirrors a DIFFERENT producer
+ * (status.py's `_nodes_block`, which folds in the node-observer pass) and
+ * carries status/last_seen/gpus/serving/error — none of which this route
+ * ever puts on the wire. Two producers, two types, so a `.status` read off
+ * a createNode/updateNode result fails to compile instead of silently
+ * resolving `undefined`. */
+export interface NodeRegistryEntry {
+  id: string;
+  label: string;
+  agent_kind: "local" | "node-agent";
+  address: string | null;
+  serving_address: string | null;
+  added_ts: string;
+  credential_set: boolean;
+}
+
 export function createNode(body: {
   id: string; label: string; address: string;
   serving_address?: string | null; credential?: string;
-}): Promise<DeckNodeEntry> {
-  return request<DeckNodeEntry>("/api/nodes", {
+}): Promise<NodeRegistryEntry> {
+  return request<NodeRegistryEntry>("/api/nodes", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -768,8 +788,8 @@ export function createNode(body: {
 export function updateNode(id: string, body: {
   label?: string; address?: string; serving_address?: string | null;
   credential?: string;
-}): Promise<DeckNodeEntry> {
-  return request<DeckNodeEntry>(`/api/nodes/${encodeURIComponent(id)}`, {
+}): Promise<NodeRegistryEntry> {
+  return request<NodeRegistryEntry>(`/api/nodes/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
