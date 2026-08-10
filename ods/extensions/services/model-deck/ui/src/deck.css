@@ -1805,3 +1805,193 @@ input[type="password"] {
    renders a div otherwise), so the affordance is never a promise the board
    cannot keep. */
 button.ui-chip:hover:not(:disabled) { border-color: var(--accent); }
+
+/* ---------------------------------------------------------------- nodes tab */
+
+/* The armed second click of NodesView's two-click delete — the one place in
+   the deck a button itself (not a banner) needs to read as dangerous. */
+button.danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Left rail + a 1px rule + the form pane (mockup 6). This grid lives one
+   level inside Panel's own section — see NodesView.tsx's comment on why —
+   so .nodes-view itself gets no rules beyond what Panel already gives it. */
+.nodes-body {
+  display: grid;
+  grid-template-columns: 280px 1px 1fr;
+  gap: calc(var(--space) * 2);
+  align-items: start;
+}
+
+.nodes-rail-divider {
+  align-self: stretch;
+  background: var(--panel-border);
+}
+
+.nodes-rail {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 2);
+}
+
+.nodes-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: calc(var(--space) * 0.75) var(--space);
+  background: transparent;
+}
+
+/* Selected = an accent bar plus a lighter fill, both at once — the rule this
+   file opened with ("never color alone") means the bar has to be a shape
+   change too, not merely a border recolour. */
+.nodes-row--selected {
+  background: var(--panel-border);
+  border-left: 2px solid var(--accent);
+}
+
+.nodes-row--add {
+  border-style: dashed;
+  color: var(--text-dim);
+  justify-content: center;
+}
+
+.nodes-row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodes-row-badge {
+  flex: none;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+}
+
+.nodes-row-address {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.node-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--panel-border);
+}
+
+.node-dot--online { background: var(--chip-loaded-fg); }
+.node-dot--offline { background: var(--danger); }
+.node-dot--dim { background: var(--panel-border); }
+
+.nodes-hint {
+  color: var(--text-dim);
+  padding: calc(var(--space) * 2);
+}
+
+.nodes-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  max-width: 420px;
+}
+
+.nodes-form label {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 2);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.nodes-form input {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+}
+
+.nodes-caption {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.nodes-form-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space);
+}
+
+.nodes-empty {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: calc(var(--space) * 4) calc(var(--space) * 2);
+  text-align: center;
+}
+
+.nodes-empty h2 {
+  margin: 0 0 var(--space);
+  font-size: 1.1rem;
+}
+
+.nodes-empty p {
+  margin: 0 0 calc(var(--space) * 2);
+  color: var(--text-dim);
+}
+
+.nodes-empty-steps {
+  list-style: none;
+  margin: 0 0 calc(var(--space) * 2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  text-align: left;
+}
+
+.nodes-empty-steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+}
+
+.nodes-step {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+/* Step 1, filled — the one thing the empty state wants clicked. */
+.nodes-step--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}

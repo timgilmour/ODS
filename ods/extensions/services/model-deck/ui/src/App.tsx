@@ -11,6 +11,7 @@ import {
 import Board from "./components/Board";
 import EventsView from "./components/EventsView";
 import ModelDetailDrawer from "./components/ModelDetailDrawer";
+import NodesView from "./components/NodesView";
 import PolicyModal from "./components/PolicyModal";
 import SetBuilder from "./components/SetBuilder";
 import SettingsModal, { type SettingsTarget } from "./components/SettingsModal";
@@ -22,7 +23,7 @@ import Banner from "./ui/Banner";
 
 const POLL_MS = 3000;
 
-type View = "deck" | "builder" | "storage" | "events";
+type View = "deck" | "builder" | "storage" | "nodes" | "events";
 
 export default function App() {
   const [state, setState] = useState<StateResponse | null>(null);
@@ -200,6 +201,12 @@ export default function App() {
             {labels.storage}
           </button>
           <button
+            className={view === "nodes" ? "primary" : undefined}
+            onClick={() => showView("nodes")}
+          >
+            {labels.nodes}
+          </button>
+          <button
             className={view === "events" ? "primary" : undefined}
             onClick={() => showView("events")}
           >
@@ -257,6 +264,10 @@ export default function App() {
           onModalOpenChange={setModalOpen}
           onChanged={refreshAll}
         />
+      )}
+
+      {view === "nodes" && (
+        <NodesView nodes={state?.nodes ?? []} onChanged={refreshAll} />
       )}
 
       {view === "events" && <EventsView refreshTrigger={refreshTrigger} />}

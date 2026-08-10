@@ -271,6 +271,34 @@ export const messages = {
     title: "No longer on the deck",
     body: "this placement is not in the latest state — what follows is the last thing we knew.",
   }),
+
+  // Nodes tab (Task 9) — the registry CRUD lives in app/routers/nodes.py.
+
+  nodesEmptyTitle: (): Message => ({
+    tone: "neutral",
+    title: "No nodes yet",
+    body: "Register the machines this deck should see. The local box is already here.",
+  }),
+
+  // The credential is write-only end to end (accepted on create/update,
+  // never echoed back — app/routers/nodes.py's module docstring). This
+  // caption is the one place the deck says so, next to the field itself.
+  nodeCredentialCaption: (): Message => ({
+    tone: "neutral",
+    title: "stored server-side, never shown again",
+  }),
+
+  // POST /api/nodes/test's two outcomes (routers/nodes.py:106-141) — the
+  // probe answered with a machine to describe, or it didn't.
+  nodeTestOk: (name: string, gpuCount: number): Message => ({
+    tone: "neutral",
+    title: `Connected — ${name}, ${gpuCount} GPU${gpuCount === 1 ? "" : "s"}`,
+  }),
+  nodeTestFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Connection failed",
+    body: detail,
+  }),
 };
 
 /** Short labels — control text, badges, captions and the `title` tooltips
@@ -594,6 +622,31 @@ export const labels = {
   reloadToApply: "Reload to apply",
   reviewInSettings: "Review in Settings",
   openingSettings: "Opening…",
+
+  // Nodes tab (Task 9). The rail's status dots read app/node_observer.py's
+  // vocabulary directly (online/offline/error/unconfigured) rather than a
+  // label from here — that module's own docstring is the one place that
+  // vocabulary is declared, and re-labelling it here would be a second
+  // place it could drift.
+  nodes: "Nodes",
+  addNode: "Add node",
+  selectANode: "Select a node",
+  /** Rail badge on the seeded local entry — app/node_store.py's one
+   * `agent_kind: "local"` row, always present, never removable. */
+  localBadge: "local",
+  nodeId: "Id",
+  nodeLabel: "Label",
+  nodeAddress: "Address",
+  nodeAddressPlaceholder: "http://host:7720",
+  nodeServingAddress: "Serving address (optional)",
+  nodeServingAddressPlaceholder: "http://host:8000",
+  nodeCredential: "Credential",
+  /** Shown only as the input's placeholder, and only once a credential is
+   * already on file (`credential_set`) — never the operator's own typing,
+   * which is real characters in a type="password" field, not this glyph. */
+  nodeCredentialPlaceholder: "••••••••",
+  testConnection: "Test connection",
+  registerALocation: "Register a location",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

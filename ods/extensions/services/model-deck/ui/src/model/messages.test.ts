@@ -152,7 +152,7 @@ describe("labels", () => {
   it("names every tab, so no tab is left as a literal beside a catalogued one", () => {
     // The Events tab used to be the only one reading from here. A rule
     // applied to one of five siblings is the rule dying quietly.
-    for (const tab of [labels.deck, labels.setBuilder, labels.storage, labels.events]) {
+    for (const tab of [labels.deck, labels.setBuilder, labels.storage, labels.nodes, labels.events]) {
       expect(tab).toEqual(expect.any(String));
       expect(tab.length).toBeGreaterThan(0);
     }
