@@ -68,26 +68,23 @@ services:
       # wollomatic auto-anchors patterns — no explicit ^…$ here.
       - -allowGET=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/json
       - -allowPOST=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(start|stop)
-      # Catalog harvest (app.engines.docker_ctl.DockerCtl.exec_run, task 8):
-      # runs app.harvest's introspection probe inside the running engine
-      # container. Two calls, both needed — POST .../exec creates the exec
-      # instance, POST /exec/{id}/start actually runs it and returns its
-      # output. -allowPOST is cumulative (wollomatic docs), so these ADD to
-      # the (start|stop) line above rather than replacing it.
+      # NO exec rules, deliberately [max-review #5]. C1's local catalog
+      # harvest was the only exec caller and C2 removed it — harvest now
+      # reads the node-agent's file-protocol cache instead. The in-process
+      # DockerCtl.exec_run/_guard machinery is kept behind an injection
+      # seam with ZERO production constructors (app/main.py says so at the
+      # spot where it deliberately does not build DockerEngineExec), so
+      # these two rules granted a standing capability nothing used.
       #
-      # The create-exec rule is pinned to ods-hipfire specifically, NOT the
-      # wildcard [a-zA-Z0-9_.-]+ the other rules use: unlike start/stop
-      # (park/resume, harmless to any allowlisted container), exec runs an
-      # ARBITRARY command as root inside whatever container it names — a
-      # wildcard here would let a deck bug (or a compromised deck) run code
-      # in every container on the host, with only this client's in-process
-      # `_guard`/allowlist standing between a bug and host-wide RCE. Exactly
-      # one container is ever harvested in C1 (Watcher._configurable_engines
-      # -> hipfire only); widen this ONLY alongside that list, never ahead
-      # of it. /exec/{id}/start stays wildcarded — the exec id is Docker-
-      # generated per call, there is no container name in that path to pin.
-      - -allowPOST=/(v[0-9.]+/)?containers/ods-hipfire/exec
-      - -allowPOST=/(v[0-9.]+/)?exec/[a-zA-Z0-9_.-]+/start
+      # exec runs an ARBITRARY command as root in the named container, so
+      # the unused grant was the whole host's blast radius sitting open
+      # with only a client-side allowlist in front of it. If a future
+      # increment re-wires a local harvest, re-add BOTH rules (the
+      # container-PINNED create-exec — never the wildcard the start/stop
+      # rules use — plus the wildcarded /exec/{id}/start, whose id Docker
+      # generates per call and which therefore has no name to pin)
+      # alongside the Watcher._configurable_engines entry that uses them,
+      # never ahead of it.
       - -watchdoginterval=300
       - -shutdowngracetime=5
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]

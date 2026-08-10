@@ -2474,6 +2474,14 @@ def test_harvest_failure_leaves_no_catalog_and_does_not_raise(tmp_path, monkeypa
 # from "engine parked" forever, and the branch's own recorded deploy hazard
 # (a hand-merged live compose losing the proxy's -allowPOST lines -> 403 on
 # exec) lands exactly there. It now logs a deduped harvest-failed event.
+#
+# That deploy hazard no longer applies to the LOCAL docker path: task 11
+# removed the socket-proxy exec rules outright, because C2 left them with
+# zero callers (harvest reads the node-agent's file cache now). The branch
+# stays live and worth this test -- engine_exec is an injection seam, and
+# the exec that still runs through it is SparkCatalogExec's remote
+# node-agent call, whose failures are network/agent-side rather than
+# proxy-allowlist-side.
 
 
 def test_harvest_exec_failure_logs_a_deduped_harvest_failed_event(tmp_path):
