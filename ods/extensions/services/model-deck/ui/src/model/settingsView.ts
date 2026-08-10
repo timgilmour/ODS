@@ -99,12 +99,20 @@ export function scopeKeys(node: string, engine: string, model: string | null): S
   };
 }
 
-/** Which model identity a Settings panel must be opened for, given the name
- * a placement carries on the board.
+/** Which model identity a Settings panel must be opened for, given a
+ * placement's SETTINGS KEY (see `settingsKeyOf`).
  *
- * A spark placement is named by its PROFILE ("heretic", "mm27b") — that is
- * what /api/spark/swap takes and what intent records (app/routers/spark.py
- * deliberately records profiles). Settings, though, live under the real
+ * CORRECTION, max-review #8: an earlier version of this docstring said "a
+ * spark placement is named by its PROFILE". It is not — `Placement.name` is
+ * what the endpoint SERVES (`--served-model-name`; mm27b serves as "aeon"),
+ * and callers that passed it here missed the lookup entirely whenever the
+ * two differ. The profile rides separately on `Placement.profile`. The claim
+ * mattered because this docstring is the authority the next implementer
+ * reads, and it asserted the exact premise the fix refuted.
+ *
+ * The PROFILE is what /api/spark/swap takes and what intent records
+ * (app/routers/spark.py deliberately records profiles). Settings, though,
+ * live under the real
  * CHECKPOINT identity: `engine_models/<node>/<engine>|<identity>`. The
  * translation is the `profile_identities` characteristics fact, written by
  * the adopt sweep (app/routers/settings.py:319) and read exactly this way by
@@ -120,22 +128,36 @@ export function scopeKeys(node: string, engine: string, model: string | null): S
  * called. Never throws — `FactEntry.value` is `unknown` by contract, so each
  * step is checked rather than cast.
  */
+/** The value `settingsIdentityFor` must be keyed on for a placement.
+ *
+ * One function rather than `placement.profile ?? placement.name` repeated at
+ * each call site: both callers live inside components, where no test can
+ * reach them (this UI has no component harness), so a fifth inline copy of
+ * the rule would be a fifth place for it to drift — the recurrence this
+ * codebase already answered structurally in model/editState.ts.
+ *
+ * `profile` is spark-only and absent for local placements, whose `name` IS
+ * the model identity — so the fallback is the correct answer, not a guess. */
+export function settingsKeyOf(placement: { name: string; profile?: string }): string {
+  return placement.profile ?? placement.name;
+}
+
 export function settingsIdentityFor(
   facts: FactsMap,
   node: string,
   engine: string,
-  placementName: string,
+  profileOrName: string,
 ): string {
   // The engine-scoped facts key, `<kind>/<id>` like every other one
   // (app/routers/facts.py:64-71); the id for an engine is `<node>/<engine>`.
   const identities = facts[`engine/${node}/${engine}`]?.profile_identities?.value;
   if (typeof identities !== "object" || identities === null || Array.isArray(identities)) {
-    return placementName;
+    return profileOrName;
   }
-  const info = (identities as Record<string, unknown>)[placementName];
-  if (typeof info !== "object" || info === null) return placementName;
+  const info = (identities as Record<string, unknown>)[profileOrName];
+  if (typeof info !== "object" || info === null) return profileOrName;
   const identity = (info as Record<string, unknown>).identity;
-  return typeof identity === "string" && identity !== "" ? identity : placementName;
+  return typeof identity === "string" && identity !== "" ? identity : profileOrName;
 }
 
 /** Which declared layer each write kind targets — engines -> engine,

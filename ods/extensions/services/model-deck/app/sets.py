@@ -170,11 +170,9 @@ class SetStore:
     def __init__(self, dir: Path):  # noqa: A002 - matches the brief's signature
         self._dir = dir
         # Narrow but real [T9b sweep]: _write uses a fixed `.tmp` path PER
-        # SLUG, so two HTTP threads creating the SAME set name (or one
-        # creating while another deletes it) race that path, and the loser's
-        # os.replace raises FileNotFoundError into a route. Different slugs
-        # cannot collide — the tmp name carries the slug — so this lock only
-        # needs to cover save()/delete().
+        # SLUG, so two HTTP threads writing the SAME set name race that path
+        # and the loser's os.replace raises FileNotFoundError into a route.
+        # Different slugs cannot collide — the tmp name carries the slug.
         #
         # Covers save(), replace() and delete() — every path that writes a
         # slug file from an HTTP thread.

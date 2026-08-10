@@ -24,13 +24,15 @@ describe("parseWatermark", () => {
   it("parses a number, with or without surrounding whitespace", () => {
     expect(parseWatermark("50")).toBe(50);
     expect(parseWatermark(" 50 ")).toBe(50);
-    expect(parseWatermark("0")).toBe(0);
     expect(parseWatermark("12.5")).toBe(12.5);
   });
 
-  it("refuses a negative threshold rather than clamping it", () => {
+  it("refuses a non-positive threshold rather than clamping it", () => {
     // Clamping would silently write a number the operator never typed.
+    // 0 is refused HERE because the backend refuses it too — mirroring the
+    // rule turns a confusing 422 into a clear message at the point of entry.
     expect(parseWatermark("-1")).toBe("invalid");
+    expect(parseWatermark("0")).toBe("invalid");
   });
 
   it("refuses the non-finite spellings Number() otherwise accepts", () => {

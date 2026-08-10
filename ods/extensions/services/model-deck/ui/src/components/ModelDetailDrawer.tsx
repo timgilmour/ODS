@@ -24,7 +24,7 @@ import {
 } from "../model/factsView";
 import { labels, messages } from "../model/messages";
 import { isTenantName, SPARK_SLOT_KEY, type DeckResource, type Placement } from "../model/nodes";
-import { settingsIdentityFor } from "../model/settingsView";
+import { settingsIdentityFor, settingsKeyOf } from "../model/settingsView";
 import Banner from "../ui/Banner";
 import ProvenanceDot from "../ui/ProvenanceDot";
 import StatePill from "../ui/StatePill";
@@ -575,7 +575,7 @@ export default function ModelDetailDrawer({
                           facts ?? {},
                           placedOn.nodeId,
                           settingsEngine,
-                          placement.profile ?? placement.name,
+                          settingsKeyOf(placement),
                         ),
                       })
                     }

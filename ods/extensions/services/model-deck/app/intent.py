@@ -222,9 +222,15 @@ class IntentStore:
             self._save(data)
 
     def put_back(self, key: str, record: dict) -> None:
-        """Restore `record` for `key` VERBATIM — the rollback primitive for an
-        actuation that was recorded and then failed. Semantics: "as if the
-        failed actuation never happened."
+        """Restore `record` for `key` VERBATIM. Semantics: "as if the failed
+        actuation never happened."
+
+        NOTE: the arbiter's rollback path uses ``put_back_if``, not this —
+        an unconditional restore there would revert an operator action that
+        landed during the failed call. This plain form has no production
+        caller today; it stays as the unconditional primitive ``put_back_if``
+        is built on, and because a future caller that genuinely holds no
+        competing writer wants exactly this.
 
         Deliberately NOT ``record()``. An arm that pre-records its intent
         (``app.arbiter._execute``'s unload arm — "whoever actuates, records")

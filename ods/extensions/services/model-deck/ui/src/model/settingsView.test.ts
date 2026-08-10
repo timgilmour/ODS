@@ -15,6 +15,7 @@ import {
   POSITIONAL_KEY,
   scopeKeys,
   settingsIdentityFor,
+  settingsKeyOf,
   toPuts,
 } from "./settingsView";
 
@@ -475,5 +476,22 @@ describe("settingsIdentityFor", () => {
         "sparky", "vllm", "heretic",
       ),
     ).toBe("heretic");
+  });
+});
+
+describe("settingsKeyOf", () => {
+  it("prefers the spark PROFILE over the served name", () => {
+    // The mm27b/aeon case [max-review #8]: profile_identities is keyed by
+    // profile, and `name` is what the endpoint serves. Fixture deliberately
+    // has them differ — every other fixture in this file still uses names
+    // that coincide, which is why the original bug was invisible.
+    expect(settingsKeyOf({ name: "aeon", profile: "mm27b" })).toBe("mm27b");
+  });
+
+  it("falls back to the name when there is no profile", () => {
+    // Local placements carry no profile, and their name IS the model
+    // identity — the fallback is the correct answer, not a guess.
+    expect(settingsKeyOf({ name: "qwen.gguf" })).toBe("qwen.gguf");
+    expect(settingsKeyOf({ name: "qwen.gguf", profile: undefined })).toBe("qwen.gguf");
   });
 });

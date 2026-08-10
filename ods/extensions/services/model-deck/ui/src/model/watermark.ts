@@ -22,13 +22,14 @@ export type WatermarkParse = number | null | "invalid";
 
 /**
  * `""`/whitespace -> `null` (explicitly no watermark).
- * A non-negative finite number -> that number.
+ * A POSITIVE finite number -> that number (0 is refused: the backend 422s
+ * on it, so accepting it here would only defer a clear message).
  * Anything else -> `"invalid"`, which callers must REFUSE rather than
  * translate into `null`.
  *
- * Negative is invalid rather than clamped: a negative GB threshold is not a
- * threshold the operator could have meant, and clamping would silently write
- * a number they never typed.
+ * Non-positive is invalid rather than clamped: it is not a threshold the
+ * operator could have meant, and clamping would silently write a number they
+ * never typed.
  */
 export function parseWatermark(raw: string | undefined | null): WatermarkParse {
   const trimmed = raw?.trim();
@@ -36,5 +37,8 @@ export function parseWatermark(raw: string | undefined | null): WatermarkParse {
   // Number("") is 0 and Number("  ") is 0, both already handled above.
   // Number("50 GB") is NaN — the case that motivated all of this.
   const n = Number(trimmed);
-  return Number.isFinite(n) && n >= 0 ? n : "invalid";
+  // `> 0`, not `>= 0`: the backend refuses a watermark of 0 with a 422, so
+  // accepting it here only converts a clear client-side message into a
+  // server round-trip the operator has to decode [re-review].
+  return Number.isFinite(n) && n > 0 ? n : "invalid";
 }

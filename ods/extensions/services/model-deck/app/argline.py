@@ -164,7 +164,14 @@ def _argv_tokens(settings: dict) -> list[str]:
     array, render_argline joins them for a shell."""
     parts: list[str] = []
 
-    for token in settings.get(POSITIONAL_KEY) or []:
+    positionals = settings.get(POSITIONAL_KEY)
+    if positionals is not None and not isinstance(positionals, list):
+        # Loud, two lines above a loud-refusal guard: `or []` swallowed a
+        # malformed non-list silently, which is worse than the TypeError it
+        # replaced [re-review]. None stays legal — it is the unset marker.
+        raise ValueError(
+            f"setting {POSITIONAL_KEY!r} must be a list, got {positionals!r}")
+    for token in positionals or []:
         if token is None:
             continue          # see the None note in _require_renderable
         _require_renderable(POSITIONAL_KEY, token)
@@ -381,10 +388,14 @@ def _normalize_positional_value(value):
     shape back.
     """
     if value is None:
-        # Same unset meaning as any other key's bare None. Wrapping it into
-        # [None] (what the generic path below would do) invented a positional
-        # token nobody typed, and that [None] then 422'd every renderer.
-        return _DROP
+        # Same unset meaning as any other key's bare None, and STORED as
+        # None rather than dropped: _DROP removes the key from the payload
+        # entirely, so no unset marker ever reaches app.ladder and "unset the
+        # positional" became inexpressible — an engine-layer positional
+        # survived while the response showed args:{} [T9-fix re-review].
+        # Stored, ladder.py:73 pops it like any other None, and the renderer
+        # tolerates it (`settings.get(POSITIONAL_KEY) or []`).
+        return None
     items = value if isinstance(value, list) else [value]
     if not items:
         return _DROP
@@ -393,7 +404,7 @@ def _normalize_positional_value(value):
     return [_normalize_args_scalar(v) for v in items]
 
 
-def normalize_args_map(values: dict) -> dict:
+def normalize_args_map(values: dict, *, heal: bool = False) -> dict:
     """Normalize an args-shaped map to argline's post-round-trip shape --
     THE canonical enforcement of both RULING 2026-08-07 axes (singleton
     list -> scalar, numeric -> string) plus the empty-list-drop rule (see
@@ -407,6 +418,17 @@ def normalize_args_map(values: dict) -> dict:
     (code-baked defaults, a live-harvested line through parse_argline,
     checkpoint recommendations from generation_config.json) must call this
     before the layer reaches app.ladder.resolve_settings.
+
+    ``heal=True`` switches null-inside-a-list from REFUSE to DROP. The two
+    postures belong to two different kinds of caller and must not be
+    conflated: a WIRE caller is handling operator input, where refusing is
+    the honest answer; a HEALING caller (``SettingsStore.restore``, whose
+    docstring says a snapshot is "exactly as untrusted as a file on disk")
+    is repairing data that already exists, where refusing turns a heal into
+    an ABORT. Without this, the undo path broke for precisely the legacy
+    data the renderer's tolerance exists to keep workable: restoring a
+    snapshot holding a list-null failed the whole ``restore_settings`` apply
+    step [T9-fix re-review].
     """
     normalized = {}
     for key, value in values.items():
@@ -414,6 +436,13 @@ def normalize_args_map(values: dict) -> dict:
         # scope; an operator reading a 422 needs to know WHICH setting was
         # refused, so the key is attached here — the one place that knows it,
         # and one that covers the nested-in-a-list path too.
+        if heal and isinstance(value, list):
+            # Drop the nulls a wire caller would be refused for, then
+            # normalize whatever is left — same skip-and-continue posture the
+            # renderer takes for already-persisted data.
+            value = [v for v in value if v is not None]
+        elif heal and key == POSITIONAL_KEY and value is None:
+            continue                      # unset marker: nothing to heal
         try:
             if key == POSITIONAL_KEY:
                 n = _normalize_positional_value(value)

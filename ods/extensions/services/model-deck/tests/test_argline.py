@@ -526,9 +526,30 @@ def test_wire_refuses_a_null_inside_a_list():
 def test_wire_treats_a_bare_positional_null_as_unset():
     """`_positional: null` used to be wrapped into [None] — inventing a
     positional token nobody typed, which then 422'd every renderer. It means
-    the same "unset" a bare None means for any other key."""
-    import warnings
+    the same "unset" a bare None means for any other key, and is STORED as
+    that marker (see the dedicated test below for why not dropped)."""
+    assert normalize_args_map({POSITIONAL_KEY: None}) == {POSITIONAL_KEY: None}
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        assert normalize_args_map({POSITIONAL_KEY: None}) == {}
+
+def test_heal_drops_list_nulls_instead_of_refusing():
+    """[T9-fix re-review] The wire REFUSES a list-null (operator input), but a
+    HEALING caller must DROP it. SettingsStore.restore re-normalizes a
+    snapshot whose own docstring calls it "exactly as untrusted as a file on
+    disk" — refusing there turned a heal into an ABORT and broke undo for
+    precisely the legacy data the renderer's tolerance keeps workable."""
+    assert normalize_args_map({"k": ["a", None]}, heal=True) == {"k": "a"}
+    assert normalize_args_map({POSITIONAL_KEY: ["serve", None]}, heal=True) == {
+        POSITIONAL_KEY: ["serve"]}
+    # ...and the wire keeps refusing the same input.
+    with pytest.raises(ValueError):
+        normalize_args_map({"k": ["a", None]})
+
+
+def test_a_bare_positional_null_is_stored_as_an_unset_marker():
+    """[T9-fix re-review] _DROP removed the key from the payload entirely, so
+    no unset marker reached app.ladder and "unset the positional" became
+    INEXPRESSIBLE — an engine-layer positional survived while the response
+    showed args:{}. Stored as None, ladder.py:73 pops it like any other
+    unset, and the renderer tolerates it."""
+    assert normalize_args_map({POSITIONAL_KEY: None}) == {POSITIONAL_KEY: None}
+    assert render_argv({POSITIONAL_KEY: None, "k": "v"}) == ["-k", "v"]

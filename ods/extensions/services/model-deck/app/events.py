@@ -37,7 +37,11 @@ from pathlib import Path
 # FastAPI runs on a real threadpool) — and _trim writes a FIXED tmp path per
 # log. Two concurrent trims race that one path, and the loser's os.replace
 # raises FileNotFoundError into whatever thread it was: a 500 on an HTTP
-# route, or a dead pass on a watcher. Module-level rather than per-store
+# route, or a dead pass on a watcher.
+#
+# PER-PROCESS, not cross-process: running uvicorn with --workers would give
+# each worker its own lock and silently un-protect a shared log file. The deck
+# runs single-process today. Module-level rather than per-store
 # because callers pass a Path, not an object, so there is no instance to hang
 # it on; contention is negligible (one small append per event).
 _WRITE_LOCK = threading.Lock()

@@ -310,7 +310,12 @@ class SettingsStore:
         for kind in KINDS:
             for entry in healed[kind].values():
                 if "args" in entry:
-                    entry["args"] = normalize_args_map(entry["args"])
+                    # heal=True: this is a repair path, not a wire. A
+                    # snapshot holding a list-null must be CLEANED, not
+                    # refused — refusing aborts the restore_settings apply
+                    # step, breaking undo for exactly the legacy data the
+                    # renderer tolerates [T9-fix re-review].
+                    entry["args"] = normalize_args_map(entry["args"], heal=True)
                 stamped = {ns: now for ns in NAMESPACES if ns in entry}
                 if stamped:
                     entry["updated_ts"] = stamped

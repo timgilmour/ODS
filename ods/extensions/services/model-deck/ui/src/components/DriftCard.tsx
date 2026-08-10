@@ -3,7 +3,7 @@ import { getFacts, sparkReload, type SettingsDrift } from "../api";
 import { partitionDrift } from "../model/driftView";
 import { humanizeAge, labels, messages } from "../model/messages";
 import { SPARK_SLOT_KEY, type Placement } from "../model/nodes";
-import { settingsIdentityFor } from "../model/settingsView";
+import { settingsIdentityFor, settingsKeyOf } from "../model/settingsView";
 import Banner from "../ui/Banner";
 import type { SettingsTarget } from "./SettingsModal";
 
@@ -92,12 +92,8 @@ export default function DriftCard({
       onOpenSettings({
         node: nodeId,
         engine: settingsEngine,
-        // placement.profile, not .name: profile_identities is keyed by the
-        // spark PROFILE (app/routers/settings.py:293), while .name is the
-        // served model — they differ for mm27b/aeon [max-review #8].
-        // Undefined for local placements, which fall back to .name.
         model: settingsIdentityFor(facts, nodeId, settingsEngine,
-                                   placement.profile ?? placement.name),
+                                   settingsKeyOf(placement)),
       });
     } catch (err) {
       setReviewError(err instanceof Error ? err.message : String(err));

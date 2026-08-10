@@ -393,3 +393,53 @@ def test_put_back_refuses_an_unknown_actor(tmp_path):
     with pytest.raises(ValueError):
         store.put_back("local/lemonade", {"state": "loaded", "model": None,
                                           "engine": "lemonade", "actor": "gremlin"})
+
+
+def test_record_refuses_an_empty_engine(tmp_path):
+    """[re-review] Without this, record(engine="") wrote a record the boundary
+    gate then SILENTLY DROPPED on the next read — a write that appears to
+    succeed and is invisible forever. record()'s bar must match the gate's."""
+    store = IntentStore(tmp_path / "intent.json")
+
+    with pytest.raises(ValueError):
+        store.record("local/lemonade", state="loaded", model="m", engine="")
+
+    assert store.get() == {}          # refused before any write
+
+
+def test_put_back_if_writes_only_when_the_predicate_holds(tmp_path):
+    """put_back_if is the arbiter's rollback primitive; nothing tested it
+    directly [re-review]. Compare and write share ONE critical section, which
+    is what makes it a CAS rather than the check-then-act it replaced."""
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("local/lemonade", state="loaded", model="a", engine="lemonade")
+    prior = store.get()["local/lemonade"]
+
+    store.record("local/lemonade", state="unloaded", model=None,
+                 engine="lemonade", actor="deck")
+
+    # Predicate false -> no write, and it says so.
+    assert store.put_back_if("local/lemonade", lambda cur: False, prior) is False
+    assert store.get()["local/lemonade"]["state"] == "unloaded"
+
+    # Predicate true -> the verbatim restore.
+    assert store.put_back_if("local/lemonade", lambda cur: True, prior) is True
+    assert store.get()["local/lemonade"] == prior
+
+
+def test_put_back_if_sees_the_current_record_and_absence(tmp_path):
+    store = IntentStore(tmp_path / "intent.json")
+    seen = []
+    record = {"state": "loaded", "model": "a", "engine": "lemonade"}
+
+    store.put_back_if("ghost/slot0", lambda cur: (seen.append(cur), True)[1], record)
+    assert seen == [None]             # absent key reaches the predicate as None
+
+    store.put_back_if("ghost/slot0", lambda cur: (seen.append(cur), False)[1], record)
+    assert seen[1]["model"] == "a"    # ...and the current record when present
+
+
+def test_put_back_if_refuses_a_malformed_record(tmp_path):
+    store = IntentStore(tmp_path / "intent.json")
+    with pytest.raises(ValueError):
+        store.put_back_if("local/lemonade", lambda cur: True, {"state": "loaded"})

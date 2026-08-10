@@ -319,6 +319,10 @@ describe("buildNodes — spark", () => {
     const spark = buildNodes(
       state(),
       sparkStatus({
+        // engine "ds4" on a profile named mm27b is a deliberately
+        // NON-default engine, chosen so the join is observable — the real
+        // mm27b is a vllm profile, so read this as "a profile whose engine
+        // differs from SPARK_DEFAULT_ENGINE", not as live topology.
         profiles: [{ name: "mm27b", engine: "ds4", health_url: null, container: "spark-mm27b" }],
         serving: { model: "aeon", endpoint_ok: true, container_status: "running" },
         swap_status: {

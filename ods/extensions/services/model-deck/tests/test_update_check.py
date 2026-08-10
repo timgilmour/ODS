@@ -875,3 +875,34 @@ def test_a_persistently_failing_artifact_is_still_logged_once(store, tmp_path):
                events_path.read_text().splitlines() if line.strip()]
     assert len([e for e in entries
                 if e["kind"] == "update-check-artifact-error"]) == 1
+
+
+def test_the_per_artifact_dedup_key_has_a_third_slot_sentinel(store, tmp_path):
+    """[re-review] The SECOND tuple slot holds free-form operator SOURCE ids
+    (_log_transitions builds `(artifact_id, result["id"])`), so a two-slot
+    artifact key `(artifact_id, "#artifact")` collides with a source
+    literally named "#artifact". Siblings put their sentinels in a THIRD
+    slot; this one now matches.
+
+    Asserted on the KEY SHAPE rather than through behaviour, deliberately and
+    with the limitation stated: with the recovery-pop in place, the collision
+    is not observable end-to-end (both the colliding sibling pop and the
+    recovery pop clear the same entry, so the two spellings behave alike). A
+    behavioural test here would pass under either shape — a test that cannot
+    fail — so this pins the contract directly instead of pretending to.
+    """
+    watched(store, "oci:local:broken", {
+        "id": "#artifact", "check": "git_tags",
+        "remote": "https://github.com/a/b", "pinned": "v1.0.0", "order": "semver"})
+    dedup: dict = {}
+
+    def exploding(source, fetch):
+        raise RuntimeError("upstream exploded")
+
+    with mock.patch.object(update_check, "dispatch", exploding):
+        update_check.run_pass(store, ok_fetch([]), tmp_path / "e.jsonl", dedup=dedup)
+
+    assert ("oci:local:broken", "#artifact", "artifact") in dedup
+    # ...and specifically NOT the two-slot spelling, which is the one a
+    # same-named source would have claimed.
+    assert ("oci:local:broken", "#artifact") not in dedup

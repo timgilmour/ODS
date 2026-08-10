@@ -18,6 +18,7 @@ import {
   type World,
 } from "../api";
 import { labels, messages } from "../model/messages";
+import { parseReserveGb } from "../model/reserveGb";
 import {
   buildDraft,
   derivePlacedModel,
@@ -321,10 +322,8 @@ export default function SetBuilder({
   // abandoned edit so the field and the draft agree again.
   function updateReserveGb(raw: string) {
     setReserveGbRaw(raw);
-    const trimmed = raw.trim();
-    if (trimmed === "") return;              // mid-edit, not a value yet
-    const n = Number(trimmed);
-    if (!Number.isInteger(n) || n < 1) return;
+    const n = parseReserveGb(raw);           // model/reserveGb.ts — testable
+    if (n === null) return;                  // mid-edit or invalid: draft stands
     setReserveGb(n);
     if (comfyui) setComfyui({ ...comfyui, reserve_gb: n });
   }
