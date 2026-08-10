@@ -24,6 +24,7 @@ from app.sets import (
     RESERVED_SLUG,
     ConfigSet,
     SetStore,
+    _previous_set,
     apply,
     apply_in_progress,
     plan_apply,
@@ -351,6 +352,60 @@ def test_save_previous_writes_reserved_file(tmp_path):
     assert store.get(RESERVED_SLUG).name == PREVIOUS_NAME
 
 
+# --- per-file isolation [c44] ---
+
+
+def test_one_corrupt_set_file_does_not_down_the_listing(tmp_path):
+    store = SetStore(tmp_path)
+    store.save(ConfigSet(name="good", ephemeral={"lemonade": {"state": "loaded"}}))
+    (tmp_path / "bad.json").write_text('{"name": "bad", "unknown_field": 1}')
+    names = [s.name for s in store.list()]
+    assert names == ["good"]
+    assert store.unreadable() == ["bad"]
+
+
+def test_get_of_a_corrupt_set_raises_a_named_valueerror(tmp_path):
+    (tmp_path / "bad.json").write_text("{not json")
+    with pytest.raises(ValueError, match="bad"):
+        SetStore(tmp_path).get("bad")
+
+
+def test_unreadable_empty_when_dir_absent(tmp_path):
+    assert SetStore(tmp_path / "never").unreadable() == []
+
+
+def test_unreadable_empty_when_all_sets_parse(tmp_path):
+    store = SetStore(tmp_path)
+    store.save(ConfigSet(name="good"))
+    assert store.unreadable() == []
+
+
+# --- replace [c50] ---
+
+
+def test_replace_overwrites_an_existing_slug(tmp_path):
+    store = SetStore(tmp_path)
+    slug = store.save(ConfigSet(name="Chat"))
+    store.replace(slug, ConfigSet(name="Chat", notes="updated"))
+    assert store.get(slug).notes == "updated"
+
+
+def test_replace_refuses_a_slug_with_nothing_stored(tmp_path):
+    store = SetStore(tmp_path)
+    with pytest.raises(ValueError):
+        store.replace("nope", ConfigSet(name="Chat"))
+
+
+def test_replace_writes_to_the_reserved_slug(tmp_path):
+    """Exists precisely so adopt can write back to '_previous' — save()
+    would refuse it (slugify('· previous') collides with the reserved
+    slug), but replace() bypasses name-derived slugging entirely."""
+    store = SetStore(tmp_path)
+    store.save_previous(ConfigSet(name=PREVIOUS_NAME))
+    store.replace(RESERVED_SLUG, ConfigSet(name=PREVIOUS_NAME, notes="reverted-from"))
+    assert store.get(RESERVED_SLUG).notes == "reverted-from"
+
+
 # ===========================================================================
 # plan_apply — pure diff
 # ===========================================================================
@@ -399,6 +454,21 @@ def test_load_uses_world_default_route_when_no_durable():
     assert plan_apply(cfg, world) == [
         {"step": "load_lemonade", "model": "extra.world.gguf"}
     ]
+
+
+def test_load_prefers_ephemeral_explicit_model_over_durable():
+    """[c45] Model precedence: ephemeral-explicit > durable > world default —
+    a set that names the exact model to reload (·previous) must not lose it
+    to a durable section naming something else."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.route.gguf")
+    cfg = ConfigSet(
+        name="explicit",
+        durable={"default_route_model": "extra.durable.gguf", "activate_model_id": "cat-1"},
+        ephemeral={"lemonade": {"state": "loaded", "model": "extra.explicit.gguf"}},
+    )
+    plan = plan_apply(cfg, world)
+    load = next(s for s in plan if s["step"] == "load_lemonade")
+    assert load["model"] == "extra.explicit.gguf"
 
 
 def test_no_model_to_load_warn():
@@ -856,6 +926,46 @@ def test_previous_captures_pre_apply_reality(tmp_path):
     assert prev.durable.default_route_model == "extra.d.gguf"
     assert prev.durable.activate_model_id is None
     assert prev.notes
+    assert prev.ephemeral.lemonade.model == "extra.live.gguf"
+
+
+def test_previous_set_records_the_actual_loaded_model():
+    """[c45] _previous_set must stamp the model that was ACTUALLY loaded,
+    not leave it to the default route — the fixture deliberately gives
+    them different values so a wrong read cannot pass."""
+    world = make_world(
+        lemonade=("loaded", "extra.foo.gguf"),
+        default_route="extra.Qwen-default.gguf",
+    )
+    prev = _previous_set(world)
+    assert prev.ephemeral.lemonade.model == "extra.foo.gguf"
+
+
+def test_previous_set_unloaded_records_no_model():
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    prev = _previous_set(world)
+    assert prev.ephemeral.lemonade.model is None
+
+
+def test_previous_apply_plans_the_actual_model_not_the_route_default():
+    """The docstring's 'ephemeral revert always works' promise: foo was
+    loaded, set parked lemonade, reverting must reload foo — not the
+    default-route model (fixture deliberately gives the two DIFFERENT
+    values so the wrong join cannot pass)."""
+    world = make_world(
+        lemonade=("unloaded", None), default_route="extra.Qwen-default.gguf"
+    )
+    prev = ConfigSet(
+        name=PREVIOUS_NAME,
+        ephemeral={
+            "lemonade": {"state": "loaded", "model": "extra.foo.gguf"},
+            "comfyui": {"state": "leave"},
+            "hipfire": {"state": "parked"},
+        },
+    )
+    steps = plan_apply(prev, world)
+    load = next(s for s in steps if s["step"] == "load_lemonade")
+    assert load["model"] == "extra.foo.gguf"
 
 
 def test_previous_durable_none_when_no_default_route(tmp_path):
@@ -1419,3 +1529,19 @@ def test_adopt_selective_rejects_malformed_key_entries(tmp_path, monkeypatch):
         "keys": [{"scope": "engines/sparky/vllm"}],  # missing "key"
     })
     assert resp.status_code == 422
+
+
+def test_adopt_previous_writes_back_to_the_reserved_slug(tmp_path, monkeypatch):
+    """[c50] slugify('· previous') == 'previous' ∈ _RESERVED_SLUGS, so
+    save() rightly refuses — adopt must write to the slug it READ from
+    (store.replace), not derive one from the name."""
+    client, deck = _make_deck_app(tmp_path, monkeypatch)
+    deck["set_store"].save_previous(ConfigSet(name=PREVIOUS_NAME))
+    deck["settings_store"].put("engines", "sparky/vllm", "args", {"x": "NEW"})
+
+    resp = client.post(f"/api/sets/{RESERVED_SLUG}/adopt", json={"mode": "current"})
+
+    assert resp.status_code == 200
+    updated = deck["set_store"].get(RESERVED_SLUG)
+    assert updated.name == PREVIOUS_NAME
+    assert updated.settings_snapshot == deck["settings_store"].get()

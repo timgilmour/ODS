@@ -638,7 +638,46 @@ def test_sets_list_separates_previous_and_filters_it_out_of_sets(tmp_path, monke
 def test_sets_list_previous_null_when_absent(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     resp = TestClient(app).get("/api/sets")
-    assert resp.json() == {"sets": [], "previous": None}
+    assert resp.json() == {"sets": [], "previous": None, "unreadable": []}
+
+
+# --- per-file isolation [c44] ---
+
+
+def test_sets_list_surfaces_unreadable_slugs_without_downing_the_route(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["set_store"].save(ConfigSet(name="Chat"))
+    (tmp_path / "sets" / "bad.json").write_text('{"name": "bad", "unknown_field": 1}')
+
+    resp = TestClient(app).get("/api/sets")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [s["name"] for s in body["sets"]] == ["Chat"]
+    assert body["unreadable"] == ["bad"]
+
+
+def test_sets_get_of_corrupt_set_is_422(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    sets_dir = tmp_path / "sets"
+    sets_dir.mkdir(parents=True, exist_ok=True)
+    (sets_dir / "bad.json").write_text('{"name": "bad", "unknown_field": 1}')
+    resp = TestClient(app).get("/api/sets/bad")
+    assert resp.status_code == 422
+
+
+def test_delete_route_removes_a_corrupt_set(tmp_path, monkeypatch):
+    """The recovery path: DELETE must work precisely when the file can't
+    parse — that is the only API path to remove it."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    sets_dir = tmp_path / "sets"
+    sets_dir.mkdir(parents=True, exist_ok=True)
+    (sets_dir / "bad.json").write_text('{"name": "bad", "unknown_field": 1}')
+
+    resp = TestClient(app).delete("/api/sets/bad")
+
+    assert resp.status_code == 200
+    assert not (sets_dir / "bad.json").exists()
 
 
 # ===========================================================================

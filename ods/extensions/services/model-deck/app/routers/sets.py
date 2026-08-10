@@ -71,10 +71,14 @@ _DEFAULT_DURATION = 5
 
 @router.get("")
 def list_sets(request: Request) -> dict:
-    all_sets = request.app.state.deck["set_store"].list()
+    store = request.app.state.deck["set_store"]
+    all_sets = store.list()
     previous = next((cfgset for cfgset in all_sets if cfgset.name == PREVIOUS_NAME), None)
     user_sets = [cfgset for cfgset in all_sets if cfgset.name != PREVIOUS_NAME]
-    return {"sets": user_sets, "previous": previous}
+    # unreadable() [c44]: one bad file must not down this route (list()
+    # already skips it) — additive field, surfaced so a recovery UI can
+    # offer to delete it; unknown fields are ignored by older clients.
+    return {"sets": user_sets, "previous": previous, "unreadable": store.unreadable()}
 
 
 @router.post("")
@@ -107,7 +111,14 @@ def delete_set(slug: str, request: Request) -> dict:
     if slug == RESERVED_SLUG:
         raise HTTPException(status_code=403, detail="cannot delete the reserved revert snapshot")
     store = request.app.state.deck["set_store"]
-    if store.get(slug) is None:
+    try:
+        missing = store.get(slug) is None
+    except ValueError:
+        # Present but corrupt [c44]: exactly the file this recovery path
+        # exists to remove — DELETE must not itself fail on the invalid
+        # JSON it's here to clear out.
+        missing = False
+    if missing:
         raise HTTPException(status_code=404, detail=f"unknown set {slug!r}")
     store.delete(slug)
     return {"status": "ok"}
@@ -149,7 +160,12 @@ def adopt_set(slug: str, body: AdoptRequest, request: Request) -> ConfigSet:
         else adopt_selective(cfgset.settings_snapshot, current, body.keys)
     )
     updated = cfgset.model_copy(update={"settings_snapshot": new_snapshot})
-    store.save(updated)
+    # replace(), not save(): must write back to the slug it read FROM.
+    # save() derives the slug from the NAME, and slugify('· previous') ==
+    # 'previous' collides with the reserved slug save() refuses [c50] — the
+    # one set adopt is most useful on (reconciling · previous's settings
+    # snapshot) would otherwise 422.
+    store.replace(slug, updated)
     return updated
 
 

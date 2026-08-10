@@ -49,7 +49,7 @@ import threading
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
@@ -93,6 +93,10 @@ class Durable(BaseModel):
 class LemonadeEphemeral(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state: Literal["loaded", "unloaded"]
+    # The model a "loaded" goal means, when the set knows it. Stamped by
+    # _previous_set (revert must reload what WAS loaded, not the route
+    # default); None = pre-existing behavior (durable/default-route pick).
+    model: str | None = None
 
 
 class ComfyuiEphemeral(BaseModel):
@@ -199,17 +203,57 @@ class SetStore:
             text = self._path(slug).read_text()
         except FileNotFoundError:
             return None
-        return ConfigSet.model_validate_json(text)
+        try:
+            return ConfigSet.model_validate_json(text)
+        except ValidationError as exc:
+            # Present-but-invalid ≠ missing: a hand-edited file, or a set
+            # saved by a newer build read under a rolled-back image
+            # (extra='forbid'). Named so the router's 422 tells the operator
+            # WHICH file, and so delete can catch it and still remove it.
+            raise ValueError(f"stored set {slug!r} failed validation: {exc}") from exc
 
     def list(self) -> list[ConfigSet]:
-        """All stored sets, sorted by name (includes ``_previous`` if present)."""
+        """All parseable stored sets, sorted by name. Invalid files are
+        SKIPPED, not fatal — one bad file must not blank every healthy set
+        (and the listing is what the recovery UI needs). unreadable() names
+        the skipped ones."""
         if not self._dir.exists():
             return []
-        sets = [
-            ConfigSet.model_validate_json(path.read_text())
-            for path in self._dir.glob("*.json")
-        ]
+        sets = []
+        for path in sorted(self._dir.glob("*.json")):
+            try:
+                sets.append(ConfigSet.model_validate_json(path.read_text()))
+            except ValidationError:
+                continue
         return sorted(sets, key=lambda cfgset: cfgset.name)
+
+    # Return type quoted: the `list()` method above already bound the name
+    # `list` in this class's namespace, shadowing the builtin for any
+    # annotation evaluated after it — a bare `list[str]` here would try to
+    # subscript that method object instead of the builtin.
+    def unreadable(self) -> "list[str]":
+        """Slugs of stored files list() skipped. Separate read, same reason
+        diff_snapshot separates has_snapshot: 'skipped' is a fact the router
+        surfaces, not something to smuggle into the ConfigSet list."""
+        if not self._dir.exists():
+            return []
+        bad = []
+        for path in sorted(self._dir.glob("*.json")):
+            try:
+                ConfigSet.model_validate_json(path.read_text())
+            except ValidationError:
+                bad.append(path.stem)
+        return bad
+
+    def replace(self, slug: str, cfgset: ConfigSet) -> str:
+        """Overwrite the set ALREADY stored at ``slug`` — an update, never a
+        create. Exists for adopt: it must write back to the slug it read
+        from; deriving from the NAME would turn '· previous' into the
+        reserved slug save() refuses [c50]."""
+        if not self._path(slug).exists():
+            raise ValueError(f"no set stored at slug {slug!r}")
+        self._write(slug, cfgset)
+        return slug
 
     def delete(self, slug: str) -> None:
         """Remove the set stored under ``slug`` (no-op if absent)."""
@@ -442,10 +486,19 @@ def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None)
         steps.append({"step": "resume_hipfire"})
 
     # --- Load --------------------------------------------------------------
+    # Model precedence: ephemeral-explicit > durable > world default. A set
+    # that names the exact model it wants loaded (stamped by _previous_set,
+    # or authored directly) wins outright — falling through to durable/world
+    # default here is what silently reloaded the wrong model on a "·
+    # previous" revert [c45].
     if lem_desired == "loaded" and lem_world["state"] == "unloaded":
-        model = (
-            durable.default_route_model if durable is not None else world["default_route"]
-        )
+        model = eph.lemonade.model if (eph and eph.lemonade) else None
+        if model is None:
+            model = (
+                durable.default_route_model
+                if durable is not None
+                else world["default_route"]
+            )
         if model is None:
             steps.append({"step": "warn", "reason": "no-model-to-load"})
         else:
@@ -748,6 +801,11 @@ def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
     ephemeral mirrors current load/park state (comfyui is always "leave" — a
     freed VRAM cache can't be meaningfully un-freed); durable records the old
     default route with activate_model_id=None (world carries no catalog id).
+    lemonade's ``model`` is stamped with the ACTUAL loaded model (None when
+    unloaded), so reverting reloads what WAS resident rather than falling
+    through plan_apply's durable/world-default fallback — which, on the
+    ``· previous`` set itself (no durable section), meant the default ROUTE
+    model, not necessarily the one that was loaded [c45].
 
     ``settings_now`` (Task 9) is stamped straight into this set's own
     ``settings_snapshot``, so the one-click revert restores settings too:
@@ -756,9 +814,16 @@ def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
     if the original apply changed anything. ``None`` (no settings_store
     wired into the apply that produced this snapshot) keeps the pre-Task-9
     shape exactly — settings_snapshot stays None, same as an old set.
+
+    Note: an OLDER image (extra='forbid', no ``model`` field on
+    LemonadeEphemeral) reading a NEW ``_previous`` file written by this
+    function fails validation — which the per-file isolation above degrades
+    to a skipped set (``list()``/``unreadable()``), not a downed API. That
+    is the exact rollback scenario [c44] describes.
     """
     tenants = world["tenants"]
-    lem_state = "loaded" if tenants["lemonade"]["state"] == "loaded" else "unloaded"
+    lem_tenant = tenants["lemonade"]
+    lem_state = "loaded" if lem_tenant["state"] == "loaded" else "unloaded"
     hip_state = (
         "running" if tenants["hipfire"]["state"] in ("running", "loading") else "parked"
     )
@@ -773,7 +838,10 @@ def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
         notes=_PREVIOUS_NOTES,
         durable=durable,
         ephemeral={
-            "lemonade": {"state": lem_state},
+            "lemonade": {
+                "state": lem_state,
+                "model": lem_tenant["model"] if lem_state == "loaded" else None,
+            },
             "comfyui": {"state": "leave"},
             "hipfire": {"state": hip_state},
         },
