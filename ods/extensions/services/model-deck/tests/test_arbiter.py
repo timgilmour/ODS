@@ -22,6 +22,7 @@ import time
 from app.arbiter import HealSuppressor, Watcher, decide
 from app.characteristics import CharacteristicsStore
 from app.engines import EngineError, GuardError
+from app.engines.spark import boot_in_flight
 from app.events import tail_events
 # app.harvest's real sentinel, for the C2 remote-pair end-to-end tests below
 # (task 8): a hand-seeded option_catalog shape would bypass
@@ -1343,6 +1344,14 @@ class FakeSpark:
         return self._payload
 
     def swap(self, profile, force=False):
+        # The REAL client's boot-window guard, via the real shared judgement
+        # (app.engines.spark.boot_in_flight) — a fake that omits it hides
+        # guard regressions from every arbiter test.
+        status = self.status()
+        serving = status.get("serving") or {}
+        if not serving.get("endpoint_ok") and not force and boot_in_flight(
+                {"swap_status": status.get("swap_status"), "serving": serving}):
+            raise GuardError("previous swap is still booting")
         self.calls.append(("swap", profile))
         if self.swap_fail is not None:
             raise self.swap_fail

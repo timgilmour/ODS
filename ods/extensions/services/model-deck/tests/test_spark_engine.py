@@ -175,6 +175,15 @@ def test_get_compose_returns_the_node_agents_text_field():
     assert client.get_compose("heretic") == text
 
 
+def test_get_compose_missing_text_is_engine_error():
+    def handler(request):
+        assert request.url.path == "/v1/node/profile/heretic/compose"
+        return httpx.Response(200, json={"profile": "heretic"}, request=request)
+    client = _client(handler)
+    with pytest.raises(EngineError):
+        client.get_compose("heretic")
+
+
 # --- settings (node-settings mech, Plan C2 Task 7) ---
 
 _DOCUMENT = {"args": {"max-model-len": "131072"}, "env": {"V": "1"},
@@ -276,6 +285,19 @@ def test_models_raises_engineerror_on_garbage_200_body():
         client.models()
 
 
+# --- busy_requests (metric line parsing) ---
+
+def test_busy_requests_nonfinite_metric_is_engine_error():
+    # float('NaN')/float('1e999') parse fine but int(total) downstream would
+    # crash outside the EngineError vocabulary -- must be caught here.
+    def handler(request):
+        return httpx.Response(200, text="vllm:num_requests_running NaN\n",
+                              request=request)
+    client = _client(_node_handler(), metrics_handler=handler)
+    with pytest.raises(EngineError):
+        client.busy_requests("vllm")
+
+
 # --- swap guards ---
 
 def test_swap_posts_profile_and_returns_request_id():
@@ -375,9 +397,14 @@ def test_swap_maps_node_404_to_engineerror():
 # the whole autotune window was swappable with no warning) ---
 
 def test_swap_refuses_while_previous_swap_still_booting():
+    # A RECENT ts, not a hardcoded past date (away-from-default rule): the
+    # guard now shares boot_in_flight's recency check, so a stale ts would
+    # make this pass for the wrong reason (see the expired-window test
+    # below, which is the actual regression this bug fixes).
+    recent = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     handler = _node_handler(
         swap_status={"state": "done", "profile": "laguna", "id": "u0",
-                     "message": "swap launched", "ts": "2026-07-30T22:35:02Z"},
+                     "message": "swap launched", "ts": recent},
         serving={"model": None, "endpoint_ok": False, "container_status": None})
     client = _client(handler)
     with pytest.raises(GuardError) as exc:
@@ -387,12 +414,28 @@ def test_swap_refuses_while_previous_swap_still_booting():
 
 
 def test_swap_force_overrides_boot_window_guard():
+    # Same recency requirement as above: force must override a GENUINELY
+    # in-flight guard, not a guard that was already going to no-op.
+    recent = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     handler = _node_handler(
         swap_status={"state": "done", "profile": "laguna", "id": "u0",
-                     "message": "swap launched", "ts": "2026-07-30T22:35:02Z"},
+                     "message": "swap launched", "ts": recent},
         serving={"model": None, "endpoint_ok": False, "container_status": None})
     client = _client(handler)
     assert client.swap("mm27b", force=True)["id"] == "u1"
+
+
+def test_swap_allowed_when_boot_window_has_expired():
+    """swap_status 'done' persists forever after a successful swap; a model
+    dead 2h later must be swappable without force (the reconciler's restore
+    path is forceless — spark.py's guard was the 26-hour class reborn)."""
+    two_hours_ago = (datetime.now(UTC) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    handler = _node_handler(
+        swap_status={"state": "done", "profile": "laguna", "id": "u0",
+                     "message": "swap launched", "ts": two_hours_ago},
+        serving={"model": None, "endpoint_ok": False, "container_status": None})
+    client = _client(handler)
+    assert client.swap("mm27b")["id"] == "u1"
 
 
 def test_swap_allowed_when_endpoint_down_with_failed_last_swap():

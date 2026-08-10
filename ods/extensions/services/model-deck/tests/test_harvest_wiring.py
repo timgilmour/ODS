@@ -64,6 +64,19 @@ def test_spark_catalog_exec_raises_engine_error_when_none_yet():
         SparkCatalogExec(FakeClient())("sparky", "vllm", "python3", "src")
 
 
+def test_spark_catalog_exec_raises_engine_error_for_partial_catalog():
+    """node-agent serves older-schema catalogs by design
+    (node-agent/settings_store.py:88-110); a partial one must surface as the
+    EngineError the harvest contract catches (arbiter.py:424-426), not
+    KeyError."""
+    class FakeClient:
+        def get_catalog(self):
+            return {"catalog": {"harvested_ts": "2026-08-10"}}
+
+    with pytest.raises(EngineError):
+        SparkCatalogExec(FakeClient())("sparky", "vllm", "python3", "src")
+
+
 def test_router_dispatches_on_the_pair_and_rejects_unknown():
     calls = []
     router = EngineExecRouter({("sparky", "vllm"):

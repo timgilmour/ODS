@@ -32,17 +32,23 @@ Guard order in swap(), mirroring hipfire.py's park():
      misconfigured scrape or a renamed gauge must not silently read as
      "idle" and let a swap kill an in-flight generation with no signal
      anywhere (Tim's ruling, 2026-08-04).
-  3. boot-window guard — endpoint down + last swap "done"/"swapping" means
-     a boot (possibly a ~15 min autotune) is in flight; refuse rather than
-     silently restart it. force=True interrupts — which is also the
-     recovery path for a profile whose boot has wedged. A last swap in
-     state "error" never started a boot, so swapping away needs no force
-     (found live 2026-07-30: helper "done" just means swap.sh launched).
+  3. boot-window guard — ONE judgement, shared with swap_in_progress() and
+     the observer: boot_in_flight(status) below, which weighs THREE things,
+     not just state — endpoint down + last swap "done"/"swapping" + the
+     swap being recent (_BOOT_WINDOW_MAX_S). The state check alone would
+     refuse forever: "done" persists after a successful swap, so a model
+     that died hours later would read as "still booting" and be shielded
+     from every forceless restore (the 26-hour hipfire failure, reproduced
+     on the spark). force=True interrupts — which is also the recovery path
+     for a profile whose boot has wedged. A last swap in state "error"
+     never started a boot, so swapping away needs no force (found live
+     2026-07-30: helper "done" just means swap.sh launched).
 The node-agent's own 409 (pending request / helper mid-swap) surfaces as
 BusyError; its 4xx validation answers surface as EngineError.
 """
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -200,7 +206,12 @@ class SparkClient(NodeAgentHTTP):
         /v1/node/profile/{profile}/compose) — the adopt sweep's one source
         of a profile's real launch configuration (app.compose_import,
         app.routers.settings' adopt route)."""
-        return self._node_get(f"/v1/node/profile/{profile}/compose")["text"]
+        body = self._node_get(f"/v1/node/profile/{profile}/compose")
+        text = body.get("text") if isinstance(body, dict) else None
+        if not isinstance(text, str):
+            raise EngineError(
+                f"compose response for profile {profile!r} has no 'text' field")
+        return text
 
     def get_settings(self, profile: str) -> dict:
         """`profile`'s settings document (GET /v1/node/profile/{profile}/
@@ -254,9 +265,14 @@ class SparkClient(NodeAgentHTTP):
             if line.startswith(metric_prefixes):
                 matched = True
                 try:
-                    total += float(line.rsplit(None, 1)[-1])
+                    value = float(line.rsplit(None, 1)[-1])
                 except ValueError:
                     raise EngineError(f"unparseable metric line: {line!r}")
+                if not math.isfinite(value):
+                    # float('NaN')/float('1e999') parse fine but int(total)
+                    # below would crash outside the EngineError vocabulary.
+                    raise EngineError(f"non-finite metric value: {line!r}")
+                total += value
         if not matched and engine in _STRICT_BUSY_ENGINES:
             raise EngineError(
                 f"/metrics matched none of {metric_prefixes!r} for engine "
@@ -314,8 +330,14 @@ class SparkClient(NodeAgentHTTP):
             # documented limitation: no ComfyUI queue visibility — the
             # operator owns not swapping mid-render).
         if not serving.get("endpoint_ok") and not force:
-            last = self._node_get("/v1/node/profiles").get("swap_status") or {}
-            if last.get("state") in ("swapping", "done"):
+            profiles_payload = self._node_get("/v1/node/profiles")
+            # ONE judgement, shared with swap_in_progress() and the observer:
+            # boot_in_flight weighs state AND endpoint AND recency. The state
+            # check alone ("done" persists forever after a successful swap)
+            # would refuse every forceless restore of a long-dead model.
+            if boot_in_flight({"swap_status": profiles_payload.get("swap_status"),
+                               "serving": serving}):
+                last = profiles_payload.get("swap_status") or {}
                 raise GuardError(
                     f"previous swap ({last.get('profile')}) is still booting "
                     "(a first boot can autotune ~15 min); wait for the "
@@ -329,7 +351,12 @@ class SparkClient(NodeAgentHTTP):
             raise BusyError(resp.text)
         if not resp.is_success:
             raise EngineError(resp.text)
-        body = resp.json()
+        try:
+            body = resp.json()
+        except json.JSONDecodeError as exc:
+            raise EngineError(f"non-JSON response from /v1/node/swap: {exc}") from exc
+        if not isinstance(body, dict):
+            raise EngineError(f"unexpected /v1/node/swap response shape: {body!r}")
         return {"id": body.get("id"), "profile": profile}
 
 
@@ -373,4 +400,12 @@ class SparkCatalogExec:
         catalog = self._client.get_catalog().get("catalog")
         if catalog is None:
             raise EngineError("no harvested catalog on the node yet")
-        return catalog["image_id"], catalog["probe_output"]
+        image_id = catalog.get("image_id")
+        probe_output = catalog.get("probe_output")
+        if not isinstance(image_id, str) or not isinstance(probe_output, str):
+            # Older-schema/partial catalogs are a SUPPORTED node-agent state
+            # (deck and agent deploy independently); the harvest contract
+            # catches EngineError, never KeyError (arbiter.py:424-426).
+            raise EngineError("harvested catalog missing image_id/probe_output "
+                              "(older node-agent schema?)")
+        return image_id, probe_output
