@@ -30,8 +30,16 @@ def test_no_credential_field_anywhere_on_the_wire(deck):
 
 
 def test_sparky_seed_preserved_the_key_vocabulary(deck):
-    # The riskiest claim in the whole feature: the seed id must be exactly
-    # spark_node_id(), or intent/settings/provenance silently orphan.
+    # What this actually proves: the sparky key vocabulary (lifecycle's
+    # sparky/ keys, provenance's oci:sparky:* artifacts) is still readable
+    # and coherent post-deploy. It does NOT prove this boot's seed used the
+    # right id — intent.json and provenance.json are additive stores with
+    # months of prior sparky-keyed history, and the provenance pass keys off
+    # the hardcoded spark_node_id() constant regardless of what nodes.json
+    # says, so a wrong id written by seed_if_missing would not turn this
+    # test red. test_registry_lists_local_and_sparky (a fresh GET /api/nodes
+    # read) is the one that proves THIS seed used the right id; the two
+    # together are the real coverage.
     state = deck.get("/api/state").json()
     assert any(k.startswith("sparky/") for k in state["lifecycle"]), (
         "lifecycle lost its sparky/ keys after the registry migration")
