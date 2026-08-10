@@ -6,7 +6,13 @@ GuardError/ValueError left to the app-wide handlers (409/422), no auth.
 THE CREDENTIAL IS WRITE-ONLY THROUGH THIS API. It is accepted on POST/PUT,
 surfaced only as `credential_set`, and never appears in any response, error
 body, or event detail — tests/test_nodes_router.py greps the literal out of
-every path. Event details carry field NAMES, never values.
+every path (a 422 for a missing required field also cannot echo it: see the
+RequestValidationError handler in app/main.py, which strips pydantic's
+`input` key from every error for exactly this reason). For the credential
+specifically: `node-updated`'s event detail carries the field NAME
+("credential") when one was supplied, never its value — other fields
+(e.g. `label`) may still appear by value elsewhere (node-added logs
+`label`), so this guarantee is about the credential, not every field.
 
 Event kinds ride ui/src/model/eventSeverity.ts's suffix convention
 (-failed => failure severity), so the Events tab needs zero new mapping.
@@ -101,6 +107,10 @@ def delete_node(node_id: str, request: Request) -> dict:
 def test_connection(body: NodeTestBody, request: Request) -> dict:
     deck = request.app.state.deck
     store = deck["node_store"]
+    if body.node_id and body.address:
+        # Literal-and-declared: two targets in one call is ambiguous input,
+        # not "node_id wins" — refuse rather than silently pick one.
+        raise ValueError("provide node_id or address, not both")
     if body.node_id:
         entry = store.get(body.node_id)
         if entry is None:

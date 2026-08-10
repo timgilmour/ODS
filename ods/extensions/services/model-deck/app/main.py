@@ -35,6 +35,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -424,6 +426,30 @@ def create_app() -> FastAPI:
     @app.exception_handler(ValueError)
     async def _handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(RequestValidationError)
+    async def _handle_request_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # pydantic v2's "missing" (required-field-absent) errors carry the
+        # ENTIRE parent object as `input` — for app/routers/nodes.py that is
+        # the request body verbatim, credential included. FastAPI's default
+        # RequestValidationError handler serializes exc.errors() as-is, so
+        # without this override a 422 for "address omitted" echoes the
+        # caller's credential back in the response body. Stripping `input`
+        # from every error (not just ones whose loc mentions "credential")
+        # closes the whole class for every route/body shape, present and
+        # future — a name-coupled redaction would silently miss the next
+        # secret field some other router adds. type/loc/msg carry everything
+        # a caller needs to fix the request; only the raw echoed value goes.
+        # jsonable_encoder (not a bare dict) because pydantic errors can
+        # carry non-JSON-native objects in `ctx` (e.g. a validator's raised
+        # ValueError) — matches FastAPI's own default handler's encoding
+        # step, minus the `input` key.
+        errors = [{k: v for k, v in error.items() if k != "input"}
+                  for error in exc.errors()]
+        return JSONResponse(status_code=422,
+                            content={"detail": jsonable_encoder(errors)})
 
     @app.get("/health")
     def health() -> dict[str, str]:

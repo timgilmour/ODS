@@ -72,6 +72,23 @@ def test_credential_never_echoed_anywhere(client):
         assert SECRET not in resp.text, f"credential leaked in {resp.request.url}"
 
 
+def test_missing_required_field_422_never_echoes_credential(client):
+    # pydantic v2's "missing" errors carry the ENTIRE parent object as
+    # `input` by default — for NodeCreate that's the request body verbatim,
+    # credential included. FastAPI's default RequestValidationError handler
+    # serializes exc.errors() as-is; app/main.py overrides it to strip
+    # `input` from every error so this can never leak, for any route.
+    resp = client.post("/api/nodes", json={"id": "foo", "label": "Foo",
+                                            "credential": SECRET})  # address omitted
+    assert resp.status_code == 422
+    assert SECRET not in resp.text
+    errors = resp.json()["detail"]
+    missing = next(e for e in errors if e["loc"][-1] == "address")
+    assert missing["type"] == "missing"
+    assert "field required" in missing["msg"].lower()
+    assert "input" not in missing
+
+
 def test_duplicate_id_409_bad_slug_422(client):
     _create(client)
     assert _create(client).status_code == 409
@@ -122,3 +139,12 @@ def test_test_connection_failure_is_ok_false_and_evented(client):
 
 def test_test_connection_requires_a_target(client):
     assert client.post("/api/nodes/test", json={}).status_code == 422
+
+
+def test_test_connection_rejects_both_targets(client):
+    # Literal-and-declared: node_id + address together is ambiguous input,
+    # refused rather than silently preferring node_id.
+    _create(client)
+    resp = client.post("/api/nodes/test",
+                       json={"node_id": "hera", "address": "http://other:7720"})
+    assert resp.status_code == 422
