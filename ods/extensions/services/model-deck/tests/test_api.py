@@ -277,7 +277,7 @@ def test_api_state_shape(tmp_path, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle",
-                                "provenance"}
+                                "provenance", "nodes"}
     assert body["policy"] == DEFAULT_POLICIES
     assert body["models"] == [{"file": "m.gguf", "size": 1, "footprint": 2}]
     assert body["world"]["default_route"] == "extra.model.gguf"
@@ -1384,12 +1384,24 @@ def test_state_reports_node_identity(tmp_path, monkeypatch):
     assert body["node"] == {"id": "local", "label": "local"}
 
 
-def test_state_node_label_follows_settings(tmp_path, monkeypatch):
-    app, deck = make_app(tmp_path, monkeypatch)
-    deck["settings"].node_label = "autarch"
-    client = TestClient(app)
+def test_state_node_label_comes_from_the_registry(tmp_path, monkeypatch):
+    """Label provenance: seeded from MODEL_DECK_NODE_LABEL on first boot,
+    then owned by the registry (app/node_store.py's seed_if_missing) -- a
+    changed env var after that seed already exists has no effect. That
+    second half is the valuable assertion: it pins seed-once at the API
+    surface, not just at the store level (see tests/test_nodes_wiring.py's
+    test_registry_wins_over_changed_env_after_seed for the same pin on the
+    spark entry)."""
+    monkeypatch.setenv("MODEL_DECK_NODE_LABEL", "autarch")
+    app1, _ = make_app(tmp_path, monkeypatch)
+    assert TestClient(app1).get("/api/state").json()["node"]["label"] == "autarch"
 
-    assert client.get("/api/state").json()["node"]["label"] == "autarch"
+    # Same data dir (set once, for this whole test, by the autouse
+    # _model_deck_default_data_dir fixture) -- env now points elsewhere, but
+    # nodes.json already exists, so the registry entry wins.
+    monkeypatch.setenv("MODEL_DECK_NODE_LABEL", "elsewhere")
+    app2, _ = make_app(tmp_path, monkeypatch)
+    assert TestClient(app2).get("/api/state").json()["node"]["label"] == "autarch"
 
 
 def test_node_label_empty_env_var_falls_through_to_default(monkeypatch):
