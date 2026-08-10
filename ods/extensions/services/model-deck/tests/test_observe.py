@@ -296,6 +296,25 @@ def test_spark_observer_backoff_grows_and_is_capped():
     assert spark.calls == 4
 
 
+def test_spark_observer_backoff_survives_days_of_failures():
+    """~3.5 days of failed probes (>1022 at the 300 s cap) must keep
+    returning the unreachable placeholder, not raise OverflowError from
+    15.0 * 2**huge — 2**(failures-1) is a Python bignum and float
+    multiplication against it overflows well before a real node stays down
+    that long."""
+    from app.engines import EngineError
+
+    clock = _Clock()
+    spark = _CountingSpark(raises=EngineError("connection refused"))
+    obs = _observer(spark, clock=clock)
+
+    for _ in range(1200):
+        status = obs.status()
+        assert status == {"profile": None, "serving": None,
+                          "reachable": False, "swap_in_progress": False}
+        clock.advance(301.0)         # past every possible backoff
+
+
 def test_spark_observer_recovers_immediately_after_a_success():
     from app.engines import EngineError
 

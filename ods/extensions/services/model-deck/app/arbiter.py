@@ -966,7 +966,18 @@ class Watcher:
                 if fields:
                     self._characteristics_store.put_fields(f"model/{child.name}", fields)
 
-        for client in self._live_fact_sources().values():
+        for name, client in self._live_fact_sources().items():
+            # Spark alone is gated on the observer's cached verdict: it is
+            # the one source with a backoff (SparkObserver) worth respecting
+            # — a direct client.models() call here would block on the same
+            # 5 s timeouts the backoff exists to avoid. Keyed on `name`, not
+            # applied to the whole loop, so a future non-spark source (see
+            # this method's docstring) still gets probed every pass even
+            # while spark is down.
+            if name == "spark":
+                view = self._spark_observer.status()
+                if view is not None and not view.get("reachable", False):
+                    continue
             try:
                 body = client.models()
             except (EngineError, BusyError):
@@ -1160,6 +1171,12 @@ class Watcher:
         coincidentally-equal different string; see _configurable_engines'
         docstring for the live-only bug that rule guards against."""
         if self._spark is None:
+            return
+        # The observer's cached verdict, no fresh probe: while sparky is down
+        # every direct call below would block on 5 s timeouts the backoff
+        # exists to avoid — and the pass would learn nothing anyway.
+        view = self._spark_observer.status()
+        if view is not None and not view.get("reachable", False):
             return
         node = spark_node_id()
         try:

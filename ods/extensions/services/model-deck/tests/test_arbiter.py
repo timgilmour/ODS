@@ -1828,6 +1828,21 @@ def test_derive_pass_retains_last_known_facts_when_spark_unreachable(tmp_path):
     assert store.get()["model/heretic"]["served"]["value"] is True
 
 
+def test_derive_pass_skips_spark_probe_while_observer_says_unreachable(tmp_path):
+    """Mirrors the provenance-pass guard below: the observer's cached
+    backoff exists precisely so a down node costs nothing between probes —
+    the live-facts loop calling spark.models() directly regardless would
+    defeat it every settings.derive_interval_s."""
+    store = CharacteristicsStore(tmp_path / "c.json")
+    spark = FakeSpark(raises=EngineError("connection refused"))
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, spark=spark)
+
+    watcher._spark_observer.status()  # seed the cache: unreachable
+    watcher._derive_pass()
+
+    assert spark.models_calls == 0
+
+
 # ===========================================================================
 # WATCHER RECORDS THE INTENT IT AUTHORS — 2026-08-06 reconciler-intent fix
 # ===========================================================================
@@ -2797,19 +2812,27 @@ def test_provenance_pass_does_not_resurrect_a_deliberately_cleared_watch(tmp_pat
 
 class _FakeSpark:
     """The three node-agent reads Watcher._provenance_spark makes
-    (app/arbiter.py:1166, 1172, 1176) and nothing else."""
+    (app/arbiter.py:1166, 1172, 1176) and nothing else. ``calls`` counts all
+    three, so a test can assert none of them ran."""
 
-    def __init__(self, composes, catalog=None):
+    def __init__(self, composes, catalog=None, raises=None):
         self.composes = composes
         self.catalog = catalog
+        self.raises = raises
+        self.calls = 0
 
     def status(self):
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
         return {"profiles": [{"name": name} for name in sorted(self.composes)]}
 
     def get_compose(self, profile):
+        self.calls += 1
         return self.composes[profile]
 
     def get_catalog(self):
+        self.calls += 1
         return {"catalog": self.catalog}
 
 
@@ -2852,6 +2875,22 @@ def test_provenance_pass_derives_no_spark_watch_without_a_declared_origin(tmp_pa
     watcher.tick()
 
     assert store.entry(_SPARK_ARTIFACT)["watch"] == []
+
+
+def test_provenance_spark_skips_probes_while_observer_says_unreachable(tmp_path):
+    """With the observer caching 'unreachable', _provenance_spark must make
+    ZERO direct spark calls — the backoff exists precisely so a down node
+    costs nothing between provenance passes either."""
+    store = _prov_store(tmp_path)
+    spark = _FakeSpark({"heretic": _spark_compose(_SPARK_REFERENCE)},
+                        raises=EngineError("down"))
+    watcher = _watcher(tmp_path, provenance_store=store, spark=spark)
+
+    watcher._spark_observer.status()  # seed the cache: unreachable
+    spark.calls = 0  # only calls made by the pass under test should count
+    watcher._provenance_pass()
+
+    assert spark.calls == 0
 
 
 def test_a_watch_source_set_watch_refuses_does_not_abandon_the_rest_of_the_pass(
