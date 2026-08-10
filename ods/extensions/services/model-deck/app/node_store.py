@@ -41,7 +41,12 @@ from pathlib import Path
 
 from app.engines import GuardError
 
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# `\Z`, not `$`: Python's `$` also matches just BEFORE a trailing newline, so
+# "sparky\n" satisfied a pattern meant to be fully anchored. The UI mirrors
+# this pattern in JS, where `$` does not admit that — the two vocabularies
+# have to agree, and an id is a KEY (intent, settings scopes, oci:<id>:
+# provenance all attach through it) [max-review c33].
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 _AGENT_KINDS = {"local", "node-agent"}
 _PATCHABLE = {"label", "address", "serving_address"}
 _ALLOWED = {"id", "label", "agent_kind", "address", "serving_address"}

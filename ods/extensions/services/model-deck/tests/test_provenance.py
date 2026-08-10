@@ -3,6 +3,7 @@
 import copy
 import inspect
 import json
+from unittest import mock
 
 import pytest
 
@@ -1279,3 +1280,28 @@ def test_an_unkeyable_declared_source_still_cannot_reach_a_set_comprehension(tmp
     entry = store.entry(_AID)
     assert [s["id"] for s in entry["update"]["sources"]] == ["s"]
     assert len(entry["watch"]) == 3            # the operator's own text, kept
+
+
+def test_failed_quarantine_is_logged_not_swallowed(tmp_path, caplog):
+    """[max-review c5] A quarantine that cannot move the file used to
+    `except OSError: pass` — the one thing louder than a corrupt document is
+    a corrupt document nobody is told about. It still must NOT raise:
+    raising here turns corrupt-file handling into the crash loop the
+    quarantine exists to prevent.
+    """
+    import logging
+
+    path = tmp_path / "provenance.json"
+    path.write_text("{ not json")
+    store = ProvenanceStore(path, tmp_path / "history.jsonl")
+
+    def boom(*args, **kwargs):
+        raise OSError("read-only filesystem")
+
+    with caplog.at_level(logging.WARNING, logger="app.provenance"):
+        with mock.patch("app.provenance.os.replace", boom):
+            assert store.get() == {}  # degrades to empty, does not raise
+
+    assert any("could not quarantine" in r.message.lower()
+               or "could not quarantine" in r.getMessage().lower()
+               for r in caplog.records)

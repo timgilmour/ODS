@@ -43,12 +43,15 @@ is a later spec gated on a socket-proxy permission decision.
 """
 
 import json
+import logging
 import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app import origins, provenance_history, updates
+
+_log = logging.getLogger(__name__)
 
 _SOURCE_DERIVED = "derived"
 _SOURCE_DECLARED = "declared"
@@ -295,8 +298,15 @@ class ProvenanceStore:
         target = self._path.with_name(f"{self._path.name}.corrupt-{stamp}")
         try:
             os.replace(self._path, target)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Loud, not raised: raising would turn corrupt-file handling into
+            # a crash loop (exactly what this quarantine exists to avoid),
+            # but a silent pass defeats the preservation it implements —
+            # the operator would never learn the document was unreadable
+            # [max-review c5]. The store has no events_path this deep, so the
+            # module logger carries it. The corrupt file stays where it is;
+            # the next _load() retries the quarantine.
+            _log.warning("could not quarantine corrupt %s: %s", self._path, exc)
 
     def _save(self, data: dict[str, dict]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

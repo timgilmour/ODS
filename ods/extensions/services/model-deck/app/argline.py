@@ -153,6 +153,20 @@ def _argv_tokens(settings: dict) -> list[str]:
                 parts.extend(str(v) for v in value)
         elif _looks_like_a_flag(value):
             parts.append(f"{flag}={value}")
+        elif not isinstance(value, (str, int, float)):
+            # Without this, the str() below rendered a mapping's PYTHON REPR
+            # straight into a launch argline — `--max-num-seqs {'a': 1}`
+            # [max-review c49]. There is no honest argline for a mapping, so
+            # refuse rather than coerce.
+            #
+            # The SECOND of two boundaries: normalize_args_map refuses these
+            # at the wire (PUT /api/settings -> 422). That gate cannot cover
+            # this one — this renderer also consumes settings read back from
+            # a settings.json that was hand-edited, or written before the
+            # gate existed. bool is excluded by the `is True` branch above,
+            # and list by its own branch, so this sees only the fall-through.
+            raise ValueError(
+                f"setting {key!r} has an unrenderable value: {value!r}")
         else:
             parts.append(flag)
             parts.append(str(value))
@@ -268,6 +282,16 @@ def _normalize_args_scalar(value):
         return value
     if isinstance(value, (int, float)):
         return str(value)
+    if isinstance(value, dict):
+        # The WIRE boundary [max-review c49]. PUT /api/settings takes JSON,
+        # so an object here is operator input, and there is no argline a
+        # mapping could mean — refuse it at entry (ValueError -> 422) rather
+        # than persisting it for _argv_tokens to trip over at launch time.
+        # Deliberately narrow: `None` and other types still pass through
+        # unchanged, per this function's documented "outside the axes"
+        # posture. The renderer holds the disk-side boundary this cannot
+        # reach (settings written before this gate, or hand-edited).
+        raise ValueError(f"setting value must not be a mapping, got {value!r}")
     return value
 
 
@@ -323,10 +347,17 @@ def normalize_args_map(values: dict) -> dict:
     """
     normalized = {}
     for key, value in values.items():
-        if key == POSITIONAL_KEY:
-            n = _normalize_positional_value(value)
-        else:
-            n = _normalize_args_value(value)
+        # The scalar normalizer refuses mappings (c49) but has no key in
+        # scope; an operator reading a 422 needs to know WHICH setting was
+        # refused, so the key is attached here — the one place that knows it,
+        # and one that covers the nested-in-a-list path too.
+        try:
+            if key == POSITIONAL_KEY:
+                n = _normalize_positional_value(value)
+            else:
+                n = _normalize_args_value(value)
+        except ValueError as exc:
+            raise ValueError(f"setting {key!r}: {exc}") from exc
         if n is _DROP:
             warnings.warn(
                 f"app.argline: empty list for args key {key!r} carries no "

@@ -116,3 +116,44 @@ def test_stored_json_is_human_readable(tmp_path):
 
     assert "\n" in path.read_text()
     assert json.loads(path.read_text())
+
+
+def test_put_fields_concurrent_writers_lose_nothing(tmp_path):
+    """Unlocked load-modify-save [max-review c4]: the watcher thread's derive
+    pass and HTTP request threads share ONE CharacteristicsStore, and
+    put_fields read the file, mutated, and wrote it back with nothing
+    serializing the three steps. Two threads writing DIFFERENT keys must both
+    land. Barrier-started so the interleave is real rather than incidental.
+
+    Unlocked, this fails two ways at once: a stale read swallows the other
+    thread's write, AND _save's atomic replace races itself — both threads
+    write the SAME `.tmp` path, so one os.replace hits a file the other
+    already moved (FileNotFoundError out of a background derive pass). Hence
+    asserting both that no thread raised and that every field landed.
+    IntentStore and SettingsStore already lock; this was the odd one out.
+    """
+    import threading
+
+    store = CharacteristicsStore(tmp_path / "characteristics.json")
+    start = threading.Barrier(2)
+    errors = []
+
+    def writer(key, value):
+        try:
+            start.wait(timeout=5)
+            for i in range(60):
+                store.put_fields(key, {f"f{i}": {"value": value, "source": "t",
+                                                 "derived_ts": "2026-08-10"}})
+        except Exception as exc:  # surfaced below; a raise here would be silent
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(k, k)) for k in ("alpha", "beta")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == []
+    data = store.get()
+    assert len(data.get("alpha", {})) == 60
+    assert len(data.get("beta", {})) == 60

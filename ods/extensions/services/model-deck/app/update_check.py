@@ -152,7 +152,22 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
                 available += 1
             for result in results:
                 _log_transitions(events_path, artifact_id, result, dedup)
-        except Exception:  # noqa: BLE001 — per-artifact isolation, see docstring
+        except Exception as exc:  # noqa: BLE001 — per-artifact isolation, see docstring
+            # Isolation, not silence [max-review c6]: one artifact's failure
+            # must not end the pass, but a fully silent `continue` meant an
+            # artifact could fail every pass forever with nothing anywhere to
+            # show for it.
+            #
+            # A DISTINCT kind from the whole-pass `update-check-error`
+            # (UpdateChecker's supervisor catch below), which carries
+            # {"error"} only. Reusing it here with an artifact_id would be
+            # one kind with two incompatible detail shapes — the vocabulary
+            # defect this module already documents at that catch. `-error`
+            # still ends in a suffix ui/src/model/eventSeverity.ts:27 reads
+            # as failure severity, so the Events tab needs no new mapping.
+            events.log_event(events_path, "update-check-artifact-error", {
+                "artifact_id": artifact_id,
+                "error": f"{type(exc).__name__}: {exc}"})
             continue
 
     return {"checked": checked, "available": available}

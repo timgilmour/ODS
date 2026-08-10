@@ -26,7 +26,12 @@ import shlex
 
 import pytest
 
-from app.argline import normalize_args_map, parse_argline, render_argline
+from app.argline import (
+    normalize_args_map,
+    parse_argline,
+    render_argline,
+    render_argv,
+)
 
 ROUND_TRIP_CASES = [
     {},
@@ -399,3 +404,54 @@ class TestRenderArgv:
 
         assert render_argline(settings) == " ".join(
             shlex.quote(t) for t in render_argv(settings))
+
+
+def test_argv_tokens_refuses_a_dict_value():
+    """[max-review c49] The else-branch fell through to str(value), so a dict
+    rendered its PYTHON REPR into a launch argline —
+    `--max-num-seqs {'a': 1}`. Refuse, don't coerce: there is no honest
+    argline for a mapping.
+
+    This is the DISK-side boundary. The wire gate (normalize_args_map,
+    below) cannot cover it: this renderer also consumes settings loaded from
+    a settings.json that was hand-edited, or written before that gate
+    existed.
+    """
+    with pytest.raises(ValueError, match="max-num-seqs"):
+        render_argv({"max-num-seqs": {"a": 1}})
+
+
+def test_argline_render_refuses_a_dict_value():
+    """Same guard, reached through the other public renderer — they share
+    _argv_tokens, and a guard placed in only one of them would let the shell
+    path through."""
+    with pytest.raises(ValueError, match="max-num-seqs"):
+        render_argline({"max-num-seqs": {"a": 1}})
+
+
+def test_argv_tokens_still_renders_the_scalars_it_should():
+    """The refusal must not catch the documented axes on its way past:
+    bools are bare-flag sentinels, lists have their own branch, and
+    str/int/float all render."""
+    assert render_argv({"flag": True}) == ["--flag"]
+    assert render_argv({"seqs": 4}) == ["--seqs", "4"]
+    assert render_argv({"ratio": 1.5}) == ["--ratio", "1.5"]
+    assert render_argv({"name": "v"}) == ["--name", "v"]
+    assert render_argv({"n": 4}) == ["-n", "4"]  # single char -> one dash
+
+
+def test_normalize_refuses_a_dict_value_at_the_wire():
+    """PUT /api/settings accepts JSON, so a dict value must be REFUSED at
+    entry (422) rather than persisted and rendered later
+    [[literal-declared-inputs]]. This is the WIRE boundary; the renderer
+    guard above cannot cover it, because by the time the renderer sees the
+    value it is already on disk and the operator is long gone."""
+    with pytest.raises(ValueError, match="max-num-seqs"):
+        normalize_args_map({"max-num-seqs": {"a": 1}})
+
+
+def test_normalize_refuses_a_dict_inside_a_list():
+    """A list is normalized element-wise, so the same value smuggled one
+    level down must be refused too."""
+    with pytest.raises(ValueError, match="max-num-seqs"):
+        normalize_args_map({"max-num-seqs": [1, {"a": 1}]})

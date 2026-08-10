@@ -3,8 +3,9 @@
 The write boundary is NOT "local vs remote". It is what each engine's
 capability descriptor declares:
 
-* ``api``          — lemonade: a live call, no reload.
-* ``env+restart``  — hipfire, comfyui: write env, reload later.
+* ``api``          — lemonade: a live call, no reload. DECLARED, NOT BUILT.
+* ``env+restart``  — hipfire, comfyui: write env, reload later. DECLARED,
+  NOT BUILT.
 * ``node-settings``— spark and future remote engines: ship a settings
   document to the node-agent (Plan C2 Task 7), whose host-side helper merges
   it into argv at the next swap. Ships and returns ``requires_reload`` —
@@ -20,7 +21,15 @@ applies launch-class settings is always a human click (Tim, 2026-08-04).
 
 Applying an EMPTY settings map is a no-op, never a wipe — "I have nothing to
 say about this engine" must not mean "clear its configuration".
+
+``api`` and ``env+restart`` are declared above because the descriptors name
+them, but NO engine client implements ``configure()`` or ``set_env()`` — they
+were never built. ``apply_settings`` refuses them explicitly rather than
+dispatching into an AttributeError [max-review c1/c12]. Today's only live
+caller (app.routers.spark) uses ``node-settings``.
 """
+
+from app.engines import EngineError
 
 MECHS = ("api", "env+restart", "node-settings", "none")
 
@@ -72,14 +81,16 @@ def apply_settings(
     if not values:
         return {"applied": False, "requires_reload": False, "reason": "no settings to apply"}
 
-    if mech == "api":
-        engine_client.configure(values)
-        return {"applied": True, "requires_reload": False, "reason": "applied live"}
-
-    # env+restart
-    engine_client.set_env(values)
-    return {
-        "applied": True,
-        "requires_reload": True,
-        "reason": "environment updated; reload to apply",
-    }
+    # Both remaining mechs are DECLARED in descriptors but UNBUILT: no engine
+    # client in app/engines implements configure() or set_env() (verified by
+    # grep across the package — only test fakes do). Dispatching would raise
+    # AttributeError deep inside a route, which reads as a deck bug rather
+    # than as "this was never built" [max-review c1/c12]. Refuse in the
+    # contract's own vocabulary instead; build the mech before restoring the
+    # dispatch.
+    #
+    # Placed AFTER the empty-values check above deliberately: applying
+    # nothing stays a no-op rather than becoming an error, which is what
+    # keeps "a save with no settings must not wipe an engine's config" true.
+    raise EngineError(
+        f"configure mech {mech!r} is declared but not implemented by any engine client")

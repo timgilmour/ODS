@@ -4,6 +4,7 @@ docstring for why that invariant holds structurally, not by convention.
 """
 
 import json
+from unittest import mock
 import pathlib
 import threading
 import types
@@ -766,3 +767,48 @@ def test_fetch_factory_reuses_one_http_client_across_ticks(store, tmp_path, monk
     assert len(calls) == 2
     assert calls[0] is not None
     assert calls[0] is calls[1]
+
+
+def test_a_failing_artifact_logs_an_event_and_the_pass_continues(store, tmp_path):
+    """[max-review c6] The per-artifact catch was fully silent, so an
+    artifact could fail every pass forever with nothing to show for it. It
+    must stay ISOLATED (the other artifacts still get verdicts) but become
+    loud, naming which artifact failed.
+
+    The kind is deliberately NOT `update-check-error`: that one is the
+    whole-pass supervisor's and carries {"error"} alone. Two detail shapes
+    under one kind is the vocabulary defect this module documents at that
+    catch, so this asserts the distinct kind explicitly.
+    """
+    watched(store, "oci:local:broken", {
+        "id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
+        "pinned": "v1.0.0", "order": "semver"})
+    watched(store, "oci:local:fine", {
+        "id": "t", "check": "git_tags", "remote": "https://github.com/c/d",
+        "pinned": "v1.0.0", "order": "semver"})
+
+    # Raised at the DISPATCH layer, not from `fetch`: a fetch that raises is
+    # caught inside dispatch and returned as a verdict, so it never reaches
+    # the per-artifact catch this test is about.
+    real_dispatch = update_check.dispatch
+
+    def exploding_dispatch(source, fetch):
+        if "/a/b" in source.get("remote", ""):
+            raise RuntimeError("upstream exploded")
+        return real_dispatch(source, fetch)
+
+    events_path = tmp_path / "events.jsonl"
+    with mock.patch.object(update_check, "dispatch", exploding_dispatch):
+        result = update_check.run_pass(store, ok_fetch([{"name": "v2.0.0"}]),
+                                       events_path, dedup={})
+
+    # Isolation held: the healthy artifact still got its verdict.
+    assert result["checked"] == 1
+    assert store.entry("oci:local:fine")["update"]["status"] == updates.AVAILABLE
+
+    entries = [json.loads(line) for line in
+               events_path.read_text().splitlines() if line.strip()]
+    errors = [e for e in entries if e["kind"] == "update-check-artifact-error"]
+    assert len(errors) == 1
+    assert errors[0]["detail"]["artifact_id"] == "oci:local:broken"
+    assert "upstream exploded" in errors[0]["detail"]["error"]

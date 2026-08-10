@@ -24,6 +24,7 @@ same quality bar as app.policy and app.intent.
 
 import json
 import os
+import threading
 from pathlib import Path
 
 _REQUIRED_FIELD_KEYS = ("value", "source", "derived_ts")
@@ -34,6 +35,12 @@ class CharacteristicsStore:
 
     def __init__(self, path: Path):
         self._path = path
+        # The watcher thread's derive pass and HTTP request threads share ONE
+        # instance, and put_fields/forget are load-modify-save. Unlocked they
+        # lose writes (stale read) AND race _save's atomic replace, which
+        # uses one fixed .tmp path per store [max-review c4]. IntentStore and
+        # SettingsStore already lock; this was the odd one out.
+        self._lock = threading.Lock()
 
     def _load(self) -> dict:
         try:
@@ -82,12 +89,16 @@ class CharacteristicsStore:
                     "every derived fact must carry its provenance"
                 )
 
-        data = self._load()
-        entry = data.setdefault(key, {})
-        entry.update(fields)
-        self._save(data)
+        # Validation above is pure and stays outside the lock; only the
+        # load-modify-save needs serializing.
+        with self._lock:
+            data = self._load()
+            entry = data.setdefault(key, {})
+            entry.update(fields)
+            self._save(data)
 
     def forget(self, key: str) -> None:
-        data = self._load()
-        if data.pop(key, None) is not None:
-            self._save(data)
+        with self._lock:
+            data = self._load()
+            if data.pop(key, None) is not None:
+                self._save(data)

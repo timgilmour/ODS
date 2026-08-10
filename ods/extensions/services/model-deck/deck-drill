@@ -42,13 +42,24 @@ fi
 # Raw docker build on purpose: `ods restart --rebuild-images` skips extension images.
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" "$EXT_DIR/livetests"
 
-LEMONADE_API_KEY="$(grep -E '^LEMONADE_API_KEY=' "$ODS_ENV" | cut -d= -f2- || true)"
-LITELLM_KEY="$(grep -E '^LITELLM_KEY=' "$ODS_ENV" | cut -d= -f2- || true)"
+# `|| true` hid a real failure here (CLAUDE.md's Bash rule): grep exits 1
+# when the key is simply absent, which is expected and fine, but it also
+# exits 2 on an unreadable $ODS_ENV — and `|| true` made those identical.
+# The explicit form keeps the empty-default semantics the gates below key
+# off, without swallowing the second case.
+if ! LEMONADE_API_KEY="$(grep -E '^LEMONADE_API_KEY=' "$ODS_ENV" | cut -d= -f2-)"; then
+  LEMONADE_API_KEY=""
+fi
+if ! LITELLM_KEY="$(grep -E '^LITELLM_KEY=' "$ODS_ENV" | cut -d= -f2-)"; then
+  LITELLM_KEY=""
+fi
 # The spark serves on the LAN, not on ods-network, so its address is
 # deployment config rather than a container name. D6 reads that port
 # directly for ground truth (/v1/models, /metrics) instead of trusting the
 # deck's own view of it; unset simply skips the case.
-SPARK_SERVING_URL="$(grep -E '^MODEL_DECK_SPARK_SERVING_URL=' "$ODS_ENV" | cut -d= -f2- || true)"
+if ! SPARK_SERVING_URL="$(grep -E '^MODEL_DECK_SPARK_SERVING_URL=' "$ODS_ENV" | cut -d= -f2-)"; then
+  SPARK_SERVING_URL=""
+fi
 export LEMONADE_API_KEY LITELLM_KEY SPARK_SERVING_URL
 
 # The lifecycle drills (D7) need an OUT-OF-BAND container stop — the deck must

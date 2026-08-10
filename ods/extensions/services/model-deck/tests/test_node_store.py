@@ -226,3 +226,20 @@ def test_seed_tolerates_malformed_keys_json(store):
     seed_if_missing(store, **{**_SEED_KW, "spark_node_keys_json": "{broken"})
     assert store.get("sparky") is not None
     assert store.credential_set("sparky") is False
+
+
+def test_node_id_with_a_trailing_newline_is_refused(store):
+    """Python's `$` also matches just before a trailing newline, so
+    "sparky\\n" passed a pattern meant to be anchored [max-review c33]. The
+    UI mirrors this pattern in JS, where `$` does NOT admit the newline — so
+    the two vocabularies disagreed, and an id the browser refuses could still
+    be created through the API. `\\Z` is the anchor that means what the
+    comment always claimed.
+
+    An id is a KEY: intent, settings scopes and oci:<id>: provenance all
+    attach through this string, so a trailing newline propagates into every
+    one of them.
+    """
+    with pytest.raises(ValueError):
+        store.add({"id": "sparky\n", "label": "Sparky", "agent_kind": "node-agent",
+                   "address": "http://x:7720"})

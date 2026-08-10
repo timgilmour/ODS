@@ -9,6 +9,7 @@ slot for sources that genuinely cannot be written.
 import pytest
 
 from app.configure import MECHS, apply_settings
+from app.engines import EngineError
 
 
 class FakeApiEngine:
@@ -35,26 +36,42 @@ def test_mech_vocabulary():
     assert set(MECHS) == {"api", "env+restart", "node-settings", "none"}
 
 
-def test_api_mech_applies_live_without_a_reload():
+def test_api_mech_refuses_because_no_client_implements_it():
+    """EXPECTATION CHANGED [max-review c1/c12]. This test used to assert the
+    api mech applied live against FakeApiEngine.configure(). That passed only
+    because the FAKE implements configure() — no client in app/engines does,
+    so the real dispatch died as AttributeError deep inside a route, which
+    reads as a deck bug rather than "this was never built".
+
+    The mech stays in MECHS: the descriptors declare it, and deleting the
+    vocabulary would be a bigger lie than admitting it is unbuilt. So the
+    honest behaviour is an explicit refusal in the contract's own error
+    type, and this test now pins that. The fake keeps its configure() to
+    prove the refusal happens BEFORE any dispatch — an implementation that
+    called through would set `configured` and fail the last assertion.
+    """
     engine = FakeApiEngine()
 
-    result = apply_settings("api", engine_client=engine, resolved={"a": {"value": "1"}})
+    with pytest.raises(EngineError, match="api"):
+        apply_settings("api", engine_client=engine, resolved={"a": {"value": "1"}})
 
-    assert engine.configured == {"a": "1"}
-    assert result == {"applied": True, "requires_reload": False, "reason": "applied live"}
+    assert engine.configured is None
 
 
-def test_env_restart_mech_sets_env_but_does_not_restart():
-    """A save changes intent; it never yanks a running model. The restart
-    is the human's explicit Reload."""
+def test_env_restart_mech_refuses_because_no_client_implements_it():
+    """Same change, same reason, for the other unbuilt mech (set_env).
+
+    The original intent — "a save changes intent; it never yanks a running
+    model" — is preserved and then some: refusing cannot restart anything.
+    """
     engine = FakeRestartEngine()
 
-    result = apply_settings("env+restart", engine_client=engine,
-                            resolved={"KEY": {"value": "v"}})
+    with pytest.raises(EngineError, match="env\\+restart"):
+        apply_settings("env+restart", engine_client=engine,
+                       resolved={"KEY": {"value": "v"}})
 
-    assert engine.env == {"KEY": "v"}
+    assert engine.env is None
     assert engine.restarted is False
-    assert result["requires_reload"] is True
 
 
 def test_none_mech_applies_nothing_and_says_so():
