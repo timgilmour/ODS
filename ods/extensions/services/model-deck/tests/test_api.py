@@ -590,6 +590,40 @@ def test_sets_create_duplicate_with_overwrite_true_succeeds(tmp_path, monkeypatc
     assert got.json()["notes"] == "v2"
 
 
+def test_sets_create_on_corrupt_existing_file_without_overwrite_422(tmp_path, monkeypatch):
+    """A corrupt file at the target slug isn't 'absent' — create's own
+    existence precheck (store.get(slug)) surfaces the SAME named ValueError
+    -> 422, naming the slug that's blocking the save."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    sets_dir = tmp_path / "sets"
+    sets_dir.mkdir(parents=True, exist_ok=True)
+    (sets_dir / "chat-mode.json").write_text('{"name": "bad", "unknown_field": 1}')
+
+    resp = TestClient(app).post("/api/sets", json={"name": "Chat mode"})
+
+    assert resp.status_code == 422
+    assert "stored set 'chat-mode'" in resp.json()["detail"]
+
+
+def test_sets_create_on_corrupt_existing_file_with_overwrite_recovers(tmp_path, monkeypatch):
+    """Recovery-by-overwrite: ?overwrite=true skips the existence precheck
+    entirely (short-circuits on `not overwrite`), so it never calls the
+    corrupt slug's get() and just writes over the bad file."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    sets_dir = tmp_path / "sets"
+    sets_dir.mkdir(parents=True, exist_ok=True)
+    (sets_dir / "chat-mode.json").write_text('{"name": "bad", "unknown_field": 1}')
+
+    resp = TestClient(app).post(
+        "/api/sets?overwrite=true", json={"name": "Chat mode", "notes": "recovered"}
+    )
+
+    assert resp.status_code == 200
+    got = TestClient(app).get("/api/sets/chat-mode")
+    assert got.status_code == 200
+    assert got.json()["notes"] == "recovered"
+
+
 def test_sets_get_missing_404(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     resp = TestClient(app).get("/api/sets/nope")
@@ -603,6 +637,7 @@ def test_sets_delete_missing_404(tmp_path, monkeypatch):
 
 
 def test_sets_delete_reserved_403(tmp_path, monkeypatch):
+    """A HEALTHY (parseable) _previous keeps the 403 — direction 1."""
     app, deck = make_app(tmp_path, monkeypatch)
     deck["set_store"].save_previous(ConfigSet(name=PREVIOUS_NAME))
 
@@ -610,6 +645,31 @@ def test_sets_delete_reserved_403(tmp_path, monkeypatch):
 
     assert resp.status_code == 403
     assert deck["set_store"].get(RESERVED_SLUG) is not None
+
+
+def test_sets_delete_reserved_corrupt_succeeds(tmp_path, monkeypatch):
+    """[c44] A CORRUPT _previous is exactly the file the recovery path
+    exists to remove — the reserved-slug 403 must not block it, or the
+    rollback scenario the isolation fix targets has no way out through the
+    API at all. Direction 2 of the reserved-slug guard."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    sets_dir = tmp_path / "sets"
+    sets_dir.mkdir(parents=True, exist_ok=True)
+    (sets_dir / f"{RESERVED_SLUG}.json").write_text('{"name": "bad", "unknown_field": 1}')
+
+    resp = TestClient(app).delete(f"/api/sets/{RESERVED_SLUG}")
+
+    assert resp.status_code == 200
+    assert not (sets_dir / f"{RESERVED_SLUG}.json").exists()
+
+
+def test_sets_delete_reserved_absent_still_403(tmp_path, monkeypatch):
+    """No file at all is neither 'corrupt' nor a green light — the guard's
+    default (protect the slot) holds when there's nothing to prove
+    corruption from."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    resp = TestClient(app).delete(f"/api/sets/{RESERVED_SLUG}")
+    assert resp.status_code == 403
 
 
 def test_sets_delete_success(tmp_path, monkeypatch):
@@ -664,6 +724,11 @@ def test_sets_get_of_corrupt_set_is_422(tmp_path, monkeypatch):
     (sets_dir / "bad.json").write_text('{"name": "bad", "unknown_field": 1}')
     resp = TestClient(app).get("/api/sets/bad")
     assert resp.status_code == 422
+    # The raw pydantic message names neither the slug nor the filename — a
+    # status-code-only assertion here would pass even pre-fix, since a bare
+    # ValidationError escaping unwrapped ALSO 422s via the app-wide
+    # handler. Pin the actual contract: get()'s named ValueError.
+    assert "stored set 'bad'" in resp.json()["detail"]
 
 
 def test_delete_route_removes_a_corrupt_set(tmp_path, monkeypatch):

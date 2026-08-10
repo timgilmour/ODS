@@ -108,9 +108,21 @@ def get_set(slug: str, request: Request) -> ConfigSet:
 
 @router.delete("/{slug}")
 def delete_set(slug: str, request: Request) -> dict:
-    if slug == RESERVED_SLUG:
-        raise HTTPException(status_code=403, detail="cannot delete the reserved revert snapshot")
     store = request.app.state.deck["set_store"]
+
+    if slug == RESERVED_SLUG:
+        # The 403 guard exists to stop the API from deleting a HEALTHY
+        # revert snapshot. A snapshot that fails to parse is exactly the
+        # file per-file isolation can't clean up any other way [c44] — a
+        # ValueError from get() (present but corrupt) is let through;
+        # anything else (parseable, or simply absent) keeps the 403.
+        try:
+            store.get(RESERVED_SLUG)
+        except ValueError:
+            store.delete(RESERVED_SLUG)
+            return {"status": "ok"}
+        raise HTTPException(status_code=403, detail="cannot delete the reserved revert snapshot")
+
     try:
         missing = store.get(slug) is None
     except ValueError:

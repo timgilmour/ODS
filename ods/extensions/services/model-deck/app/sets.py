@@ -199,10 +199,16 @@ class SetStore:
 
     def get(self, slug: str) -> ConfigSet | None:
         """The set stored under ``slug``, or None if there is none."""
+        path = self._path(slug)
         try:
-            text = self._path(slug).read_text()
+            text = path.read_text()
         except FileNotFoundError:
             return None
+        except (OSError, UnicodeDecodeError) as exc:
+            # Present but UNREADABLE (permissions, non-UTF-8 bytes) is the
+            # same "not missing" case as invalid-JSON below — a distinct
+            # exception type, but the same named-ValueError contract.
+            raise ValueError(f"stored set {slug!r} could not be read: {exc}") from exc
         try:
             return ConfigSet.model_validate_json(text)
         except ValidationError as exc:
@@ -212,37 +218,43 @@ class SetStore:
             # WHICH file, and so delete can catch it and still remove it.
             raise ValueError(f"stored set {slug!r} failed validation: {exc}") from exc
 
+    def _scan(self) -> tuple[list[ConfigSet], list[str]]:
+        """One pass over every stored ``*.json`` -> (parseable ConfigSets,
+        slugs that aren't). The SAME pass backs both list() and
+        unreadable() so the two can never disagree about which files parsed
+        between one call and the next — two independent directory scans
+        could see a file change (or a concurrent write land) in between.
+        A read failure (bad permissions, non-UTF-8 bytes) counts as
+        unreadable exactly like a validation failure; either way it isn't a
+        usable ConfigSet."""
+        if not self._dir.exists():
+            return [], []
+        good: list[ConfigSet] = []
+        bad: list[str] = []
+        for path in sorted(self._dir.glob("*.json")):
+            try:
+                good.append(ConfigSet.model_validate_json(path.read_text()))
+            except (ValidationError, OSError, UnicodeDecodeError):
+                bad.append(path.stem)
+        return good, bad
+
     def list(self) -> list[ConfigSet]:
         """All parseable stored sets, sorted by name. Invalid files are
         SKIPPED, not fatal — one bad file must not blank every healthy set
         (and the listing is what the recovery UI needs). unreadable() names
         the skipped ones."""
-        if not self._dir.exists():
-            return []
-        sets = []
-        for path in sorted(self._dir.glob("*.json")):
-            try:
-                sets.append(ConfigSet.model_validate_json(path.read_text()))
-            except ValidationError:
-                continue
-        return sorted(sets, key=lambda cfgset: cfgset.name)
+        good, _ = self._scan()
+        return sorted(good, key=lambda cfgset: cfgset.name)
 
     # Return type quoted: the `list()` method above already bound the name
     # `list` in this class's namespace, shadowing the builtin for any
     # annotation evaluated after it — a bare `list[str]` here would try to
     # subscript that method object instead of the builtin.
     def unreadable(self) -> "list[str]":
-        """Slugs of stored files list() skipped. Separate read, same reason
-        diff_snapshot separates has_snapshot: 'skipped' is a fact the router
-        surfaces, not something to smuggle into the ConfigSet list."""
-        if not self._dir.exists():
-            return []
-        bad = []
-        for path in sorted(self._dir.glob("*.json")):
-            try:
-                ConfigSet.model_validate_json(path.read_text())
-            except ValidationError:
-                bad.append(path.stem)
+        """Slugs of stored files list() skipped — the other half of the
+        same _scan() pass, so it can never disagree with what list()
+        actually returned."""
+        _, bad = self._scan()
         return bad
 
     def replace(self, slug: str, cfgset: ConfigSet) -> str:
@@ -492,7 +504,10 @@ def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None)
     # default here is what silently reloaded the wrong model on a "·
     # previous" revert [c45].
     if lem_desired == "loaded" and lem_world["state"] == "unloaded":
-        model = eph.lemonade.model if (eph and eph.lemonade) else None
+        # eph and eph.lemonade are guaranteed truthy here: lem_desired can
+        # only be "loaded" if the ternary above that sets it actually read
+        # eph.lemonade.state, so no re-guard is needed to reach .model.
+        model = eph.lemonade.model
         if model is None:
             model = (
                 durable.default_route_model
@@ -815,11 +830,18 @@ def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
     wired into the apply that produced this snapshot) keeps the pre-Task-9
     shape exactly — settings_snapshot stays None, same as an old set.
 
-    Note: an OLDER image (extra='forbid', no ``model`` field on
-    LemonadeEphemeral) reading a NEW ``_previous`` file written by this
-    function fails validation — which the per-file isolation above degrades
-    to a skipped set (``list()``/``unreadable()``), not a downed API. That
-    is the exact rollback scenario [c44] describes.
+    Note: this ``model`` field and the per-file isolation in ``SetStore``
+    ship in the SAME commit, so an image OLDER than this one has neither.
+    Rolling back to a build that already CONTAINS the isolation fix (this
+    commit or later) degrades a mismatched ``_previous.json`` to a skipped
+    set (``list()``/``unreadable()``), not a downed API. Rolling back PAST
+    this commit — to a build without the isolation fix — still downs the
+    whole sets API on a new-shape ``_previous.json`` (extra='forbid' with
+    no ``model`` field), exactly as [c44] describes, until the file is
+    either removed from disk by hand or overwritten by that older build's
+    own next apply: ``save_previous()`` unconditionally overwrites
+    ``_previous.json`` with whatever shape the RUNNING build writes, so one
+    more apply on the old build self-heals it.
     """
     tenants = world["tenants"]
     lem_tenant = tenants["lemonade"]

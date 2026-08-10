@@ -366,8 +366,37 @@ def test_one_corrupt_set_file_does_not_down_the_listing(tmp_path):
 
 def test_get_of_a_corrupt_set_raises_a_named_valueerror(tmp_path):
     (tmp_path / "bad.json").write_text("{not json")
-    with pytest.raises(ValueError, match="bad"):
+    # Pins the actual message CONTRACT (slug named, "stored set" prefix),
+    # not just any substring containing "bad" — a bare "bad" match would
+    # pass even against pydantic's raw, unnamed ValidationError text.
+    with pytest.raises(ValueError, match=r"stored set 'bad'"):
         SetStore(tmp_path).get("bad")
+
+
+def test_unreadable_treats_non_utf8_bytes_as_unreadable_not_fatal(tmp_path):
+    """A read failure (bad encoding) must not down the listing any more
+    than a validation failure does — list()/unreadable() catch OSError and
+    UnicodeDecodeError alongside ValidationError."""
+    store = SetStore(tmp_path)
+    (tmp_path / "bad.json").write_bytes(b"\xff\xfe not valid utf-8")
+    assert store.list() == []
+    assert store.unreadable() == ["bad"]
+
+
+def test_get_of_non_utf8_file_raises_a_named_valueerror(tmp_path):
+    (tmp_path / "bad.json").write_bytes(b"\xff\xfe not valid utf-8")
+    with pytest.raises(ValueError, match=r"stored set 'bad'"):
+        SetStore(tmp_path).get("bad")
+
+
+def test_unreadable_treats_a_read_oserror_as_unreadable_not_fatal(tmp_path):
+    """A directory sitting where a file is expected (IsADirectoryError, an
+    OSError) is chosen over a chmod-based fixture so a root-run CI process
+    (which ignores file permissions) can't silently skip the case."""
+    store = SetStore(tmp_path)
+    (tmp_path / "bad.json").mkdir()
+    assert store.list() == []
+    assert store.unreadable() == ["bad"]
 
 
 def test_unreadable_empty_when_dir_absent(tmp_path):
