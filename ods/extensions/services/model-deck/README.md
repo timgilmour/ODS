@@ -105,6 +105,18 @@ See the **Storage tiering** section below for detailed semantics.
 | `PUT` | `/api/storage/policy` | Set auto mode on/off |
 | `POST` | `/api/storage/rescan` | Force full catalog scan |
 
+### Nodes (registry)
+
+See [Node registry](#node-registry-topology-credentials-and-observation) below for the full data model, seeding, and observer semantics.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/nodes` | List every registry entry + `credential_set` (never the credential itself) |
+| `POST` | `/api/nodes` | Create a node-agent entry (`{id, label, address, serving_address?, credential?}`). 409 on a duplicate id, 422 on an invalid slug/missing address |
+| `PUT` | `/api/nodes/{id}` | Partial update — `label` / `address` / `serving_address` / `credential`. `id` is immutable |
+| `DELETE` | `/api/nodes/{id}` | Remove the entry and its credential. 409 for `local` (undeletable) |
+| `POST` | `/api/nodes/test` | Test connection — `{node_id}` (probes with the stored credential) **or** `{address, credential}` (pre-save, e.g. before the first Save). Never both. Returns `{ok, name?, platform?, capabilities?, gpu_count?, error?}`; the credential is never echoed, including on failure |
+
 ### Spark (Remote Node)
 
 | Method | Path | Description |
@@ -534,6 +546,177 @@ Unit rows cover intent, status derivation, reconcile planning, observation, the 
 - `observe_local` names the three current tenants explicitly. That is the adapter's job (it is the vocabulary boundary), but a fourth local engine does touch that file.
 - **There is no lifecycle UI.** The `lifecycle` block is served and typed (`ui/src/api.ts`), but no component renders status, quarantine release, or adopt — those are curl-level operations today.
 
+## Node registry: topology, credentials, and observation
+
+Closes the last deferred piece of the model-centric Deck rework: node
+topology (which boxes exist, how to reach them) used to live entirely in
+`MODEL_DECK_SPARK_*` env vars, one hardcoded remote node, no way to add a
+second one without editing compose. `app/node_store.py` makes topology and
+credentials **data**, added/removed/edited through the API and the Nodes
+tab, with the local box always present as a registry entry like any other.
+
+v1 is deliberately **observe-only for anything beyond local + spark**: a
+newly added node shows up with reachability, GPU, and serving telemetry —
+no verbs, no placements, no lifecycle. Full engine operability (swap,
+settings, harvest, adopt) against a *second* real node is design §11,
+deferred until one exists to build against.
+
+### `nodes.json` / `node_credentials.json`
+
+Topology and credentials are **separate files**, deliberately: `nodes.json`
+is safely readable and backupable (`id`, `label`, `agent_kind`, `address`,
+`serving_address`, `added_ts` — no secrets); `node_credentials.json` is a
+mode-`0600` sidecar (`{node_id: bearer_key}`), written with the same
+atomic-tmp-then-chmod-then-rename discipline the rest of the deck's stores
+use, and its values never leave `app/node_store.py` except through
+`credential_for()`.
+
+```json
+// nodes.json
+[
+  {"id": "local",  "label": "autarch", "agent_kind": "local"},
+  {"id": "sparky", "label": "sparky",  "agent_kind": "node-agent",
+   "address": "http://192.168.1.x:7720",
+   "serving_address": "http://192.168.1.x:8000", "added_ts": "..."}
+]
+```
+
+`id` is **immutable identity** — it keys lifecycle intent (`<node>/<resource>`),
+settings scopes (`<node>/<engine>`), and provenance artifact ids
+(`oci:<node>:...`). There is no rename-id operation; `label` is the only
+editable display string, and it must never build a key (the
+`app/arbiter.py:1025-1050` rule, now structural: labels exist only in
+registry entries). `id` is validated on create against a lowercase-slug
+regex, refused (422) rather than coerced when it doesn't match; a duplicate
+id is a 409. The `local` entry is seeded once, undeletable (409 on
+`DELETE /api/nodes/local`), and is the only entry `agent_kind: "local"` may
+ever describe — `add()` refuses that kind for anything else.
+
+### Seed-once, and how to re-seed
+
+At startup, `seed_if_missing()` runs **only while `nodes.json` does not
+exist**: it seeds `local` (label from `MODEL_DECK_NODE_LABEL`), and, if
+`MODEL_DECK_SPARK_NODE_URL` + `MODEL_DECK_SPARK_SERVING_URL` are both set,
+seeds sparky with its address/serving-address and copies its credential out
+of `ODS_REMOTE_NODE_KEYS[MODEL_DECK_SPARK_NODE_NAME]`. Once `nodes.json`
+exists, **env is never consulted again** — no per-boot merge that could
+resurrect a deleted entry. Compose keeps passing the env vars for exactly
+one reason: a fresh install seeds itself on first boot.
+
+The sparky entry's id **must be exactly `spark_node_id()`**
+(`app/observe.py`, derived from `SPARK_SLOT_KEY`, today `"sparky"`) — every
+existing keyed datum (intent, settings scopes, `oci:sparky:*` provenance)
+attaches through that literal string. Get it wrong and those records
+silently orphan rather than erroring; `livetests/test_safe_nodes.py::
+test_sparky_seed_preserved_the_key_vocabulary` is the live proof that they
+didn't.
+
+**To re-seed:** delete `nodes.json` and restart. This re-reads the env vars
+as if from a fresh install — **any operator edits made through the UI
+(labels, addresses) are lost**, because the seed has no memory of what it
+last wrote. `node_credentials.json` is untouched by this: a manually-set
+credential in the sidecar survives unless the env var supplies a new one for
+that same id, which overwrites it. To fully reset both topology and
+credentials, delete both files.
+
+### The credential is write-only
+
+`credential` is accepted on `POST /api/nodes` and `PUT /api/nodes/{id}`,
+surfaced only as `credential_set: true|false`, and **never appears in any
+response, error body, or event detail.** `node-updated`'s event carries the
+field *name* (`"credential"`) when one was supplied, never its value — other
+fields (e.g. `label`) may still appear by value elsewhere (`node-added` logs
+`label`), so this guarantee is specifically about the credential.
+
+This closes a path that would otherwise leak it: pydantic v2's "missing
+required field" errors carry the **entire parent object** as `input`, so a
+422 for "address omitted" would echo the caller's credential back verbatim
+in the response body under FastAPI's default handler. `app/main.py`'s
+`RequestValidationError` handler strips the `input` key from *every* error
+of *every* route (not just ones whose `loc` mentions "credential") before
+serializing — closing the whole class for every request body shape, present
+and future, rather than a name-coupled redaction that would silently miss
+the next secret field some other router adds.
+
+### Observer thread + status vocabulary
+
+`app/node_observer.py::NodeObserver` runs on its **own daemon thread** (the
+`app/update_check.py` precedent), never inside `arbiter.Watcher.tick()`:
+that tick is one synchronous 2 s loop running the reconciler, and N nodes ×
+a 5 s transport timeout on a down box would stall the machinery that keeps
+local models loaded. It holds no intent store, no docker client, and a
+client with no actuating verbs (`NodeAgentClient` is observe-only) — it
+structurally cannot become a second actuator.
+
+Every pass (`interval`, default 10 s) **re-reads the registry** (the
+`dashboard-api/remote_nodes.py` 5 s re-read precedent), so add/remove/
+credential edits made through the API apply to observation live, no
+restart. Only `agent_kind: "node-agent"` entries are probed — `local` is
+hardcoded `"online"` by `app/routers/status.py::_nodes_block` and never
+asked. For each node-agent entry it probes `GET /v1/node/gpu` (governs
+status) and `GET /v1/node/serving` (auxiliary — a failure there only
+degrades `serving` to `null`, it never governs status itself) and writes a
+snapshot atomically swapped in as one reference, so a reader never sees a
+half-built pass.
+
+| Status | Meaning |
+|---|---|
+| `online` | The gpu probe answered. A node that answers but reports its own collector failure still reads `online`, with the message carried in `error` |
+| `offline` | Transport failure reaching the node (`NodeAgentUnreachable`) |
+| `error` | The node answered badly — non-2xx or a bad body |
+| `unconfigured` | No stored credential. **Never probed** — distinct from `offline` on purpose: "not set up" and "not answering" must not collapse into the same dot |
+
+(`null` in `/api/state`'s `nodes[].status` is a fifth, implicit case: the
+observer hasn't ticked this node yet — a fresh add, or a `NO_WATCHER`
+deployment.)
+
+### Sparky observed twice, on purpose
+
+The existing lifecycle path (`SparkObserver` → `observe_spark` →
+`derive_status`, TTL-cached, feeding the reconciler and the board's spark
+card) is **untouched** and keeps answering "is the serving slot healthy".
+`NodeObserver` answers a different question — "is the box answering at
+all" — for the Nodes screen's status dots. Two consumers, two questions:
+v1 does not route the reconciler, or the board's spark card, through the
+new observation path. This is a named seam, not an oversight — a future
+increment that tries to unify them needs to keep both questions answerable
+separately.
+
+### The restart-for-actuation caveat
+
+Editing sparky's address or credential through `PUT /api/nodes/sparky`
+applies to **observation immediately** (`NodeObserver` re-reads the
+registry every pass) but to **actuation only on the deck's next restart** —
+`SparkClient` is built once, at app startup, from whatever the registry
+held at that moment (`app/main.py`'s deck-build step). A save that changes
+sparky's connection details does not retroactively rebind the client the
+watcher and the spark router already hold. v1 documents this rather than
+adding live client rebinding next to the reconciler; an event naming the
+restart requirement is a candidate follow-up, not built.
+
+### Deferred (design §11)
+
+In intended order, from
+`~/notes/designs/2026-08-09-model-deck-nodes-registry-design.md`:
+
+1. **Full N-node operability** — generalizing the ~10 single-spark
+   hardcoded sites (`SPARK_SLOT_KEY`, the one `SparkClient`, the one
+   harvest route, the adopt allowlist, the spark router). Build when a real
+   second box exists.
+2. **Capability descriptors** — the ontology's per-node engine-capability
+   schema. The node-agent's `/v1/node/info` `capabilities[]` is the
+   designed hook; C2 shipped inference-from-harvested-catalog instead.
+3. **Local-like nodes** — a second node exposing its own
+   lemonade/comfyui/hipfire verbs needs `ui/src/model/nodes.ts`'s
+   `controls` reworked first (see that file's header comment on the
+   `App.tsx` local-snapshot prop-drilling landmine, dormant while only
+   `node-agent` kinds can be added).
+4. **Live client rebinding** — actuation picking up connection edits
+   without a restart (see above).
+5. **Dashboard-api convergence** — shared node topology; today both
+   dashboard-api and the deck read `ODS_REMOTE_NODE_KEYS` independently,
+   and that stays.
+
 ## Provenance: where every artifact came from
 
 The deck records the upstream origin and current version of every artifact it
@@ -865,7 +1048,10 @@ Model Deck API (:3015, FastAPI)
 ## Files
 
 - `app/main.py` — FastAPI application, startup, exception handlers
-- `app/routers/` — Endpoint modules (control, storage, policy, sets, spark, lifecycle, status)
+- `app/routers/` — Endpoint modules (control, storage, policy, sets, spark, lifecycle, status, nodes)
+- `app/node_store.py` — NodeStore: `nodes.json` topology + `node_credentials.json` 0600 sidecar, seed-once migration
+- `app/node_observer.py` — NodeObserver: own daemon thread, registry-driven status probes (see [Node registry](#node-registry-topology-credentials-and-observation))
+- `app/engines/node_agent.py` — Thin observe-only client (`info`/`gpu`/`serving`); `SparkClient` extends the same base
 - `app/arbiter.py` — VRAM arbitration, watcher, planning, lifecycle reconcile pass
 - `app/intent.py` — IntentStore: durable desired state (`/data/intent.json`), failure budget
 - `app/lifecycle.py` — `derive_status`: intent × observation → one status (pure)
