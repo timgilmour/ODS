@@ -161,3 +161,41 @@ def test_small_log_is_left_alone(tmp_path):
 
     assert len(path.read_text().splitlines()) == 50
     assert tail_events(path, 100)[0]["detail"]["i"] == 0
+
+
+def test_concurrent_log_event_never_crashes_on_rotation(tmp_path):
+    """The trim writes ONE fixed `.trim-tmp` path per log, and log_event is
+    reachable from essentially every thread the deck runs (arbiter watcher,
+    storage watcher, mover, update-checker, and all sync HTTP routes on
+    FastAPI's threadpool). Unlocked, two concurrent trims race that path and
+    the loser's os.replace raises FileNotFoundError into whichever thread it
+    was — a 500 on a route, or a dead watcher pass.
+
+    Sized so several rotations happen while both threads are writing.
+    """
+    import threading
+
+    path = tmp_path / "events.jsonl"
+    pad = "z" * 1000
+    start = threading.Barrier(2)
+    errors = []
+
+    def writer(tag):
+        try:
+            start.wait(timeout=5)
+            for i in range(4000):
+                log_event(path, "k", {"who": tag, "i": i, "pad": pad})
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(t,)) for t in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert errors == []
+    # Still a well-formed log afterwards — a torn trim would strand a partial
+    # line, and tail_events silently skips those, so assert on the raw text.
+    for line in path.read_text().splitlines():
+        json.loads(line)

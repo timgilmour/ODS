@@ -231,3 +231,27 @@ def test_state_nodes_block_carries_actuation_stale(monkeypatch):
         after = {n["id"]: n for n in c.get("/api/state").json()["nodes"]}
         assert after[spark_node_id()]["actuation_stale"] is True
         assert after["local"]["actuation_stale"] is False
+
+
+def test_addresses_without_a_credential_is_not_stale(monkeypatch):
+    """CLOSES A MUTATION-DEAD TERM [T8 review]. seed_if_missing seeds spark
+    with BOTH addresses and NO credential when ODS_REMOTE_NODE_KEYS is absent
+    or malformed (node_store.py's documented degradation), so this state is
+    real, not hypothetical. A restart would bind no client either — nothing
+    is out of date, so nothing is stale.
+
+    The sibling unbound test can't cover this: its fixture omits
+    serving_address AND the credential, so the credential term is never the
+    deciding one. Two mutants (dropping `and current["credential_fp"]`, and
+    making credential_fingerprint digest "" rather than return None) each
+    passed the whole suite before this test existed — and each would give the
+    operator a PERMANENT false "Restart required" banner.
+    """
+    app = _app(monkeypatch,
+               MODEL_DECK_SPARK_NODE_URL="http://192.168.1.7:7720",
+               MODEL_DECK_SPARK_SERVING_URL="http://192.168.1.7:8000")
+    assert app.state.deck["spark"] is None       # no key -> no client bound
+    with TestClient(app) as c:
+        node = _spark_node(c)
+        assert node["credential_set"] is False
+        assert node["actuation_stale"] is False

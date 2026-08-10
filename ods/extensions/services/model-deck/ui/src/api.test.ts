@@ -5,7 +5,8 @@ import type { NodeRegistryEntry } from "./api";
 // The registry-CRUD wire shape, exactly as app/routers/nodes.py::_public
 // produces it over NodeStore.add()/update() (app/node_store.py:104-139):
 // {id, label, agent_kind, address, serving_address, added_ts,
-// credential_set}. NO observer fields (status/last_seen/gpus/serving/error)
+// credential_set, actuation_stale}. NO observer fields
+// (status/last_seen/gpus/serving/error)
 // — those belong to a DIFFERENT producer, status.py's _nodes_block, and
 // DeckNodeEntry mirrors that one. createNode/updateNode used to be typed
 // Promise<DeckNodeEntry>, which let `.status` compile against a payload
@@ -18,6 +19,9 @@ const registryResponse = {
   serving_address: null,
   added_ts: "2026-08-10T00:00:00+00:00",
   credential_set: true,
+  // Present on EVERY registry row, not just spark's — always false for a
+  // non-spark node (app/node_binding.py's entry_actuation_stale).
+  actuation_stale: false,
 };
 
 function mockFetchOnce(body: unknown) {
@@ -70,6 +74,7 @@ describe("createNode / updateNode — registry CRUD wire shape", () => {
     const localShaped = {
       id: "local", label: "autarch", agent_kind: "local",
       added_ts: "2026-08-01T00:00:00+00:00", credential_set: false,
+      actuation_stale: false,
     };
     mockFetchOnce(localShaped);
     const result = await updateNode("local", { label: "autarch" });

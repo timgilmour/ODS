@@ -243,3 +243,24 @@ def test_node_id_with_a_trailing_newline_is_refused(store):
     with pytest.raises(ValueError):
         store.add({"id": "sparky\n", "label": "Sparky", "agent_kind": "node-agent",
                    "address": "http://x:7720"})
+
+
+def test_credential_fingerprint_contract(store):
+    """Pins the ""/absent -> None contract its docstring states [T8 review].
+    None must be distinct from any real digest: the nodes router's unbound
+    branch treats it as "no credential", and a fingerprint of "" would read
+    as one."""
+    store.add({"id": "hera", "label": "Hera", "agent_kind": "node-agent",
+               "address": "http://hera:7720"}, credential="s3cret")
+    store.add({"id": "nokey", "label": "No Key", "agent_kind": "node-agent",
+               "address": "http://nokey:7720"})
+
+    fp = store.credential_fingerprint("hera")
+    assert fp is not None
+    assert fp != "s3cret"                       # never the value itself
+    assert fp == store.credential_fingerprint("hera")   # stable
+    assert store.credential_fingerprint("nokey") is None
+    assert store.credential_fingerprint("ghost") is None  # unknown node
+
+    store.update("hera", {}, credential="rotated")
+    assert store.credential_fingerprint("hera") != fp   # rotation is visible

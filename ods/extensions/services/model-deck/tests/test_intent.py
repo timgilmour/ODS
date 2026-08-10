@@ -315,3 +315,81 @@ def test_put_back_refuses_a_record_that_is_not_one(tmp_path):
         store.put_back("local/lemonade", {"state": "sideways", "engine": "lemonade"})
     with pytest.raises(ValueError):
         store.put_back("local/lemonade", "not a dict")
+
+
+def test_load_drops_a_malformed_record_and_keeps_the_others(tmp_path):
+    """Boundary gate [T7 review Important-1]. IntentStore was the one sibling
+    store without a per-record gate: _load checked only the whole-FILE shape,
+    so per-record garbage reached every consumer verbatim — and consumers
+    hard-index (app/lifecycle.py:62 and app/reconcile.py:57 both do
+    intent["model"]), so one bad record crashed the reconcile pass.
+
+    Gated at _load, per this codebase's boundary rule and PolicyStore's
+    precedent: malformed records are DROPPED, not repaired — there is no
+    default to heal an intent to, and a dropped record reads as "no intent",
+    which is the safe direction (nothing gets restored).
+    """
+    path = tmp_path / "intent.json"
+    path.write_text(json.dumps({
+        "local/good": {"state": "loaded", "model": "m.gguf", "engine": "lemonade",
+                       "actor": "operator", "updated_ts": "2026-08-09T00:00:00+00:00",
+                       "last_healthy_ts": None, "failures": 0, "quarantined": False},
+        "local/not-a-dict": "wat",
+        "local/bad-state": {"state": "sideways", "model": None, "engine": "lemonade"},
+        "local/no-engine": {"state": "loaded", "model": None},
+        "local/no-model-key": {"state": "loaded", "engine": "lemonade"},
+        "local/bad-actor": {"state": "loaded", "model": None, "engine": "lemonade",
+                            "actor": "gremlin"},
+    }))
+    store = IntentStore(path)
+
+    data = store.get()
+
+    assert set(data) == {"local/good"}
+
+
+def test_load_keeps_a_legacy_record_with_no_actor(tmp_path):
+    """A pre-upgrade intent.json has no `actor` at all. That is legal — every
+    reader treats a missing actor as "operator" — so the gate must not drop
+    it. Only a PRESENT-but-invalid actor is malformed."""
+    path = tmp_path / "intent.json"
+    path.write_text(json.dumps({
+        "local/legacy": {"state": "loaded", "model": "m.gguf", "engine": "lemonade",
+                         "updated_ts": "2026-08-09T00:00:00+00:00"},
+    }))
+
+    assert set(IntentStore(path).get()) == {"local/legacy"}
+
+
+def test_a_model_key_of_none_is_well_formed(tmp_path):
+    """model=None is legitimate — hipfire is single-model, so "loaded, no
+    opinion which" is a real intent (app/lifecycle.py's `wanted is None`
+    branch). The gate checks PRESENCE, never truthiness."""
+    path = tmp_path / "intent.json"
+    path.write_text(json.dumps({
+        "local/hipfire": {"state": "loaded", "model": None, "engine": "hipfire"},
+    }))
+
+    assert set(IntentStore(path).get()) == {"local/hipfire"}
+
+
+def test_put_back_refuses_a_record_with_no_model_key(tmp_path):
+    """[T7 review Important-2] state+engine was NOT the right bar: consumers
+    hard-index model too (app/lifecycle.py:62, app/reconcile.py:57), so a
+    record accepted without it persists and KeyErrors the next reconcile
+    pass."""
+    store = IntentStore(tmp_path / "intent.json")
+
+    with pytest.raises(ValueError):
+        store.put_back("local/lemonade", {"state": "loaded", "engine": "lemonade"})
+
+
+def test_put_back_refuses_an_unknown_actor(tmp_path):
+    """record() validates actor; put_back must hold the same contract, or a
+    put-back "gremlin" reads as non-operator at app/routers/control.py's
+    supersession check — the direction record()'s own comment calls wrong."""
+    store = IntentStore(tmp_path / "intent.json")
+
+    with pytest.raises(ValueError):
+        store.put_back("local/lemonade", {"state": "loaded", "model": None,
+                                          "engine": "lemonade", "actor": "gremlin"})

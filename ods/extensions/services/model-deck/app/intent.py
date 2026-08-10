@@ -26,6 +26,7 @@ watcher daemon thread via an internal lock; callers need not coordinate.
 """
 
 import json
+import logging
 import os
 import threading
 from datetime import UTC, datetime
@@ -34,6 +35,8 @@ from pathlib import Path
 # Consecutive restore failures before a key is quarantined (stops the
 # reconciler from crash-looping a resource whose config is simply wrong).
 FAILURE_BUDGET = 2
+
+_log = logging.getLogger(__name__)
 
 VALID_STATES = ("loaded", "unloaded")
 
@@ -56,10 +59,59 @@ class IntentStore:
     def __init__(self, path: Path):
         self._path = path
         self._lock = threading.Lock()
+        # Keys already warned about by the boundary gate — see _load().
+        self._warned: set[str] = set()
 
     # --- persistence -------------------------------------------------------
 
+    def _well_formed(self, key: str, record: object) -> bool:
+        """One record's boundary check. `model` is a PRESENCE check, never a
+        truthiness one: ``model=None`` is a legitimate intent ("loaded, no
+        opinion which model" — the correct reading for single-model engines
+        like hipfire, see app.lifecycle's `wanted is None` branch).
+
+        `actor` is optional — a pre-upgrade intent.json has none at all, and
+        every reader treats missing as "operator" — but a PRESENT one must be
+        valid, or app.routers.control's supersession check silently reads it
+        as non-operator.
+        """
+        if not isinstance(record, dict):
+            return False
+        if record.get("state") not in VALID_STATES:
+            return False
+        if not record.get("engine"):
+            return False
+        if "model" not in record:
+            return False
+        if "actor" in record and record["actor"] not in VALID_ACTORS:
+            return False
+        return True
+
     def _load(self) -> dict[str, dict]:
+        """Missing/corrupt file reads as empty; every surviving record then
+        passes the per-record boundary gate.
+
+        THE GATE LIVES HERE AND NOWHERE ELSE [T7 review Important-1]. This
+        store used to check only the whole-FILE shape, one level up from
+        where the damage was: consumers hard-index these records
+        (app/lifecycle.py:62 and app/reconcile.py:57 both do
+        ``intent["model"]``), so a single malformed record crashed the
+        reconcile pass — and, after T7, could make the arbiter's own rollback
+        raise from inside the handler whose whole job is isolating a failure.
+
+        Malformed records are DROPPED, not repaired: unlike PolicyStore there
+        is no default to heal an intent to, and "no intent" is the safe
+        reading — nothing gets restored, rather than something wrong getting
+        restored.
+
+        Deliberately does NOT persist the heal, which is where this departs
+        from PolicyStore._load's otherwise-identical pattern: PolicyStore has
+        no lock, while this store's whole point is one guarding
+        load-modify-save, and ``get()`` reads without holding it. Writing
+        from an unlocked read path would race every mutation. The heal lands
+        on the next ``_save()`` instead; until then no consumer can see the
+        bad record anyway, which is the property that matters.
+        """
         try:
             text = self._path.read_text()
         except OSError:
@@ -70,7 +122,18 @@ class IntentStore:
             return {}
         if not isinstance(data, dict):
             return {}
-        return data
+        gated = {}
+        for key, record in data.items():
+            if self._well_formed(key, record):
+                gated[key] = record
+            elif key not in self._warned:
+                # Once per key per process: _load runs on every arbiter tick,
+                # so an unguarded warning here would be tick-rate spam for as
+                # long as the file stays unhealed.
+                self._warned.add(key)
+                _log.warning("dropping malformed intent record %r from %s",
+                             key, self._path)
+        return gated
 
     def _save(self, data: dict[str, dict]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,18 +238,32 @@ class IntentStore:
           return a quarantined key to its quarantine; re-recording would put
           a crash-looping resource back into the restore rotation.
 
-        Refuses anything that isn't a record (``state`` + ``engine``, with a
-        known state) rather than coercing it — a bad shape persisted here is
-        one every reader downstream has to defend against.
+        Refuses anything that isn't a well-formed record rather than coercing
+        it — a bad shape persisted here is one every reader downstream has to
+        defend against. It shares ``_well_formed`` with the ``_load`` boundary
+        gate deliberately: two hand-written copies of "what a record is" would
+        drift, and this one would be the lenient copy that lets a bad record
+        back in behind the gate.
+
+        An earlier version of this check took ``state`` + ``engine`` only,
+        on the stated grounds that those were "the fields
+        derive_status/plan_reconcile dereference". That was simply wrong —
+        both also hard-index ``model`` (app/lifecycle.py:62,
+        app/reconcile.py:57), so a record accepted without it persisted and
+        KeyError'd the next reconcile pass [T7 review Important-2].
+
+        SINCE ``_load`` GATES, this raise is unreachable from the arbiter's
+        rollback path — ``prior`` comes from ``get()``, which now yields only
+        well-formed records. It stays as an internal assertion for other
+        callers: raising here from inside the arbiter's ``except EngineError``
+        handler would abort the very tick that handler exists to keep alive.
         """
-        if not isinstance(record, dict):
-            raise ValueError(f"record must be a dict, got {type(record).__name__}")
-        if record.get("state") not in VALID_STATES:
+        if not self._well_formed(key, record):
             raise ValueError(
-                f"record['state'] must be one of {VALID_STATES}, "
-                f"got {record.get('state')!r}")
-        if not record.get("engine"):
-            raise ValueError("record['engine'] is required")
+                f"put_back({key!r}) needs a well-formed record — a dict with "
+                f"state in {VALID_STATES}, a truthy engine, a 'model' key "
+                f"(None is allowed), and any 'actor' in {VALID_ACTORS}; "
+                f"got {record!r}")
 
         with self._lock:
             data = self._load()

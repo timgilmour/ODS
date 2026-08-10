@@ -96,6 +96,11 @@ export interface IntentRecord {
   /** null means "loaded, no opinion which model" (single-model engines). */
   model: string | null;
   engine: string;
+  /** Who authored this record (app/intent.py's VALID_ACTORS). Optional: a
+   * pre-upgrade intent.json has no such key, and every backend reader treats
+   * a missing one as "operator" (app/routers/control.py's supersession
+   * check). Carried on GET /api/lifecycle's raw intent record. */
+  actor?: "operator" | "deck";
   updated_ts: string;
   last_healthy_ts: string | null;
   failures: number;
@@ -158,7 +163,7 @@ export interface DeckNodeEntry {
   // True when the deck's ACTUATION path is still bound to configuration the
   // registry has moved past — swaps/restores keep using the boot-time
   // address until a restart, while observation already follows the edit.
-  // Produced by app/routers/status.py's `_nodes_block` (via
+  // Produced by app/routers/status.py:65-71's `_nodes_block` (via
   // app/node_binding.py's `entry_actuation_stale`); always present, and
   // always false for non-spark nodes.
   actuation_stale: boolean;

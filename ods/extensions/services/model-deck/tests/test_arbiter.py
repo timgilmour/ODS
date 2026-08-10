@@ -812,7 +812,8 @@ def test_watcher_guarderror_race_logged_and_no_reload(tmp_path):
 def test_failed_unload_does_not_abort_the_tick_or_strand_intent(tmp_path):
     """Idle-TTL fires an unload while lemonade is briefly unresponsive
     (EngineError). Per-action isolation — _execute_restore's documented
-    invariant (arbiter.py:886-889), applied to the arm that lacked it
+    invariant (arbiter.py's _execute_restore docstring), applied to the arm
+    that lacked it
     [max-review #9]. The tick must:
 
     1. keep going — the reconcile pass still runs, so a due hipfire restore
@@ -3285,3 +3286,87 @@ def test_a_watch_source_set_watch_refuses_does_not_abandon_the_rest_of_the_pass(
     kinds = [e["kind"] for e in tail_events(tmp_path / "events.jsonl")]
     assert "provenance-seed-watch-failed" in kinds, "refused, but silently"
     assert "provenance-pass-error" not in kinds
+
+
+def test_failed_unload_with_a_malformed_prior_record_still_isolates(tmp_path):
+    """[T7 review Important-1] The isolation handler could itself raise.
+
+    `prior` comes from IntentStore.get(); before the boundary gate, a
+    malformed record on disk reached it verbatim, so put_back's validation
+    raised ValueError from INSIDE the `except EngineError` block — producing
+    exactly what T7 exists to prevent: tick-error, no 'unload-failed' event,
+    reconcile skipped. Fixed at the boundary (IntentStore._load gates each
+    record), so this drives the whole path with a hand-corrupted intent.json
+    and requires the tick to survive it.
+    """
+    from app.intent import IntentStore
+
+    path = tmp_path / "intent.json"
+    path.write_text(json.dumps({
+        "local/lemonade": {"state": "loaded"},           # no engine, no model
+        "local/hipfire": {"state": "loaded", "model": None, "engine": "hipfire"},
+    }))
+    intent = IntentStore(path)
+
+    lemonade = FakeLemonade(raise_on_unload=EngineError("lemonade unreachable"))
+    hipfire = FakeHipfire(state="parked")
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model="extra.foo.gguf", idle_s=1000),
+        hipfire=_hip(state="parked"),
+        default_route=None,
+    )
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot), FakeRegistry(), _policy(lem_idle=900),
+        lemonade=lemonade, hipfire=hipfire, intent_store=intent,
+    )
+
+    watcher.tick()  # must not raise
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "tick-error" not in kinds        # the whole point
+    assert "unload-failed" in kinds         # the diagnostic survived
+    assert "resume" in hipfire.calls        # the tick carried on into reconcile
+
+
+def test_failed_unload_does_not_revert_an_operator_action_that_raced_it(tmp_path):
+    """[T7 review m1] The rollback is compare-and-swap, not last-write-wins.
+
+    An operator can record a deliberate load in the seconds the unload call
+    is hanging. Blindly putting `prior` back would silently revert THEIR
+    action — the same class of bug as the pull-through supersession hole
+    task 6 closed. The fake writes an operator record and then raises,
+    reproducing exactly that interleave.
+    """
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.old.gguf",
+                  engine="lemonade", actor="operator")
+
+    class RacingLemonade(FakeLemonade):
+        def unload(self, model):
+            self.unloaded.append(model)
+            # The operator's action lands mid-call, after this arm's
+            # speculative pre-record.
+            intent.record("local/lemonade", state="loaded",
+                          model="extra.NEW.gguf", engine="lemonade",
+                          actor="operator")
+            raise EngineError("lemonade unreachable")
+
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model="extra.old.gguf", idle_s=1000),
+        default_route=None,
+    )
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot), FakeRegistry(), _policy(lem_idle=900),
+        lemonade=RacingLemonade(), intent_store=intent,
+    )
+
+    watcher.tick()
+
+    record = intent.get()["local/lemonade"]
+    assert record["model"] == "extra.NEW.gguf"   # the operator's, not prior's
+    assert record["actor"] == "operator"
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "unload-failed" in kinds
+    assert "unload-rollback-skipped" in kinds

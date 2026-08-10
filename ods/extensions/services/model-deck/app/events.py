@@ -27,8 +27,20 @@ No Settings import here — pure inputs only.
 
 import json
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
+
+# ONE process-wide lock for the append+rotate pair. log_event is called from
+# essentially every thread the deck runs — the arbiter watcher, the storage
+# watcher, the mover, the update-checker, and all ~90 sync HTTP routes (which
+# FastAPI runs on a real threadpool) — and _trim writes a FIXED tmp path per
+# log. Two concurrent trims race that one path, and the loser's os.replace
+# raises FileNotFoundError into whatever thread it was: a 500 on an HTTP
+# route, or a dead pass on a watcher. Module-level rather than per-store
+# because callers pass a Path, not an object, so there is no instance to hang
+# it on; contention is negligible (one small append per event).
+_WRITE_LOCK = threading.Lock()
 
 # Rotation bounds. The log is display-only (the Events tab reads the tail);
 # 2000 lines is ~20x what the UI ever requests, and the byte cap keeps one
@@ -40,8 +52,14 @@ _TRIM_TO_LINES = 2_000
 def log_event(path: Path, kind: str, detail: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {"ts": datetime.now(UTC).isoformat(), "kind": kind, "detail": detail}
-    with path.open("a") as f:
-        f.write(json.dumps(record) + "\n")
+    with _WRITE_LOCK:
+        with path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+        _rotate_if_oversized(path)
+
+
+def _rotate_if_oversized(path: Path) -> None:
+    """Caller holds _WRITE_LOCK."""
     try:
         oversized = path.stat().st_size > _MAX_LOG_BYTES
     except OSError:
@@ -55,11 +73,15 @@ def log_event(path: Path, kind: str, detail: dict) -> None:
 def _trim(path: Path) -> None:
     """Rewrite the log to its newest ``_TRIM_TO_LINES`` lines.
 
-    Atomic replace, the same idiom the JSON stores use, so a reader never
-    sees a half-written log. Two racing trims can drop a handful of tail
-    lines — acceptable at this module's stated quality bar (a display-only
-    audit trail whose appends are already lossy on a crash), and not
-    acceptable anywhere state is kept.
+    Caller holds _WRITE_LOCK. Atomic replace, the same idiom the JSON stores
+    use, so a reader never sees a half-written log.
+
+    The lock is not about losing a few tail lines — the real failure without
+    it is a CRASH: this writes one fixed ``.trim-tmp`` path per log, so two
+    concurrent trims race it and the loser's ``os.replace`` raises
+    FileNotFoundError into whichever thread it was (a 500 on an HTTP route, a
+    dead watcher pass). Rare, because it is gated behind the size threshold —
+    rare is not safe.
     """
     lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
     lines = lines[-_TRIM_TO_LINES:]

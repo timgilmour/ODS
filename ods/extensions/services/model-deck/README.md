@@ -111,7 +111,7 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/nodes` | List every registry entry + `credential_set` (never the credential itself) |
+| `GET` | `/api/nodes` | List every registry entry + `credential_set` (never the credential itself) + `actuation_stale` |
 | `POST` | `/api/nodes` | Create a node-agent entry (`{id, label, address, serving_address?, credential?}`). 409 on a duplicate id, 422 on an invalid slug/missing address |
 | `PUT` | `/api/nodes/{id}` | Partial update — `label` / `address` / `serving_address` / `credential`. `id` is immutable |
 | `DELETE` | `/api/nodes/{id}` | Remove the entry and its credential. 409 for `local` (undeletable) |
@@ -632,6 +632,16 @@ response, error body, or event detail.** `node-updated`'s event carries the
 field *name* (`"credential"`) when one was supplied, never its value — other
 fields (e.g. `label`) may still appear by value elsewhere (`node-added` logs
 `label`), so this guarantee is specifically about the credential.
+
+`actuation_stale` respects this too. The deck binds its SparkClient once at
+start, so editing sparky's connection moves *monitoring* immediately while
+*swaps and restores* keep using the boot-time configuration until a restart —
+the flag surfaces that split, and the credential is part of what was bound,
+so a rotated key must go stale like a changed address. It is compared as a
+**sha256 fingerprint** (`NodeStore.credential_fingerprint`), never a value,
+so this route can answer "has the credential changed since boot?" without
+the value ever reaching it. An unset credential fingerprints to `None`,
+distinct from any real digest.
 
 This closes a path that would otherwise leak it: pydantic v2's "missing
 required field" errors carry the **entire parent object** as `input`, so a

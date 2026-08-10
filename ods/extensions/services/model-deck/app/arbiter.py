@@ -749,7 +749,32 @@ class Watcher:
                     # lacked it: a raise here must not abort the remaining
                     # actions or the reconcile/derive/provenance passes via
                     # tick()'s broad catch [max-review #9].
-                    if self._intent_store is not None and prior is not None:
+                    #
+                    # Logged BEFORE the rollback, not after: the diagnostic is
+                    # what tells an operator this happened at all, so it must
+                    # not be contingent on the rollback succeeding [T7 review].
+                    self._log("unload-failed",
+                              {"model": action["model"], "error": str(exc)})
+                    # Compare-and-swap, not last-write-wins [T7 review m1]:
+                    # an operator can record a deliberate load/unload during
+                    # the seconds this engine call was hanging, and blindly
+                    # putting `prior` back would silently revert THEIR action
+                    # — the same class of bug as the pull-through supersession
+                    # hole task 6 closed. Only roll back if the record is
+                    # still the speculative one this arm wrote: deck-authored
+                    # and unloaded. An operator's write flips actor to
+                    # "operator" (their routes never pass actor="deck"), so
+                    # that pair is a sufficient witness.
+                    current = (self._intent_store.get().get(LOCAL_LEMONADE_KEY)
+                               if self._intent_store is not None else None)
+                    superseded = not (current is not None
+                                      and current.get("actor") == "deck"
+                                      and current.get("state") == "unloaded")
+                    if superseded and current is not None:
+                        self._log("unload-rollback-skipped",
+                                  {"model": action["model"],
+                                   "reason": "intent changed during the unload"})
+                    if self._intent_store is not None and prior is not None and not superseded:
                         # put_back, not record(): a VERBATIM restore of the
                         # record the pre-record above overwrote — actor,
                         # updated_ts, failures and quarantined all included.
@@ -764,8 +789,6 @@ class Watcher:
                     # leaves the fresh 'unloaded' record standing: there is no
                     # forget() to undo it with. Rare, and no worse than the
                     # behavior this fix replaces.
-                    self._log("unload-failed",
-                              {"model": action["model"], "error": str(exc)})
                 else:
                     # Deck-initiated unload (idle release OR contention
                     # eviction): arm suppression so healing can't immediately

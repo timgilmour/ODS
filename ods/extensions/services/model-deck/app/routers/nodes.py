@@ -49,7 +49,11 @@ class NodeTestBody(BaseModel):
     credential: str | None = None
 
 
-def _public(store, entry: dict, spark_bound: dict | None = None) -> dict:
+def _public(store, entry: dict, spark_bound: dict | None) -> dict:
+    # spark_bound is POSITIONAL-REQUIRED, not defaulted [T8 review m1]: None
+    # is the value that MEANS "no client bound", so a default would let a
+    # future call site that forgets the argument raise a silent, permanent
+    # false "Restart required" alarm instead of failing loudly here.
     # actuation_stale via app.node_binding, the SAME function
     # app.routers.status._nodes_block calls — the Nodes screen renders from
     # /api/state, so a second copy of the rule here would be the one that
