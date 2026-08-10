@@ -29,7 +29,6 @@ carries real in-memory idle-clock state that must stay single-sourced, not
 forked into two silently-diverging copies.
 """
 
-import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -154,25 +153,40 @@ def _build_deck(settings: Settings) -> dict:
     )
     hostagent = HostAgent(hostagent_url, settings.hostagent_key)
 
+    from app.node_store import NodeStore, seed_if_missing
+    from app.observe import spark_node_id
+
+    node_store = NodeStore(data_dir / "nodes.json", data_dir / "node_credentials.json")
+    # One-time migration: env -> registry. Once nodes.json exists env is
+    # never consulted again (design §4); compose keeps passing the vars so a
+    # fresh install seeds itself.
+    seed_if_missing(node_store,
+                    node_label=settings.node_label,
+                    spark_id=spark_node_id(),
+                    spark_node_url=settings.spark_node_url,
+                    spark_serving_url=settings.spark_serving_url,
+                    spark_node_name=settings.spark_node_name,
+                    spark_node_keys_json=settings.spark_node_keys_json)
+
     from app.engines.spark import SparkClient
 
+    # Built FROM the registry, never from env directly — the seed above is
+    # the only place env is read for spark identity. Consequence to
+    # preserve: connection edits (via the /api/nodes router) apply to
+    # OBSERVATION immediately (NodeObserver re-reads the registry every
+    # tick), but to ACTUATION only on next restart — this client is bound
+    # once, here, at build.
     spark_client = None
-    if settings.spark_node_url and settings.spark_serving_url:
-        try:
-            node_keys = json.loads(settings.spark_node_keys_json or "{}")
-        except ValueError:
-            node_keys = {}
-        spark_key = node_keys.get(settings.spark_node_name, "")
-        if isinstance(spark_key, str) and spark_key:
+    _spark_entry = node_store.get(spark_node_id())
+    if _spark_entry and _spark_entry.get("address") and _spark_entry.get("serving_address"):
+        _spark_key = node_store.credential_for(spark_node_id())
+        if _spark_key:
             spark_client = SparkClient(
-                node_url=settings.spark_node_url,
-                node_key=spark_key,
-                serving_url=settings.spark_serving_url,
+                node_url=_spark_entry["address"],
+                node_key=_spark_key,
+                serving_url=_spark_entry["serving_address"],
                 litellm=litellm,
             )
-
-    from app.node_store import NodeStore
-    node_store = NodeStore(data_dir / "nodes.json", data_dir / "node_credentials.json")
 
     location_store = LocationStore(data_dir / "locations.json")
     catalog = Catalog(data_dir / "catalog.json", location_store)
@@ -372,6 +386,16 @@ def _build_update_checker(deck: dict):
                          events_path=deck["events_path"])
 
 
+def _build_node_observer(deck: dict):
+    """Same shape as _build_update_checker: only ever called from lifespan
+    with the deck in scope."""
+    from app.node_observer import NodeObserver
+
+    return NodeObserver(deck["node_store"], deck["events_path"],
+                        interval=deck["settings"].node_observe_interval_s,
+                        client_factory=deck["node_agent_client_factory"])
+
+
 def create_app() -> FastAPI:
     """Build the Model Deck FastAPI app. Requires no environment variables."""
     settings = Settings()
@@ -387,6 +411,7 @@ def create_app() -> FastAPI:
         watcher = None
         storage_watcher = None
         update_checker = None
+        node_observer = None
         if os.environ.get("MODEL_DECK_NO_WATCHER") != "1":
             watcher = _build_watcher(settings)
             watcher.start()
@@ -395,10 +420,15 @@ def create_app() -> FastAPI:
             update_checker = _build_update_checker(deck)
             deck["update_checker"] = update_checker
             update_checker.start()
+            node_observer = _build_node_observer(deck)
+            deck["node_observer"] = node_observer
+            node_observer.start()
         try:
             yield
         finally:
-            # Reverse start order: update_checker started last, stops first.
+            # Reverse start order: node_observer started last, stops first.
+            if node_observer is not None:
+                node_observer.stop()
             if update_checker is not None:
                 update_checker.stop()
             if storage_watcher is not None:

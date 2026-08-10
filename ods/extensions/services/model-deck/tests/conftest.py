@@ -18,9 +18,26 @@ give every test a writable, per-test-isolated data dir by default here; a
 test that wants its own (e.g. to assert exact on-disk layout) simply calls
 monkeypatch.setenv("MODEL_DECK_DATA_DIR", ...) itself, which — running after
 this fixture, in the same test's monkeypatch stack — wins.
+
+Module-level fallback below: Task 6 (node registry wiring) makes
+``_build_deck`` write through ``seed_if_missing`` unconditionally, which
+means even the bare ``app = create_app()`` at the bottom of app/main.py
+(the uvicorn entrypoint) now touches disk. That line runs the instant
+anything imports app.main — including every test module's own `from app
+import main`, which happens at COLLECTION time, before the autouse fixture
+above ever gets to run. `os.environ.setdefault` here (module scope, so it
+executes once, before pytest imports any test file) gives that first import
+a writable scratch dir instead of the unwritable "/data" default; the
+autouse fixture then overrides it per-test as before.
 """
 
+import os
+import tempfile
+
 import pytest
+
+os.environ.setdefault("MODEL_DECK_DATA_DIR",
+                      tempfile.mkdtemp(prefix="model-deck-collect-"))
 
 
 @pytest.fixture(autouse=True)

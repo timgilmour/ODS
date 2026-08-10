@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     )
     watch_interval: float = 2.0
 
+    # Node-observation cadence (app/node_observer.py). Its own thread, never
+    # the watcher tick — N nodes x a 5 s transport timeout on a down box
+    # would stall the reconciler. 10 s (dashboard-api's remote poller runs
+    # at 5 s) is fresh enough for status dots.
+    node_observe_interval_s: float = 10.0
+
     # Characteristics refresh cadence. The watcher ticks every ~2 s;
     # re-reading every checkpoint that often is pointless I/O, so derivation
     # is throttled to this interval — except the first successful lifecycle

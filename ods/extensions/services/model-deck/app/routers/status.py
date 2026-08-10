@@ -24,7 +24,7 @@ def get_state(request: Request) -> dict:
         # Node identity. The deck has exactly one local node today; the key
         # matches app.observe's _LOCAL_NODE prefix so the UI adapter can join
         # this against lifecycle keys like "local/hipfire" without a mapping.
-        "node": {"id": "local", "label": deck["settings"].node_label},
+        "node": _local_identity(deck),
         "world": world,
         "policy": deck["policy_store"].get(),
         "models": deck["registry"].scan(),
@@ -37,7 +37,39 @@ def get_state(request: Request) -> dict:
         # app.arbiter.Watcher._provenance_pass). The full ledger lives at
         # GET /api/provenance; this is the summary a dashboard needs.
         "provenance": _provenance_block(deck),
+        # Registry x observer snapshot. Status vocabulary is produced by
+        # app/node_observer.py (online|offline|error|unconfigured); null =
+        # not yet observed (observer hasn't ticked, or NO_WATCHER deck).
+        "nodes": _nodes_block(deck),
     }
+
+
+def _local_identity(deck: dict) -> dict:
+    entry = deck["node_store"].get("local")
+    label = entry["label"] if entry else deck["settings"].node_label
+    return {"id": "local", "label": label}
+
+
+def _nodes_block(deck: dict) -> list[dict]:
+    observer = deck.get("node_observer")
+    snap = observer.snapshot() if observer is not None else {}
+    out = []
+    for entry in deck["node_store"].list():
+        obs = snap.get(entry["id"], {})
+        out.append({
+            "id": entry["id"],
+            "label": entry["label"],
+            "agent_kind": entry["agent_kind"],
+            "address": entry.get("address"),
+            "serving_address": entry.get("serving_address"),
+            "credential_set": deck["node_store"].credential_set(entry["id"]),
+            "status": "online" if entry["agent_kind"] == "local" else obs.get("status"),
+            "last_seen": obs.get("last_seen"),
+            "gpus": obs.get("gpus"),
+            "serving": obs.get("serving"),
+            "error": obs.get("error"),
+        })
+    return out
 
 
 def _provenance_block(deck: dict) -> dict:
