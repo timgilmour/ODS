@@ -22,8 +22,8 @@ applies launch-class settings is always a human click (Tim, 2026-08-04).
 Applying an EMPTY settings map is a no-op, never a wipe — "I have nothing to
 say about this engine" must not mean "clear its configuration".
 
-``api`` and ``env+restart`` are declared above because the descriptors name
-them, but NO engine client implements ``configure()`` or ``set_env()`` — they
+``api`` and ``env+restart`` are listed above because ``MECHS`` names them,
+but NO engine client implements ``configure()`` or ``set_env()`` — they
 were never built. ``apply_settings`` refuses them explicitly rather than
 dispatching into an AttributeError [max-review c1/c12]. Today's only live
 caller (app.routers.spark) uses ``node-settings``.
@@ -81,13 +81,14 @@ def apply_settings(
     if not values:
         return {"applied": False, "requires_reload": False, "reason": "no settings to apply"}
 
-    # Both remaining mechs are DECLARED in descriptors but UNBUILT: no engine
+    # Both remaining mechs are named in MECHS but UNBUILT: no engine
     # client in app/engines implements configure() or set_env() (verified by
     # grep across the package — only test fakes do). Dispatching would raise
     # AttributeError deep inside a route, which reads as a deck bug rather
     # than as "this was never built" [max-review c1/c12]. Refuse in the
     # contract's own vocabulary instead; build the mech before restoring the
-    # dispatch.
+    # dispatch. (MECHS is the only place they are named — no capability
+    # descriptor anywhere declares either one [T9 review m8].)
     #
     # Placed AFTER the empty-values check above deliberately: applying
     # nothing stays a no-op rather than becoming an error, which is what

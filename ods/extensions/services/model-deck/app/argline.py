@@ -127,6 +127,30 @@ POSITIONAL_KEY = "_positional"
 _DROP = object()
 
 
+def _require_renderable(key: str, value) -> None:
+    """Refuse anything that has no honest argline rendering [max-review c49].
+
+    Applied at EVERY place a value becomes a token — bare values, list
+    ELEMENTS, and positional tokens — because the fall-through `str(value)`
+    is reached from all three. The first version of this guard sat only on
+    the bare-value branch, below the list branch and after the positional
+    loop, so `{"served-model-name": ["a", {"a": 1}]}` and
+    `{POSITIONAL_KEY: ["serve", {"a": 1}]}` both still rendered a Python
+    repr into a launch argline — c49 verbatim, through the very boundary
+    whose comment claims to cover hand-edited files.
+
+    ``None`` is NOT refused here and never reaches this function: it is a
+    load-bearing value meaning EXPLICIT UNSET (app/ladder.py:73 pops the key
+    and everything a lower layer contributed), so its honest rendering is
+    nothing at all — see the skip in _argv_tokens. Refusing it instead made
+    a scope containing one permanently un-viewable and un-editable through
+    the deck, a 422 the operator had no way to clear.
+    """
+    if not isinstance(value, (str, int, float)):
+        raise ValueError(
+            f"setting {key!r} has an unrenderable value: {value!r}")
+
+
 def _argv_tokens(settings: dict) -> list[str]:
     """The dispatch shared by render_argv and render_argline: positionals,
     then one flag per remaining key, UNQUOTED. Quoting is each caller's own
@@ -135,15 +159,25 @@ def _argv_tokens(settings: dict) -> list[str]:
     parts: list[str] = []
 
     for token in settings.get(POSITIONAL_KEY, []):
+        _require_renderable(POSITIONAL_KEY, token)
         parts.append(str(token))
 
     for key, value in settings.items():
         if key == POSITIONAL_KEY:
             continue
         flag = f"-{key}" if len(key) == 1 else f"--{key}"
+        if value is None:
+            # EXPLICIT UNSET, not a missing value: app/ladder.py:73 pops the
+            # key and anything a lower layer contributed, so by the time a
+            # RESOLVED map is rendered there is nothing left to emit. Raw
+            # declared layers are rendered too (the resolved-settings view),
+            # and there the honest rendering of "unset" is likewise nothing.
+            continue
         if value is True:
             parts.append(flag)
         elif isinstance(value, list):
+            for element in value:
+                _require_renderable(key, element)
             if any(_looks_like_a_flag(v) for v in value):
                 # A dash-shaped element anywhere forces the whole list to
                 # equals-form -- see module docstring.
@@ -153,21 +187,13 @@ def _argv_tokens(settings: dict) -> list[str]:
                 parts.extend(str(v) for v in value)
         elif _looks_like_a_flag(value):
             parts.append(f"{flag}={value}")
-        elif not isinstance(value, (str, int, float)):
-            # Without this, the str() below rendered a mapping's PYTHON REPR
-            # straight into a launch argline — `--max-num-seqs {'a': 1}`
-            # [max-review c49]. There is no honest argline for a mapping, so
-            # refuse rather than coerce.
-            #
+        else:
             # The SECOND of two boundaries: normalize_args_map refuses these
             # at the wire (PUT /api/settings -> 422). That gate cannot cover
             # this one — this renderer also consumes settings read back from
             # a settings.json that was hand-edited, or written before the
-            # gate existed. bool is excluded by the `is True` branch above,
-            # and list by its own branch, so this sees only the fall-through.
-            raise ValueError(
-                f"setting {key!r} has an unrenderable value: {value!r}")
-        else:
+            # gate existed. bool is excluded by the `is True` branch above.
+            _require_renderable(key, value)
             parts.append(flag)
             parts.append(str(value))
 
@@ -275,9 +301,14 @@ def _looks_like_a_flag(value) -> bool:
 def _normalize_args_scalar(value):
     """One of the two RULING 2026-08-07 axes: int/float becomes str. bool
     is an int subclass in Python, so it is excluded explicitly -- ``True``
-    is the bare-flag sentinel, not a number. Anything else (str, None,
-    dict, ...) is outside the documented axes and passes through unchanged
-    rather than guessed at."""
+    is the bare-flag sentinel, not a number.
+
+    A ``dict`` is REFUSED (see below) -- it has no argline rendering, and
+    accepting it here persisted a value that later rendered as a Python
+    repr [max-review c49]. Anything else (str, None, ...) is outside the
+    documented axes and passes through unchanged rather than guessed at;
+    ``None`` in particular is meaningful, not absent -- app/ladder.py:73
+    reads it as an explicit unset."""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):

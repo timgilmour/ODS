@@ -27,6 +27,7 @@ import shlex
 import pytest
 
 from app.argline import (
+    POSITIONAL_KEY,
     normalize_args_map,
     parse_argline,
     render_argline,
@@ -455,3 +456,42 @@ def test_normalize_refuses_a_dict_inside_a_list():
     level down must be refused too."""
     with pytest.raises(ValueError, match="max-num-seqs"):
         normalize_args_map({"max-num-seqs": [1, {"a": 1}]})
+
+
+def test_render_refuses_a_dict_inside_a_list():
+    """[T9 review Imp-2] The first version of the render guard sat only on
+    the bare-value branch, BELOW the list branch — so this rendered
+    `{'a': 1}`'s Python repr into a launch argline, c49 verbatim, through the
+    very boundary whose comment claims to cover hand-edited files."""
+    with pytest.raises(ValueError, match="served-model-name"):
+        render_argv({"served-model-name": ["a", {"a": 1}]})
+    with pytest.raises(ValueError, match="served-model-name"):
+        render_argline({"served-model-name": ["a", {"a": 1}]})
+
+
+def test_render_refuses_a_dict_positional_token():
+    """Same gap on the other side: positionals are emitted by their own loop
+    ABOVE the flag loop, so they bypassed the guard entirely."""
+    with pytest.raises(ValueError, match=POSITIONAL_KEY):
+        render_argv({POSITIONAL_KEY: ["serve", {"a": 1}]})
+
+
+def test_render_skips_an_explicitly_unset_value():
+    """[T9 review Imp-3] None is NOT unrenderable garbage — it is a
+    load-bearing value meaning EXPLICIT UNSET (app/ladder.py:73 pops the key
+    and anything a lower layer contributed), so its honest rendering is
+    nothing at all.
+
+    Refusing it made a scope containing one permanently un-viewable and
+    un-editable through the deck: the wire accepts None (it must — it is a
+    real operator opinion), so a 422 raised only at render time was one the
+    operator had no way to clear.
+    """
+    assert render_argv({"gone": None, "kept": "v"}) == ["--kept", "v"]
+    assert render_argline({"gone": None, "kept": "v"}) == "--kept v"
+
+
+def test_normalize_accepts_an_explicitly_unset_value():
+    """The wire must keep accepting None for the same reason — refusing it
+    would remove the operator's only way to say "unset this key"."""
+    assert normalize_args_map({"k": None}) == {"k": None}

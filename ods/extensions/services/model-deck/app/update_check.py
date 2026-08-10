@@ -165,9 +165,25 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
             # defect this module already documents at that catch. `-error`
             # still ends in a suffix ui/src/model/eventSeverity.ts:27 reads
             # as failure severity, so the Events tab needs no new mapping.
-            events.log_event(events_path, "update-check-artifact-error", {
-                "artifact_id": artifact_id,
-                "error": f"{type(exc).__name__}: {exc}"})
+            # DEDUPED, like every sibling kind [T9 review Imp-1]: this
+            # module logs ON TRANSITION (module docstring), and an artifact
+            # whose upstream is permanently broken would otherwise re-log
+            # every pass forever — spam that, now that the events log is a
+            # bounded ring (task 10), also EVICTS real history.
+            #
+            # Keyed on type(exc).__name__ ALONE, never the message: a raised
+            # exception's text can differ every call for the identical
+            # failure (the connection-object repr with an embedded address
+            # this module already documents at dispatch's except). Keying on
+            # that would defeat the dedup entirely. The logged DETAIL still
+            # carries the full message — only the dedup key is the class.
+            failed_key = (artifact_id, "#artifact")
+            reason = type(exc).__name__
+            if dedup.get(failed_key) != reason:
+                dedup[failed_key] = reason
+                events.log_event(events_path, "update-check-artifact-error", {
+                    "artifact_id": artifact_id,
+                    "error": f"{reason}: {exc}"})
             continue
 
     return {"checked": checked, "available": available}

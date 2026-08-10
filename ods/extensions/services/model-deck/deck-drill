@@ -42,11 +42,14 @@ fi
 # Raw docker build on purpose: `ods restart --rebuild-images` skips extension images.
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" "$EXT_DIR/livetests"
 
-# `|| true` hid a real failure here (CLAUDE.md's Bash rule): grep exits 1
-# when the key is simply absent, which is expected and fine, but it also
-# exits 2 on an unreadable $ODS_ENV — and `|| true` made those identical.
-# The explicit form keeps the empty-default semantics the gates below key
-# off, without swallowing the second case.
+# CLAUDE.md's Bash rule: no bare `|| true`. The explicit if-form makes the
+# empty-default INTENTIONAL and visible rather than a side effect of
+# swallowing every exit status. It converges to the same value `|| true`
+# did — grep's exit 1 (key absent) and exit 2 (unreadable $ODS_ENV) both
+# still land on "", which the gates below read as "skip this case" — so
+# this is a readability/intent fix, not a behavioural one. Branching on
+# $? > 1 to hard-fail an unreadable env file would be a real behaviour
+# change and is deliberately NOT made here.
 if ! LEMONADE_API_KEY="$(grep -E '^LEMONADE_API_KEY=' "$ODS_ENV" | cut -d= -f2-)"; then
   LEMONADE_API_KEY=""
 fi
