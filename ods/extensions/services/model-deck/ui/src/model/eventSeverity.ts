@@ -56,7 +56,7 @@ function normalize(kind: string): string {
 export function eventSeverity(kind: string, detail?: unknown): Severity {
   // An explicit failure outcome beats the suffix rule. The backend logs BOTH
   // terminal results of a set apply under the ONE kind "apply-end"
-  // (app/sets.py's run_apply logs {"outcome": "failed"} on a failed step and
+  // (app/sets.py's _run_apply logs {"outcome": "failed"} on a failed step and
   // {"outcome": "ok"} at the end), so the kind alone cannot classify it —
   // and "-end" reads as success, which rendered a FAILED apply green
   // [max-review #14]. Only "failed" is honoured: a detail must be able to
