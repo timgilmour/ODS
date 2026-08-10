@@ -112,3 +112,59 @@ def test_corrupt_files_self_heal_to_empty(store, tmp_path):
     (tmp_path / "node_credentials.json").write_text("{not json")
     assert store.list() == []
     assert store.credential_for("hera") == ""
+
+
+# ---- seed_if_missing: one-time env→registry migration ----
+
+from app.node_store import seed_if_missing
+
+_SEED_KW = dict(node_label="autarch", spark_id="sparky",
+                spark_node_url="http://192.168.1.7:7720",
+                spark_serving_url="http://192.168.1.7:8000",
+                spark_node_name="sparky",
+                spark_node_keys_json='{"sparky": "spark-key"}')
+
+
+def test_seed_creates_local_and_sparky(store):
+    assert seed_if_missing(store, **_SEED_KW) is True
+    local = store.get("local")
+    assert local["label"] == "autarch" and local["agent_kind"] == "local"
+    sparky = store.get("sparky")
+    assert sparky["agent_kind"] == "node-agent"
+    assert sparky["address"] == "http://192.168.1.7:7720"
+    assert sparky["serving_address"] == "http://192.168.1.7:8000"
+    assert store.credential_for("sparky") == "spark-key"
+
+
+def test_seed_runs_exactly_once(store):
+    seed_if_missing(store, **_SEED_KW)
+    store.remove("sparky")
+    # Changed env after the seed must have NO effect — including resurrecting
+    # a deliberately removed node. This is the mutation check the design
+    # demands: env is consulted only while nodes.json does not exist.
+    again = seed_if_missing(store, **{**_SEED_KW, "node_label": "changed",
+                                      "spark_node_url": "http://elsewhere:7720"})
+    assert again is False
+    assert store.get("sparky") is None
+    assert store.get("local")["label"] == "autarch"
+
+
+def test_seed_without_spark_env_creates_local_only(store):
+    seed_if_missing(store, **{**_SEED_KW, "spark_node_url": "",
+                              "spark_serving_url": ""})
+    assert store.get("local") is not None
+    assert store.get("sparky") is None
+
+
+def test_seed_with_missing_key_still_creates_the_entry(store):
+    # Entry without credential: the node exists, credential_set is False,
+    # and the observer will report it `unconfigured` rather than probing.
+    seed_if_missing(store, **{**_SEED_KW, "spark_node_keys_json": "{}"})
+    assert store.get("sparky") is not None
+    assert store.credential_set("sparky") is False
+
+
+def test_seed_tolerates_malformed_keys_json(store):
+    seed_if_missing(store, **{**_SEED_KW, "spark_node_keys_json": "{broken"})
+    assert store.get("sparky") is not None
+    assert store.credential_set("sparky") is False

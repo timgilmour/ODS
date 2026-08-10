@@ -157,3 +157,33 @@ class NodeStore:
 
     def credential_set(self, node_id: str) -> bool:
         return bool(self.credential_for(node_id))
+
+
+def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
+                    spark_node_url: str, spark_serving_url: str,
+                    spark_node_name: str, spark_node_keys_json: str) -> bool:
+    """One-time migration of env-var node config into the registry.
+
+    Runs ONLY while nodes.json does not exist; once it does, env is never
+    consulted again — no per-boot merge that could resurrect a removed
+    entry. The spark entry's id is the caller-passed `spark_id`, which MUST
+    be spark_node_id() (app/observe.py:42-47): every keyed datum — intent,
+    settings scopes, oci:<id>: provenance — attaches through that string.
+
+    The keys-json parse mirrors app/main.py's historical tolerance: a
+    malformed map degrades to "no credential" (the node still seeds, the
+    observer reports it unconfigured), never a crash at first boot.
+    """
+    if store.exists():
+        return False
+    store.add({"id": "local", "label": node_label, "agent_kind": "local"})
+    if spark_node_url and spark_serving_url:
+        try:
+            node_keys = json.loads(spark_node_keys_json or "{}")
+        except ValueError:
+            node_keys = {}
+        key = node_keys.get(spark_node_name, "") if isinstance(node_keys, dict) else ""
+        store.add({"id": spark_id, "label": spark_id, "agent_kind": "node-agent",
+                   "address": spark_node_url, "serving_address": spark_serving_url},
+                  credential=key if isinstance(key, str) and key else None)
+    return True
