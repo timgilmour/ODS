@@ -11,6 +11,7 @@ import { labels, messages } from "../model/messages";
 import {
   emptyForm,
   formForEntry,
+  testTarget,
   toCreatePayload,
   toPatchPayload,
   validate,
@@ -177,7 +178,16 @@ function NodeForm({
   // another node's form. The refusal-identity machinery has nothing to do.
   const [deleteArmed, setDeleteArmed] = useState(false);
 
-  const errors = validate(form, mode);
+  // Add always creates a node-agent row (node_store.py's add() refuses
+  // agent_kind "local" outside its one seed); edit carries the target's own
+  // kind, so the seeded local entry's address stops being required — see
+  // nodeForm.ts's validate() doc comment.
+  const errors = validate(form, mode, entry?.agent_kind ?? "node-agent");
+  // What Test would actually probe, recomputed every render from the
+  // current buffer — see nodeForm.ts's testTarget() doc comment for why an
+  // edited-but-unretyped address is "blocked" rather than silently testing
+  // the old stored one.
+  const target = testTarget(form, entry);
   const set = (field: keyof NodeFormState) => (e: ChangeEvent<HTMLInputElement>) => {
     setForm({ ...form, [field]: e.target.value });
     setTestResult(null);
@@ -199,16 +209,13 @@ function NodeForm({
   }
 
   async function test() {
-    // The Test button is disabled exactly when neither branch below has
-    // anything to test against (see its `disabled` prop) — this guard is
-    // defensive, not a third user-facing outcome.
-    if (!form.credential && !entry) return;
+    if (target.kind === "blocked") return; // the button is disabled for this
     setTestResult(null);
     try {
-      // A typed credential tests that typed pair; otherwise the stored one.
-      const result = form.credential
-        ? await testNode({ address: form.address, credential: form.credential })
-        : await testNode({ node_id: entry!.id });
+      const result =
+        target.kind === "typed"
+          ? await testNode({ address: target.address, credential: target.credential })
+          : await testNode({ node_id: entry!.id }); // "stored" only when entry exists
       setTestResult(result);
     } catch (err) {
       setTestResult({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -277,7 +284,8 @@ function NodeForm({
         <button
           type="button"
           onClick={test}
-          disabled={!form.address || (!form.credential && !entry)}
+          disabled={target.kind === "blocked"}
+          title={target.kind === "blocked" ? target.reason : undefined}
         >
           {labels.testConnection}
         </button>

@@ -5,9 +5,18 @@
  * The credential field is WRITE-ONLY end to end: formForEntry always seeds
  * it "", the backend never echoes it (app/routers/nodes.py), and
  * toPatchPayload only ships it when the operator actually typed one.
+ *
+ * validate()'s error strings and testTarget()'s blocked reasons are
+ * sourced from model/messages.ts's `labels`, not written here — both are
+ * operator-visible text, so the one-catalog rule that governs the rest of
+ * the deck governs this module too. applySteps.ts's stepRow is the same
+ * idiom already in this codebase: a pure model function that imports
+ * `labels` and returns its values, so nothing downstream needs a literal
+ * of its own either.
  */
 
 import type { DeckNodeEntry } from "../api";
+import { labels } from "./messages";
 
 /** Mirrors app/node_store.py _ID_RE — the backend refuses what this allows
  * through, so the two must agree; the backend is authoritative. */
@@ -35,15 +44,29 @@ export function formForEntry(entry: DeckNodeEntry): NodeFormState {
   };
 }
 
-export function validate(form: NodeFormState, mode: "add" | "edit"): string[] {
+/** `agentKind` decides whether an address is required. The seeded local
+ * node (app/node_store.py:179's seed spec) is stored with no address at
+ * all and never gets one — it is a loopback identity, not a location to
+ * dial — so its edit form must still be able to save a label-only change.
+ * Every node-agent entry keeps requiring one: `add()` only ever creates
+ * node-agent rows (node_store.py:107-110 refuses `agent_kind: "local"`
+ * outside the one seed), so callers pass "node-agent" for add
+ * unconditionally and the target entry's own kind for edit. */
+export function validate(
+  form: NodeFormState,
+  mode: "add" | "edit",
+  agentKind: "local" | "node-agent",
+): string[] {
   const errors: string[] = [];
   if (mode === "add" && !ID_RE.test(form.id)) {
-    errors.push("id must be a lowercase slug (a-z, 0-9, hyphens)");
+    errors.push(labels.nodeIdInvalid);
   }
-  if (!form.label.trim()) errors.push("label is required");
-  if (!form.address.trim()) errors.push("address is required");
+  if (!form.label.trim()) errors.push(labels.nodeLabelRequired);
+  if (agentKind === "node-agent" && !form.address.trim()) {
+    errors.push(labels.nodeAddressRequired);
+  }
   if (mode === "add" && !form.credential) {
-    errors.push("credential is required for a new node");
+    errors.push(labels.nodeCredentialRequiredForAdd);
   }
   return errors;
 }
@@ -66,4 +89,40 @@ export function toPatchPayload(form: NodeFormState, entry: DeckNodeEntry) {
   if (serving !== (entry.serving_address ?? null)) patch.serving_address = serving;
   if (form.credential) patch.credential = form.credential;
   return patch;
+}
+
+/** What "Test connection" would actually probe, given the buffer on
+ * screen — kept out of NodesView because "would this test lie about what's
+ * displayed" is a decision, not render wiring.
+ *
+ * - "stored": nothing typed that would change what's tested — probe
+ *   `entry`'s on-file address+credential.
+ * - "typed": a credential is on the screen right now — probe exactly the
+ *   address+credential the operator typed, address included regardless of
+ *   whether it also changed, so a typed pair is always tested as typed.
+ * - "blocked": there is nothing honest to test. In particular, an edited
+ *   address with no retyped credential would otherwise silently probe the
+ *   OLD stored address while the screen shows the new one — the bug this
+ *   type exists to make unrepresentable. `reason` is pre-resolved catalog
+ *   text (model/messages.ts), ready for a tooltip with no lookup in the
+ *   caller. */
+export type TestTarget =
+  | { kind: "stored" }
+  | { kind: "typed"; address: string; credential: string }
+  | { kind: "blocked"; reason: string };
+
+export function testTarget(form: NodeFormState, entry: DeckNodeEntry | null): TestTarget {
+  if (!form.address.trim()) {
+    return { kind: "blocked", reason: labels.testBlockedNoAddress };
+  }
+  if (form.credential) {
+    return { kind: "typed", address: form.address, credential: form.credential };
+  }
+  if (!entry) {
+    return { kind: "blocked", reason: labels.testBlockedNoCredential };
+  }
+  if (form.address !== (entry.address ?? "")) {
+    return { kind: "blocked", reason: labels.testBlockedAddressChanged };
+  }
+  return { kind: "stored" };
 }

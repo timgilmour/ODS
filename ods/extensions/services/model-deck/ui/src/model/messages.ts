@@ -647,6 +647,23 @@ export const labels = {
   nodeCredentialPlaceholder: "••••••••",
   testConnection: "Test connection",
   registerALocation: "Register a location",
+
+  // model/nodeForm.ts's validate() and testTarget() — pure decision logic
+  // that must not own its own copy (the same "everything through here"
+  // rule the rest of the deck follows). See applySteps.ts's stepRow for the
+  // same idiom: a pure model function importing labels rather than
+  // hardcoding strings, so a component rendering its output needs no
+  // literal of its own either.
+  nodeIdInvalid: "id must be a lowercase slug (a-z, 0-9, hyphens)",
+  nodeLabelRequired: "label is required",
+  nodeAddressRequired: "address is required",
+  nodeCredentialRequiredForAdd: "credential is required for a new node",
+  testBlockedNoAddress: "enter an address to test",
+  testBlockedNoCredential: "type a credential to test",
+  /** The one case Task 9's review caught: an edited address with no
+   * retyped credential would otherwise silently test the OLD stored
+   * address while the screen shows the new one. */
+  testBlockedAddressChanged: "address changed — retype the credential to test the new pair",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is
