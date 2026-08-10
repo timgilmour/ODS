@@ -50,6 +50,7 @@ import httpx
 
 from app.engines import BusyError, EngineError, GuardError
 from app.engines.litellm import LiteLLMClient
+from app.engines.node_agent import NodeAgentHTTP
 
 _TIMEOUT = httpx.Timeout(5.0)
 
@@ -132,7 +133,7 @@ def _recent(ts: str | None, now: datetime | None = None) -> bool:
     return (now or datetime.now(UTC)) - started < timedelta(seconds=_BOOT_WINDOW_MAX_S)
 
 
-class SparkClient:
+class SparkClient(NodeAgentHTTP):
     def __init__(
         self,
         node_url: str,
@@ -142,12 +143,7 @@ class SparkClient:
         node_transport: httpx.BaseTransport | None = None,
         serving_transport: httpx.BaseTransport | None = None,
     ) -> None:
-        self._node = httpx.Client(
-            base_url=node_url.rstrip("/"),
-            headers={"Authorization": f"Bearer {node_key}"},
-            timeout=_TIMEOUT,
-            transport=node_transport,
-        )
+        super().__init__(node_url, node_key, transport=node_transport, timeout=_TIMEOUT)
         self._serving = httpx.Client(
             base_url=serving_url.rstrip("/"),
             timeout=_TIMEOUT,
@@ -157,15 +153,6 @@ class SparkClient:
         self._litellm = litellm
 
     # -- reads ------------------------------------------------------------
-
-    def _node_get(self, path: str) -> dict:
-        try:
-            resp = self._node.get(path)
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
-        return resp.json()
 
     def status(self) -> dict:
         profiles = self._node_get("/v1/node/profiles")
