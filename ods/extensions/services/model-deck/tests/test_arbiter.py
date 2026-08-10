@@ -548,17 +548,23 @@ class FakePolicyStore:
 
 
 class FakeLemonade:
-    def __init__(self, raise_on_load=None, in_flight=False):
+    def __init__(self, raise_on_load=None, raise_on_unload=None, in_flight=False):
         self.unloaded = []
         self.loaded = []
         self._raise_on_load = raise_on_load
+        self._raise_on_unload = raise_on_unload
         self._in_flight = in_flight
 
     def load_in_flight(self):
         return self._in_flight
 
     def unload(self, model):
+        # Records the ATTEMPT before its guard, so a test can tell "the
+        # unload was never dispatched" apart from "it was dispatched and
+        # raised" (the FakeSpark lesson from task 1).
         self.unloaded.append(model)
+        if self._raise_on_unload is not None:
+            raise self._raise_on_unload
 
     def load(self, model):
         if self._raise_on_load is not None:
@@ -567,13 +573,16 @@ class FakeLemonade:
 
 
 class FakeComfy:
-    def __init__(self, raise_guard=False):
+    def __init__(self, raise_guard=False, raise_on_free=None):
         self.freed = 0
         self._raise_guard = raise_guard
+        self._raise_on_free = raise_on_free
 
     def free(self):
         if self._raise_guard:
             raise GuardError("queue raced non-empty")
+        if self._raise_on_free is not None:
+            raise self._raise_on_free
         self.freed += 1
 
 
@@ -798,6 +807,83 @@ def test_watcher_guarderror_race_logged_and_no_reload(tmp_path):
     kinds = [e["kind"] for e in tail_events(events_path)]
     assert "free-raced" in kinds
     assert lemonade.loaded == []  # eviction raced -> no premature reload
+
+
+def test_failed_unload_does_not_abort_the_tick_or_strand_intent(tmp_path):
+    """Idle-TTL fires an unload while lemonade is briefly unresponsive
+    (EngineError). Per-action isolation — _execute_restore's documented
+    invariant (arbiter.py:886-889), applied to the arm that lacked it
+    [max-review #9]. The tick must:
+
+    1. keep going — the reconcile pass still runs, so a due hipfire restore
+       fires (before this fix the raise escaped into tick()'s broad catch,
+       skipping reconcile/derive/provenance for the whole tick);
+    2. roll the just-recorded 'unloaded' intent back to its prior value —
+       the actuation did NOT happen, and 'unloaded' standing against a
+       still-loaded model derives the inert 'unexpected' status;
+    3. log 'unload-failed'.
+    """
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    # Seeded AWAY from record()'s model=None default: a rollback that
+    # "restores" nothing would still pass a None-vs-None assertion.
+    intent.record("local/lemonade", state="loaded", model="extra.foo.gguf",
+                  engine="lemonade")
+    intent.record("local/hipfire", state="loaded", model=None, engine="hipfire")
+
+    lemonade = FakeLemonade(raise_on_unload=EngineError("lemonade unreachable"))
+    hipfire = FakeHipfire(state="parked")  # intent says loaded -> restore is due
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model="extra.foo.gguf", idle_s=1000),
+        hipfire=_hip(state="parked"),
+        default_route=None,  # no pending inference to re-trigger
+    )
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot), FakeRegistry(), _policy(lem_idle=900),
+        lemonade=lemonade, hipfire=hipfire, intent_store=intent,
+    )
+
+    watcher.tick()  # must not raise
+
+    assert lemonade.unloaded == ["extra.foo.gguf"]  # it WAS dispatched
+    assert "resume" in hipfire.calls  # (1) the tick carried on into reconcile
+    record = intent.get()["local/lemonade"]  # (2) rolled back, not stranded
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.foo.gguf"
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "unload-failed" in kinds  # (3)
+    assert "unload_lemonade" not in kinds  # never claim an unload that failed
+
+
+def test_failed_free_comfyui_skips_retrigger_and_logs(tmp_path):
+    """An EngineError from free() (vs the already-caught GuardError race):
+    logged as 'free-failed', and the VRAM is treated as NOT reclaimed — so
+    the pending default-route load is not re-triggered into a GPU that may
+    still be full."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],  # free = 12 GiB
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    lemonade = FakeLemonade()
+    comfy = FakeComfy(raise_on_free=EngineError("comfy unreachable"))
+    watcher, events_path = _make_watcher(
+        tmp_path,
+        FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(),
+        lemonade=lemonade,
+        comfy=comfy,
+    )
+
+    watcher.tick()  # must not raise
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "free-failed" in kinds
+    assert "free_comfyui" not in kinds  # never claim a free that failed
+    assert lemonade.loaded == []  # VRAM not confirmed reclaimed -> no reload
 
 
 def test_watcher_successful_free_rearms_comfy_idle_clock(tmp_path):

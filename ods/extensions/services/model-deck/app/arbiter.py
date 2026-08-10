@@ -726,7 +726,13 @@ class Watcher:
                 # supersession check relies on that distinction to tell
                 # "the deck unloaded something idle" apart from "the
                 # operator asked for this" [max-review Important-1].
+                # Snapshot the prior record first, so a FAILED unload can roll
+                # it back: the actuation didn't happen, and leaving 'unloaded'
+                # standing against a still-loaded model derives the inert
+                # 'unexpected' status until an eventual retry [max-review #9].
+                prior = None
                 if self._intent_store is not None:
+                    prior = self._intent_store.get().get(LOCAL_LEMONADE_KEY)
                     self._intent_store.record(
                         LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade",
                         actor="deck")
@@ -735,11 +741,44 @@ class Watcher:
                 # try/except in the future still can't return without this
                 # key marked actuated.
                 actuated.add(LOCAL_LEMONADE_KEY)
-                self._lemonade.unload(action["model"])
-                # Deck-initiated unload (idle release OR contention eviction):
-                # arm suppression so healing can't immediately revert it.
-                self._heal_suppressor.note_deck_unload()
-                self._log(kind, {"model": action["model"]})
+                try:
+                    self._lemonade.unload(action["model"])
+                except EngineError as exc:
+                    # Per-action isolation — _execute_restore's documented
+                    # invariant (see its docstring), applied to the arm that
+                    # lacked it: a raise here must not abort the remaining
+                    # actions or the reconcile/derive/provenance passes via
+                    # tick()'s broad catch [max-review #9].
+                    if self._intent_store is not None and prior is not None:
+                        # actor="deck" like the record it undoes — a rollback
+                        # stamped "operator" would postdate a pull-through
+                        # submission and wrongly trip app.routers.control's
+                        # supersession check (task 6 follow-up).
+                        # Narrow, deliberate limitation: record() resets
+                        # failures/quarantined, so those are not restored —
+                        # but this arm's own pre-record already cleared them
+                        # a few lines above, on the success path too, so
+                        # there is nothing left for a rollback to recover.
+                        # The effect is a quarantined key re-entering the
+                        # retry budget: benign, and strictly better than
+                        # stranding 'unloaded'.
+                        self._intent_store.record(
+                            LOCAL_LEMONADE_KEY, state=prior["state"],
+                            model=prior.get("model"),
+                            engine=prior.get("engine", "lemonade"),
+                            actor="deck")
+                    # prior is None (no record for this key yet) + failure
+                    # leaves the fresh 'unloaded' record standing: there is no
+                    # forget() to undo it with. Rare, and no worse than the
+                    # behavior this fix replaces.
+                    self._log("unload-failed",
+                              {"model": action["model"], "error": str(exc)})
+                else:
+                    # Deck-initiated unload (idle release OR contention
+                    # eviction): arm suppression so healing can't immediately
+                    # revert it.
+                    self._heal_suppressor.note_deck_unload()
+                    self._log(kind, {"model": action["model"]})
             elif kind == "free_comfyui":
                 try:
                     self._comfy.free()
@@ -748,6 +787,14 @@ class Watcher:
                     # The VRAM was NOT reclaimed — log and skip the reload.
                     eviction_raced = True
                     self._log("free-raced", {})
+                except EngineError as exc:
+                    # Comfy unreachable / refused. Same conservative reading
+                    # as the race above — the VRAM is NOT confirmed reclaimed,
+                    # so the pending load must not be re-triggered into a GPU
+                    # that may still be full — and the same per-action
+                    # isolation as the unload arm [max-review #9].
+                    eviction_raced = True
+                    self._log("free-failed", {"error": str(exc)})
                 else:
                     # Re-arm the idle TTL so the idle-release rule fires once
                     # per TTL while comfy stays idle, not on every tick.
