@@ -61,4 +61,23 @@ describe("createNode / updateNode — registry CRUD wire shape", () => {
     expect(result.label).toBe("Hera Box 2");
     expect("status" in result).toBe(false);
   });
+
+  it("updateNode on the seeded local node omits address/serving_address entirely — the ?? access pattern still works", async () => {
+    // node_store.py:179 seeds the local node with NO address or
+    // serving_address key at all (agent_kind "local" needs neither), and
+    // _public() spreads the stored dict as-is — so PUT /api/nodes/local
+    // {"label": ...} resolves a response missing both keys, not `null`.
+    const localShaped = {
+      id: "local", label: "autarch", agent_kind: "local",
+      added_ts: "2026-08-01T00:00:00+00:00", credential_set: false,
+    };
+    mockFetchOnce(localShaped);
+    const result = await updateNode("local", { label: "autarch" });
+    expect("address" in result).toBe(false);
+    expect("serving_address" in result).toBe(false);
+    // The typed access pattern a caller must use, now that both fields are
+    // optional (not just nullable): `??` collapses missing and null alike.
+    expect(result.address ?? "").toBe("");
+    expect(result.serving_address ?? "").toBe("");
+  });
 });

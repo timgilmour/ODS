@@ -768,8 +768,12 @@ export interface NodeRegistryEntry {
   id: string;
   label: string;
   agent_kind: "local" | "node-agent";
-  address: string | null;
-  serving_address: string | null;
+  // Optional, not just nullable: `_public` spreads the stored dict as-is,
+  // and the seeded local node is stored with NO address/serving_address
+  // key at all (node_store.py:179's seed spec), so a PUT that never
+  // touches either field returns a response missing both keys.
+  address?: string | null;
+  serving_address?: string | null;
   added_ts: string;
   credential_set: boolean;
 }
