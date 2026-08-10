@@ -155,6 +155,13 @@ export interface DeckNodeEntry {
   address: string | null;
   serving_address: string | null;
   credential_set: boolean;
+  // True when the deck's ACTUATION path is still bound to configuration the
+  // registry has moved past — swaps/restores keep using the boot-time
+  // address until a restart, while observation already follows the edit.
+  // Produced by app/routers/status.py's `_nodes_block` (via
+  // app/node_binding.py's `entry_actuation_stale`); always present, and
+  // always false for non-spark nodes.
+  actuation_stale: boolean;
   status: NodeAgentStatus;
   last_seen: string | null;
   gpus: NodeGpu[] | null;
@@ -776,6 +783,9 @@ export interface NodeRegistryEntry {
   serving_address?: string | null;
   added_ts: string;
   credential_set: boolean;
+  // Same field, same producer as DeckNodeEntry's — app/routers/nodes.py's
+  // `_public` calls the same app/node_binding.py rule the state block does.
+  actuation_stale: boolean;
 }
 
 export function createNode(body: {

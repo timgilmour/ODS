@@ -9,6 +9,20 @@ describe("messages", () => {
     expect(m.action?.label).toBe("Retry");
   });
 
+  it("warns, not alarms, when actuation is bound to stale config", () => {
+    // "warning" is load-bearing: nothing is broken and no data is at risk,
+    // so this must not render as danger (Banner gives danger role="alert",
+    // which interrupts a screen reader). It must also name the split, since
+    // "restart required" alone doesn't tell the operator that MONITORING
+    // already moved while control did not.
+    const m = messages.nodeActuationStale();
+    expect(m.tone).toBe("warning");
+    expect(m.body).toContain("monitoring");
+    expect(m.body).toMatch(/swaps and restores/);
+    // No action button: the deck cannot restart itself from here.
+    expect(m.action).toBeUndefined();
+  });
+
   it("says nothing about age when the age is unknown", () => {
     const m = messages.nodeUnreachable("sparky", null);
     expect(m.body).not.toContain("null");

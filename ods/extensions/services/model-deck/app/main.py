@@ -177,6 +177,7 @@ def _build_deck(settings: Settings) -> dict:
     # tick), but to ACTUATION only on next restart — this client is bound
     # once, here, at build.
     spark_client = None
+    spark_bound = None
     _spark_entry = node_store.get(spark_node_id())
     if _spark_entry and _spark_entry.get("address") and _spark_entry.get("serving_address"):
         _spark_key = node_store.credential_for(spark_node_id())
@@ -187,6 +188,18 @@ def _build_deck(settings: Settings) -> dict:
                 serving_url=_spark_entry["serving_address"],
                 litellm=litellm,
             )
+            # Exactly WHAT this client was bound to, so the nodes router can
+            # tell the operator when the registry has moved on and only a
+            # restart will re-bind [max-review #13]. Recorded here, at the
+            # single build site, rather than re-derived later — a copy of the
+            # bind condition elsewhere would drift out of agreement with it.
+            # The credential rides as a digest, never a value: this stash is
+            # read by an API whose credential contract is write-only.
+            spark_bound = {
+                "address": _spark_entry["address"],
+                "serving_address": _spark_entry["serving_address"],
+                "credential_fp": node_store.credential_fingerprint(spark_node_id()),
+            }
 
     location_store = LocationStore(data_dir / "locations.json")
     catalog = Catalog(data_dir / "catalog.json", location_store)
@@ -205,6 +218,8 @@ def _build_deck(settings: Settings) -> dict:
         "hipfire": hipfire,
         "hostagent": hostagent,
         "spark": spark_client,
+        # None when no client was bound at boot (see spark_bound above).
+        "spark_bound": spark_bound,
         "litellm": litellm,
         "registry": Registry(data_dir / "registry.json", _GGUF_DIR),
         "characteristics_store": CharacteristicsStore(data_dir / "characteristics.json"),

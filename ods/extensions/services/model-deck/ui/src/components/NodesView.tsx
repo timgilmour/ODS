@@ -103,21 +103,30 @@ export default function NodesView({
               }}
             />
           ) : entry ? (
-            // Keyed on the entry's own id: switching rail rows must START a
-            // new form, not carry the previous row's buffers (label edits,
-            // a typed credential, an armed delete) into this one. A
-            // useState initializer and a ref-held arming flag only run once
-            // per mount, so the key is what makes "once per selection" true.
-            <NodeForm
-              key={entry.id}
-              mode="edit"
-              entry={entry}
-              onDone={() => onChanged()}
-              onDeleted={() => {
-                setSelected(null);
-                onChanged();
-              }}
-            />
+            <>
+              {/* Not dismissible: the condition is live, and it clears only
+                  when the deck restarts or the edit is reverted. A dismiss
+                  would hide a still-true fact until the next fetch. */}
+              {entry.actuation_stale && (
+                <Banner message={messages.nodeActuationStale()} />
+              )}
+              {/* Keyed on the entry's own id: switching rail rows must START
+                  a new form, not carry the previous row's buffers (label
+                  edits, a typed credential, an armed delete) into this one.
+                  A useState initializer and a ref-held arming flag only run
+                  once per mount, so the key is what makes "once per
+                  selection" true. */}
+              <NodeForm
+                key={entry.id}
+                mode="edit"
+                entry={entry}
+                onDone={() => onChanged()}
+                onDeleted={() => {
+                  setSelected(null);
+                  onChanged();
+                }}
+              />
+            </>
           ) : null}
         </div>
       </div>

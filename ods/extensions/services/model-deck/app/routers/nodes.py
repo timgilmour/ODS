@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from app.engines import EngineError
 from app.events import log_event
+from app.node_binding import entry_actuation_stale
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -48,8 +49,14 @@ class NodeTestBody(BaseModel):
     credential: str | None = None
 
 
-def _public(store, entry: dict) -> dict:
-    return {**entry, "credential_set": store.credential_set(entry["id"])}
+def _public(store, entry: dict, spark_bound: dict | None = None) -> dict:
+    # actuation_stale via app.node_binding, the SAME function
+    # app.routers.status._nodes_block calls — the Nodes screen renders from
+    # /api/state, so a second copy of the rule here would be the one that
+    # drifts unnoticed.
+    return {**entry,
+            "credential_set": store.credential_set(entry["id"]),
+            "actuation_stale": entry_actuation_stale(store, entry, spark_bound)}
 
 
 def _checked_credential(value: str | None) -> str | None:
@@ -64,8 +71,10 @@ def _checked_credential(value: str | None) -> str | None:
 
 @router.get("")
 def list_nodes(request: Request) -> dict:
-    store = request.app.state.deck["node_store"]
-    return {"nodes": [_public(store, n) for n in store.list()]}
+    deck = request.app.state.deck
+    store = deck["node_store"]
+    bound = deck["spark_bound"]
+    return {"nodes": [_public(store, n, bound) for n in store.list()]}
 
 
 @router.post("")
@@ -79,7 +88,7 @@ def create_node(body: NodeCreate, request: Request) -> dict:
                       credential=credential)
     log_event(deck["events_path"], "node-added",
               {"node": entry["id"], "label": entry["label"]})
-    return _public(store, entry)
+    return _public(store, entry, deck["spark_bound"])
 
 
 @router.put("/{node_id}")
@@ -92,7 +101,7 @@ def update_node(node_id: str, body: NodePatch, request: Request) -> dict:
     changed = sorted(fields) + (["credential"] if credential else [])
     log_event(deck["events_path"], "node-updated",
               {"node": node_id, "fields": changed})   # names, never values
-    return _public(store, entry)
+    return _public(store, entry, deck["spark_bound"])
 
 
 @router.delete("/{node_id}")

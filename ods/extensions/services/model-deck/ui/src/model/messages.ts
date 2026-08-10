@@ -47,6 +47,19 @@ export const messages = {
     action: { label: "Retry" },
   }),
 
+  // The deck binds its actuation client ONCE at start (app/main.py), so a
+  // connection edit splits the two paths until a restart: monitoring follows
+  // immediately, swaps and restores do not. "warning", not "danger" —
+  // nothing is broken and no data is at risk; an action the operator will
+  // reasonably expect to have taken effect simply hasn't yet.
+  nodeActuationStale: (): Message => ({
+    tone: "warning",
+    title: "Restart required for control changes",
+    body:
+      "Connection edits apply to monitoring immediately, but swaps and " +
+      "restores still use the address from the last deck start.",
+  }),
+
   warmingFirstBoot: (): Message => ({
     tone: "neutral",
     title: "first boot can autotune for about 15 minutes — this is normal",

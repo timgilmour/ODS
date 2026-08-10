@@ -107,3 +107,127 @@ def test_intent_json_is_never_touched_by_node_machinery(monkeypatch, tmp_path):
         c.get("/api/state")
         c.get("/api/nodes")
     assert not (tmp_path / "data" / "intent.json").exists()
+
+
+# --- actuation binding staleness [max-review #13] ---------------------------
+#
+# main.py builds the SparkClient ONCE, at app build, from the registry (see
+# its comment there). Connection edits reach OBSERVATION immediately —
+# NodeObserver re-reads the registry every tick — but ACTUATION keeps using
+# the boot-time address until a restart. That consequence was documented in
+# main.py and surfaced to the operator NOWHERE. These pin the surfacing.
+
+_SPARK_ENV = {
+    "MODEL_DECK_SPARK_NODE_URL": "http://192.168.1.7:7720",
+    "MODEL_DECK_SPARK_SERVING_URL": "http://192.168.1.7:8000",
+    "ODS_REMOTE_NODE_KEYS": json.dumps({"sparky": "spark-key"}),
+}
+
+
+def _spark_node(client):
+    nodes = client.get("/api/nodes").json()["nodes"]
+    return next(n for n in nodes if n["id"] == spark_node_id())
+
+
+def test_nodes_list_not_stale_when_registry_matches_binding(monkeypatch):
+    app = _app(monkeypatch, **_SPARK_ENV)
+    assert app.state.deck["spark"] is not None  # fixture precondition: bound
+    with TestClient(app) as c:
+        assert _spark_node(c)["actuation_stale"] is False
+
+
+def test_nodes_list_flags_stale_actuation_after_address_edit(monkeypatch):
+    """The finding: the bound client still points at the boot address."""
+    app = _app(monkeypatch, **_SPARK_ENV)
+    with TestClient(app) as c:
+        c.put(f"/api/nodes/{spark_node_id()}",
+              json={"address": "http://192.168.1.99:7720"})
+        assert _spark_node(c)["actuation_stale"] is True
+
+
+def test_nodes_list_flags_stale_actuation_after_serving_address_edit(monkeypatch):
+    """serving_address is bound too (main.py passes it as serving_url), so it
+    goes stale by the same mechanism — asserted separately because a
+    binding record that only captured `address` would pass the test above."""
+    app = _app(monkeypatch, **_SPARK_ENV)
+    with TestClient(app) as c:
+        c.put(f"/api/nodes/{spark_node_id()}",
+              json={"serving_address": "http://192.168.1.7:9999"})
+        assert _spark_node(c)["actuation_stale"] is True
+
+
+def test_nodes_list_flags_stale_actuation_after_credential_edit(monkeypatch):
+    """The credential is bound as node_key. Compared by fingerprint — the
+    value never leaves the store — and the response still must not echo it."""
+    app = _app(monkeypatch, **_SPARK_ENV)
+    with TestClient(app) as c:
+        c.put(f"/api/nodes/{spark_node_id()}", json={"credential": "rotated-key"})
+        node = _spark_node(c)
+        assert node["actuation_stale"] is True
+        assert "rotated-key" not in c.get("/api/nodes").text
+
+
+def test_nodes_list_not_stale_when_an_edit_changes_nothing(monkeypatch):
+    """Re-submitting the SAME address is not a rebind-worthy change. Pins that
+    the flag compares CONFIGURATION, not "was a PUT ever issued"."""
+    app = _app(monkeypatch, **_SPARK_ENV)
+    with TestClient(app) as c:
+        c.put(f"/api/nodes/{spark_node_id()}",
+              json={"address": "http://192.168.1.7:7720", "label": "renamed"})
+        assert _spark_node(c)["actuation_stale"] is False
+
+
+def test_nodes_list_flags_stale_when_spark_configured_after_boot(monkeypatch):
+    """Booted with no spark env => no client bound at all. Configuring one
+    now cannot actuate until a restart, so it is stale rather than fine."""
+    app = _app(monkeypatch)  # no spark env
+    assert app.state.deck["spark"] is None
+    with TestClient(app) as c:
+        c.post("/api/nodes", json={"id": spark_node_id(), "label": "sparky",
+                                   "address": "http://192.168.1.7:7720",
+                                   "serving_address": "http://192.168.1.7:8000",
+                                   "credential": "spark-key"})
+        assert _spark_node(c)["actuation_stale"] is True
+
+
+def test_unbound_and_unconfigured_spark_is_not_stale(monkeypatch):
+    """No client, no configuration: nothing is out of date, so no nag."""
+    app = _app(monkeypatch)
+    with TestClient(app) as c:
+        c.post("/api/nodes", json={"id": spark_node_id(), "label": "sparky",
+                                   "address": "http://192.168.1.7:7720"})
+        # serving_address and credential absent -> a restart would bind nothing
+        assert _spark_node(c)["actuation_stale"] is False
+
+
+def test_non_spark_nodes_are_never_stale(monkeypatch):
+    """Observe-only nodes have no actuation binding to go stale."""
+    app = _app(monkeypatch, **_SPARK_ENV)
+    with TestClient(app) as c:
+        c.post("/api/nodes", json={"id": "hera", "label": "Hera",
+                                   "address": "http://hera:7720",
+                                   "credential": "k"})
+        c.put("/api/nodes/hera", json={"address": "http://hera:9999"})
+        nodes = {n["id"]: n for n in c.get("/api/nodes").json()["nodes"]}
+        assert nodes["hera"]["actuation_stale"] is False
+        assert nodes["local"]["actuation_stale"] is False
+
+
+def test_state_nodes_block_carries_actuation_stale(monkeypatch):
+    """/api/state is what the Nodes SCREEN renders (ui/src/components/
+    NodesView.tsx takes DeckNodeEntry[], not the registry CRUD list), so the
+    flag has to reach this block or the finding stays exactly as invisible as
+    it was. Pinned separately from the /api/nodes tests above because those
+    would all still pass with this block unchanged."""
+    app = _app(monkeypatch, **_SPARK_ENV)
+    with TestClient(app) as c:
+        before = {n["id"]: n for n in c.get("/api/state").json()["nodes"]}
+        assert before[spark_node_id()]["actuation_stale"] is False
+        assert before["local"]["actuation_stale"] is False
+
+        c.put(f"/api/nodes/{spark_node_id()}",
+              json={"address": "http://192.168.1.99:7720"})
+
+        after = {n["id"]: n for n in c.get("/api/state").json()["nodes"]}
+        assert after[spark_node_id()]["actuation_stale"] is True
+        assert after["local"]["actuation_stale"] is False

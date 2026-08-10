@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 
 from app import provenance
 from app.events import tail_events
+from app.node_binding import entry_actuation_stale
 from app.routers import build_lifecycle_view, build_world_snapshot
 
 router = APIRouter(tags=["status"])
@@ -63,6 +64,12 @@ def _nodes_block(deck: dict) -> list[dict]:
             "address": entry.get("address"),
             "serving_address": entry.get("serving_address"),
             "credential_set": deck["node_store"].credential_set(entry["id"]),
+            # The Nodes screen renders from THIS block, so this is where the
+            # bound-vs-registry split has to become visible [max-review #13].
+            # Same function app.routers.nodes' list uses — one rule, two
+            # surfaces (app.node_binding).
+            "actuation_stale": entry_actuation_stale(
+                deck["node_store"], entry, deck["spark_bound"]),
             "status": "online" if entry["agent_kind"] == "local" else obs.get("status"),
             "last_seen": obs.get("last_seen"),
             "gpus": obs.get("gpus"),

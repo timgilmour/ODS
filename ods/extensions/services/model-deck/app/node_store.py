@@ -32,6 +32,7 @@ those call sites; if a new shape concern shows up, it belongs here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -192,6 +193,22 @@ class NodeStore:
 
     def credential_set(self, node_id: str) -> bool:
         return bool(self.credential_for(node_id))
+
+    def credential_fingerprint(self, node_id: str) -> str | None:
+        """A stable, non-reversible stand-in for the credential, so callers
+        can answer "is this still the same credential?" without ever holding
+        the value. ``None`` when unset — distinct from any real digest.
+
+        Used by the nodes router's ``actuation_stale`` flag, which compares
+        the SparkClient's boot-time binding against the registry's current
+        state. The credential is part of that binding (main.py passes it as
+        ``node_key``), so a rotation goes stale exactly like an address edit
+        — but this API is write-only by contract (see the router's module
+        docstring), and a digest keeps it that way."""
+        value = self.credential_for(node_id)
+        if not value:
+            return None
+        return hashlib.sha256(value.encode()).hexdigest()
 
 
 def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,

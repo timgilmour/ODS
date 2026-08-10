@@ -13,7 +13,7 @@ const entry: DeckNodeEntry = {
   id: "hera", label: "Hera Box", agent_kind: "node-agent",
   address: "http://hera:7720", serving_address: "http://hera:8000",
   credential_set: true, status: "online", last_seen: null,
-  gpus: null, serving: null, error: null,
+  gpus: null, serving: null, error: null, actuation_stale: false,
 };
 
 // The seeded local node (app/node_store.py:179's seed spec) — no address,
@@ -23,7 +23,7 @@ const localEntry: DeckNodeEntry = {
   id: "local", label: "This box", agent_kind: "local",
   address: null, serving_address: null,
   credential_set: false, status: "online", last_seen: null,
-  gpus: null, serving: null, error: null,
+  gpus: null, serving: null, error: null, actuation_stale: false,
 };
 
 test("formForEntry never carries the credential", () => {

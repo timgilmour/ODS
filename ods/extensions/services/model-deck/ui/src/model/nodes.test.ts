@@ -524,6 +524,7 @@ const localEntry: DeckNodeEntry = {
   id: "local", label: "autarch", agent_kind: "local",
   address: null, serving_address: null, credential_set: false,
   status: "online", last_seen: null, gpus: null, serving: null, error: null,
+  actuation_stale: false,
 };
 
 // Labels deliberately ≠ ids: a fixture whose label equals its id cannot
@@ -535,6 +536,7 @@ const heraEntry: DeckNodeEntry = {
   gpus: [{ index: 0, name: "RTX", memory_used_mb: 1024, memory_total_mb: 24576,
            utilization_percent: 5 }],
   serving: { model: "big-model", endpoint_ok: true }, error: null,
+  actuation_stale: false,
 };
 
 describe("buildNodes — registry nodes", () => {
