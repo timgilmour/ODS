@@ -59,3 +59,14 @@ def test_info_and_serving_paths():
     c.info()
     c.serving()
     assert paths == ["/v1/node/info", "/v1/node/serving"]
+
+
+def test_200_with_non_json_body_is_engine_error():
+    """2xx response with non-JSON body raises EngineError, not JSONDecodeError."""
+    def handler(request):
+        return httpx.Response(200, text="not json")
+
+    with pytest.raises(EngineError) as exc_info:
+        _client(handler).gpu()
+    assert "non-JSON response" in str(exc_info.value)
+    assert not isinstance(exc_info.value, NodeAgentUnreachable)

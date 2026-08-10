@@ -90,9 +90,16 @@ class NodeObserver:
         previous = self._snap
         snap: dict[str, dict] = {}
         for entry in self._store.list():
+            # Skip non-dict entries (nodes.json is human-editable)
+            if not isinstance(entry, dict):
+                continue
+            # Skip non-node-agent entries
             if entry.get("agent_kind") != "node-agent":
                 continue
-            node_id = entry["id"]
+            # Skip malformed node-agent entries (missing required id or address)
+            node_id = entry.get("id")
+            if not node_id or not entry.get("address"):
+                continue
             if not self._store.credential_set(node_id):
                 snap[node_id] = {"status": "unconfigured", "last_seen": None,
                                  "gpus": None, "serving": None,

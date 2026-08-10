@@ -124,3 +124,32 @@ def test_registry_is_reread_every_tick(store, tmp_path):
     store.remove("hera")
     obs.tick()
     assert "hera" not in obs.snapshot()   # removal is live, no restart
+
+
+def test_malformed_nodes_do_not_stall_well_formed_siblings(store, tmp_path):
+    """Per-entry isolation: non-dict elements and missing id/address don't abort
+    the whole tick. Well-formed siblings are still probed and snapshot swaps."""
+    # Add a second well-formed node
+    store.add({"id": "atlas", "label": "Atlas Box", "agent_kind": "node-agent",
+               "address": "http://atlas:7720"}, credential="s3cr3t")
+    # Inject malformed entries directly into the persisted list
+    data = store._load()
+    data.append("not a dict")  # non-dict element
+    data.append({"id": "bad-entry", "label": "Bad", "agent_kind": "node-agent"})
+    # missing address
+    store._save(data)
+    # Probe with a client that tracks calls
+    obs = _observer(store, tmp_path, FakeClient())
+    obs.tick()
+    snap = obs.snapshot()
+    # Both well-formed nodes should be present (hera and atlas)
+    assert "hera" in snap
+    assert "atlas" in snap
+    assert snap["hera"]["status"] == "online"
+    assert snap["atlas"]["status"] == "online"
+    # Malformed entries should not appear
+    assert "bad-entry" not in snap
+    # Only the two well-formed nodes should have been probed
+    assert len(obs.calls) == 2
+    assert ("http://hera:7720", "s3cret") in obs.calls
+    assert ("http://atlas:7720", "s3cr3t") in obs.calls

@@ -45,7 +45,10 @@ class NodeAgentHTTP:
             raise NodeAgentUnreachable(str(exc)) from exc
         if not resp.is_success:
             raise EngineError(resp.text)
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:  # JSONDecodeError is a ValueError
+            raise EngineError(f"non-JSON response from {path}: {exc}") from exc
 
     def close(self) -> None:
         self._node.close()
