@@ -99,7 +99,8 @@ export interface IntentRecord {
   /** Who authored this record (app/intent.py's VALID_ACTORS). Optional: a
    * pre-upgrade intent.json has no such key, and every backend reader treats
    * a missing one as "operator" (app/routers/control.py's supersession
-   * check). Carried on GET /api/lifecycle's raw intent record. */
+   * check). Carried on /api/state's lifecycle map (app/routers/__init__.py's
+   * raw intent record, delivered by app/routers/status.py). */
   actor?: "operator" | "deck";
   updated_ts: string;
   last_healthy_ts: string | null;

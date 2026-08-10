@@ -111,18 +111,26 @@ class LocationStore:
         spec = dict(spec)
         spec.pop("uuid", None)
         _validate(spec)
-        if self.get(spec["name"]) is not None:
-            raise ValueError(f"location {spec['name']!r} already exists")
         root = Path(spec["path"])
         if not root.is_dir():
             raise GuardError(f"location path {spec['path']!r} does not exist — is the drive mounted into the container?")
-        spec["uuid"] = uuidlib.uuid4().hex
-        marker = root / MARKER_NAME
-        try:
-            marker.write_text(json.dumps({"uuid": spec["uuid"], "name": spec["name"]}))
-        except OSError as exc:
-            raise GuardError(f"cannot write marker at {marker}: {exc}") from exc
+        # The duplicate-name check must be INSIDE the lock, with the append it
+        # guards. Outside it, two concurrent registers of the same name both
+        # passed the check and both appended — silent corruption of the
+        # uniqueness invariant, and worse than a raced write because nothing
+        # signals: routers/storage.py and routers/provenance.py build
+        # name-keyed dicts from this list, so one entry simply vanishes.
+        # NodeStore.add() holds its lock across the identical check for the
+        # identical reason.
         with self._lock:
+            if self.get(spec["name"]) is not None:
+                raise ValueError(f"location {spec['name']!r} already exists")
+            spec["uuid"] = uuidlib.uuid4().hex
+            marker = root / MARKER_NAME
+            try:
+                marker.write_text(json.dumps({"uuid": spec["uuid"], "name": spec["name"]}))
+            except OSError as exc:
+                raise GuardError(f"cannot write marker at {marker}: {exc}") from exc
             data = self._load()
             data.append(spec)
             self._save(data)

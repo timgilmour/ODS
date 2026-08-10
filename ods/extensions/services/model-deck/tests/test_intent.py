@@ -321,7 +321,7 @@ def test_load_drops_a_malformed_record_and_keeps_the_others(tmp_path):
     """Boundary gate [T7 review Important-1]. IntentStore was the one sibling
     store without a per-record gate: _load checked only the whole-FILE shape,
     so per-record garbage reached every consumer verbatim — and consumers
-    hard-index (app/lifecycle.py:62 and app/reconcile.py:57 both do
+    hard-index (app/lifecycle.py and app/reconcile.py both do
     intent["model"]), so one bad record crashed the reconcile pass.
 
     Gated at _load, per this codebase's boundary rule and PolicyStore's
@@ -375,7 +375,7 @@ def test_a_model_key_of_none_is_well_formed(tmp_path):
 
 def test_put_back_refuses_a_record_with_no_model_key(tmp_path):
     """[T7 review Important-2] state+engine was NOT the right bar: consumers
-    hard-index model too (app/lifecycle.py:62, app/reconcile.py:57), so a
+    hard-index model too (app/lifecycle.py, app/reconcile.py), so a
     record accepted without it persists and KeyErrors the next reconcile
     pass."""
     store = IntentStore(tmp_path / "intent.json")

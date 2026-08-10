@@ -64,6 +64,12 @@ class Registry:
         size = (self._gguf_dir / model_file).stat().st_size
         return int(size * _ESTIMATE_FACTOR)
 
+    # NOT lock-guarded, unlike every sibling store [T9b]: this is the only
+    # write path here and it has ZERO live callers (measured footprints were
+    # never wired up). A lock on dead code invents a contract nobody uses —
+    # but the fixed-tmp-path race is real, so anyone re-wiring this must add
+    # the per-store threading.Lock the siblings use (app/intent.py's is the
+    # reference) in the same change.
     def observe(self, model_file: str, measured_bytes: int) -> None:
         """Record a measured footprint, persisted to registry.json immediately."""
         data = self._load()

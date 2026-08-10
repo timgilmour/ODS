@@ -176,6 +176,9 @@ class SetStore:
         # cannot collide — the tmp name carries the slug — so this lock only
         # needs to cover save()/delete().
         #
+        # Covers save(), replace() and delete() — every path that writes a
+        # slug file from an HTTP thread.
+        #
         # save_previous() deliberately does NOT take it: apply() is its sole
         # caller and already holds app.actuation.LOCK, so it is structurally
         # serialized. Taking this lock there would be harmless but would
@@ -281,9 +284,16 @@ class SetStore:
         create. Exists for adopt: it must write back to the slug it read
         from; deriving from the NAME would turn '· previous' into the
         reserved slug save() refuses [c50]."""
-        if not self._path(slug).exists():
-            raise ValueError(f"no set stored at slug {slug!r}")
-        self._write(slug, cfgset)
+        # Same lock as save()/delete(): replace() writes through the same
+        # fixed per-slug tmp path, so two adopts of one slug — or an adopt
+        # racing a save — hit the identical FileNotFoundError. The
+        # exists() check joins it for the same reason register()'s
+        # duplicate check does: a guard outside the lock it protects is not
+        # a guard.
+        with self._lock:
+            if not self._path(slug).exists():
+                raise ValueError(f"no set stored at slug {slug!r}")
+            self._write(slug, cfgset)
         return slug
 
     def delete(self, slug: str) -> None:

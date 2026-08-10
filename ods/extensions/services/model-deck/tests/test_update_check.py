@@ -812,3 +812,66 @@ def test_a_failing_artifact_logs_an_event_and_the_pass_continues(store, tmp_path
     assert len(errors) == 1
     assert errors[0]["detail"]["artifact_id"] == "oci:local:broken"
     assert "upstream exploded" in errors[0]["detail"]["error"]
+
+
+def test_a_recovered_artifact_re_announces_its_next_failure(store, tmp_path):
+    """[T9-fix review] The per-artifact dedup was never cleared on recovery,
+    unlike all three sibling kinds — so fail -> recover -> fail logged only
+    the FIRST failure and suppressed every later one. A flapping upstream is
+    exactly what an operator needs to see, and it was the one case guaranteed
+    to be silent.
+
+    Three passes, one shared dedup dict (the real UpdateChecker keeps one for
+    the process lifetime); single-pass coverage structurally cannot see this.
+    """
+    watched(store, "oci:local:flappy", {
+        "id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
+        "pinned": "v1.0.0", "order": "semver"})
+
+    events_path = tmp_path / "events.jsonl"
+    dedup: dict = {}
+    real_dispatch = update_check.dispatch
+
+    def run(explode):
+        def maybe(source, fetch):
+            if explode:
+                raise RuntimeError("upstream exploded")
+            return real_dispatch(source, fetch)
+        with mock.patch.object(update_check, "dispatch", maybe):
+            update_check.run_pass(store, ok_fetch([{"name": "v2.0.0"}]),
+                                  events_path, dedup=dedup)
+
+    def artifact_errors():
+        return [json.loads(line) for line in
+                events_path.read_text().splitlines() if line.strip()
+                and json.loads(line)["kind"] == "update-check-artifact-error"]
+
+    run(True)
+    assert len(artifact_errors()) == 1
+    run(False)                       # recovered
+    run(True)                        # and broke again, same failure class
+    assert len(artifact_errors()) == 2
+
+
+def test_a_persistently_failing_artifact_is_still_logged_once(store, tmp_path):
+    """The other half of the same rule: an artifact that never recovers must
+    NOT re-log every pass (that spam now also evicts real history from the
+    bounded events ring)."""
+    watched(store, "oci:local:broken", {
+        "id": "t", "check": "git_tags", "remote": "https://github.com/a/b",
+        "pinned": "v1.0.0", "order": "semver"})
+
+    events_path = tmp_path / "events.jsonl"
+    dedup: dict = {}
+
+    def exploding(source, fetch):
+        raise RuntimeError("upstream exploded")
+
+    with mock.patch.object(update_check, "dispatch", exploding):
+        for _ in range(5):
+            update_check.run_pass(store, ok_fetch([]), events_path, dedup=dedup)
+
+    entries = [json.loads(line) for line in
+               events_path.read_text().splitlines() if line.strip()]
+    assert len([e for e in entries
+                if e["kind"] == "update-check-artifact-error"]) == 1

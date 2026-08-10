@@ -495,3 +495,40 @@ def test_normalize_accepts_an_explicitly_unset_value():
     """The wire must keep accepting None for the same reason — refusing it
     would remove the operator's only way to say "unset this key"."""
     assert normalize_args_map({"k": None}) == {"k": None}
+
+
+def test_render_skips_an_unset_inside_a_list_and_positionals():
+    """[T9-fix review] The unset ruling was applied ONLY to the bare-value
+    branch, so a persisted None inside a list or in _positional still hit the
+    refusal — and that wedged the SHIP path: GET effective, the preview and
+    POST /api/spark/reload all 422'd, i.e. the endpoints that would show the
+    operator what to fix were the ones failing. The ladder pops only
+    TOP-LEVEL Nones, so a list containing one survives resolution and reaches
+    the renderer.
+
+    Already-persisted data must therefore render, not refuse."""
+    assert render_argv({"served-model-name": ["a", None]}) == ["--served-model-name", "a"]
+    assert render_argv({POSITIONAL_KEY: ["serve", None]}) == ["serve"]
+    # A list of nothing but Nones says nothing at all — not a bare flag.
+    assert render_argv({"gone": [None], "kept": "v"}) == ["--kept", "v"]
+
+
+def test_wire_refuses_a_null_inside_a_list():
+    """The other boundary: a bare None means "unset this key", but INSIDE a
+    list it means nothing, so a NEW write is refused rather than guessed at.
+    Persisted ones still render (above), which is what makes them fixable."""
+    with pytest.raises(ValueError, match="served-model-name"):
+        normalize_args_map({"served-model-name": ["a", None]})
+    with pytest.raises(ValueError, match=POSITIONAL_KEY):
+        normalize_args_map({POSITIONAL_KEY: ["serve", None]})
+
+
+def test_wire_treats_a_bare_positional_null_as_unset():
+    """`_positional: null` used to be wrapped into [None] — inventing a
+    positional token nobody typed, which then 422'd every renderer. It means
+    the same "unset" a bare None means for any other key."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert normalize_args_map({POSITIONAL_KEY: None}) == {}

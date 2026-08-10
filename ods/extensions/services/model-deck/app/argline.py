@@ -139,12 +139,18 @@ def _require_renderable(key: str, value) -> None:
     repr into a launch argline — c49 verbatim, through the very boundary
     whose comment claims to cover hand-edited files.
 
-    ``None`` is NOT refused here and never reaches this function: it is a
-    load-bearing value meaning EXPLICIT UNSET (app/ladder.py:73 pops the key
-    and everything a lower layer contributed), so its honest rendering is
-    nothing at all — see the skip in _argv_tokens. Refusing it instead made
-    a scope containing one permanently un-viewable and un-editable through
-    the deck, a 422 the operator had no way to clear.
+    ``None`` never reaches this function: every caller skips it first. It is
+    a load-bearing value meaning EXPLICIT UNSET (app/ladder.py:73 pops the
+    key and everything a lower layer contributed), so its honest rendering is
+    nothing at all. Refusing it instead made a scope containing one
+    permanently un-viewable and un-editable through the deck — a 422 the
+    operator had no way to clear.
+
+    That skip is at THREE sites, not one. An earlier version put it only on
+    the bare-value branch, which left list elements and positional tokens
+    refusing None and reproduced the same wedge one level down — this time
+    also 422ing POST /api/spark/reload, since the ladder pops only TOP-LEVEL
+    Nones and a list containing one survives resolution.
     """
     if not isinstance(value, (str, int, float)):
         raise ValueError(
@@ -158,7 +164,9 @@ def _argv_tokens(settings: dict) -> list[str]:
     array, render_argline joins them for a shell."""
     parts: list[str] = []
 
-    for token in settings.get(POSITIONAL_KEY, []):
+    for token in settings.get(POSITIONAL_KEY) or []:
+        if token is None:
+            continue          # see the None note in _require_renderable
         _require_renderable(POSITIONAL_KEY, token)
         parts.append(str(token))
 
@@ -176,8 +184,19 @@ def _argv_tokens(settings: dict) -> list[str]:
         if value is True:
             parts.append(flag)
         elif isinstance(value, list):
+            # Drop None ELEMENTS the same way the bare-value branch drops a
+            # bare None: nothing is the honest rendering of "no value", and
+            # refusing here wedged real ship paths — a persisted [None] made
+            # GET effective, the preview AND POST /api/spark/reload all 422,
+            # i.e. the endpoints that would show the operator what to fix
+            # were the ones failing. The wire refuses NEW list-Nones
+            # (_normalize_args_value); this keeps already-persisted ones
+            # renderable so they can be edited out.
+            value = [v for v in value if v is not None]
             for element in value:
                 _require_renderable(key, element)
+            if not value:
+                continue      # a list of nothing but Nones says nothing
             if any(_looks_like_a_flag(v) for v in value):
                 # A dash-shaped element anywhere forces the whole list to
                 # equals-form -- see module docstring.
@@ -339,6 +358,12 @@ def _normalize_args_value(value):
     if isinstance(value, list):
         if not value:
             return _DROP
+        if any(v is None for v in value):
+            # A bare None means "unset this key" (app/ladder.py:73); INSIDE a
+            # list it means nothing at all, and persisting one used to reach
+            # the renderer and 422 every path that renders. Refuse the new
+            # write rather than guess which element was meant.
+            raise ValueError("a list value must not contain null")
         if len(value) == 1:
             return _normalize_args_scalar(value[0])
         return [_normalize_args_scalar(v) for v in value]
@@ -355,9 +380,16 @@ def _normalize_positional_value(value):
     a caller handing a bare positional value still gets the canonical
     shape back.
     """
+    if value is None:
+        # Same unset meaning as any other key's bare None. Wrapping it into
+        # [None] (what the generic path below would do) invented a positional
+        # token nobody typed, and that [None] then 422'd every renderer.
+        return _DROP
     items = value if isinstance(value, list) else [value]
     if not items:
         return _DROP
+    if any(v is None for v in items):
+        raise ValueError("a positional list must not contain null")
     return [_normalize_args_scalar(v) for v in items]
 
 

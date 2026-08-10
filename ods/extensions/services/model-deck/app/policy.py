@@ -24,8 +24,12 @@ malformed ``_auto`` record (wrong shape, or a non-bool ``enabled``) is
 dropped rather than kept, healing to ``auto_enabled()``'s default-True
 reading instead of crashing the tick.
 
-This is single-process, in-process state only — no cross-process locking.
-The supervisor is the sole owner of policy.json.
+This is single-process, in-process state only — no CROSS-process locking.
+Within the process both stores below DO hold a threading.Lock across every
+load-modify-save (T9b): the watcher tick and the HTTP threadpool are real
+concurrent writers, and since the boundary gate `_load()` itself persists a
+heal, even two concurrent READS are two writers on a partial file. The
+supervisor is the sole owner of policy.json.
 """
 
 import json

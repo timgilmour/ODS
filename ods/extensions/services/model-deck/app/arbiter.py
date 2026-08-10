@@ -755,36 +755,38 @@ class Watcher:
                     # not be contingent on the rollback succeeding [T7 review].
                     self._log("unload-failed",
                               {"model": action["model"], "error": str(exc)})
-                    # Compare-and-swap, not last-write-wins [T7 review m1]:
-                    # an operator can record a deliberate load/unload during
-                    # the seconds this engine call was hanging, and blindly
-                    # putting `prior` back would silently revert THEIR action
-                    # — the same class of bug as the pull-through supersession
-                    # hole task 6 closed. Only roll back if the record is
-                    # still the speculative one this arm wrote: deck-authored
-                    # and unloaded. An operator's write flips actor to
-                    # "operator" (their routes never pass actor="deck"), so
-                    # that pair is a sufficient witness.
-                    current = (self._intent_store.get().get(LOCAL_LEMONADE_KEY)
-                               if self._intent_store is not None else None)
-                    superseded = not (current is not None
-                                      and current.get("actor") == "deck"
-                                      and current.get("state") == "unloaded")
-                    if superseded and current is not None:
-                        self._log("unload-rollback-skipped",
-                                  {"model": action["model"],
-                                   "reason": "intent changed during the unload"})
-                    if self._intent_store is not None and prior is not None and not superseded:
-                        # put_back, not record(): a VERBATIM restore of the
-                        # record the pre-record above overwrote — actor,
-                        # updated_ts, failures and quarantined all included.
-                        # See IntentStore.put_back's docstring for why each
-                        # of those must not be re-stamped; the short version
-                        # is that a re-record silently relabels who authored
-                        # the intent, advances the settings-drift baseline
-                        # for a process that never relaunched, and releases a
-                        # quarantine the failure budget deliberately imposed.
-                        self._intent_store.put_back(LOCAL_LEMONADE_KEY, prior)
+                    # A real compare-and-swap: the predicate and the write
+                    # run in ONE critical section inside the store
+                    # (put_back_if). An operator can record a deliberate
+                    # load/unload during the seconds this engine call hung,
+                    # and blindly putting `prior` back would silently revert
+                    # THEIR action — the same class of bug as the pull-through
+                    # supersession hole task 6 closed. An earlier version read
+                    # the record and then wrote in two separate critical
+                    # sections, which is check-then-act, not CAS [T7/T8
+                    # fix-round review].
+                    #
+                    # Still the speculative record this arm wrote? It is
+                    # deck-authored AND unloaded; an operator's write flips
+                    # actor to "operator" (their routes never pass
+                    # actor="deck"), so that pair is a sufficient witness.
+                    def _still_ours(current):
+                        return (current is not None
+                                and current.get("actor") == "deck"
+                                and current.get("state") == "unloaded")
+
+                    if self._intent_store is not None and prior is not None:
+                        if not self._intent_store.put_back_if(
+                                LOCAL_LEMONADE_KEY, _still_ours, prior):
+                            # Someone else's intent is newer. Leave it alone
+                            # and say so — a silent skip here would be the
+                            # same invisibility the rollback exists to end.
+                            # Covers the forget()-shaped case too (current
+                            # gone entirely), which the previous shape logged
+                            # nothing for.
+                            self._log("unload-rollback-skipped",
+                                      {"model": action["model"],
+                                       "reason": "intent changed during the unload"})
                     # prior is None (no record for this key yet) + failure
                     # leaves the fresh 'unloaded' record standing: there is no
                     # forget() to undo it with. Rare, and no worse than the

@@ -64,7 +64,7 @@ class IntentStore:
 
     # --- persistence -------------------------------------------------------
 
-    def _well_formed(self, key: str, record: object) -> bool:
+    def _well_formed(self, record: object) -> bool:
         """One record's boundary check. `model` is a PRESENCE check, never a
         truthiness one: ``model=None`` is a legitimate intent ("loaded, no
         opinion which model" — the correct reading for single-model engines
@@ -94,8 +94,8 @@ class IntentStore:
         THE GATE LIVES HERE AND NOWHERE ELSE [T7 review Important-1]. This
         store used to check only the whole-FILE shape, one level up from
         where the damage was: consumers hard-index these records
-        (app/lifecycle.py:62 and app/reconcile.py:57 both do
-        ``intent["model"]``), so a single malformed record crashed the
+        (app/lifecycle.py and app/reconcile.py both index
+        ``intent["model"]`` unconditionally), so a single malformed record crashed the
         reconcile pass — and, after T7, could make the arbiter's own rollback
         raise from inside the handler whose whole job is isolating a failure.
 
@@ -103,6 +103,11 @@ class IntentStore:
         is no default to heal an intent to, and "no intent" is the safe
         reading — nothing gets restored, rather than something wrong getting
         restored.
+
+        Lifecycle of a dropped record: any ``record()`` on any key persists
+        the heal (the gated map is what gets saved); ``note_healthy``/
+        ``note_failure`` on a dropped key are silent no-ops, which is
+        consistent — the reconciler cannot see it either.
 
         Deliberately does NOT persist the heal, which is where this departs
         from PolicyStore._load's otherwise-identical pattern: PolicyStore has
@@ -124,7 +129,7 @@ class IntentStore:
             return {}
         gated = {}
         for key, record in data.items():
-            if self._well_formed(key, record):
+            if self._well_formed(record):
                 gated[key] = record
             elif key not in self._warned:
                 # Once per key per process: _load runs on every arbiter tick,
@@ -195,6 +200,11 @@ class IntentStore:
             raise ValueError(f"state must be one of {VALID_STATES}, got {state!r}")
         if actor not in VALID_ACTORS:
             raise ValueError(f"actor must be one of {VALID_ACTORS}, got {actor!r}")
+        if not engine:
+            # Matches the boundary gate's bar. Without this, record(engine="")
+            # wrote a record that _load() then silently DROPPED on the next
+            # read — a write that appears to succeed and is invisible forever.
+            raise ValueError("engine must be a non-empty string")
 
         with self._lock:
             data = self._load()
@@ -248,8 +258,8 @@ class IntentStore:
         An earlier version of this check took ``state`` + ``engine`` only,
         on the stated grounds that those were "the fields
         derive_status/plan_reconcile dereference". That was simply wrong —
-        both also hard-index ``model`` (app/lifecycle.py:62,
-        app/reconcile.py:57), so a record accepted without it persisted and
+        both also hard-index ``model`` (app/lifecycle.py and
+        app/reconcile.py), so a record accepted without it persisted and
         KeyError'd the next reconcile pass [T7 review Important-2].
 
         SINCE ``_load`` GATES, this raise is unreachable from the arbiter's
@@ -258,7 +268,7 @@ class IntentStore:
         callers: raising here from inside the arbiter's ``except EngineError``
         handler would abort the very tick that handler exists to keep alive.
         """
-        if not self._well_formed(key, record):
+        if not self._well_formed(record):
             raise ValueError(
                 f"put_back({key!r}) needs a well-formed record — a dict with "
                 f"state in {VALID_STATES}, a truthy engine, a 'model' key "
@@ -266,9 +276,39 @@ class IntentStore:
                 f"got {record!r}")
 
         with self._lock:
-            data = self._load()
-            data[key] = dict(record)  # copied: the caller's dict stays theirs
-            self._save(data)
+            self._put_back_locked(key, record)
+
+    def _put_back_locked(self, key: str, record: dict) -> None:
+        """put_back's write half. Caller holds the lock."""
+        data = self._load()
+        data[key] = dict(record)      # copied: the caller's dict stays theirs
+        self._save(data)
+
+    def put_back_if(self, key: str, predicate, record: dict) -> bool:
+        """Restore `record` for `key` only if `predicate(current)` still holds,
+        with the compare and the write in ONE critical section. Returns whether
+        the write happened.
+
+        A caller doing ``get()`` then ``put_back()`` is check-then-act across
+        TWO critical sections, not a compare-and-swap: another thread can
+        record() in between and have its record silently reverted. That window
+        is microseconds rather than the seconds an engine call takes, but the
+        store already owns the lock, so there is no reason to leave it open
+        [T7/T8 fix-round review].
+
+        ``predicate`` receives the current record, or ``None`` when the key is
+        absent, and runs UNDER THE LOCK — it must not call back into this
+        store.
+        """
+        if not self._well_formed(record):
+            raise ValueError(
+                f"put_back_if({key!r}) needs a well-formed record; got {record!r}")
+        with self._lock:
+            current = self._load().get(key)
+            if not predicate(current):
+                return False
+            self._put_back_locked(key, record)
+            return True
 
     def note_healthy(self, key: str, now: str | None = None) -> None:
         """Observation confirmed intent. Stamps last_healthy_ts and clears

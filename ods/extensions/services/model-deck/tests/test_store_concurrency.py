@@ -13,8 +13,9 @@ DRIVEN DIRECTLY, not through TestClient. FastAPI's sync routes really do run
 on separate threadpool threads, but TestClient may serialize requests — a
 green test through the client would prove nothing about the store.
 
-The already-locked stores (Intent, Settings, Characteristics, Provenance,
-Catalog) are covered by their own suites. Registry is deliberately absent: its
+Intent, Characteristics and Catalog have their own concurrency tests.
+Settings and Provenance are LOCKED but have no thread test anywhere — a real
+coverage gap, recorded rather than papered over. Registry is deliberately absent: its
 only write path (`observe()`) has zero live callers, so locking dead code
 would be inventing a contract nobody uses.
 """
@@ -47,6 +48,9 @@ def _hammer(fns, rounds=40):
         t.start()
     for t in threads:
         t.join(timeout=30)
+        # A hung writer would otherwise let every assertion below pass
+        # vacuously — join(timeout) returns whether or not it finished.
+        assert not t.is_alive(), "a writer thread did not finish"
     return errors
 
 
@@ -146,6 +150,45 @@ def test_location_store_concurrent_registers_all_land(tmp_path):
     assert len([n for n in names if n.startswith("beta")]) == 20
 
 
+def test_location_store_refuses_a_duplicate_name_under_concurrency(tmp_path):
+    """CRITICAL [T9b review]: register()'s duplicate-name check ran OUTSIDE
+    the lock, so two concurrent registers of the SAME name both passed it and
+    both appended — silent corruption of the uniqueness invariant, with
+    nothing raised. Worse than a raced write, because downstream
+    (routers/storage.py, routers/provenance.py) builds name-keyed dicts from
+    this list, so one entry simply vanishes.
+
+    The sibling test above cannot see it: it registers only DISTINCT names,
+    so the duplicate check is never the deciding one. Exactly one thread must
+    win; the other must get a ValueError.
+    """
+    store = LocationStore(tmp_path / "locations.json")
+    root = tmp_path / "shared"
+    root.mkdir()
+    spec = {"name": "cold", "path": str(root), "role": "cold",
+            "store_type": "gguf", "engine": "none", "watermark_gb": None,
+            "archive_to": None, "readonly": False}
+
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def attempt(_i):
+        try:
+            store.register(dict(spec))
+        except ValueError:
+            with lock:
+                outcomes.append("refused")
+        else:
+            with lock:
+                outcomes.append("registered")
+
+    errors = _hammer([attempt, attempt], rounds=1)
+
+    assert errors == []          # a ValueError here is the CORRECT outcome
+    assert sorted(outcomes) == ["refused", "registered"]
+    assert [loc["name"] for loc in store.list()] == ["cold"]
+
+
 def test_set_store_same_slug_concurrent_saves_do_not_crash(tmp_path):
     """The narrow one: _write's tmp path carries the SLUG, so only same-name
     writers can collide.
@@ -160,6 +203,23 @@ def test_set_store_same_slug_concurrent_saves_do_not_crash(tmp_path):
     errors = _hammer([
         lambda i: store.save(ConfigSet(name="Image session", notes=f"a{i}")),
         lambda i: store.save(ConfigSet(name="Image session", notes=f"b{i}")),
+    ])
+
+    assert errors == []
+    assert store.get("image-session") is not None
+
+
+def test_set_store_replace_races_a_save_on_the_same_slug(tmp_path):
+    """replace() (the adopt path) writes through the same fixed per-slug tmp
+    path as save(), so it needed the same lock — flagged in review as a
+    residual after the first pass covered save/delete only."""
+    store = SetStore(tmp_path / "sets")
+    store.save(ConfigSet(name="Image session"))
+
+    errors = _hammer([
+        lambda i: store.save(ConfigSet(name="Image session", notes=f"a{i}")),
+        lambda i: store.replace("image-session",
+                                ConfigSet(name="Image session", notes=f"b{i}")),
     ])
 
     assert errors == []

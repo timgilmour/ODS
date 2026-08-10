@@ -148,6 +148,12 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
             results = [dispatch(source, fetch) for source in sources]
             status = store.record_update(artifact_id, results)
             checked += 1
+            # Recovery clears the per-artifact failure dedup, exactly as the
+            # three sibling kinds pop theirs (_log_transitions). Without this
+            # a FLAPPING artifact — the one an operator most needs to see —
+            # logs once and is then suppressed forever, which is verbatim the
+            # behaviour this module's docstring rules against.
+            dedup.pop((artifact_id, "#artifact", "artifact"), None)
             if status == updates.AVAILABLE:
                 available += 1
             for result in results:
@@ -165,7 +171,8 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
             # defect this module already documents at that catch. `-error`
             # still ends in a suffix ui/src/model/eventSeverity.ts:27 reads
             # as failure severity, so the Events tab needs no new mapping.
-            # DEDUPED, like every sibling kind [T9 review Imp-1]: this
+            # DEDUPED, and CLEARED ON RECOVERY like every sibling kind
+            # (see the success branch above) [T9 review Imp-1]: this
             # module logs ON TRANSITION (module docstring), and an artifact
             # whose upstream is permanently broken would otherwise re-log
             # every pass forever — spam that, now that the events log is a
@@ -177,7 +184,10 @@ def run_pass(store, fetch, events_path, *, dedup: dict) -> dict:
             # this module already documents at dispatch's except). Keying on
             # that would defeat the dedup entirely. The logged DETAIL still
             # carries the full message — only the dedup key is the class.
-            failed_key = (artifact_id, "#artifact")
+            # THIRD slot for the sentinel, like every sibling key: the
+            # second slot holds free-form operator SOURCE ids, so a source
+            # literally named "#artifact" would have collided with this.
+            failed_key = (artifact_id, "#artifact", "artifact")
             reason = type(exc).__name__
             if dedup.get(failed_key) != reason:
                 dedup[failed_key] = reason
