@@ -856,6 +856,48 @@ def test_failed_unload_does_not_abort_the_tick_or_strand_intent(tmp_path):
     assert "unload_lemonade" not in kinds  # never claim an unload that failed
 
 
+def test_failed_unload_rollback_preserves_the_prior_actor_and_timestamp(tmp_path):
+    """The rollback RESTORES the prior record — it does not author a fresh
+    deck-stamped one. Two independent consumers depend on that, and neither
+    is exercised by the sibling test above:
+
+    * ``actor`` — app.routers.control's pull-through supersession check
+      honors ONLY operator-authored records; relabeling an operator's record
+      "deck" would hide it there, silently dropping the operator's override.
+    * ``updated_ts`` — it is the settings-drift baseline
+      (app/routers/__init__.py:131-148), documented to move only at a
+      DELIBERATE load/unload, i.e. when a process relaunches and re-consumes
+      its settings. A failed unload relaunched nothing, so a fresh stamp
+      would silently clear a legitimate "settings changed since launch" flag.
+
+    The fixture is operator-authored with an OLD timestamp — both set away
+    from what a naive rollback would write (actor="deck", ts=now).
+    """
+    from app.intent import IntentStore
+
+    old_ts = "2026-08-09T12:00:00+00:00"
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.foo.gguf",
+                  engine="lemonade", actor="operator", now=old_ts)
+
+    lemonade = FakeLemonade(raise_on_unload=EngineError("lemonade unreachable"))
+    snapshot = _world(
+        lemonade=_lem(state="loaded", model="extra.foo.gguf", idle_s=1000),
+        default_route=None,
+    )
+    watcher, _events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot), FakeRegistry(), _policy(lem_idle=900),
+        lemonade=lemonade, intent_store=intent,
+    )
+
+    watcher.tick()
+
+    record = intent.get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["actor"] == "operator"   # not relabeled to "deck"
+    assert record["updated_ts"] == old_ts  # not advanced by a failed unload
+
+
 def test_failed_free_comfyui_skips_retrigger_and_logs(tmp_path):
     """An EngineError from free() (vs the already-caught GuardError race):
     logged as 'free-failed', and the VRAM is treated as NOT reclaimed — so
