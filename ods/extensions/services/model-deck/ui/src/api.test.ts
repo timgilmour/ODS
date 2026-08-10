@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createNode, updateNode } from "./api";
+import { createNode, errorMessage, putUnitPinned, updateNode } from "./api";
 import type { NodeRegistryEntry } from "./api";
 
 // The registry-CRUD wire shape, exactly as app/routers/nodes.py::_public
@@ -84,5 +84,64 @@ describe("createNode / updateNode — registry CRUD wire shape", () => {
     // optional (not just nullable): `??` collapses missing and null alike.
     expect(result.address ?? "").toBe("");
     expect(result.serving_address ?? "").toBe("");
+  });
+});
+
+describe("errorMessage", () => {
+  it("renders a validation-error LIST as readable messages", () => {
+    // app/main.py's RequestValidationError handler emits `detail` as
+    // pydantic's LIST of {type, loc, msg} dicts (with `input` stripped).
+    // Typed as a string, that array reached the ApiError message as-is and
+    // the operator saw "[object Object]" [max-review c32].
+    const message = errorMessage(
+      { detail: [{ type: "missing", loc: ["body", "address"], msg: "Field required" }] },
+      422,
+      "Unprocessable Entity",
+    );
+    expect(message).toContain("Field required");
+    expect(message).not.toContain("[object Object]");
+  });
+
+  it("joins several validation errors", () => {
+    const message = errorMessage(
+      { detail: [{ msg: "Field required" }, { msg: "Input should be a valid string" }] },
+      422,
+      "Unprocessable Entity",
+    );
+    expect(message).toBe("Field required; Input should be a valid string");
+  });
+
+  it("passes a plain string detail through unchanged", () => {
+    expect(errorMessage({ detail: "node has no address to test" }, 422, "x"))
+      .toBe("node has no address to test");
+  });
+
+  it("falls back to status + statusText when there is no usable detail", () => {
+    expect(errorMessage(null, 500, "Internal Server Error"))
+      .toBe("500 Internal Server Error");
+    expect(errorMessage({}, 500, "Internal Server Error"))
+      .toBe("500 Internal Server Error");
+    expect(errorMessage({ detail: [] }, 500, "Internal Server Error"))
+      .toBe("500 Internal Server Error");
+  });
+
+  it("does not lose an item that has no msg", () => {
+    // Better a JSON blob than a silently dropped error.
+    const message = errorMessage({ detail: [{ type: "weird" }] }, 422, "x");
+    expect(message).toContain("weird");
+  });
+});
+
+describe("putUnitPinned", () => {
+  it("encodes the unit id into the path", async () => {
+    // Unit ids come from catalog scans of real filenames; a "#" truncated
+    // the path silently [max-review c34].
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }));
+    await putUnitPinned("hot:weird#name?.gguf", true);
+    expect(calls[0]).toBe("/api/storage/units/hot%3Aweird%23name%3F.gguf");
   });
 });

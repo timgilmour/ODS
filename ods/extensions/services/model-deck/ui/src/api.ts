@@ -362,8 +362,45 @@ export interface ApplyReport {
 // Request core
 // ---------------------------------------------------------------------------
 
+/** One pydantic validation error, as the app-wide RequestValidationError
+ * handler emits them (app/main.py's handler, which strips the `input` key
+ * from every item — see the nodes router's write-only-credential note). */
+interface ValidationItem {
+  type?: string;
+  loc?: unknown[];
+  msg?: string;
+}
+
 interface ErrorBody {
-  detail?: string;
+  /** A plain string for HTTPException and every hand-raised error; a LIST of
+   * ValidationItem for a 422 from the validation handler. Typing it as
+   * `string` alone was not merely imprecise — the list then reached
+   * `new ApiError(status, detail)` as an array and rendered
+   * "[object Object]" to the operator [max-review c32]. */
+  detail?: string | ValidationItem[];
+}
+
+/** The ONE place an error body becomes an operator-facing sentence, shared by
+ * request() and getCatalog() (which does its own fetch). */
+export function errorMessage(
+  body: ErrorBody | null,
+  status: number,
+  statusText: string,
+): string {
+  const detail = body?.detail;
+  if (typeof detail === "string" && detail) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) =>
+        item && typeof item === "object" && typeof item.msg === "string"
+          ? item.msg
+          : JSON.stringify(item),
+      )
+      .filter(Boolean)
+      .join("; ");
+    if (messages) return messages;
+  }
+  return `${status} ${statusText}`;
 }
 
 /** Thrown by request() instead of a plain Error, so callers that need to
@@ -386,7 +423,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     const body: ErrorBody | null = await res.json().catch(() => null);
-    throw new ApiError(res.status, body?.detail ?? `${res.status} ${res.statusText}`);
+    throw new ApiError(res.status, errorMessage(body, res.status, res.statusText));
   }
 
   if (res.status === 204) {
@@ -529,7 +566,7 @@ export async function getCatalog(node: string, engine: string): Promise<Catalog 
   const res = await fetch(`/api/settings/catalog/${encodeURIComponent(node)}/${encodeURIComponent(engine)}`);
   if (!res.ok) {
     const body: ErrorBody | null = await res.json().catch(() => null);
-    throw new ApiError(res.status, body?.detail ?? `${res.status} ${res.statusText}`);
+    throw new ApiError(res.status, errorMessage(body, res.status, res.statusText));
   }
   const data = await res.json();
   return data === null ? null : (data as Catalog);
@@ -720,7 +757,10 @@ export function cancelStorageJob(id: string): Promise<{ cancelled: boolean }> {
   return request<{ cancelled: boolean }>(`/api/storage/moves/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 export function putUnitPinned(unitId: string, pinned: boolean): Promise<StorageUnit> {
-  return request<StorageUnit>(`/api/storage/units/${unitId}`, {
+  // encodeURIComponent, like every other path param in this file: unit ids
+  // come from catalog scans of real FILENAMES, so a "#" or "?" in one
+  // silently truncated the path [max-review c34].
+  return request<StorageUnit>(`/api/storage/units/${encodeURIComponent(unitId)}`, {
     method: "PUT", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pinned }),
   });

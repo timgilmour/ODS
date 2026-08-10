@@ -37,6 +37,56 @@ describe("eventSeverity — failure", () => {
   });
 });
 
+describe("eventSeverity — outcome outranks the suffix", () => {
+  it("classifies a FAILED apply-end as a failure, not a success", () => {
+    // app/sets.py logs BOTH terminal results under the one kind "apply-end":
+    // :835 {"outcome": "failed", "step", "error"} and :850 {"outcome": "ok"}.
+    // The kind alone therefore cannot classify it, and the suffix rule made
+    // a failed apply render GREEN [max-review #14].
+    expect(eventSeverity("apply-end", { outcome: "failed", step: "load_lemonade" }))
+      .toBe("failure");
+  });
+
+  it("leaves a successful apply-end a success", () => {
+    expect(eventSeverity("apply-end", { outcome: "ok" })).toBe("success");
+  });
+
+  it("falls back to the suffix convention when there is no outcome", () => {
+    // The bare-kind expectation below stays valid; only the failed case was
+    // ever wrong. Also covers a detail that is not an object at all.
+    expect(eventSeverity("apply-end", { step: "load_lemonade" })).toBe("success");
+    expect(eventSeverity("apply-end", null)).toBe("success");
+    expect(eventSeverity("apply-end", "nonsense")).toBe("success");
+  });
+
+  it("does not let an outcome field promote an unrelated kind", () => {
+    // Only "failed" outranks; nothing else in a detail may reclassify.
+    expect(eventSeverity("noop", { outcome: "ok" })).toBe("neutral");
+  });
+});
+
+describe("eventSeverity — attention kinds without the suffix", () => {
+  it("flags a superseded pull-through: the requested load did NOT happen", () => {
+    // app/routers/control.py logs this when an operator action overtook a
+    // pull-through mid-copy. Neutral would read as "nothing to see here".
+    expect(eventSeverity("pull-through-superseded")).toBe("attention");
+  });
+
+  it("flags an unknown policy tenant", () => {
+    // app/policy.py's boundary gate (task 3) surfaces a tenant it dropped.
+    expect(eventSeverity("policy-unknown-tenant")).toBe("attention");
+  });
+
+  it("classifies the per-artifact update-check error by its suffix", () => {
+    // Two kinds, two DETAIL SHAPES, deliberately distinct (app/update_check.py):
+    // the whole-pass "update-check-error" carries {error}, the per-artifact
+    // one adds {artifact_id}. Both end in "-error", so both are failures with
+    // no new mapping — pinned so a future rename can't silently drop one.
+    expect(eventSeverity("update-check-error")).toBe("failure");
+    expect(eventSeverity("update-check-artifact-error")).toBe("failure");
+  });
+});
+
 describe("eventSeverity — success", () => {
   it("classifies -end", () => {
     expect(eventSeverity("apply-end")).toBe("success");

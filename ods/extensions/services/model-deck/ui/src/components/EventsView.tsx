@@ -79,7 +79,7 @@ export default function EventsView({ refreshTrigger }: { refreshTrigger: number 
           rows.map((e, i) => (
             <div className="event-row" key={`${e.ts}-${i}`}>
               <span className="event-ts">{e.ts}</span>
-              <span className={`ui-pill ${SEVERITY_CLASS[eventSeverity(e.kind)]}`}>{e.kind}</span>
+              <span className={`ui-pill ${SEVERITY_CLASS[eventSeverity(e.kind, e.detail)]}`}>{e.kind}</span>
               <span className="event-detail">{JSON.stringify(e.detail)}</span>
             </div>
           ))

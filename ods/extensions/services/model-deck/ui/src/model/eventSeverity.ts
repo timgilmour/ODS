@@ -30,7 +30,16 @@ const ATTENTION_SUFFIXES = ["-warn"];
 
 // Kinds that carry a severity but don't follow the suffix convention.
 const SUCCESS_EXACT = new Set(["reconciled"]);
-const ATTENTION_EXACT = new Set(["storage-shortfall", "host-agent-busy", "free-raced", "origin-moved"]);
+const ATTENTION_EXACT = new Set([
+  "storage-shortfall", "host-agent-busy", "free-raced", "origin-moved",
+  // The operator asked for a load and it did NOT happen: an action of
+  // theirs overtook the pull-through mid-copy (app/routers/control.py).
+  // Neutral would read as "nothing to see here".
+  "pull-through-superseded",
+  // app/policy.py's boundary gate dropped a tenant record it could not
+  // parse — worth a look, not an alarm.
+  "policy-unknown-tenant",
+]);
 
 function normalize(kind: string): string {
   return kind.replace(/_/g, "-");
@@ -38,8 +47,22 @@ function normalize(kind: string): string {
 
 /** Checked in this order — failed-restore ("lifecycle-restore-failed") must
  * classify as a failure, not a success, even though it contains "restore";
- * ending in "-failed" is checked first so it wins. */
-export function eventSeverity(kind: string): Severity {
+ * ending in "-failed" is checked first so it wins.
+ *
+ * `detail` is optional: pass it wherever it is available, because an
+ * explicit outcome outranks the naming convention entirely (see below). */
+export function eventSeverity(kind: string, detail?: unknown): Severity {
+  // An explicit failure outcome beats the suffix rule. The backend logs BOTH
+  // terminal results of a set apply under the ONE kind "apply-end"
+  // (app/sets.py:835 failed, :850 ok), so the kind alone cannot classify it —
+  // and "-end" reads as success, which rendered a FAILED apply green
+  // [max-review #14]. Only "failed" is honoured: a detail must be able to
+  // escalate a mis-suffixed kind, never to launder an unrelated one into
+  // looking fine.
+  if (detail !== null && typeof detail === "object") {
+    if ((detail as Record<string, unknown>).outcome === "failed") return "failure";
+  }
+
   const normalized = normalize(kind);
 
   if (FAILURE_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return "failure";
