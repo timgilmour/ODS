@@ -23,6 +23,7 @@
  */
 
 import type {
+  DeckNodeEntry,
   ExternalProc,
   LifecycleMap,
   LifecycleStatus,
@@ -120,6 +121,9 @@ export interface DeckNode {
    * error" and a red pill with no explanation anywhere on screen. Absent
    * when the backend offered no reason. */
   detail?: string;
+  /** The model the node reports serving, when the deck holds no placement
+   * for it — observe-only cards; placement-bearing nodes leave it unset. */
+  servingLine?: string;
 }
 
 // Spark is a single-slot node and its lifecycle key is a fixed constant
@@ -259,14 +263,61 @@ function localNode(state: StateResponse): DeckNode {
   };
 }
 
+/** app/node_observer.py's status vocabulary -> the board's. `unconfigured`
+ * and null both render unreachable; the backend's own sentence (entry.error)
+ * carries the difference — never a phrase invented here. */
+const OBSERVED_STATUS: Record<string, NodeStatus> = {
+  online: "reachable",
+  offline: "unreachable",
+  error: "down",
+  unconfigured: "unreachable",
+};
+
+/** A registry `node-agent` entry, rendered as an observe-only card: no
+ * controls, no placements — this file has no verbs to give a box it only
+ * watches. See OBSERVED_STATUS for the status mapping and this file's
+ * header for why controls/placements must stay empty (the App.tsx
+ * prop-drilling landmine this keeps dormant). */
+function observedNode(entry: DeckNodeEntry): DeckNode {
+  return {
+    id: entry.id,
+    label: entry.label,
+    status: (entry.status && OBSERVED_STATUS[entry.status]) || "unreachable",
+    lastSeen: entry.last_seen,
+    detail: entry.error ?? undefined,
+    servingLine: entry.serving?.model ?? undefined,
+    resources: (entry.gpus ?? []).map((g) => ({
+      id: `gpu${g.index}`,
+      label: `GPU ${g.index}`,
+      // node-agent reports MB; the board's meters speak bytes (World.gpus).
+      capacity: { used: g.memory_used_mb * 1024 * 1024,
+                  total: g.memory_total_mb * 1024 * 1024 },
+      controls: [],     // observe-only: no verbs, no placements (spec §1) —
+      placements: [],   // which is also what keeps the App.tsx prop-drilling
+                        // landmine (this file's header) dormant.
+    })),
+  };
+}
+
 export function buildNodes(
   state: StateResponse | null,
   spark: SparkStatus | null,
 ): DeckNode[] {
   if (state === null) return [];
+  const entries = state.nodes ?? [];
   const nodes = [localNode(state)];
   const sparkNode = buildSparkNode(state.lifecycle, spark);
-  if (sparkNode) nodes.push(sparkNode);
+  if (sparkNode) {
+    // The registry owns the label now; the id stays the key everywhere.
+    const reg = entries.find((e) => e.id === SPARK_NODE_ID);
+    if (reg) sparkNode.label = reg.label;
+    nodes.push(sparkNode);
+  }
+  for (const entry of entries) {
+    if (entry.agent_kind !== "node-agent") continue;
+    if (entry.id === SPARK_NODE_ID && sparkNode) continue;
+    nodes.push(observedNode(entry));
+  }
   return nodes;
 }
 

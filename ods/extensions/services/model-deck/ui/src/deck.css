@@ -897,6 +897,10 @@ input[type="password"] {
 
 .node-label { font-size: 1.25rem; font-weight: 700; }
 
+/* An observe-only card's one-line "what it's serving" fact, directly under
+   the title — same dim-text token as .deck-subtitle, no invented hex. */
+.node-serving-line { color: var(--text-dim); font-size: 0.85em; margin: 2px 0 6px; }
+
 .node-resources {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));

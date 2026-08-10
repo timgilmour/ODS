@@ -132,6 +132,36 @@ export interface NodeIdentity {
   label: string;
 }
 
+/** app/node_observer.py's vocabulary, verbatim (online|offline|error|
+ * unconfigured); null = not yet observed (routers/status.py _nodes_block). */
+export type NodeAgentStatus = "online" | "offline" | "error" | "unconfigured" | null;
+
+/** node-agent IndividualGPU (node-agent/models.py:23-31), the fields the
+ * board renders. Extra fields arrive and are ignored. */
+export interface NodeGpu {
+  index: number;
+  name: string;
+  memory_used_mb: number;
+  memory_total_mb: number;
+  utilization_percent: number;
+}
+
+/** app/routers/status.py's `_nodes_block` — one entry per registered node,
+ * local box included (agent_kind "local", always status "online"). */
+export interface DeckNodeEntry {
+  id: string;
+  label: string;
+  agent_kind: "local" | "node-agent";
+  address: string | null;
+  serving_address: string | null;
+  credential_set: boolean;
+  status: NodeAgentStatus;
+  last_seen: string | null;
+  gpus: NodeGpu[] | null;
+  serving: { model: string | null; endpoint_ok: boolean } | null;
+  error: string | null;
+}
+
 export interface StateResponse {
   node: NodeIdentity;
   world: World;
@@ -140,6 +170,9 @@ export interface StateResponse {
   /** Empty object when no intent store is wired (app/routers/__init__.py
    * returns {} rather than omitting the key). */
   lifecycle: LifecycleMap;
+  /** app/routers/status.py's `_nodes_block` — optional so every existing
+   * StateResponse fixture (pre-registry) still compiles unchanged. */
+  nodes?: DeckNodeEntry[];
 }
 
 export interface EventEntry {
@@ -703,4 +736,56 @@ export function deleteLocation(name: string): Promise<{ status: string }> {
 }
 export function postStorageRescan(): Promise<{ units: number }> {
   return request<{ units: number }>("/api/storage/rescan", { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// Node registry (/api/nodes, see app/routers/nodes.py) — CRUD + the
+// test-connection probe. The credential is write-only: accepted on
+// create/update, never echoed back (only `credential_set` reports whether
+// one is stored).
+// ---------------------------------------------------------------------------
+
+export interface NodeTestResult {
+  ok: boolean;
+  error?: string;
+  name?: string;
+  platform?: string;
+  capabilities?: string[];
+  gpu_count?: number;
+}
+
+export function createNode(body: {
+  id: string; label: string; address: string;
+  serving_address?: string | null; credential?: string;
+}): Promise<DeckNodeEntry> {
+  return request<DeckNodeEntry>("/api/nodes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateNode(id: string, body: {
+  label?: string; address?: string; serving_address?: string | null;
+  credential?: string;
+}): Promise<DeckNodeEntry> {
+  return request<DeckNodeEntry>(`/api/nodes/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteNode(id: string): Promise<unknown> {
+  return request<unknown>(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function testNode(body: {
+  node_id?: string; address?: string; credential?: string;
+}): Promise<NodeTestResult> {
+  return request<NodeTestResult>("/api/nodes/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }

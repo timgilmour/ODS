@@ -86,6 +86,9 @@ export default function NodeCard({
         ) : undefined
       }
     >
+      {node.servingLine && (
+        <div className="node-serving-line">{node.servingLine}</div>
+      )}
       {fetchError && <Banner message={messages.nodeFetchFailed(node.label, fetchError)} />}
       {unreachable && (
         <Banner message={messages.nodeUnreachable(node.label, age)} onAction={onRefresh} />

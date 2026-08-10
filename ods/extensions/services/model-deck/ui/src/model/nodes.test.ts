@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LifecycleEntry, SettingsDrift, SparkStatus, StateResponse } from "../api";
+import type { DeckNodeEntry, LifecycleEntry, SettingsDrift, SparkStatus, StateResponse } from "../api";
 import { buildNodes, findPlacement, isTenantName, TENANT_ORDER } from "./nodes";
 
 function state(overrides: Partial<StateResponse> = {}): StateResponse {
@@ -512,5 +512,73 @@ describe("findPlacement", () => {
   it("returns null for an id no node ever carried", () => {
     expect(findPlacement(nodes, "local/nope")).toBeNull();
     expect(findPlacement([], "local/hipfire")).toBeNull();
+  });
+});
+
+// The registry's own entry for the local box — always present in
+// state.nodes (app/routers/status.py's _nodes_block), always agent_kind
+// "local", always skipped by buildNodes' registry loop (which only turns
+// "node-agent" entries into observe-only cards). Included in these fixtures
+// because the real payload always carries it alongside the remote entries.
+const localEntry: DeckNodeEntry = {
+  id: "local", label: "autarch", agent_kind: "local",
+  address: null, serving_address: null, credential_set: false,
+  status: "online", last_seen: null, gpus: null, serving: null, error: null,
+};
+
+// Labels deliberately ≠ ids: a fixture whose label equals its id cannot
+// catch a label used as a key (the node_label class of defect).
+const heraEntry: DeckNodeEntry = {
+  id: "hera", label: "Hera Box", agent_kind: "node-agent",
+  address: "http://hera:7720", serving_address: null, credential_set: true,
+  status: "online", last_seen: "2026-08-10T00:00:00+00:00",
+  gpus: [{ index: 0, name: "RTX", memory_used_mb: 1024, memory_total_mb: 24576,
+           utilization_percent: 5 }],
+  serving: { model: "big-model", endpoint_ok: true }, error: null,
+};
+
+describe("buildNodes — registry nodes", () => {
+  it("a registry node-agent entry becomes an observe-only card", () => {
+    const s = state({ nodes: [localEntry, heraEntry] });
+    const nodes = buildNodes(s, null);
+    const hera = nodes.find((n) => n.id === "hera")!;
+    expect(hera.label).toBe("Hera Box");
+    expect(hera.status).toBe("reachable");
+    expect(hera.servingLine).toBe("big-model");
+    expect(hera.resources).toHaveLength(1);
+    expect(hera.resources[0].capacity).toEqual({
+      used: 1024 * 1024 * 1024, total: 24576 * 1024 * 1024 });
+    expect(hera.resources[0].controls).toEqual([]); // observe-only: no verbs
+    expect(hera.resources[0].placements).toEqual([]); // and no placements
+  });
+
+  it.each([
+    ["offline", "unreachable"],
+    ["error", "down"],
+    ["unconfigured", "unreachable"],
+    [null, "unreachable"],
+  ] as const)("observer status %s renders as %s", (status, expected) => {
+    const s = state({ nodes: [localEntry, { ...heraEntry, status,
+      error: "backend sentence" }] });
+    const hera = buildNodes(s, null).find((n) => n.id === "hera")!;
+    expect(hera.status).toBe(expected);
+    expect(hera.detail).toBe("backend sentence");
+  });
+
+  it("sparky's card label comes from the registry", () => {
+    const s = state({ nodes: [localEntry,
+      { ...heraEntry, id: "sparky", label: "Spark Box" }] });
+    const nodes = buildNodes(s, sparkStatus());
+    const sparky = nodes.find((n) => n.id === "sparky")!;
+    expect(sparky.label).toBe("Spark Box");
+    // and NOT a second observe-only sparky card:
+    expect(nodes.filter((n) => n.id === "sparky")).toHaveLength(1);
+  });
+
+  it("sparky with no spark client still gets an observe-only card", () => {
+    const s = state({ nodes: [localEntry,
+      { ...heraEntry, id: "sparky", label: "Spark Box" }] });
+    const nodes = buildNodes(s, null); // /api/spark 503s: engine unbuilt
+    expect(nodes.find((n) => n.id === "sparky")).toBeDefined();
   });
 });
