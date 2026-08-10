@@ -934,9 +934,42 @@ def test_policy_put_bad_field_type_422(tmp_path, monkeypatch):
     resp = TestClient(app).put(
         "/api/policy",
         json={"lemonade": {"priority": "high", "pinned": True, "idle_ttl": 0}},
-       
+
     )
     assert resp.status_code == 422
+
+
+def test_policy_put_unknown_tenant_logs_an_event(tmp_path, monkeypatch):
+    """The feedback lost when the pre-1ee64611 unknown-tenant rejection was
+    removed: the put still succeeds (defaults are seed data, not an
+    allowlist), but a typo'd tenant name now shows up in Events instead of
+    silently policying nothing."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    resp = client.put(
+        "/api/policy",
+        json={"sparky-vllm": {"priority": 5, "pinned": True, "idle_ttl": 0}},
+    )
+    assert resp.status_code == 200
+
+    events = client.get("/api/events").json()["events"]
+    hit = next(e for e in events if e["kind"] == "policy-unknown-tenant")
+    assert hit["detail"]["tenants"] == ["sparky-vllm"]
+
+
+def test_policy_put_known_tenants_only_logs_no_unknown_tenant_event(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    resp = client.put(
+        "/api/policy",
+        json={"lemonade": {"priority": 5, "pinned": True, "idle_ttl": 0}},
+    )
+    assert resp.status_code == 200
+
+    kinds = [e["kind"] for e in client.get("/api/events").json()["events"]]
+    assert "policy-unknown-tenant" not in kinds
 
 
 # ===========================================================================

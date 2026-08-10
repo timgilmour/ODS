@@ -9,7 +9,11 @@ idle_ttl}}``, persisted next to no other state — this module owns the whole
 file. Writes are atomic (temp file + ``os.replace``) since the supervisor
 may crash mid-write; a missing or corrupt file is treated as absent rather
 than raised, and self-heals by materializing and persisting the defaults on
-the next ``get()``.
+the next ``get()``. A parseable file that is merely missing or malformed for
+one tenant self-heals the same way, one level down: ``PolicyStore._gated``
+is an element-level boundary gate (NodeStore._load's pattern) run by both
+``get()`` and ``put()`` — a missing or malformed known tenant is replaced by
+its default, and a runtime tenant survives only if it validates.
 
 This is single-process, in-process state only — no cross-process locking.
 The supervisor is the sole owner of policy.json.
@@ -84,17 +88,49 @@ class PolicyStore:
         tmp_path.write_text(json.dumps(data))
         os.replace(tmp_path, self._path)
 
+    def _gated(self, data: dict) -> dict:
+        """Element-level boundary gate (NodeStore._load's pattern): every
+        DEFAULT_POLICIES tenant present and valid — decide() and the UI's
+        per-tenant destructure (ui/src/model/nodes.ts:186) index them
+        unconditionally. Malformed records are replaced by their default
+        (defaults are seed data); a runtime tenant (accepted since 1ee64611)
+        survives only if it validates — there is no default to heal it to.
+        ``_auto`` passes through untouched (auto_enabled reads it)."""
+        gated: dict = {}
+        for tenant, policy in data.items():
+            if tenant == _AUTO_KEY:
+                gated[tenant] = policy
+                continue
+            if not isinstance(policy, dict):
+                continue
+            try:
+                _validate_policy(tenant, policy)
+            except ValueError:
+                continue
+            gated[tenant] = policy
+        for tenant, default in DEFAULT_POLICIES.items():
+            if tenant not in gated:
+                gated[tenant] = dict(default)
+        return gated
+
     def get(self) -> dict[str, TenantPolicy]:
         """Full tenant->policy mapping, excluding reserved config keys.
 
         On first read (file missing or corrupt), materializes the default
-        policies and persists them before returning.
+        policies and persists them before returning. A parseable file that
+        is missing or malformed for one tenant is healed the same way, at
+        the element level (see `_gated`), and the heal is persisted too —
+        a hand-edit must never leave a tenant `decide()` will KeyError on.
         """
         data = self._load()
         if data is None:
             data = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
             self._save(data)
-        return {k: v for k, v in data.items() if k != _AUTO_KEY}
+            return dict(data)
+        gated = self._gated(data)
+        if gated != data:
+            self._save(gated)        # persist the heal, like the missing-file path
+        return {k: v for k, v in gated.items() if k != _AUTO_KEY}
 
     def put(self, policies: dict[str, TenantPolicy]) -> None:
         """Partial update by tenant: replaces the whole record for each tenant
@@ -117,10 +153,13 @@ class PolicyStore:
         # reading through it would silently drop the automation setting on
         # every policy write. A missing/corrupt file still seeds the defaults,
         # matching get()'s self-heal, so a put on a fresh deck doesn't leave
-        # the untouched tenants unpolicied.
+        # the untouched tenants unpolicied. _gated() runs after that fallback
+        # too, so a put merging onto a partial hand-edit heals it in the same
+        # write rather than waiting for the next get().
         current = self._load()
         if current is None:
             current = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
+        current = self._gated(current)
         current.update({tenant: dict(policy) for tenant, policy in policies.items()})
         self._save(current)
 

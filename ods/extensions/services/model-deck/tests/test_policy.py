@@ -49,10 +49,17 @@ def test_get_parent_dir_created_on_first_read(tmp_path):
 
 
 def test_get_does_not_rewrite_file_once_it_exists(tmp_path):
+    # All three known tenants present and valid (unlike a partial hand-edit)
+    # so the boundary gate is a no-op and this proves the narrower claim:
+    # an already-well-formed file's custom values survive untouched.
     policy_path = tmp_path / "policy.json"
     store = PolicyStore(policy_path)
     store.get()
-    custom = {"hipfire": {"priority": 1, "pinned": False, "idle_ttl": 5}}
+    custom = {
+        "hipfire": {"priority": 1, "pinned": False, "idle_ttl": 5},
+        "lemonade": dict(DEFAULT_POLICIES["lemonade"]),
+        "comfyui": dict(DEFAULT_POLICIES["comfyui"]),
+    }
     policy_path.write_text(json.dumps(custom))
 
     result = PolicyStore(policy_path).get()
@@ -291,3 +298,69 @@ def test_set_auto_on_a_fresh_file_still_seeds_the_tenant_defaults(tmp_path):
     store = PolicyStore(path)
     assert set(store.get()) == set(DEFAULT_POLICIES)
     assert store.auto_enabled() is False
+
+
+# ===========================================================================
+# Boundary gate — element-level healing (NodeStore._load's pattern, 017fd207)
+# ===========================================================================
+
+
+def test_get_heals_a_missing_tenant(tmp_path):
+    """Hand-edit threat model, same as every sibling store: a parseable file
+    missing 'comfyui' must come back with comfyui's default materialized —
+    decide() destructures all three tenants unconditionally."""
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    del data["comfyui"]
+    path.write_text(json.dumps(data))
+    got = PolicyStore(path).get()
+    assert got["comfyui"] == DEFAULT_POLICIES["comfyui"]
+    # and the heal persists (next reader of the raw file sees it too)
+    assert "comfyui" in json.loads(path.read_text())
+
+
+def test_get_replaces_a_malformed_known_tenant_record(tmp_path):
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data["lemonade"] = "not-a-dict"
+    path.write_text(json.dumps(data))
+    assert PolicyStore(path).get()["lemonade"] == DEFAULT_POLICIES["lemonade"]
+
+
+def test_get_keeps_a_valid_runtime_tenant_and_drops_a_malformed_one(tmp_path):
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data["sparky-thing"] = {"priority": 10, "pinned": False, "idle_ttl": 60}   # valid, kept
+    data["ghost"] = {"priority": "high"}                                       # malformed, dropped
+    path.write_text(json.dumps(data))
+    got = PolicyStore(path).get()
+    assert got["sparky-thing"]["priority"] == 10
+    assert "ghost" not in got
+
+
+def test_get_preserves_auto_key_through_the_gate(tmp_path):
+    """set_auto's warning (policy.py:139-145): the gate must not cost the
+    file its _auto record."""
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data["_auto"] = {"enabled": False}
+    path.write_text(json.dumps(data))
+    store = PolicyStore(path)
+    store.get()
+    assert store.auto_enabled() is False
+
+
+def test_put_onto_a_partial_file_also_heals(tmp_path):
+    """put()'s merge runs current = self._gated(current) after its own
+    _load() fallback, so a hand-edit missing a tenant heals on the very
+    put that touches an unrelated tenant, not just on the next get()."""
+    path = tmp_path / "policy.json"
+    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    del data["comfyui"]
+    path.write_text(json.dumps(data))
+
+    PolicyStore(path).put({"lemonade": {"priority": 5, "pinned": True, "idle_ttl": 0}})
+
+    on_disk = json.loads(path.read_text())
+    assert on_disk["comfyui"] == DEFAULT_POLICIES["comfyui"]
+    assert on_disk["lemonade"] == {"priority": 5, "pinned": True, "idle_ttl": 0}
