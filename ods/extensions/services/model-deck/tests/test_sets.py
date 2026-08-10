@@ -4,8 +4,10 @@ A ConfigSet is user-authored JSON (the one place Model Deck uses pydantic to
 validate it). ``plan_apply`` is a PURE diff of a set against a world snapshot,
 emitting only the steps that change reality, in a fixed safety order. ``apply``
 is the imperative shell: it snapshots pre-apply reality as the ``_previous``
-revert set FIRST, executes the plan serialized under a module lock, and halts
-on the first failing step with an exact report. Clients are recording fakes.
+revert set FIRST, executes the plan serialized under the shared actuation lock
+(``app.actuation.LOCK`` — task 6; also held by the watcher tick's actuation
+phase and the pull-through completion hook), and halts on the first failing
+step with an exact report. Clients are recording fakes.
 """
 
 import threading

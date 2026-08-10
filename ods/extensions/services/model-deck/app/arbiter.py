@@ -720,10 +720,16 @@ class Watcher:
             if kind == "unload_lemonade":
                 # Whoever actuates, records — and records FIRST, so a tick
                 # that lands mid-unload derives 'parked', never 'down'
-                # (2026-08-06).
+                # (2026-08-06). actor="deck": this is the arbiter's OWN
+                # automatic action (idle-release or contention-eviction),
+                # never an operator's — app.routers.control's pull-through
+                # supersession check relies on that distinction to tell
+                # "the deck unloaded something idle" apart from "the
+                # operator asked for this" [max-review Important-1].
                 if self._intent_store is not None:
                     self._intent_store.record(
-                        LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade")
+                        LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade",
+                        actor="deck")
                 # Added BEFORE the engine call (mirrors the retrigger tail
                 # below) so the invariant is structural: an unload wrapped in
                 # try/except in the future still can't return without this
@@ -759,10 +765,13 @@ class Watcher:
             # Deck-authored load: record BEFORE actuating (same rule as the
             # unload arm above). A failed load then derives 'down' and the
             # reconciler retries under the existing FAILURE_BUDGET —
-            # deliberate, not a gap.
+            # deliberate, not a gap. actor="deck" for the same reason as the
+            # unload arm above — this is automatic contention-healing, not
+            # an operator's request.
             if self._intent_store is not None:
                 self._intent_store.record(
-                    LOCAL_LEMONADE_KEY, state="loaded", model=pending["model"], engine="lemonade")
+                    LOCAL_LEMONADE_KEY, state="loaded", model=pending["model"], engine="lemonade",
+                    actor="deck")
             actuated.add(LOCAL_LEMONADE_KEY)
             try:
                 self._lemonade.load(pending["model"])

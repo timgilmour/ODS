@@ -1126,10 +1126,17 @@ def test_watcher_heal_load_clears_suppressor(tmp_path):
 
 
 def test_tick_actuation_yields_while_lock_held(tmp_path):
-    """Hold actuation.LOCK on another thread for the whole tick; a tick with
-    a due idle-release unload must perform ZERO engine calls. The snapshot
-    itself still runs (unconditionally, cheap, read-only) — only the
-    actuation+reconcile phase is gated. [c42]"""
+    """Same-thread try-acquire probe: this test's own thread holds
+    actuation.LOCK for the whole tick (a plain threading.Lock is non-
+    reentrant, so tick()'s own acquire(blocking=False) fails exactly as it
+    would if a DIFFERENT thread held it) — a tick with a due idle-release
+    unload must perform ZERO engine calls. The snapshot itself still runs
+    (unconditionally, cheap, read-only) — only the actuation+reconcile
+    phase is gated. [c42]. The cross-thread cases (a real other thread
+    holding the lock, on both sides of the race) are covered by this
+    test's siblings below,
+    ``test_tick_yields_when_lock_acquired_after_the_snapshot`` and
+    ``test_apply_waits_for_an_in_flight_tick_actuation``."""
     from app import actuation
 
     snapshot = _world(

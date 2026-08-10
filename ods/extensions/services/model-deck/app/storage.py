@@ -180,6 +180,12 @@ class StorageWatcher:
                 break
 
     def tick(self) -> None:
+        # apply_in_progress() delegates to app.actuation.in_progress() (task
+        # 6) — it now peeks the ONE shared lock, so this yields to ANY
+        # actuator (an arbiter tick's actuation phase, a set apply, or the
+        # pull-through completion hook), not only a set apply. Desirable
+        # here unchanged: the storage watcher's own moves should stay off
+        # engine state's toes regardless of which of the three is busy.
         if apply_in_progress() or self._queue.active():
             return
         try:

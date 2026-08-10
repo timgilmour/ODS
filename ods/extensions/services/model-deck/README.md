@@ -368,7 +368,7 @@ A **watermark** is a minimum free-space target on a hot location. When `free_byt
 - **Archive-to:** the location's declared `archive_to` destination (e.g., hot location archives overflow to `cold`)
 - **Partial relief:** if the archive can't accommodate all candidates, it archives what it can and reports a `storage_shortfall` event
 
-The watcher ticks every 60 seconds, respects the `auto: on/off` toggle, and yields to in-flight set applies and move jobs.
+The watcher ticks every 60 seconds, respects the `auto: on/off` toggle, and yields to any in-flight actuator (an arbiter tick's actuation phase, a set apply, or the pull-through completion hook — `apply_in_progress()` peeks the one shared lock in `app/actuation.py`) and to active move jobs.
 
 **`last_used` tracking:** `last_used` is updated on every load the deck itself performs — a manual load (`POST /api/tenants/lemonade/load`), a pull-through load of a cold model, a config-set apply's `load_lemonade` step, and the arbiter's contention-heal reload. Models that have never been loaded through the deck (including any loaded out of band, straight against lemonade) keep `last_used = null`, are evicted first, and tie-break among themselves by filesystem mtime.
 
@@ -433,6 +433,7 @@ A flat `{"<node>/<resource>": record}` mapping recording what each resource is *
     "state": "loaded",
     "model": null,
     "engine": "hipfire",
+    "actor": "operator",
     "updated_ts": "2026-08-04T09:12:44.117034+00:00",
     "last_healthy_ts": "2026-08-04T09:31:02.550881+00:00",
     "failures": 0,
@@ -444,7 +445,9 @@ A flat `{"<node>/<resource>": record}` mapping recording what each resource is *
 - Keys are `<node>/<resource>`: `local/lemonade`, `local/hipfire`, `local/comfyui`, `sparky/slot0`. There are **no known-key defaults** — keys are discovered at runtime, which is what lets a new engine or node work without a code change, and a missing file is legitimately empty rather than "needs materializing".
 - `model: null` means *"loaded, no opinion which model"* — the correct record for single-model engines like hipfire, whose model the deck does not choose. Recording a name the deck cannot observe would manufacture permanent drift. For `sparky/slot0` the recorded identity is the **profile**, not the served model name (mm27b serves under `--served-model-name aeon`).
 - `state: "unloaded"` is intent, **not** an absence of it. A deliberate park is a recorded decision and the reconciler will never undo one. Deleting a key (`IntentStore.forget`) is the only way to say "the deck has no opinion".
+- `actor` (task 6 follow-up) is `"operator"` or `"deck"` — who authored the record, not what it says. Every router-initiated record (control routes, a config-set apply's goal-intent recording, spark swap, park/unload) is `"operator"`, including the pull-through hook's own completion record — it is completing an operator's earlier request, just minutes later. Only the arbiter's own two automatic records — idle-release/contention-eviction unload and pending-load retrigger — are `"deck"`. A record with no `actor` at all (pre-upgrade `intent.json`) reads as `"operator"`, the conservative default. This is what lets the pull-through hook's supersession check (below) tell an operator's later action apart from the deck's own automatic churn: an idle model unloading mid-copy must not silently drop an operator's explicit pull-through load.
 - Intent is recorded implicitly, on every deliberate action, guards first — a guard-refused action never happened, so it records nothing. Beyond that, **whoever actuates, records**, and *when* depends on how long the call can run: lemonade load/unload (including the deferred pull-through load, minutes later) and the watcher's own idle-release/contention-evict/load-retrigger record **before** the engine call, so a tick landing mid-call — or a call that itself fails — still sees the stated intent, not stale state (a failed lemonade load/unload is retried under the failure budget, not left unrecorded). hipfire park/resume, spark swap, and every *completed* step of a set apply record **after** the call returns: their guard refusals raise inside the client call itself, so reaching the record already means it succeeded.
+- **Pull-through supersession exception:** the completion hook's own load (the deferred lemonade load above) is skipped outright — recording nothing, restarting nothing — if the *current* intent is an **operator**-authored record whose `updated_ts` postdates the pull's submission (`app/routers/control.py`, `_pull_through`/`after`). A deck-authored record (automatic idle-release/eviction) never triggers this skip, only an operator's.
 - Writes are atomic (temp + `os.replace`); a missing or corrupt file reads as `{}`.
 
 ### Status vocabulary (`app/lifecycle.py`)
@@ -474,6 +477,8 @@ Two ordering rules that are easy to get wrong:
 ### The reconcile pass
 
 `Watcher._reconcile_pass` runs at the **end of every watcher tick, after arbitration, on the same snapshot** — deliberately. Arbitration settles VRAM contention happening right now; reconciliation settles desired state over time. The other order can restore a model that arbitration is about to evict (a load/evict flap).
+
+Both arbitration and this reconcile pass only run once the tick's actuation phase has acquired `app/actuation.py`'s single process-wide lock — the SAME lock a config-set apply and the pull-through completion hook hold. Exactly one of the three actuates real engine state at a time; the tick try-acquires and skips a whole actuation+reconcile pass cleanly when it's busy elsewhere. Worst-case waits for the other two: an apply through `hostagent.activate` can block up to ~600 s (`app/engines/hostagent.py`'s read timeout); the pull-through hook can hold it up to ~285 s (a lemonade container restart + its readiness poll + a lemonade load).
 
 `plan_reconcile` (pure, `app/reconcile.py`) emits an action for exactly **one** status: `down`. Every other status is inert, and each refusal is a real incident rather than caution for its own sake — restoring a `parked` resource fights the operator every tick; auto-correcting `drifted`/`unexpected`/`unmanaged` means acting on state the deck did not author; retrying a `quarantined` key is the crash loop the budget exists to stop; `unreachable` is a node being off, not a model having fallen over; `warming` is a boot whose "not loaded yet" is indistinguishable from "died".
 

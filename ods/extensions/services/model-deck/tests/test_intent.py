@@ -9,6 +9,8 @@ self-heals, matching PolicyStore's quality bar.
 
 import json
 
+import pytest
+
 from app.intent import IntentStore
 
 
@@ -38,12 +40,48 @@ def test_record_persists_full_record(tmp_path):
             "state": "loaded",
             "model": "gpt-oss-120b",
             "engine": "hipfire",
+            "actor": "operator",  # default — see test_record_actor_defaults_to_operator
             "updated_ts": "2026-08-04T00:00:00+00:00",
             "last_healthy_ts": None,
             "failures": 0,
             "quarantined": False,
         }
     }
+
+
+def test_record_actor_defaults_to_operator(tmp_path):
+    """Deliberate default (task 6 follow-up, max-review Important-1): a
+    forgotten ``actor`` kwarg must fail SAFE for app.routers.control's
+    pull-through supersession check — "operator" is the value that check
+    treats as ABLE to supersede, so an accidental omission still protects an
+    operator's later action rather than silently becoming invisible to it."""
+    store = IntentStore(tmp_path / "intent.json")
+
+    store.record("local/hipfire", state="loaded", model="a", engine="hipfire")
+
+    assert store.get()["local/hipfire"]["actor"] == "operator"
+
+
+def test_record_accepts_explicit_actor_deck(tmp_path):
+    """The one caller class that overrides the default: app.arbiter's own
+    two automatic records (idle-release/contention-eviction unload,
+    pending-load retrigger)."""
+    store = IntentStore(tmp_path / "intent.json")
+
+    store.record("local/lemonade", state="unloaded", model=None,
+                 engine="lemonade", actor="deck")
+
+    assert store.get()["local/lemonade"]["actor"] == "deck"
+
+
+def test_record_rejects_invalid_actor(tmp_path):
+    store = IntentStore(tmp_path / "intent.json")
+
+    with pytest.raises(ValueError):
+        store.record("local/lemonade", state="loaded", model="a",
+                     engine="lemonade", actor="bogus")
+
+    assert store.get() == {}  # refused before any write, like the state guard
 
 
 def test_record_unloaded_is_intent_not_deletion(tmp_path):

@@ -175,14 +175,24 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
     def after(job: dict) -> None:
         from app import actuation
         with actuation.LOCK:
-            # A deliberate action may have superseded this pull while the
-            # copy ran (minutes): an operator's set parking lemonade must
-            # not be undone by a load they asked for BEFORE it. Any intent
-            # recorded after submission outranks this hook — skip the
-            # restart AND the load; the file is moved and registers on the
-            # next natural restart.
+            # A deliberate OPERATOR action may have superseded this pull
+            # while the copy ran (minutes): an operator's set parking
+            # lemonade must not be undone by a load they asked for BEFORE
+            # it. Only an operator-authored record outranks this hook —
+            # the arbiter's own automatic records (idle-release,
+            # contention-eviction; both stamp actor="deck", app/arbiter.py)
+            # do NOT: an idle model unloading mid-copy must not silently
+            # drop the operator's explicit pull-through load, leaving the
+            # file moved-but-unregistered [max-review Important-1, task 6
+            # follow-up]. A record with no "actor" at all (pre-upgrade
+            # intent.json) reads as "operator" — conservative, preserving
+            # this check's original skip behavior for those.
             entry = deck["intent_store"].get().get(LOCAL_LEMONADE_KEY)
-            if entry is not None and entry.get("updated_ts", "") > submitted_at:
+            if (
+                entry is not None
+                and entry.get("actor", "operator") == "operator"
+                and entry.get("updated_ts", "") > submitted_at
+            ):
                 log_event(deck["events_path"], "pull-through-superseded",
                           {"job": job["id"], "model": bare,
                            "intent_state": entry.get("state")})
@@ -215,10 +225,13 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
             # The pull-through load lands here, minutes after the request
             # returned "pulling" — it is no less deliberate, so it records
             # too, and BEFORE the call for the same reason as the hot path
-            # above.
+            # above. actor="operator" explicit (not just the default): this
+            # hook is completing an operator's own earlier request, the
+            # third writer class the supersession check above depends on
+            # being told apart from the arbiter's automatic "deck" records.
             deck["intent_store"].record(
                 LOCAL_LEMONADE_KEY, state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
-                engine="lemonade",
+                engine="lemonade", actor="operator",
             )
             deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
             deck["heal_suppressor"].clear()

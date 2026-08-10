@@ -37,6 +37,14 @@ FAILURE_BUDGET = 2
 
 VALID_STATES = ("loaded", "unloaded")
 
+# Who authored a record: a human-initiated route (or a hook completing an
+# operator's own earlier request), or the arbiter's own automatic actions
+# (idle-release, contention-eviction, pending-load retrigger). Introduced
+# for app.routers.control's pull-through supersession check (task 6 follow-
+# up, max-review Important-1): the deck's own automatic churn must not be
+# mistaken for an operator overriding a pull-through load in flight.
+VALID_ACTORS = ("operator", "deck")
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -86,6 +94,19 @@ class IntentStore:
         model: str | None,
         engine: str,
         now: str | None = None,
+        # Default "operator", NOT "deck": nearly every call site is a
+        # router-initiated record (a human-initiated route, or a hook
+        # completing an operator's own earlier request), and the one place
+        # this distinction is safety-critical — app.routers.control's
+        # pull-through supersession check — must fail SAFE if a future
+        # caller forgets the kwarg. A forgotten kwarg that defaulted to
+        # "deck" would silently make an unlabeled record invisible to that
+        # check (never supersede a stale pull), the wrong direction to
+        # fail; defaulting to "operator" means a forgotten kwarg still
+        # protects an operator's later action. Only app.arbiter's own two
+        # automatic records (idle-release/contention-eviction unload,
+        # pending-load retrigger) pass actor="deck" explicitly.
+        actor: str = "operator",
     ) -> None:
         """Record a deliberate action as the new intent for `key`.
 
@@ -98,9 +119,19 @@ class IntentStore:
         forever, and invisibly: derive_status only reports ``quarantined``
         on the loaded-intent branch, so a quarantined-and-parked resource
         hides the flag while still being permanently excluded.
+
+        ``actor`` (see the parameter default's comment above) distinguishes
+        who authored this record: ``"operator"`` or ``"deck"``. Persisted
+        and returned verbatim — a legacy record with no ``actor`` key at
+        all (pre-upgrade intent.json) is NOT normalized here; a reader that
+        cares (``app.routers.control``'s supersession check) treats a
+        missing field as ``"operator"`` itself, conservative in the same
+        direction as this default.
         """
         if state not in VALID_STATES:
             raise ValueError(f"state must be one of {VALID_STATES}, got {state!r}")
+        if actor not in VALID_ACTORS:
+            raise ValueError(f"actor must be one of {VALID_ACTORS}, got {actor!r}")
 
         with self._lock:
             data = self._load()
@@ -109,6 +140,7 @@ class IntentStore:
                 "state": state,
                 "model": model,
                 "engine": engine,
+                "actor": actor,
                 "updated_ts": now or _now_iso(),
                 "last_healthy_ts": previous.get("last_healthy_ts"),
                 "failures": 0,

@@ -588,7 +588,12 @@ def test_pull_through_hook_skips_load_when_superseded(tmp_path, monkeypatch):
     see that deliberate action outranks the pull it would otherwise finish
     with a load: it must NOT restart/load, must log
     'pull-through-superseded', and must leave the superseding intent exactly
-    as the operator recorded it (no re-stamp, no silent overwrite)."""
+    as the operator recorded it (no re-stamp, no silent overwrite).
+
+    actor="operator" explicit here (max-review Important-1, task 6 follow-
+    up): only an OPERATOR-authored record may supersede the hook — see
+    test_pull_through_hook_loads_despite_deck_authored_record_after_submission
+    for the sibling case this rule exists to fix."""
     app, deck = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
     cold = _register(client, tmp_path, "cold", engine="none")
@@ -606,7 +611,7 @@ def test_pull_through_hook_skips_load_when_superseded(tmp_path, monkeypatch):
     # in that exact representation, never coerced to epoch seconds).
     deck["intent_store"].record(
         "local/lemonade", state="unloaded", model=None, engine="lemonade",
-        now="2999-01-01T00:00:00+00:00",
+        now="2999-01-01T00:00:00+00:00", actor="operator",
     )
 
     pending = deck["job_queue"]._pending.pop(0)
@@ -624,8 +629,91 @@ def test_pull_through_hook_skips_load_when_superseded(tmp_path, monkeypatch):
     assert superseded[0]["detail"]["intent_state"] == "unloaded"
 
     record = deck["intent_store"].get()["local/lemonade"]
+    assert record["actor"] == "operator"
     assert record["state"] == "unloaded"
     assert record["updated_ts"] == "2999-01-01T00:00:00+00:00"
+
+
+def test_pull_through_hook_loads_despite_deck_authored_record_after_submission(tmp_path, monkeypatch):
+    """[max-review Important-1] The predicate this test guards against: "ANY
+    intent recorded after submission supersedes the hook" is WRONG — the
+    arbiter records intent on its own automatic actions too (idle-release at
+    arbiter.py's unload arm, pending-load retrigger), and the heal suppressor
+    does not stop idle rules. Live scenario this reproduces: an idle model Y
+    unloads mid-copy (a deck-authored 'unloaded' record, actor="deck") while
+    this operator's pull-through is still running. That must NOT silently
+    drop the operator's explicit load — only an OPERATOR-authored record may
+    supersede. A deck-authored record after submission must be invisible to
+    the check: the load still happens."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    cold = _register(client, tmp_path, "cold", engine="none")
+    _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(cold, "a.gguf")
+    deck["catalog"].scan()
+
+    resp = client.post("/api/tenants/lemonade/load?pull=true", json={"model": "a.gguf"})
+    job_id = resp.json()["job"]
+
+    # Deck-authored, strictly after submission — exactly the shape
+    # app.arbiter's idle-release/contention-eviction unload writes.
+    deck["intent_store"].record(
+        "local/lemonade", state="unloaded", model=None, engine="lemonade",
+        now="2999-01-01T00:00:00+00:00", actor="deck",
+    )
+
+    pending = deck["job_queue"]._pending.pop(0)
+    deck["job_queue"]._process(pending)
+
+    done = deck["job_queue"].get(job_id)
+    assert done["state"] == "done"
+    assert ("load", "extra.a.gguf") in deck["lemonade"].calls  # the load DID happen
+
+    events = tail_events(deck["events_path"])
+    assert [e for e in events if e["kind"] == "pull-through-superseded"] == []
+
+    # The hook's own completion record wins last (it ran after the deck's
+    # stale-mid-copy unload) and is itself operator-authored.
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["actor"] == "operator"
+
+
+def test_pull_through_hook_loads_when_intent_predates_submission(tmp_path, monkeypatch):
+    """[max-review Important-2] The comparison direction that a green suite
+    doesn't otherwise exercise: every OTHER pull-through test starts with NO
+    pre-existing intent record (entry is None), so a mutant that weakens the
+    predicate from "postdates submission" down to merely "entry is not None"
+    would still pass every one of them. Seed an OLD operator-authored record
+    (well before submission) and prove the load still happens — this is the
+    one test that specifically requires the timestamp comparison, not just
+    presence, to be checked."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    cold = _register(client, tmp_path, "cold", engine="none")
+    _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(cold, "a.gguf")
+    deck["catalog"].scan()
+
+    # An old record, well BEFORE submission — e.g. yesterday's manual park,
+    # long since irrelevant to this pull.
+    deck["intent_store"].record(
+        "local/lemonade", state="unloaded", model=None, engine="lemonade",
+        now="2020-01-01T00:00:00+00:00", actor="operator",
+    )
+
+    resp = client.post("/api/tenants/lemonade/load?pull=true", json={"model": "a.gguf"})
+    job_id = resp.json()["job"]
+
+    pending = deck["job_queue"]._pending.pop(0)
+    deck["job_queue"]._process(pending)
+
+    done = deck["job_queue"].get(job_id)
+    assert done["state"] == "done"
+    assert ("load", "extra.a.gguf") in deck["lemonade"].calls
+
+    events = tail_events(deck["events_path"])
+    assert [e for e in events if e["kind"] == "pull-through-superseded"] == []
 
 
 def test_hot_load_notes_last_used(tmp_path, monkeypatch):
