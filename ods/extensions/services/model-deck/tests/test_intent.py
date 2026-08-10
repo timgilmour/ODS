@@ -162,6 +162,35 @@ def test_note_healthy_clears_failures_and_quarantine(tmp_path):
     assert record["last_healthy_ts"] == "2026-08-04T02:00:00+00:00"
 
 
+def test_health_bookkeeping_never_touches_actor_or_updated_ts(tmp_path):
+    """note_failure/note_healthy mutate FIELDS on the existing record; they
+    must never rebuild it. A rebuild would default ``actor`` back to
+    "operator" (relabeling the arbiter's own deck records, which
+    app.routers.control's pull-through supersession check reads) and re-stamp
+    ``updated_ts`` (the settings-drift baseline in app.routers.__init__,
+    which must advance only at a deliberate load/unload).
+
+    Today they mutate in place, so this pins the property rather than
+    reporting a bug — a future refactor to "rebuild the record" is exactly
+    what it is here to fail. The fixture is deck-authored with an OLD
+    timestamp: both away from what a rebuild would produce.
+    """
+    store = IntentStore(tmp_path / "intent.json")
+    old_ts = "2026-08-09T12:00:00+00:00"
+    store.record("local/lemonade", state="loaded", model="m.gguf",
+                 engine="lemonade", actor="deck", now=old_ts)
+
+    store.note_failure("local/lemonade")
+    record = store.get()["local/lemonade"]
+    assert record["actor"] == "deck"
+    assert record["updated_ts"] == old_ts
+
+    store.note_healthy("local/lemonade")
+    record = store.get()["local/lemonade"]
+    assert record["actor"] == "deck"
+    assert record["updated_ts"] == old_ts
+
+
 def test_note_failure_on_unknown_key_is_a_noop(tmp_path):
     store = IntentStore(tmp_path / "intent.json")
 
@@ -223,3 +252,66 @@ def test_concurrent_record_and_note_healthy_lose_no_deliberate_write(tmp_path):
     finally:
         stop.set()
         t.join(timeout=5)
+
+
+def test_put_back_restores_a_record_verbatim(tmp_path):
+    """``put_back`` is the rollback primitive for a failed actuation: "as if
+    it never happened". Unlike ``record()`` it re-stamps NOTHING — every
+    field, including the ones record() deliberately resets
+    (failures/quarantined) and the ones it re-derives (updated_ts, actor),
+    comes back byte-identical.
+
+    The fixture is quarantined with a non-zero failure count and an OLD
+    operator-authored timestamp, because those are exactly the fields a
+    record()-based rollback silently loses: it would clear a quarantine that
+    the failure budget deliberately imposed, putting a crash-looping
+    resource back into the restore rotation.
+    """
+    store = IntentStore(tmp_path / "intent.json")
+    old_ts = "2026-08-09T12:00:00+00:00"
+    store.record("local/lemonade", state="loaded", model="extra.foo.gguf",
+                 engine="lemonade", actor="operator", now=old_ts)
+    store.note_failure("local/lemonade")
+    store.note_failure("local/lemonade")  # -> FAILURE_BUDGET -> quarantined
+    prior = store.get()["local/lemonade"]
+    assert prior["quarantined"] is True  # fixture precondition
+
+    # The speculative pre-record an actuation arm writes before acting; it
+    # resets failures/quarantined and re-stamps actor/updated_ts.
+    store.record("local/lemonade", state="unloaded", model=None,
+                 engine="lemonade", actor="deck")
+    assert store.get()["local/lemonade"] != prior  # the write really happened
+
+    store.put_back("local/lemonade", prior)
+
+    assert store.get()["local/lemonade"] == prior
+
+
+def test_put_back_leaves_other_keys_untouched(tmp_path):
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("local/lemonade", state="loaded", model="m.gguf", engine="lemonade")
+    store.record("local/hipfire", state="loaded", model=None, engine="hipfire")
+    prior = store.get()["local/lemonade"]
+    untouched = store.get()["local/hipfire"]
+
+    store.record("local/lemonade", state="unloaded", model=None, engine="lemonade")
+    store.put_back("local/lemonade", prior)
+
+    assert store.get()["local/hipfire"] == untouched
+
+
+def test_put_back_refuses_a_record_that_is_not_one(tmp_path):
+    """Refuse, don't coerce: a caller handing back something that isn't a
+    record would otherwise persist a shape every reader then has to defend
+    against. state+engine are the fields derive_status/plan_reconcile
+    dereference, so they are the minimum bar."""
+    store = IntentStore(tmp_path / "intent.json")
+
+    with pytest.raises(ValueError):
+        store.put_back("local/lemonade", {"engine": "lemonade"})  # no state
+    with pytest.raises(ValueError):
+        store.put_back("local/lemonade", {"state": "loaded"})  # no engine
+    with pytest.raises(ValueError):
+        store.put_back("local/lemonade", {"state": "sideways", "engine": "lemonade"})
+    with pytest.raises(ValueError):
+        store.put_back("local/lemonade", "not a dict")

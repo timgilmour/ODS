@@ -148,6 +148,51 @@ class IntentStore:
             }
             self._save(data)
 
+    def put_back(self, key: str, record: dict) -> None:
+        """Restore `record` for `key` VERBATIM — the rollback primitive for an
+        actuation that was recorded and then failed. Semantics: "as if the
+        failed actuation never happened."
+
+        Deliberately NOT ``record()``. An arm that pre-records its intent
+        (``app.arbiter._execute``'s unload arm — "whoever actuates, records")
+        must undo that write exactly on failure, and re-recording gets three
+        fields wrong:
+
+        * ``actor`` — re-records default to ``"operator"``, and stamping the
+          arbiter's own ``"deck"`` is equally wrong. Either way the label no
+          longer describes who actually authored the surviving intent, and
+          ``app.routers.control``'s pull-through supersession check reads
+          exactly that label to decide whether an operator overrode a pull
+          in flight.
+        * ``updated_ts`` — the settings-drift baseline
+          (``app.routers.__init__``), documented there to advance only at a
+          DELIBERATE load/unload: the moment a process relaunches and
+          re-consumes its settings. A failed unload relaunched nothing, so a
+          fresh stamp silently clears a legitimate "settings changed since
+          launch" flag.
+        * ``failures``/``quarantined`` — ``record()`` resets both. The
+          pre-record already cleared them, so only a verbatim put-back can
+          return a quarantined key to its quarantine; re-recording would put
+          a crash-looping resource back into the restore rotation.
+
+        Refuses anything that isn't a record (``state`` + ``engine``, with a
+        known state) rather than coercing it — a bad shape persisted here is
+        one every reader downstream has to defend against.
+        """
+        if not isinstance(record, dict):
+            raise ValueError(f"record must be a dict, got {type(record).__name__}")
+        if record.get("state") not in VALID_STATES:
+            raise ValueError(
+                f"record['state'] must be one of {VALID_STATES}, "
+                f"got {record.get('state')!r}")
+        if not record.get("engine"):
+            raise ValueError("record['engine'] is required")
+
+        with self._lock:
+            data = self._load()
+            data[key] = dict(record)  # copied: the caller's dict stays theirs
+            self._save(data)
+
     def note_healthy(self, key: str, now: str | None = None) -> None:
         """Observation confirmed intent. Stamps last_healthy_ts and clears
         the failure budget — a success is what releases a quarantine."""

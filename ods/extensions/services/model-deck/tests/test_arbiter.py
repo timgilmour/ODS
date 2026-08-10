@@ -869,9 +869,13 @@ def test_failed_unload_rollback_preserves_the_prior_actor_and_timestamp(tmp_path
       DELIBERATE load/unload, i.e. when a process relaunches and re-consumes
       its settings. A failed unload relaunched nothing, so a fresh stamp
       would silently clear a legitimate "settings changed since launch" flag.
+    * ``quarantined``/``failures`` — record() resets both, so only a verbatim
+      put-back returns a quarantined key to its quarantine; re-recording
+      would put a crash-looping resource back into the restore rotation.
 
-    The fixture is operator-authored with an OLD timestamp — both set away
-    from what a naive rollback would write (actor="deck", ts=now).
+    Every fixture field is set away from what a naive rollback would write:
+    operator-authored (not "deck"), an OLD timestamp (not now), and
+    quarantined with a non-zero failure count (not the 0/False reset).
     """
     from app.intent import IntentStore
 
@@ -879,6 +883,10 @@ def test_failed_unload_rollback_preserves_the_prior_actor_and_timestamp(tmp_path
     intent = IntentStore(tmp_path / "intent.json")
     intent.record("local/lemonade", state="loaded", model="extra.foo.gguf",
                   engine="lemonade", actor="operator", now=old_ts)
+    intent.note_failure("local/lemonade")
+    intent.note_failure("local/lemonade")  # -> FAILURE_BUDGET -> quarantined
+    prior = intent.get()["local/lemonade"]
+    assert prior["quarantined"] is True  # fixture precondition
 
     lemonade = FakeLemonade(raise_on_unload=EngineError("lemonade unreachable"))
     snapshot = _world(
@@ -2174,6 +2182,16 @@ def test_idle_release_records_unloaded_intent_and_reconciler_stays_quiet(tmp_pat
 
     assert lemonade.unloaded == ["extra.m.gguf"]
     assert intent.get()["local/lemonade"]["state"] == "unloaded"
+    # The record must be stamped actor="deck": this is the arbiter's OWN
+    # idle-release, and app.routers.control's pull-through supersession check
+    # honors only OPERATOR-authored records — a deck unload mislabeled
+    # "operator" silently drops an operator's in-flight pull-through load
+    # [max-review Important-1, task 6]. Asserted here at the PRODUCER because
+    # the supersession tests seed their records via IntentStore.record()
+    # directly, so deleting actor="deck" from this call site left the whole
+    # suite green. The seed above is operator-authored (record() defaults),
+    # so this assertion sits away from the fixture's own value.
+    assert intent.get()["local/lemonade"]["actor"] == "deck"
 
     # Next tick observes the unloaded engine; intent now says unloaded too,
     # so plan_reconcile derives 'parked' and must NOT restore.
@@ -2220,6 +2238,10 @@ def test_load_retriggered_records_loaded_intent(tmp_path):
     assert lemonade.loaded == ["extra.model.gguf"]  # exactly once, not twice
     record = intent.get()["local/lemonade"]
     assert record == {**record, "state": "loaded", "model": "extra.model.gguf"}
+    # Producer-side pin, same reason as the idle-release arm's: this
+    # contention-heal reload is deck-authored, and nothing else in the suite
+    # catches this call site losing its actor="deck" [task 6 open finding].
+    assert record["actor"] == "deck"
 
 
 def test_same_tick_evict_and_reload_pins_single_load_and_final_intent(tmp_path):

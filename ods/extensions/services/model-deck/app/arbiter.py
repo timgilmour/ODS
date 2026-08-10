@@ -750,40 +750,16 @@ class Watcher:
                     # actions or the reconcile/derive/provenance passes via
                     # tick()'s broad catch [max-review #9].
                     if self._intent_store is not None and prior is not None:
-                        # A faithful restoration, not a new deck-authored
-                        # record: the prior actor AND the prior updated_ts
-                        # are both put back, undoing the speculative
-                        # pre-record above entirely. Neither may be
-                        # re-stamped, for two independent reasons:
-                        #
-                        # * actor — relabeling an operator's record "deck"
-                        #   would hide it from app.routers.control's
-                        #   pull-through supersession check, which only
-                        #   honors operator-authored records (task 6
-                        #   follow-up). A missing actor reads "operator",
-                        #   matching how that check reads it too.
-                        # * updated_ts — it is the settings-drift baseline
-                        #   (app/routers/__init__.py:131-148), documented to
-                        #   move only at a DELIBERATE load/unload, i.e. the
-                        #   moment a process relaunches and re-consumes its
-                        #   settings. A failed unload relaunched nothing, so
-                        #   a fresh stamp would silently clear a legitimate
-                        #   "settings changed since launch" flag.
-                        #
-                        # Narrow, deliberate limitation: record() resets
-                        # failures/quarantined, so those are not restored —
-                        # but this arm's own pre-record already cleared them
-                        # a few lines above, on the success path too, so
-                        # there is nothing left for a rollback to recover.
-                        # The effect is a quarantined key re-entering the
-                        # retry budget: benign, and strictly better than
-                        # stranding 'unloaded'.
-                        self._intent_store.record(
-                            LOCAL_LEMONADE_KEY, state=prior["state"],
-                            model=prior.get("model"),
-                            engine=prior.get("engine", "lemonade"),
-                            actor=prior.get("actor", "operator"),
-                            now=prior.get("updated_ts"))
+                        # put_back, not record(): a VERBATIM restore of the
+                        # record the pre-record above overwrote — actor,
+                        # updated_ts, failures and quarantined all included.
+                        # See IntentStore.put_back's docstring for why each
+                        # of those must not be re-stamped; the short version
+                        # is that a re-record silently relabels who authored
+                        # the intent, advances the settings-drift baseline
+                        # for a process that never relaunched, and releases a
+                        # quarantine the failure budget deliberately imposed.
+                        self._intent_store.put_back(LOCAL_LEMONADE_KEY, prior)
                     # prior is None (no record for this key yet) + failure
                     # leaves the fresh 'unloaded' record standing: there is no
                     # forget() to undo it with. Rare, and no worse than the
