@@ -1344,6 +1344,15 @@ class FakeSpark:
         return self._payload
 
     def swap(self, profile, force=False):
+        # Record the ATTEMPT first, guard second. Watcher._execute_restore
+        # swallows every exception _restore raises into a
+        # lifecycle-restore-failed event, so a reconciler regression that
+        # dispatches a swap during an in-flight boot (or while spark is
+        # unreachable) must still show up in self.calls — appending only
+        # after the guard clears would let that regression hide behind the
+        # swallowed GuardError/EngineError, leaving `spark.calls == []`
+        # true for the wrong reason instead of proving no attempt was made.
+        self.calls.append(("swap", profile))
         # The REAL client's boot-window guard, via the real shared judgement
         # (app.engines.spark.boot_in_flight) — a fake that omits it hides
         # guard regressions from every arbiter test.
@@ -1352,7 +1361,6 @@ class FakeSpark:
         if not serving.get("endpoint_ok") and not force and boot_in_flight(
                 {"swap_status": status.get("swap_status"), "serving": serving}):
             raise GuardError("previous swap is still booting")
-        self.calls.append(("swap", profile))
         if self.swap_fail is not None:
             raise self.swap_fail
         return {"id": "u1", "profile": profile}

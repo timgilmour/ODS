@@ -64,7 +64,8 @@ UNMAPPED_ENGINE_PROFILES = (
 
 
 def _node_handler(profiles=DEFAULT_PROFILES, swap_status=None,
-                  serving=None, swap_response=(202, {"id": "u1"})):
+                  serving=None, swap_response=(202, {"id": "u1"}),
+                  swap_response_text=None):
     calls = []
     serving = serving or {"model": "aeon", "endpoint_ok": True,
                           "container_status": None}
@@ -80,6 +81,11 @@ def _node_handler(profiles=DEFAULT_PROFILES, swap_status=None,
             return httpx.Response(200, json=serving, request=request)
         if path == "/v1/node/swap":
             code, body = swap_response
+            if swap_response_text is not None:
+                # A raw, non-JSON body -- swap_response's `body` always
+                # gets JSON-encoded, so this is the only way to simulate a
+                # 2xx swap response that isn't valid JSON at all.
+                return httpx.Response(code, text=swap_response_text, request=request)
             return httpx.Response(code, json=body, request=request)
         return httpx.Response(404, request=request)
 
@@ -391,6 +397,22 @@ def test_swap_maps_node_404_to_engineerror():
         swap_response=(404, {"detail": "unknown profile"})))
     with pytest.raises(EngineError):
         client.swap("ghost")
+
+
+def test_swap_raises_engineerror_on_garbage_200_swap_response():
+    """A 2xx swap response with a non-JSON body must not escape as a raw
+    JSONDecodeError -- mirrors test_models_raises_engineerror_on_garbage_200_body."""
+    client = _client(_node_handler(swap_response_text="not json"))
+    with pytest.raises(EngineError):
+        client.swap("laguna")
+
+
+def test_swap_raises_engineerror_on_non_dict_swap_response():
+    """A 2xx swap response whose JSON body isn't an object (e.g. a bare
+    array) must not silently proceed to a garbage `.get("id")` call."""
+    client = _client(_node_handler(swap_response=(202, ["not", "a", "dict"])))
+    with pytest.raises(EngineError):
+        client.swap("laguna")
 
 
 # --- boot-window guard (found live 2026-07-30: helper "done" != endpoint up;
