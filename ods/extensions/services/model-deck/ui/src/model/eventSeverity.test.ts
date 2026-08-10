@@ -73,7 +73,8 @@ describe("eventSeverity — attention kinds without the suffix", () => {
   });
 
   it("flags an unknown policy tenant", () => {
-    // app/policy.py's boundary gate (task 3) surfaces a tenant it dropped.
+    // app/routers/policy.py's put_policy: the tenant is ACCEPTED, so this
+    // event is the only sign a typo'd name is policying nothing.
     expect(eventSeverity("policy-unknown-tenant")).toBe("attention");
   });
 

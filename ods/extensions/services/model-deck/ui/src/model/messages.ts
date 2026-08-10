@@ -400,9 +400,9 @@ export const labels = {
   idleTitle: "time since last activity — counts towards the idle-TTL eviction",
 
   // Set-apply step vocabulary — one label per "step" kind app/sets.py's
-  // plan_apply() emits: unload_lemonade (sets.py:237), free_comfyui (:244),
-  // warn (:246,:265,:296), park_hipfire (:258), activate (:263),
-  // resume_hipfire (:288), load_lemonade (:298), policy_patch (:302).
+  // plan_apply() emits: unload_lemonade, free_comfyui, warn, park_hipfire,
+  // activate, resume_hipfire, load_lemonade, policy_patch. Named, not
+  // line-cited: those numbers drifted three times across this wave.
   stepUnload: "Unload",
   stepLoad: "Load",
   stepFreeComfyui: "Free ComfyUI VRAM",

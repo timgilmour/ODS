@@ -339,6 +339,13 @@ def _normalize_args_scalar(value):
         return value
     if isinstance(value, (int, float)):
         return str(value)
+    if isinstance(value, list):
+        # A list INSIDE a list. Reachable only through the singleton-collapse
+        # axis (``{"k": [["x", ...]]}`` collapses to its inner list), which
+        # readmitted the very shapes the dict guard below refuses — including
+        # a dict two levels down [final review]. No argline renders a nested
+        # list, so refuse it here rather than let it reach the renderer.
+        raise ValueError(f"setting value must not be a nested list, got {value!r}")
     if isinstance(value, dict):
         # The WIRE boundary [max-review c49]. PUT /api/settings takes JSON,
         # so an object here is operator input, and there is no argline a
@@ -440,9 +447,16 @@ def normalize_args_map(values: dict, *, heal: bool = False) -> dict:
             # Drop the nulls a wire caller would be refused for, then
             # normalize whatever is left — same skip-and-continue posture the
             # renderer takes for already-persisted data.
+            #
+            # Only INSIDE a list. A bare ``None`` — including
+            # ``_positional: None`` — is an UNSET MARKER, not damage, and
+            # healing must preserve it: dropping the positional one here (an
+            # earlier version did) made undo silently change effective launch
+            # args, because a harvested engine-defaults positional that the
+            # marker had suppressed came back after a restore. That is the
+            # inexpressible-unset bug recreated on the repair path, and it
+            # sat exactly where two rounds' rulings intersect [final review].
             value = [v for v in value if v is not None]
-        elif heal and key == POSITIONAL_KEY and value is None:
-            continue                      # unset marker: nothing to heal
         try:
             if key == POSITIONAL_KEY:
                 n = _normalize_positional_value(value)

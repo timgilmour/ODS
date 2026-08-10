@@ -553,3 +553,30 @@ def test_a_bare_positional_null_is_stored_as_an_unset_marker():
     unset, and the renderer tolerates it."""
     assert normalize_args_map({POSITIONAL_KEY: None}) == {POSITIONAL_KEY: None}
     assert render_argv({POSITIONAL_KEY: None, "k": "v"}) == ["-k", "v"]
+
+
+def test_heal_preserves_an_unset_marker_including_the_positional_one():
+    """[final review] The heal posture drops nulls INSIDE a list — damage —
+    but a BARE None is an unset MARKER and must survive, positional included.
+
+    An earlier heal branch dropped `_positional: None` while preserving
+    `{"k": None}`: the two rounds' rulings disagreed at their single
+    intersection, and the consequence was silent. A restore would re-expose a
+    harvested engine-defaults positional the marker had suppressed, so UNDO
+    changed effective launch args. Both spellings asserted together, because
+    the defect was the disagreement between them.
+    """
+    assert normalize_args_map({POSITIONAL_KEY: None}, heal=True) == {POSITIONAL_KEY: None}
+    assert normalize_args_map({"k": None}, heal=True) == {"k": None}
+
+
+def test_wire_refuses_a_nested_list():
+    """[final review] The singleton-collapse axis readmitted the shapes the
+    dict guard refuses: `{"k": [["x", {"a": 1}]]}` collapsed to its inner
+    list and sailed through. No argline renders a nested list."""
+    with pytest.raises(ValueError, match="k"):
+        normalize_args_map({"k": [["x", {"a": 1}]]})
+    with pytest.raises(ValueError, match="k"):
+        normalize_args_map({"k": [["a", "b"], ["c"]]})
+    # The ordinary singleton collapse still works.
+    assert normalize_args_map({"k": ["v"]}) == {"k": "v"}

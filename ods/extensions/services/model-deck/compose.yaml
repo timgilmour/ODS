@@ -68,6 +68,12 @@ services:
       # wollomatic auto-anchors patterns — no explicit ^…$ here.
       - -allowGET=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/json
       - -allowPOST=/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(start|stop)
+      # DEPLOY: removing these is a FLAG change on ods-docker-ctl, so that
+      # container must be RECREATED, not restarted — `docker compose up -d
+      # --force-recreate ods-docker-ctl`. A plain restart re-runs the old
+      # argv and leaves the exec grant live while every record says it is
+      # gone.
+      #
       # NO exec rules, deliberately [max-review #5]. C1's local catalog
       # harvest was the only exec caller and C2 removed it — harvest now
       # reads the node-agent's file-protocol cache instead. The in-process

@@ -559,3 +559,22 @@ def test_restore_heals_a_persisted_list_null_instead_of_refusing(tmp_path):
     # that makes the drop safe: no NEW null can be written through put().
     with pytest.raises(ValueError):
         store.put("engines", "sparky/vllm", "args", {"served-model-name": ["a", None]})
+
+
+def test_restore_preserves_an_unset_positional_marker(tmp_path):
+    """[final review] The store-level half of the heal/unset seam: a snapshot
+    carrying `_positional: None` must restore WITH the marker intact.
+
+    Dropped, the restore silently re-exposes whatever positional a lower
+    layer contributes (harvested engine defaults), so undo changes what the
+    engine would be launched with — a change nothing on screen reports."""
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({
+        "engines": {"sparky/vllm": {"args": {"_positional": None, "keep": "v"}}},
+        "models": {}, "engine_models": {},
+    })
+
+    args = store.scope("engines", "sparky/vllm")["args"]
+    assert "_positional" in args and args["_positional"] is None
+    assert args["keep"] == "v"

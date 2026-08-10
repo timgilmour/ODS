@@ -16,9 +16,10 @@ function str(v: unknown): string | null {
 }
 
 /** Maps one plan step to display copy. The vocabulary is app/sets.py
- * plan_apply()'s, verbatim: unload_lemonade (sets.py:237), free_comfyui
- * (:244), warn (:246,:265,:296), park_hipfire (:258), activate (:263),
- * resume_hipfire (:288), load_lemonade (:298), policy_patch (:302).
+ * plan_apply()'s, verbatim: unload_lemonade, free_comfyui, warn,
+ * park_hipfire, activate, resume_hipfire, load_lemonade, policy_patch.
+ * (Deliberately named rather than line-cited — these citations have drifted
+ * three times; grep plan_apply for the emit sites.)
  * Unknown kinds render verbatim — a future backend step must degrade to
  * ugly-but-true, never to a crash or a silent drop. */
 export function stepRow(step: Step, index: number): StepRow {

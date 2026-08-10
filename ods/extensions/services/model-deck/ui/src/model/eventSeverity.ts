@@ -36,8 +36,10 @@ const ATTENTION_EXACT = new Set([
   // theirs overtook the pull-through mid-copy (app/routers/control.py).
   // Neutral would read as "nothing to see here".
   "pull-through-superseded",
-  // app/policy.py's boundary gate dropped a tenant record it could not
-  // parse — worth a look, not an alarm.
+  // A PUT named a tenant outside DEFAULT_POLICIES. Deliberately ACCEPTED
+  // (defaults are seed data, not an allowlist), so the event is the only
+  // feedback that a typo'd tenant name is policying nothing —
+  // app/routers/policy.py's put_policy, NOT the store's boundary gate.
   "policy-unknown-tenant",
 ]);
 
@@ -54,7 +56,8 @@ function normalize(kind: string): string {
 export function eventSeverity(kind: string, detail?: unknown): Severity {
   // An explicit failure outcome beats the suffix rule. The backend logs BOTH
   // terminal results of a set apply under the ONE kind "apply-end"
-  // (app/sets.py:835 failed, :850 ok), so the kind alone cannot classify it —
+  // (app/sets.py's run_apply logs {"outcome": "failed"} on a failed step and
+  // {"outcome": "ok"} at the end), so the kind alone cannot classify it —
   // and "-end" reads as success, which rendered a FAILED apply green
   // [max-review #14]. Only "failed" is honoured: a detail must be able to
   // escalate a mis-suffixed kind, never to launder an unrelated one into
