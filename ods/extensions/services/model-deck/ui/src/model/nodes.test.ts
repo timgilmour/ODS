@@ -304,6 +304,46 @@ describe("buildNodes — spark", () => {
     expect(spark.resources[0].placements[0].stale).toBe(true);
   });
 
+  it("carries the PROFILE for settings identity and the served name for display", () => {
+    // AWAY FROM THE DEFAULT FIXTURE, deliberately: sparkStatus() serves
+    // "heretic" from a profile also named "heretic", so served-name and
+    // profile coincide and nothing can tell a profile-keyed lookup from a
+    // name-keyed one. The real mm27b/aeon case does not coincide — the
+    // node-agent reports models[0].id "aeon" while the profile is "mm27b".
+    //
+    // The identity vocabulary is the PROFILE: app/routers/settings.py:293
+    // writes identities[meta["name"]] (a profiles[] entry's name), and
+    // app/observe.py:180-184 says so outright — "Identity is the PROFILE the
+    // node last swapped to, not the served model name ... comparing served
+    // names would report permanent drift for a correct placement".
+    const spark = buildNodes(
+      state(),
+      sparkStatus({
+        profiles: [{ name: "mm27b", engine: "ds4", health_url: null, container: "spark-mm27b" }],
+        serving: { model: "aeon", endpoint_ok: true, container_status: "running" },
+        swap_status: {
+          state: "done", profile: "mm27b", id: "1",
+          message: "", ts: "2026-08-05T00:00:00Z",
+        },
+      }),
+    )[1];
+    const placement = spark.resources[0].placements[0];
+
+    expect(placement.name).toBe("aeon");       // the chip shows what is served
+    expect(placement.profile).toBe("mm27b");   // settings/facts key vocabulary
+    // Joined by PROFILE, not served name: keyed on "aeon" this finds no
+    // profiles[] entry and silently falls back to the default engine.
+    expect(placement.engine).toBe("ds4");
+  });
+
+  it("leaves profile undefined when the node has never reported a swap", () => {
+    // swap_status null is a real state (a node up since before the deck
+    // watched it). Callers fall back to placement.name, so this must be
+    // absent rather than an empty string.
+    const spark = buildNodes(state(), sparkStatus())[1];
+    expect(spark.resources[0].placements[0].profile).toBeUndefined();
+  });
+
   it("reads as warming while a swap is in flight and the endpoint is down", () => {
     const spark = buildNodes(
       state(),

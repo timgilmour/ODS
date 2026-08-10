@@ -47,6 +47,19 @@ export interface Placement {
   id: string;
   /** Model identity, verbatim. Never prettified — truncate at render time. */
   name: string;
+  /** Spark only: the swap PROFILE that names this placement in the settings
+   * and facts vocabularies. Distinct from `name`, which is what the endpoint
+   * currently SERVES (`--served-model-name`) and is display-only — mm27b
+   * serves as "aeon", and the two coincide often enough that keying on
+   * `name` looks correct until it silently isn't.
+   *
+   * Settings/facts are keyed by profile: app/routers/settings.py:293 writes
+   * `identities[meta["name"]]` from a profiles[] entry, and
+   * app/observe.py:180-184 states the rule outright ("Identity is the
+   * PROFILE the node last swapped to, not the served model name").
+   * Undefined for every non-spark placement, and for a spark node that has
+   * not reported a swap — callers fall back to `name`. */
+  profile?: string;
   bytes: number | null;
   status: LifecycleStatus;
   engine: string;
@@ -393,7 +406,14 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
 
   const stale = status === "unreachable";
   const model = spark.serving.model;
-  const engine = spark.profiles.find((p) => p.name === model)?.engine ?? SPARK_DEFAULT_ENGINE;
+  // The PROFILE is the identity vocabulary (see Placement.profile). It also
+  // fixes the engine join: profiles[] is keyed by profile name, so matching
+  // on the SERVED name found nothing whenever the two differ and silently
+  // fell back to SPARK_DEFAULT_ENGINE — an "aeon" placement reporting vllm
+  // while ds4 was actually serving it.
+  const profile = spark.swap_status?.profile ?? null;
+  const engine = spark.profiles.find((p) => p.name === (profile ?? model))?.engine
+    ?? SPARK_DEFAULT_ENGINE;
 
   // Both candidates are sentences the BACKEND wrote, so the banner reports
   // rather than guesses. The swap helper's own message wins when the last
@@ -426,6 +446,7 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
               {
                 id: SPARK_SLOT_KEY,
                 name: model,
+                profile: profile ?? undefined,
                 bytes: null,
                 status: entry?.status ?? (endpointOk ? "serving" : "down"),
                 engine,

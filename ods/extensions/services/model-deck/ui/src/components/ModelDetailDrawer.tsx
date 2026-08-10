@@ -561,16 +561,21 @@ export default function ModelDetailDrawer({
                       onOpenSettings({
                         node: placedOn.nodeId,
                         engine: settingsEngine,
-                        // The board names a spark placement by its PROFILE;
-                        // settings live under the checkpoint identity. See
-                        // settingsIdentityFor — a local placement's name is
+                        // Settings live under the checkpoint identity, looked
+                        // up by the spark PROFILE — `placement.name` is what
+                        // the endpoint SERVES (mm27b serves as "aeon"), and
+                        // profile_identities is keyed by profile
+                        // (app/routers/settings.py:293). Keying on the served
+                        // name silently missed whenever the two differ, which
+                        // is the whole of max-review #8. `profile` is
+                        // undefined for local placements, whose name is
                         // already the model and passes through unchanged.
                         // `?? {}` is unreachable while the button is enabled.
                         model: settingsIdentityFor(
                           facts ?? {},
                           placedOn.nodeId,
                           settingsEngine,
-                          placement.name,
+                          placement.profile ?? placement.name,
                         ),
                       })
                     }
