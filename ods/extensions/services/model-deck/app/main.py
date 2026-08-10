@@ -51,6 +51,7 @@ from app.routers import (
     status,
     storage,
 )
+from app.routers import nodes as nodes_router
 from app.routers import provenance as provenance_router
 # Aliased: create_app() below has its own local `settings` (the Settings()
 # instance) and app.settings already owns that name for env config — the
@@ -65,6 +66,13 @@ _GGUF_DIR = Path("/gguf-store")
 # hipfire runs as a sibling container on the compose network; its health
 # endpoint is <container>:11435/health (config/ports.json + manifest.yaml).
 _HIPFIRE_PORT = 11435
+
+
+def _default_node_agent_factory(address: str, key: str):
+    from app.engines.node_agent import NodeAgentClient
+
+    return NodeAgentClient(address, key)
+
 
 # Deck cache keyed by the id() of the Settings instance that produced it.
 #
@@ -161,6 +169,9 @@ def _build_deck(settings: Settings) -> dict:
                 litellm=litellm,
             )
 
+    from app.node_store import NodeStore
+    node_store = NodeStore(data_dir / "nodes.json", data_dir / "node_credentials.json")
+
     location_store = LocationStore(data_dir / "locations.json")
     catalog = Catalog(data_dir / "catalog.json", location_store)
     mover = Mover()
@@ -215,6 +226,11 @@ def _build_deck(settings: Settings) -> dict:
         "storage_policy_store": StoragePolicyStore(data_dir / "storage_policy.json"),
         "mover": mover,
         "job_queue": job_queue,
+        "node_store": node_store,
+        # The one place a real node-agent client is minted for probes; the
+        # nodes router and the observer both go through it, and tests swap
+        # THIS entry rather than monkeypatching a module.
+        "node_agent_client_factory": _default_node_agent_factory,
     }
     # Late-bound so the queue's execution-start guard can re-snapshot the world
     # (spec section 2). It has to be assigned rather than injected: the queue is
@@ -424,6 +440,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router.router, prefix="/api")
     app.include_router(rename.router, prefix="/api")
     app.include_router(provenance_router.router, prefix="/api")
+    app.include_router(nodes_router.router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when
     # present so the API keeps working standalone until then. Mounted LAST:
