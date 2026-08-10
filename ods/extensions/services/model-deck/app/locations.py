@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import uuid as uuidlib
 from pathlib import Path
 
@@ -75,6 +76,13 @@ class LocationStore:
     def __init__(self, path: Path, disk_usage=shutil.disk_usage):
         self._path = path
         self._disk_usage = disk_usage
+        # One lock around every load-modify-save. Reachable from FastAPI's
+        # sync-route threadpool, which runs real OS threads: two concurrent
+        # writes to DIFFERENT keys still read-modify-write the SAME file, so
+        # one silently loses — and _save writes a fixed .tmp path, so the
+        # racing os.replace can also raise FileNotFoundError into a route
+        # (a 500). Same fix as the arbiter-facing stores [T9b sweep].
+        self._lock = threading.Lock()
 
     # -- persistence (PolicyStore idiom) ------------------------------------
 
@@ -114,28 +122,31 @@ class LocationStore:
             marker.write_text(json.dumps({"uuid": spec["uuid"], "name": spec["name"]}))
         except OSError as exc:
             raise GuardError(f"cannot write marker at {marker}: {exc}") from exc
-        data = self._load()
-        data.append(spec)
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            data.append(spec)
+            self._save(data)
         return spec
 
     def update(self, name: str, patch: dict) -> dict:
         bad = set(patch) - _PATCHABLE
         if bad:
             raise ValueError(f"field(s) not patchable: {sorted(bad)}")
-        data = self._load()
-        for loc in data:
-            if loc["name"] == name:
-                merged = {**loc, **patch}
-                _validate({k: v for k, v in merged.items() if k != "uuid"})
-                loc.update(patch)
-                self._save(data)
-                return loc
+        with self._lock:
+            data = self._load()
+            for loc in data:
+                if loc["name"] == name:
+                    merged = {**loc, **patch}
+                    _validate({k: v for k, v in merged.items() if k != "uuid"})
+                    loc.update(patch)
+                    self._save(data)
+                    return loc
         raise ValueError(f"unknown location {name!r}")
 
     def deregister(self, name: str) -> None:
-        data = [loc for loc in self._load() if loc["name"] != name]
-        self._save(data)
+        with self._lock:
+            data = [loc for loc in self._load() if loc["name"] != name]
+            self._save(data)
 
     # -- availability ---------------------------------------------------------
 

@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -93,6 +94,18 @@ class NodeStore:
     def __init__(self, path: Path, credentials_path: Path):
         self._path = path
         self._creds_path = credentials_path
+        # One lock around every MUTATOR's load-modify-save. Reachable from
+        # FastAPI's sync-route threadpool (real OS threads), where two
+        # concurrent writes to different nodes still read-modify-write the
+        # same file — and each of the TWO fixed .tmp paths here (nodes and
+        # credentials) is its own race surface whose loser's os.replace
+        # raises FileNotFoundError into a route [T9b sweep].
+        #
+        # Reads (get/list/credential_*) deliberately stay lock-free: add()
+        # calls get() internally, so locking reads with a non-reentrant Lock
+        # would deadlock. Holding it across the whole mutator body also makes
+        # the duplicate-id check atomic with the append it guards.
+        self._lock = threading.Lock()
 
     # -- persistence (LocationStore idiom) ----------------------------------
 
@@ -145,49 +158,53 @@ class NodeStore:
     def add(self, spec: dict, credential: str | None = None) -> dict:
         spec = dict(spec)
         _validate(spec)
-        if spec["agent_kind"] == "local" and self.get("local") is not None:
-            raise ValueError("the local node is seeded, not added")
-        if spec["agent_kind"] == "local" and spec["id"] != "local":
-            raise ValueError("agent_kind 'local' is reserved for the seeded local node")
-        if self.get(spec["id"]) is not None:
-            raise GuardError(f"node {spec['id']!r} already exists")
-        spec["added_ts"] = datetime.now(UTC).isoformat()
-        data = self._load()
-        data.append(spec)
-        self._save(data)
-        if credential:
-            creds = self._load_creds()
-            creds[spec["id"]] = credential
-            self._save_creds(creds)
+        with self._lock:
+            if spec["agent_kind"] == "local" and self.get("local") is not None:
+                raise ValueError("the local node is seeded, not added")
+            if spec["agent_kind"] == "local" and spec["id"] != "local":
+                raise ValueError(
+                    "agent_kind 'local' is reserved for the seeded local node")
+            if self.get(spec["id"]) is not None:
+                raise GuardError(f"node {spec['id']!r} already exists")
+            spec["added_ts"] = datetime.now(UTC).isoformat()
+            data = self._load()
+            data.append(spec)
+            self._save(data)
+            if credential:
+                creds = self._load_creds()
+                creds[spec["id"]] = credential
+                self._save_creds(creds)
         return spec
 
     def update(self, node_id: str, patch: dict, credential: str | None = None) -> dict:
         bad = set(patch) - _PATCHABLE
         if bad:
             raise ValueError(f"field(s) not patchable: {sorted(bad)}")
-        data = self._load()
-        for node in data:
-            if node["id"] == node_id:
-                merged = {**node, **patch}
-                _validate({k: v for k, v in merged.items() if k != "added_ts"})
-                node.update(patch)
-                self._save(data)
-                if credential:
-                    creds = self._load_creds()
-                    creds[node_id] = credential
-                    self._save_creds(creds)
-                return node
+        with self._lock:
+            data = self._load()
+            for node in data:
+                if node["id"] == node_id:
+                    merged = {**node, **patch}
+                    _validate({k: v for k, v in merged.items() if k != "added_ts"})
+                    node.update(patch)
+                    self._save(data)
+                    if credential:
+                        creds = self._load_creds()
+                        creds[node_id] = credential
+                        self._save_creds(creds)
+                    return node
         raise ValueError(f"unknown node {node_id!r}")
 
     def remove(self, node_id: str) -> None:
         if node_id == "local":
             raise GuardError("the local node cannot be removed")
-        data = [n for n in self._load() if n["id"] != node_id]
-        self._save(data)
-        creds = self._load_creds()
-        if node_id in creds:
-            del creds[node_id]
-            self._save_creds(creds)
+        with self._lock:
+            data = [n for n in self._load() if n["id"] != node_id]
+            self._save(data)
+            creds = self._load_creds()
+            if node_id in creds:
+                del creds[node_id]
+                self._save_creds(creds)
         # Deliberately touches NOTHING keyed by this id: intent, settings
         # scopes, and provenance survive removal (provenance declarations are
         # not re-derivable). Re-adding the same id reattaches everything.

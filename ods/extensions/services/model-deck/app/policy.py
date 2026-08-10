@@ -30,6 +30,7 @@ The supervisor is the sole owner of policy.json.
 
 import json
 import os
+import threading
 from pathlib import Path
 
 TenantPolicy = dict[str, int | bool]
@@ -77,6 +78,17 @@ class PolicyStore:
 
     def __init__(self, path: Path):
         self._path = path
+        # ONE lock per store around every load-modify-save. The arbiter's
+        # 2 s tick (app/arbiter.py) reads policy concurrently with sync HTTP
+        # routes, which FastAPI runs on a real threadpool — and _save writes
+        # a FIXED .tmp path, so two writers race it and the loser's
+        # os.replace raises FileNotFoundError into whichever thread it was:
+        # a 500 on /api/status right when someone is looking. Sharpened by
+        # the boundary gate (task 3), which made _load() itself a WRITER on
+        # any partial/corrupt file — so the heal-write must happen with this
+        # lock already held, which is why every public method below takes it
+        # and _load/_save stay lock-free internals.
+        self._lock = threading.Lock()
 
     def _gated(self, data: dict) -> dict:
         """Element-level boundary gate (NodeStore._load's pattern), run
@@ -146,12 +158,14 @@ class PolicyStore:
         this method does nothing but filter the reserved `_auto` key back
         out.
         """
-        data = self._load()
-        if data is None:
-            data = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
-            self._save(data)
-            return dict(data)
-        return {k: v for k, v in data.items() if k != _AUTO_KEY}
+        with self._lock:
+            data = self._load()
+            if data is None:
+                data = {tenant: dict(policy)
+                        for tenant, policy in DEFAULT_POLICIES.items()}
+                self._save(data)
+                return dict(data)
+            return {k: v for k, v in data.items() if k != _AUTO_KEY}
 
     def put(self, policies: dict[str, TenantPolicy]) -> None:
         """Partial update by tenant: replaces the whole record for each tenant
@@ -175,11 +189,13 @@ class PolicyStore:
         # every policy write. _load() is the sole boundary gate (module
         # docstring), so a missing/corrupt file, or a partial hand-edited
         # one, is already healed by the time this merge runs.
-        current = self._load()
-        if current is None:
-            current = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
-        current.update({tenant: dict(policy) for tenant, policy in policies.items()})
-        self._save(current)
+        with self._lock:
+            current = self._load()
+            if current is None:
+                current = {tenant: dict(policy)
+                           for tenant, policy in DEFAULT_POLICIES.items()}
+            current.update({tenant: dict(policy) for tenant, policy in policies.items()})
+            self._save(current)
 
     # --- lifecycle automation toggle ---------------------------------------
 
@@ -188,7 +204,8 @@ class PolicyStore:
         tiering (whose automation moves bytes and defaults off), lifecycle
         auto-restore only returns a resource to a state the operator already
         chose, and its absence is what let hipfire stay dead for 26 hours."""
-        data = self._load() or {}
+        with self._lock:
+            data = self._load() or {}
         value = data.get(_AUTO_KEY, {}).get("enabled", True)
         return bool(value)
 
@@ -203,11 +220,13 @@ class PolicyStore:
         consumer falls back on. Writing the toggle first must not be able
         to cost the deck its defaults.
         """
-        data = self._load()
-        if data is None:
-            data = {tenant: dict(policy) for tenant, policy in DEFAULT_POLICIES.items()}
-        data[_AUTO_KEY] = {"enabled": bool(enabled)}
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            if data is None:
+                data = {tenant: dict(policy)
+                        for tenant, policy in DEFAULT_POLICIES.items()}
+            data[_AUTO_KEY] = {"enabled": bool(enabled)}
+            self._save(data)
 
 
 # --- Storage tiering policy -------------------------------------------------
@@ -221,6 +240,9 @@ class StoragePolicyStore:
 
     def __init__(self, path: Path):
         self._path = path
+        # Same race, slower cadence: StorageWatcher's 60 s pass heals via
+        # get() while HTTP routes read and write the same fixed .tmp path.
+        self._lock = threading.Lock()
 
     def _load(self) -> dict | None:
         try:
@@ -238,13 +260,15 @@ class StoragePolicyStore:
         os.replace(tmp, self._path)
 
     def get(self) -> dict:
-        data = self._load()
-        if data is None:
-            data = dict(STORAGE_POLICY_DEFAULT)
-            self._save(data)
-        return data
+        with self._lock:
+            data = self._load()
+            if data is None:
+                data = dict(STORAGE_POLICY_DEFAULT)
+                self._save(data)
+            return data
 
     def put(self, policy: dict) -> None:
         if set(policy) != {"auto"} or not isinstance(policy.get("auto"), bool):
             raise ValueError('storage policy must be exactly {"auto": <bool>}')
-        self._save(dict(policy))
+        with self._lock:
+            self._save(dict(policy))

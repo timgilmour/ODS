@@ -25,6 +25,7 @@ as empty; writes are atomic; a rejected put leaves the file untouched.
 
 import json
 import os
+import threading
 from pathlib import Path
 
 # Each entry: field -> validator. Deliberately tiny; see the docstring.
@@ -42,6 +43,13 @@ class DeclaredStore:
 
     def __init__(self, path: Path):
         self._path = path
+        # One lock around every load-modify-save. Reachable from FastAPI's
+        # sync-route threadpool, which runs real OS threads: two concurrent
+        # writes to DIFFERENT keys still read-modify-write the SAME file, so
+        # one silently loses — and _save writes a fixed .tmp path, so the
+        # racing os.replace can also raise FileNotFoundError into a route
+        # (a 500). Same fix as the arbiter-facing stores [T9b sweep].
+        self._lock = threading.Lock()
 
     def _load(self) -> dict:
         try:
@@ -79,11 +87,13 @@ class DeclaredStore:
             if not validator(value):
                 raise ValueError(f"{name!r} has the wrong type: {value!r}")
 
-        data = self._load()
-        data.setdefault(key, {}).update(fields)
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            data.setdefault(key, {}).update(fields)
+            self._save(data)
 
     def forget(self, key: str) -> None:
-        data = self._load()
-        if data.pop(key, None) is not None:
-            self._save(data)
+        with self._lock:
+            data = self._load()
+            if data.pop(key, None) is not None:
+                self._save(data)

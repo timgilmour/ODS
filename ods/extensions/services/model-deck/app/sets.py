@@ -49,6 +49,7 @@ always works.
 import copy
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Literal
 
@@ -168,6 +169,18 @@ class SetStore:
 
     def __init__(self, dir: Path):  # noqa: A002 - matches the brief's signature
         self._dir = dir
+        # Narrow but real [T9b sweep]: _write uses a fixed `.tmp` path PER
+        # SLUG, so two HTTP threads creating the SAME set name (or one
+        # creating while another deletes it) race that path, and the loser's
+        # os.replace raises FileNotFoundError into a route. Different slugs
+        # cannot collide — the tmp name carries the slug — so this lock only
+        # needs to cover save()/delete().
+        #
+        # save_previous() deliberately does NOT take it: apply() is its sole
+        # caller and already holds app.actuation.LOCK, so it is structurally
+        # serialized. Taking this lock there would be harmless but would
+        # imply a race that cannot happen.
+        self._lock = threading.Lock()
 
     def _path(self, slug: str) -> Path:
         return self._dir / f"{slug}.json"
@@ -192,7 +205,8 @@ class SetStore:
             raise ValueError(
                 f"slug {slug!r} is reserved for the auto-captured revert snapshot"
             )
-        self._write(slug, cfgset)
+        with self._lock:
+            self._write(slug, cfgset)
         return slug
 
     def save_previous(self, cfgset: ConfigSet) -> str:
@@ -274,7 +288,8 @@ class SetStore:
 
     def delete(self, slug: str) -> None:
         """Remove the set stored under ``slug`` (no-op if absent)."""
-        self._path(slug).unlink(missing_ok=True)
+        with self._lock:
+            self._path(slug).unlink(missing_ok=True)
 
 
 # ===========================================================================
