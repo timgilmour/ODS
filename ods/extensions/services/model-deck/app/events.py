@@ -42,10 +42,24 @@ from pathlib import Path
 # it on; contention is negligible (one small append per event).
 _WRITE_LOCK = threading.Lock()
 
-# Rotation bounds. The log is display-only (the Events tab reads the tail);
-# 2000 lines is ~20x what the UI ever requests, and the byte cap keeps one
-# pathological detail payload from deferring rotation indefinitely.
+# Rotation bounds. The log is display-only (the Events tab reads the tail).
+#
+# The TRIGGER is bytes and the TARGET must be bytes too, or there is no
+# hysteresis: a line-only target gets back under a byte trigger only while
+# the trailing window happens to average below _MAX_LOG_BYTES/_TRIM_TO_LINES
+# (2500 B/line). Above that ratio the file stays oversized after every trim,
+# so EVERY subsequent append rewrites the whole multi-MB log — sustained
+# thrashing rather than periodic amortization. That is reachable, not
+# theoretical: engines raise EngineError(resp.text) carrying a raw HTTP body
+# (app/engines/lemonade.py, app/engines/spark.py), and app/arbiter.py logs
+# `load-failed` with str(exc) UN-deduped on every 2 s tick, so one degraded
+# backend returning a multi-KB error body thrashes for the whole outage.
+#
+# _TRIM_TARGET_BYTES is well under the trigger so a trim buys real headroom
+# whatever the record size. _TRIM_TO_LINES still caps the count (~20x what
+# the UI ever requests) for the ordinary small-record case.
 _MAX_LOG_BYTES = 5_000_000
+_TRIM_TARGET_BYTES = 2_000_000
 _TRIM_TO_LINES = 2_000
 
 
@@ -85,6 +99,16 @@ def _trim(path: Path) -> None:
     """
     lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
     lines = lines[-_TRIM_TO_LINES:]
+    # ...then trim again by BYTES, newest-first, so the rewritten file is
+    # actually under the target no matter how large the records are.
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        total += len(line) + 1          # +1 for the newline it is joined with
+        if total > _TRIM_TARGET_BYTES and kept:
+            break
+        kept.append(line)
+    lines = list(reversed(kept))
     tmp = path.with_suffix(path.suffix + ".trim-tmp")
     tmp.write_text("\n".join(lines) + "\n")
     os.replace(tmp, path)

@@ -199,3 +199,40 @@ def test_concurrent_log_event_never_crashes_on_rotation(tmp_path):
     # line, and tail_events silently skips those, so assert on the raw text.
     for line in path.read_text().splitlines():
         json.loads(line)
+
+
+def test_large_records_do_not_thrash_the_trim(tmp_path, monkeypatch):
+    """[T10 review] The trigger is bytes; a LINE-only trim target has no
+    hysteresis above _MAX_LOG_BYTES/_TRIM_TO_LINES (2500 B/line) — the file
+    stays oversized after each trim, so every subsequent append rewrites the
+    whole multi-MB log.
+
+    Reachable, not theoretical: engines raise EngineError(resp.text) carrying
+    a raw HTTP body, and the arbiter logs `load-failed` with str(exc)
+    UN-deduped every 2 s tick, so one degraded backend thrashes the log for
+    the duration of an outage.
+
+    Fixture is deliberately AWAY from the other rotation tests' 1000-byte
+    payloads — those sit under the ratio, which is exactly why the suite
+    could not see this.
+    """
+    import app.events as events_mod
+
+    path = tmp_path / "events.jsonl"
+    pad = "q" * 3000                       # ~3 KB/line, above the 2500 ratio
+
+    trims = []
+    real_trim = events_mod._trim
+    monkeypatch.setattr(events_mod, "_trim",
+                        lambda p: (trims.append(1), real_trim(p))[1])
+
+    while not trims:                       # write until the first rotation
+        log_event(path, "load-failed", {"error": pad})
+    first = len(trims)
+
+    for _ in range(20):                    # 20 more appends after that trim
+        log_event(path, "load-failed", {"error": pad})
+
+    # Thrashing would trim on essentially every one of those 20 appends.
+    assert len(trims) - first <= 1
+    assert path.stat().st_size <= _MAX_LOG_BYTES
