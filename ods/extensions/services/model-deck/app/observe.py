@@ -33,6 +33,9 @@ _LOCAL_NODE = "local"
 # the key.
 LOCAL_LEMONADE_KEY = f"{_LOCAL_NODE}/lemonade"
 
+# Same rationale as LOCAL_LEMONADE_KEY above, for hipfire's intent key.
+LOCAL_HIPFIRE_KEY = f"{_LOCAL_NODE}/hipfire"
+
 # Spark is a single-slot serving node: one resource, always this key. Public
 # so writers (app.routers.spark) and readers (app.arbiter) name it from one
 # place instead of re-typing the literal.
@@ -65,7 +68,7 @@ def observe_local(world: dict) -> dict[str, dict]:
             # acting on it restarts a model that is already mid-load.
             transitioning=lemonade["state"] == "loading",
         ),
-        f"{_LOCAL_NODE}/hipfire": _record(
+        LOCAL_HIPFIRE_KEY: _record(
             unknown=hipfire["state"] == "unknown",
             loaded=hipfire["state"] == "running",
             model=hipfire.get("model"),
@@ -118,7 +121,7 @@ def observe_spark(spark_status: dict | None) -> dict[str, dict]:
 # a new engine adds a line here rather than editing either caller.
 _ENGINE_BY_KEY = {
     LOCAL_LEMONADE_KEY: "lemonade",
-    "local/hipfire": "hipfire",
+    LOCAL_HIPFIRE_KEY: "hipfire",
     "local/comfyui": "comfyui",
     SPARK_SLOT_KEY: "spark",
 }

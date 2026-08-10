@@ -53,6 +53,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
+from app.observe import LOCAL_HIPFIRE_KEY, LOCAL_LEMONADE_KEY
 from app.settings_store import KINDS, NAMESPACES
 
 # Reserved on-disk slug for the auto-captured pre-apply snapshot. Written only
@@ -573,6 +574,55 @@ _HOST_AGENT_GUARDED_STEPS = frozenset(
 )
 
 
+def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
+    """Record the set's DECLARED tenant goals as intent — every accepted
+    goal, not every executed step, BEFORE any step actuates.
+
+    The step-derived recording this replaces had a hole: a goal the world
+    already appears to satisfy plans no step, so nothing was recorded, and
+    a stale 'loaded' intent (crashed tenant) survived the operator's own
+    set — the reconciler then fought the apply [max-review #2]. Recording
+    the goal itself closes it: intent is the operator's declared desire,
+    which an apply ACCEPTS whether or not it needs to act.
+
+    Deliberate consequences, all matching existing lifecycle semantics:
+    * recorded up-front — a step that later fails leaves intent at the
+      declared goal and the reconciler converges toward it (the documented
+      restore-on-failure path, arbiter.py:746-747);
+    * comfyui records nothing (routers/sets.py's old table documented why:
+      /free leaves the server observing 'loaded'; an 'unloaded' intent
+      would derive permanent 'unexpected');
+    * hipfire records model=None ('loaded, no opinion which model');
+    * a 'loaded' lemonade goal with NO determinable model records nothing —
+      the plan already warned no-model-to-load, and a model-less loaded
+      intent is unrestorable.
+    """
+    if intent_store is None:
+        return
+    eph = cfgset.ephemeral
+    if eph is None:
+        return
+    if eph.lemonade is not None:
+        if eph.lemonade.state == "unloaded":
+            intent_store.record(LOCAL_LEMONADE_KEY, state="unloaded",
+                                model=None, engine="lemonade")
+        else:
+            model = next((s["model"] for s in steps
+                          if s["step"] == "load_lemonade"), None)
+            if model is None and world["tenants"]["lemonade"]["state"] == "loaded":
+                model = world["tenants"]["lemonade"].get("model")
+            if model is not None:
+                intent_store.record(LOCAL_LEMONADE_KEY, state="loaded",
+                                    model=model, engine="lemonade")
+    if eph.hipfire is not None:
+        if eph.hipfire.state == "parked":
+            intent_store.record(LOCAL_HIPFIRE_KEY, state="unloaded",
+                                model=None, engine="hipfire")
+        elif eph.hipfire.state == "running":
+            intent_store.record(LOCAL_HIPFIRE_KEY, state="loaded",
+                                model=None, engine="hipfire")
+
+
 def apply(
     cfgset: ConfigSet,
     *,
@@ -589,6 +639,7 @@ def apply(
     force: bool = False,
     settings_now: dict | None = None,
     settings_store=None,
+    intent_store=None,
 ) -> dict:
     """Execute ``cfgset`` against the live box, serialized under a module lock.
 
@@ -618,6 +669,11 @@ def apply(
     given, the step fails loudly (ValueError) rather than silently
     no-opping — see ``_execute_step``.
 
+    ``intent_store`` (Task 5; optional, None tolerated for unit tests without
+    the arbiter's lifecycle wired in) records the set's DECLARED goals as
+    intent, inside this lock and before the first step actuates — see
+    ``_record_goal_intents``.
+
     Returns an ApplyReport dict:
         {"completed": [<step>, ...], "failed": <step>|None,
          "error": <str>|None, "warnings": [<reason>, ...]}
@@ -638,6 +694,7 @@ def apply(
             force=force,
             settings_now=settings_now,
             settings_store=settings_store,
+            intent_store=intent_store,
         )
 
 
@@ -657,6 +714,7 @@ def _run_apply(
     force=False,
     settings_now=None,
     settings_store=None,
+    intent_store=None,
 ) -> dict:
     steps = plan_apply(cfgset, world, settings_now=settings_now)
 
@@ -703,6 +761,10 @@ def _run_apply(
     # before any step touches the box. settings_now rides along so reverting
     # to "· previous" restores settings too (Task 9).
     store.save_previous(_previous_set(world, settings_now))
+
+    # Record the DECLARED goals as intent, still inside the lock, before the
+    # first step actuates (Task 5) — see _record_goal_intents.
+    _record_goal_intents(cfgset, steps, world, intent_store)
 
     report: dict = {"completed": [], "failed": None, "error": None, "warnings": []}
 

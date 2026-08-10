@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from app.arbiter import HealSuppressor
 from app.engines import BusyError, EngineError, GuardError
 from app.events import tail_events
+from app.intent import IntentStore
 from app.main import create_app
 from app.policy import DEFAULT_POLICIES, PolicyStore
 from app.sets import (
@@ -1302,6 +1303,163 @@ def test_apply_load_step_without_catalog_still_works(tmp_path):
     cfg = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
 
     report, clients = run_apply(cfg, world, tmp_path)
+
+    assert report["failed"] is None
+    assert clients["lemonade"].calls == [("load", "extra.d.gguf")]
+
+
+# ===========================================================================
+# Task 5 — apply records DECLARED goals as intent, before actuation
+# [max-review #2/c40]: a goal the world already appears to satisfy plans no
+# step, so the old step-derived recording left nothing behind, and a stale
+# intent from a crashed tenant survived the operator's own apply. These tests
+# seed the PRIOR intent to the OPPOSITE of the goal, so a no-op recording bug
+# cannot pass silently.
+# ===========================================================================
+
+
+def test_apply_records_a_park_goal_even_when_no_step_is_planned(tmp_path):
+    """THE review scenario [c40]: lemonade crashed (observed 'unloaded',
+    stale intent 'loaded'); operator applies a set declaring lemonade
+    unloaded. No step plans — but intent MUST flip to 'unloaded', or the
+    reconciler reloads ~20GB the operator just declared off."""
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.foo.gguf",
+                  engine="lemonade")
+    world = make_world(lemonade=("unloaded", None))  # crashed: goal already "met"
+    # hipfire omitted entirely ("don't touch", Ephemeral's own contract) —
+    # HipfireEphemeral's state Literal (sets.py:110) is "running"/"parked"
+    # only, no "leave" member to spell that with.
+    cfgset = ConfigSet(name="quiet", ephemeral={
+        "lemonade": {"state": "unloaded"}, "comfyui": {"state": "leave"},
+    })
+
+    run_apply(cfgset, world, tmp_path, intent_store=intent)
+
+    assert intent.get()["local/lemonade"]["state"] == "unloaded"
+
+
+def test_apply_records_goals_before_the_first_step_actuates(tmp_path):
+    """Record-before-actuate: the fake lemonade's unload() reads the intent
+    store mid-call — it must already say 'unloaded' when the engine call
+    fires (the same invariant arbiter.py:706-708 documents)."""
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.foo.gguf",
+                  engine="lemonade")
+    seen = {}
+
+    class SnoopingLemonade(RecLemonade):
+        def unload(self, model):
+            seen["state_at_call"] = intent.get()["local/lemonade"]["state"]
+            super().unload(model)
+
+    world = make_world(lemonade=("loaded", "extra.foo.gguf"))
+    cfgset = ConfigSet(name="quiet", ephemeral={"lemonade": {"state": "unloaded"}})
+
+    run_apply(cfgset, world, tmp_path, lemonade=SnoopingLemonade(), intent_store=intent)
+
+    assert seen["state_at_call"] == "unloaded"
+
+
+def test_apply_with_no_ephemeral_records_nothing(tmp_path):
+    """A durable-only (or policy-only) set declares no per-tenant load/park
+    goal at all — nothing to record, and no stale intent must be disturbed."""
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.foo.gguf",
+                  engine="lemonade")
+    world = make_world(default_route="extra.old.gguf")
+    cfgset = ConfigSet(
+        name="durable-only",
+        durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-1"},
+    )
+
+    report, _ = run_apply(cfgset, world, tmp_path, intent_store=intent)
+
+    assert report["failed"] is None
+    assert intent.get()["local/lemonade"]["state"] == "loaded"  # untouched
+
+
+def test_loaded_goal_with_no_determinable_model_records_nothing(tmp_path):
+    """goal=loaded, nothing loaded, no durable, no default route: plan_apply
+    (sets.py:518-519) warns 'no-model-to-load'; a loaded intent without a
+    model would be unrestorable, so ``_record_goal_intents`` records nothing
+    (its own documented narrowing) rather than a model=None loaded record."""
+    intent = IntentStore(tmp_path / "intent.json")
+    world = make_world(lemonade=("unloaded", None), default_route=None)
+    cfgset = ConfigSet(name="no-model", ephemeral={"lemonade": {"state": "loaded"}})
+
+    report, _ = run_apply(cfgset, world, tmp_path, intent_store=intent)
+
+    assert report["warnings"] == ["no-model-to-load"]
+    assert intent.get() == {}
+
+
+def test_apply_records_a_loaded_goal_already_met_with_its_actual_model(tmp_path):
+    """Symmetric to the park case above: lemonade is ALREADY loaded (goal
+    met, no load_lemonade step plans), but intent still had nothing on file
+    (e.g. a fresh box, or intent lost). The recorded model must be the one
+    actually resident, not None — exercises the world-state fallback branch
+    of ``_record_goal_intents`` distinct from the planned-step branch."""
+    intent = IntentStore(tmp_path / "intent.json")
+    world = make_world(lemonade=("loaded", "extra.resident.gguf"))
+    cfgset = ConfigSet(name="already-loaded", ephemeral={"lemonade": {"state": "loaded"}})
+
+    run_apply(cfgset, world, tmp_path, intent_store=intent)
+
+    record = intent.get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.resident.gguf"
+
+
+def test_apply_records_a_hipfire_park_goal(tmp_path):
+    """hipfire's declared goal is recorded the same way lemonade's is —
+    engine='hipfire', model=None (single-model, Deck has no opinion which)."""
+    intent = IntentStore(tmp_path / "intent.json")
+    world = make_world(hipfire="running")
+    cfgset = ConfigSet(name="quiet-hipfire", ephemeral={"hipfire": {"state": "parked"}})
+
+    run_apply(cfgset, world, tmp_path, intent_store=intent)
+
+    record = intent.get()["local/hipfire"]
+    assert record["state"] == "unloaded"
+    assert record["model"] is None
+    assert record["engine"] == "hipfire"
+
+
+def test_apply_records_a_hipfire_running_goal(tmp_path):
+    intent = IntentStore(tmp_path / "intent.json")
+    world = make_world(hipfire="parked")
+    cfgset = ConfigSet(name="run-hipfire", ephemeral={"hipfire": {"state": "running"}})
+
+    run_apply(cfgset, world, tmp_path, intent_store=intent)
+
+    record = intent.get()["local/hipfire"]
+    assert record["state"] == "loaded"
+    assert record["model"] is None
+
+
+def test_apply_comfyui_goal_records_nothing(tmp_path):
+    """comfyui never gets an intent record (routers/sets.py's old table
+    documented why, now carried in ``_record_goal_intents``'s own docstring):
+    /free leaves the server observing itself loaded, so an 'unloaded' intent
+    would derive as permanent 'unexpected'."""
+    intent = IntentStore(tmp_path / "intent.json")
+    world = make_world(comfy=("idle", 0))
+    cfgset = ConfigSet(name="free-comfy", ephemeral={"comfyui": {"state": "free"}})
+
+    run_apply(cfgset, world, tmp_path, intent_store=intent)
+
+    assert intent.get() == {}
+
+
+def test_apply_tolerates_no_intent_store(tmp_path):
+    """intent_store=None (the default; unit tests without lifecycle wired
+    in, exactly like every other apply() test in this file) must keep
+    working — recording is opt-in, not required."""
+    world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfgset = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+
+    report, clients = run_apply(cfgset, world, tmp_path)
 
     assert report["failed"] is None
     assert clients["lemonade"].calls == [("load", "extra.d.gguf")]

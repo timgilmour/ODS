@@ -18,9 +18,11 @@ against a stale snapshot could evict/load the wrong thing. It's a sync
 what lets a slow/blocked apply (serialized under ``app.sets``' lock) not
 stall the event loop.
 
-``apply`` also records the resulting intent (``_record_intent`` below) for
-each step that actually completed — a set apply is as deliberate as a button
-press on the control routes, and the reconciler must see it the same way.
+``apply`` passes ``intent_store`` straight through to ``app.sets.apply()``,
+which records the set's DECLARED goals as intent (``_record_goal_intents``)
+before the first step actuates — a set apply is as deliberate as a button
+press on the control routes, and the reconciler must see it the same way,
+whether or not a step was needed to reach the goal (Task 5, max-review #2).
 
 Task 9 (2026-08-07): every saved set now carries the ENTIRE settings store,
 captured at save time — ``create_set`` always re-stamps ``settings_snapshot``
@@ -220,39 +222,6 @@ def apply_set(slug: str, request: Request, force: bool = False) -> dict:
         catalog=deck["catalog"],
         settings_now=deck["settings_store"].get(),
         settings_store=deck["settings_store"],
+        intent_store=deck["intent_store"],
     )
-    _record_intent(deck, report)
     return report
-
-
-# How a completed apply step translates to an intent record. A set apply is
-# as deliberate as a button press, so it must leave the same last-known-good
-# record the control routes do — otherwise "load it via a set" would be
-# invisible to the reconciler.
-#
-# Only ``report["completed"]`` is walked: a failed or never-reached step did
-# not happen, and intent is last-known-GOOD. free_comfyui and policy_patch
-# are deliberately absent — /free leaves the server up and still observing
-# as loaded, so an "unloaded" intent would derive as permanent
-# ``unexpected``; a policy patch touches no engine state at all.
-_STEP_INTENT = {
-    "load_lemonade": ("local/lemonade", "lemonade", "loaded"),
-    "unload_lemonade": ("local/lemonade", "lemonade", "unloaded"),
-    "resume_hipfire": ("local/hipfire", "hipfire", "loaded"),
-    "park_hipfire": ("local/hipfire", "hipfire", "unloaded"),
-}
-
-
-def _record_intent(deck: dict, report: dict) -> None:
-    """Record every completed step of an apply as intent, in plan order."""
-    store = deck["intent_store"]
-    for step in report["completed"]:
-        mapping = _STEP_INTENT.get(step["step"])
-        if mapping is None:
-            continue
-        key, engine, state = mapping
-        # Only a load names a model. hipfire is single-model and the Deck
-        # does not choose its model, so it records None ("loaded, no opinion
-        # which model") rather than a name it cannot observe.
-        model = step["model"] if state == "loaded" and "model" in step else None
-        store.record(key, state=state, model=model, engine=engine)

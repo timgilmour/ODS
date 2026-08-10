@@ -1273,9 +1273,14 @@ def test_comfyui_free_records_no_intent(tmp_path, monkeypatch):
     assert deck["intent_store"].get() == {}
 
 
-def test_apply_records_intent_for_each_completed_step(tmp_path, monkeypatch):
+def test_apply_records_the_declared_goals_via_the_router(tmp_path, monkeypatch):
     """A set apply is as deliberate as a button press — the same actions
-    through a different door must leave the same record."""
+    through a different door must leave the same record. Recording is now
+    GOAL-derived (app.sets._record_goal_intents, Task 5), not per-completed
+    -step: here both declared goals also happen to be the steps that ran, so
+    the outcome matches the pre-Task-5 one; the sibling test below
+    (test_apply_records_the_declared_goal_even_when_the_step_fails) is the
+    case where the two diverge."""
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded=None)
     deck["hipfire"] = FakeHipfire(state="parked")
@@ -1300,9 +1305,14 @@ def test_apply_records_intent_for_each_completed_step(tmp_path, monkeypatch):
     assert intents["local/hipfire"]["state"] == "loaded"
 
 
-def test_apply_records_nothing_for_a_step_that_never_ran(tmp_path, monkeypatch):
-    """The apply report's 'failed' step is not a completed action; only the
-    steps that actually succeeded may become intent."""
+def test_apply_records_the_declared_goal_even_when_the_step_fails(tmp_path, monkeypatch):
+    """2026-08-10 reversal of this test's own prior assertion (max-review
+    #2/c40, Task 5's design ruling): intent is now recorded from the
+    DECLARED goal, before the step runs — not from the completed-step list
+    — so a load that then fails still leaves intent=loaded, matching the
+    single-tenant control route's test_failed_load_still_records_intent
+    above. Recording nothing here (the old behavior) would make a crashed
+    apply invisible to the reconciler's restore-on-failure budget."""
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded=None)
     deck["lemonade"].fail = EngineError("boom")
@@ -1316,7 +1326,9 @@ def test_apply_records_nothing_for_a_step_that_never_ran(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["failed"] == {"step": "load_lemonade", "model": "extra.model.gguf"}
-    assert deck["intent_store"].get() == {}
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.model.gguf"
 
 
 # ===========================================================================
