@@ -252,3 +252,18 @@ describe("humanizeAge", () => {
     expect(humanizeAge("2026-08-05T12:00:30Z", now)).toBe("0s");
   });
 });
+
+describe("invalidWatermark", () => {
+  it("refuses in danger tone and NAMES the offending locations", () => {
+    // The modal edits several drives at once, so "a watermark is invalid"
+    // would leave the operator hunting. danger, because the save was
+    // REFUSED and nothing was written [max-review #15].
+    const m = messages.invalidWatermark(["hot", "scratch"]);
+    expect(m.tone).toBe("danger");
+    expect(m.body).toContain("hot");
+    expect(m.body).toContain("scratch");
+    // Says what to do instead — including that empty is a legal answer,
+    // which is the distinction the whole fix rests on.
+    expect(m.body).toContain("empty");
+  });
+});

@@ -527,3 +527,35 @@ def test_restore_journals_diff_against_previous(tmp_path):
     store.restore(snapshot)
     last = store.get()["engines"]["sparky/vllm"]["journal"]["args"][-1]
     assert last["old"] == "262144" and last["new"] == "131072"
+
+
+def test_restore_heals_a_persisted_list_null_instead_of_refusing(tmp_path):
+    """THE PAIRING, asserted in one place [re-review]. The wire REFUSES a
+    null inside a list (operator input, refuse-don't-coerce); restore() must
+    DROP it, because restore is a repair path — its own docstring calls a
+    snapshot "exactly as untrusted as a file on disk".
+
+    Getting this wrong broke UNDO: the refusal propagated out of
+    restore_settings and failed the whole apply step, for exactly the legacy
+    data the renderer's tolerance exists to keep workable.
+
+    The pre-existing renormalize test could not catch it — its `{"flag": [1]}`
+    fixture is a singleton-collapse that behaves identically under both
+    postures. This one is fixtured on the shape the postures DISAGREE about.
+    """
+    store = SettingsStore(tmp_path / "s.json")
+
+    store.restore({
+        "engines": {"sparky/vllm": {"args": {"served-model-name": ["a", None],
+                                             "_positional": ["serve", None]}}},
+        "models": {}, "engine_models": {},
+    })
+
+    args = store.scope("engines", "sparky/vllm")["args"]
+    assert args["served-model-name"] == "a"        # null dropped, not refused
+    assert args["_positional"] == ["serve"]
+
+    # ...and the WIRE keeps refusing the identical shape, which is the half
+    # that makes the drop safe: no NEW null can be written through put().
+    with pytest.raises(ValueError):
+        store.put("engines", "sparky/vllm", "args", {"served-model-name": ["a", None]})

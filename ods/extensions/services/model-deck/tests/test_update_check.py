@@ -884,12 +884,18 @@ def test_the_per_artifact_dedup_key_has_a_third_slot_sentinel(store, tmp_path):
     literally named "#artifact". Siblings put their sentinels in a THIRD
     slot; this one now matches.
 
-    Asserted on the KEY SHAPE rather than through behaviour, deliberately and
-    with the limitation stated: with the recovery-pop in place, the collision
-    is not observable end-to-end (both the colliding sibling pop and the
-    recovery pop clear the same entry, so the two spellings behave alike). A
-    behavioural test here would pass under either shape — a test that cannot
-    fail — so this pins the contract directly instead of pretending to.
+    Pins the SHAPE directly; the sibling recovery test above ALSO
+    discriminates behaviourally.
+
+    CORRECTION [re-review]: an earlier version of this docstring claimed "a
+    behavioural test would pass under either shape". That is true only of a
+    CONSISTENT two-slot mutant (set and recovery-pop both narrowed), where
+    the two spellings genuinely behave alike. It is false of the far more
+    likely regression — narrowing the write and leaving the pop three-slot —
+    which desynchronizes them so the dedup never clears, and which
+    test_a_recovered_artifact_re_announces_its_next_failure kills on its own.
+    Both mutants verified. This pin is belt-and-braces for the consistent
+    one, not the only thing standing between here and the bug.
     """
     watched(store, "oci:local:broken", {
         "id": "#artifact", "check": "git_tags",

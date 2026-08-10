@@ -1864,3 +1864,40 @@ def test_adopt_previous_writes_back_to_the_reserved_slug(tmp_path, monkeypatch):
     updated = deck["set_store"].get(RESERVED_SLUG)
     assert updated.name == PREVIOUS_NAME
     assert updated.settings_snapshot == deck["settings_store"].get()
+
+
+def test_apply_restores_a_snapshot_holding_a_persisted_list_null(tmp_path):
+    """END TO END, through apply()'s restore_settings step [re-review].
+
+    The `· previous` revert snapshot is auto-captured from the LIVE store, so
+    it carries whatever legacy shapes that store holds — including a list-null
+    written before the wire refused them. When restore() refused instead of
+    healing, this step FAILED and took undo with it: completed went from
+    ['restore_settings'] to [] with the apply reported failed.
+
+    The store-level pairing lives in test_settings_store.py; this pins that
+    the healing actually reaches the operator-visible apply path, which is
+    where the regression was observed.
+    """
+    world = make_world()
+    settings_store = SettingsStore(tmp_path / "settings.json")
+    settings_store.put("engines", "sparky/vllm", "args", {"x": "OLD-CURRENT"})
+    snapshot = {
+        "engines": {"sparky/vllm": {
+            "args": {"served-model-name": ["a", None], "_positional": ["serve", None]},
+            "updated_ts": {"args": "2020-01-01T00:00:00+00:00"},
+        }},
+        "models": {}, "engine_models": {},
+    }
+    cfg = ConfigSet(name="previous", ephemeral={}, settings_snapshot=snapshot)
+
+    report, _ = run_apply(
+        cfg, world, tmp_path,
+        settings_now=settings_store.get(), settings_store=settings_store,
+    )
+
+    assert report["failed"] is None
+    assert [s["step"] for s in report["completed"]] == ["restore_settings"]
+    args = settings_store.get()["engines"]["sparky/vllm"]["args"]
+    assert args["served-model-name"] == "a"
+    assert args["_positional"] == ["serve"]

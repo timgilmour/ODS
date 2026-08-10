@@ -305,6 +305,22 @@ class IntentStore:
         ``predicate`` receives the current record, or ``None`` when the key is
         absent, and runs UNDER THE LOCK — it must not call back into this
         store.
+
+        WHY THE RESTORE IS VERBATIM (the rationale that matters, kept here
+        because this is the entry point the arbiter actually calls):
+
+        * ``actor`` — re-recording defaults it to "operator", and stamping
+          "deck" is equally wrong. Either way the label stops describing who
+          authored the surviving intent, and app.routers.control's
+          pull-through supersession check reads exactly that label.
+        * ``updated_ts`` — the settings-drift baseline
+          (app.routers.__init__), documented to advance only at a DELIBERATE
+          load/unload, i.e. when a process relaunches and re-consumes its
+          settings. A failed unload relaunched nothing.
+        * ``failures``/``quarantined`` — ``record()`` resets both, so only a
+          verbatim put-back returns a quarantined key to its quarantine;
+          re-recording puts a crash-looping resource back into the restore
+          rotation.
         """
         if not self._well_formed(record):
             raise ValueError(
