@@ -39,7 +39,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.observe import LOCAL_LEMONADE_KEY
+from app.observe import LOCAL_HIPFIRE_KEY, LOCAL_LEMONADE_KEY
 
 router = APIRouter(prefix="/tenants", tags=["control"])
 
@@ -55,12 +55,6 @@ _EXTRA_PREFIX = "extra."
 # the job rather than silently eating the error).
 _READY_TIMEOUT_S = 60.0
 _READY_POLL_S = 2.0
-
-# Intent key for the local node's hipfire tenant (app.observe uses the same
-# "<node>/<resource>" shape). Lemonade's equivalent, LOCAL_LEMONADE_KEY, is
-# imported above — app.arbiter's reconcile pass needs the same constant, so
-# it lives in app.observe rather than being re-typed here.
-_HIPFIRE_KEY = "local/hipfire"
 
 
 class LemonadeLoadBody(BaseModel):
@@ -247,7 +241,7 @@ def hipfire_park(request: Request, force: bool = False) -> dict:
     _ensure_host_agent_idle(deck, force)
     deck["hipfire"].park(force=force)
     deck["intent_store"].record(
-        _HIPFIRE_KEY, state="unloaded", model=None, engine="hipfire"
+        LOCAL_HIPFIRE_KEY, state="unloaded", model=None, engine="hipfire"
     )
     return {"status": "ok"}
 
@@ -262,6 +256,6 @@ def hipfire_resume(request: Request, force: bool = False) -> dict:
     # None reads as "loaded, no opinion which model"; recording a name the
     # Deck cannot observe would manufacture permanent drift.
     deck["intent_store"].record(
-        _HIPFIRE_KEY, state="loaded", model=None, engine="hipfire"
+        LOCAL_HIPFIRE_KEY, state="loaded", model=None, engine="hipfire"
     )
     return {"status": "ok"}

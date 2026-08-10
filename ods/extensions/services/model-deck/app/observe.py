@@ -27,7 +27,7 @@ from app.engines.spark import boot_in_flight
 
 _LOCAL_NODE = "local"
 
-# Public so writers (app.arbiter, app.routers.control) and readers
+# Public so writers (app.arbiter, app.routers.control, app.sets) and readers
 # (app.arbiter's reconcile pass) name it from one place instead of
 # re-typing the literal — actuation and observation can never disagree on
 # the key.

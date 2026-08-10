@@ -892,6 +892,12 @@ def test_apply_hipfire_busy_veto_409_and_no_mutation(tmp_path, monkeypatch):
     assert "in flight" in resp.json()["detail"]
     assert deck["hipfire"].calls == []
     assert deck["set_store"].get(RESERVED_SLUG) is None
+    # A vetoed apply never reached _record_goal_intents either — nothing
+    # ran, so there is nothing to declare (mirrors the control-route
+    # sibling invariant, test_guard_refused_unload_records_nothing /
+    # test_failed_park_records_no_intent above: "a refused action never
+    # happened").
+    assert deck["intent_store"].get() == {}
 
 
 def test_apply_force_skips_hipfire_busy_veto(tmp_path, monkeypatch):
@@ -935,6 +941,9 @@ def test_apply_host_agent_busy_veto_409_and_no_mutation(tmp_path, monkeypatch):
     assert "host agent is busy" in resp.json()["detail"]
     assert deck["lemonade"].calls == []
     assert deck["set_store"].get(RESERVED_SLUG) is None
+    # Same invariant as the hipfire-busy veto above: a refused apply never
+    # reached _record_goal_intents.
+    assert deck["intent_store"].get() == {}
 
 
 def test_apply_force_skips_host_agent_busy_veto(tmp_path, monkeypatch):

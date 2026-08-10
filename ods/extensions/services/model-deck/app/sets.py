@@ -29,8 +29,9 @@ Three layers, cleanly separated for testability:
 * ``apply(cfgset, ...)`` — the imperative shell. Serialized under a module
   lock (two applies never interleave real evictions/activations on a live
   box). It FIRST snapshots pre-apply reality as the ``_previous`` revert set,
-  then executes the plan step by step, halting on the first failure with an
-  exact report, logging every step.
+  then records the set's DECLARED goals as intent (``_record_goal_intents``,
+  before any step actuates), then executes the plan step by step, halting on
+  the first failure with an exact report, logging every step.
 
 Why _previous is captured first and unconditionally: apply performs real,
 partially-irreversible actions (unloading models, parking containers,
@@ -595,7 +596,21 @@ def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
     * hipfire records model=None ('loaded, no opinion which model');
     * a 'loaded' lemonade goal with NO determinable model records nothing —
       the plan already warned no-model-to-load, and a model-less loaded
-      intent is unrestorable.
+      intent is unrestorable;
+    * model resolution mirrors plan_apply's own documented LOAD precedence
+      (ephemeral-explicit > planned step > observed world) — checking the
+      DECLARED ``eph.lemonade.model`` FIRST, not last, matters even when no
+      step plans: if the world already reads "loaded" with some OTHER model
+      resident (no swap step exists to reconcile identity, only state), the
+      declared model still wins the recorded intent. This is deliberate, not
+      a bug: the operator's stated desire is what intent means (this
+      function's own opening claim), so recording anything but the
+      declaration would silently downgrade "I asked for X" into "you have
+      Y, fine". The consequence is a 'drifted' status (intent X, observed Y)
+      rather than a fight — reconcile.py acts on 'down' alone (app/reconcile
+      .py:31), so 'drifted' is report-only and never triggers a restore; a
+      human decides, exactly like the sibling 'unmanaged'/'unexpected'
+      statuses reconcile.py already leaves alone.
     """
     if intent_store is None:
         return
@@ -606,9 +621,11 @@ def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
         if eph.lemonade.state == "unloaded":
             intent_store.record(LOCAL_LEMONADE_KEY, state="unloaded",
                                 model=None, engine="lemonade")
-        else:
-            model = next((s["model"] for s in steps
-                          if s["step"] == "load_lemonade"), None)
+        elif eph.lemonade.state == "loaded":
+            model = eph.lemonade.model
+            if model is None:
+                model = next((s["model"] for s in steps
+                              if s["step"] == "load_lemonade"), None)
             if model is None and world["tenants"]["lemonade"]["state"] == "loaded":
                 model = world["tenants"]["lemonade"].get("model")
             if model is not None:
