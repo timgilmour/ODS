@@ -8,6 +8,7 @@ import {
   type TenantName,
 } from "../api";
 import { labels, messages } from "../model/messages";
+import { parseWatermark } from "../model/watermark";
 import Banner from "../ui/Banner";
 import Modal from "../ui/Modal";
 
@@ -97,6 +98,21 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
     order.forEach((tenant, i) => {
       payload[tenant] = { priority: RANKS[i], pinned: pinned[tenant], idle_ttl: idleTtl[tenant] };
     });
+    // REFUSE BEFORE ANY WRITE [max-review #15]. An unparseable watermark used
+    // to coerce to null, and `watermark_gb: null` is a legal value meaning "no
+    // watermark on this drive" — so a typo like "50 GB" silently DISABLED
+    // auto-archiving and reported success. Checked ahead of putPolicy so a
+    // refused save writes NOTHING: from the operator's view the modal either
+    // applies or it doesn't, never half.
+    const invalidWatermarks = hotLocations.filter(
+      (loc) => parseWatermark(watermarkInputs[loc.name]) === "invalid",
+    );
+    if (invalidWatermarks.length > 0) {
+      setError(messages.invalidWatermark(invalidWatermarks.map((l) => l.name)).body ?? "");
+      setSaving(false);
+      return;
+    }
+
     try {
       await putPolicy(payload);
 
@@ -104,12 +120,6 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
         if (autoTiering !== storageState.policy.auto) {
           await putStoragePolicy({ auto: autoTiering });
         }
-        const parseWatermark = (raw: string | undefined): number | null => {
-          const trimmed = raw?.trim();
-          if (!trimmed) return null;
-          const n = Number(trimmed);
-          return Number.isFinite(n) ? n : null;
-        };
         const changedRows = hotLocations.filter((loc) => {
           const nextWatermark = parseWatermark(watermarkInputs[loc.name]);
           const nextArchive = archiveInputs[loc.name] || null;
@@ -118,7 +128,10 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
         await Promise.all(
           changedRows.map((loc) =>
             updateLocation(loc.name, {
-              watermark_gb: parseWatermark(watermarkInputs[loc.name]),
+              // The "invalid" arm is unreachable past the gate above; the
+              // cast keeps that fact local rather than widening
+              // updateLocation's contract to accept a sentinel.
+              watermark_gb: parseWatermark(watermarkInputs[loc.name]) as number | null,
               archive_to: archiveInputs[loc.name] || null,
             }),
           ),

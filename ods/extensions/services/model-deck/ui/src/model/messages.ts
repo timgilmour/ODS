@@ -75,6 +75,17 @@ export const messages = {
     body: `${detail} — what follows may be out of date.`,
   }),
 
+  // "danger": the save was REFUSED and nothing was written. Naming the
+  // offending locations matters — the modal edits several drives at once,
+  // and "a watermark is invalid" would leave the operator hunting.
+  invalidWatermark: (names: string[]): Message => ({
+    tone: "danger",
+    title: "Save refused",
+    body:
+      `Watermark for ${names.join(", ")} isn't a number — enter GB as a ` +
+      "number, or leave it empty for no watermark.",
+  }),
+
   guardRefused: (detail: string): Message => ({
     tone: "danger",
     title: "Refused",

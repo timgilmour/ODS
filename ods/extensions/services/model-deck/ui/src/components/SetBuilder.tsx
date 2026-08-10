@@ -108,6 +108,11 @@ export default function SetBuilder({
   const [placedModel, setPlacedModel] = useState<string | null>(null);
   const [catalogId, setCatalogId] = useState("");
   const [reserveGb, setReserveGb] = useState(24);
+  // The RAW string is what the input renders. Committing only valid parses
+  // means clearing the field no longer snaps a digit under the operator's
+  // cursor: the old `Math.max(1, Math.round(value || 0))` turned an empty
+  // field (Number("") === 0) into 1 mid-edit [max-review c35].
+  const [reserveGbRaw, setReserveGbRaw] = useState("24");
   // policy_overrides is not editable in v1, but must survive load->save
   // verbatim (a loaded set that carries overrides keeps them on the next
   // save). New drafts keep it null; a badge surfaces its presence.
@@ -145,6 +150,7 @@ export default function SetBuilder({
     setPlacedModel(null);
     setCatalogId("");
     setReserveGb(24);
+    setReserveGbRaw("24");   // both states, always together — see updateReserveGb
     setPolicyOverrides(null);
     setSaveError(null);
     setOverwriteSnapshot(null);
@@ -160,7 +166,9 @@ export default function SetBuilder({
     setHipfire(f.hipfire);
     setPolicyOverrides(f.policyOverrides);
     setCatalogId(cfgset.durable?.activate_model_id ?? "");
-    setReserveGb(cfgset.ephemeral?.comfyui?.reserve_gb ?? 24);
+    const loadedReserve = cfgset.ephemeral?.comfyui?.reserve_gb ?? 24;
+    setReserveGb(loadedReserve);
+    setReserveGbRaw(String(loadedReserve));   // both states, always together
     setPlacedModel(derivePlacedModel(cfgset));
     setSaveError(null);
     setOverwriteSnapshot(null);
@@ -305,10 +313,20 @@ export default function SetBuilder({
   }
 
   // Whole GB only — fractional input causes an avoidable server 422.
-  function updateReserveGb(value: number) {
-    const clamped = Math.max(1, Math.round(value || 0));
-    setReserveGb(clamped);
-    if (comfyui) setComfyui({ ...comfyui, reserve_gb: clamped });
+  //
+  // An unparseable or out-of-range edit updates the VISIBLE string but does
+  // not touch the committed draft: the operator can clear the field, type,
+  // and correct themselves without the value being rewritten under them, and
+  // the draft keeps the last thing they actually meant. onBlur re-syncs an
+  // abandoned edit so the field and the draft agree again.
+  function updateReserveGb(raw: string) {
+    setReserveGbRaw(raw);
+    const trimmed = raw.trim();
+    if (trimmed === "") return;              // mid-edit, not a value yet
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < 1) return;
+    setReserveGb(n);
+    if (comfyui) setComfyui({ ...comfyui, reserve_gb: n });
   }
 
   // --- Footprint budgets ----------------------------------------------------
@@ -595,8 +613,9 @@ export default function SetBuilder({
                           type="number"
                           min={1}
                           step={1}
-                          value={reserveGb}
-                          onChange={(e) => updateReserveGb(Number(e.target.value))}
+                          value={reserveGbRaw}
+                          onChange={(e) => updateReserveGb(e.target.value)}
+                          onBlur={() => setReserveGbRaw(String(reserveGb))}
                         />
                       </label>
                     )}
