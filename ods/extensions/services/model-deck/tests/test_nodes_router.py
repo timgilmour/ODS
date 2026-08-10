@@ -127,6 +127,25 @@ def test_test_connection_pre_save(client):
     assert body["ok"] is True
 
 
+def test_test_connection_address_without_credential_is_refused(client):
+    # Never-coerce: {address} with no credential must not silently probe
+    # with an empty bearer — refuse rather than let the node-agent 401 on
+    # an empty body and surface as an unhelpful {"ok": false, "error": ""}.
+    resp = client.post("/api/nodes/test", json={"address": "http://new:7720"})
+    assert resp.status_code == 422
+    assert "address+credential" in resp.json()["detail"]
+
+
+def test_test_connection_address_with_empty_credential_is_refused(client):
+    # "" is provided-and-wrong, not absent — refused with the more specific
+    # never-coerce message (pre-existing behavior via _checked_credential,
+    # unchanged by this fix).
+    resp = client.post("/api/nodes/test",
+                       json={"address": "http://new:7720", "credential": ""})
+    assert resp.status_code == 422
+    assert "non-empty string" in resp.json()["detail"]
+
+
 def test_test_connection_failure_is_ok_false_and_evented(client):
     client.app.state.deck["node_agent_client_factory"] = (
         lambda address, key: FakeAgent(raises=EngineError("401 unauthorized")))

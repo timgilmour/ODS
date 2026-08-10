@@ -14,6 +14,20 @@ display string and must never build a key (app/arbiter.py:1025-1050).
 Persistence follows the LocationStore idiom (app/locations.py): atomic
 tmp+os.replace writes, corrupt file self-heals to empty. No Settings import
 — paths are injected.
+
+Malformed-entry gating lives HERE, at `_load()`, and nowhere else. The
+file-level idiom above (an unparseable nodes.json self-heals to an empty
+list, never a crash) is applied a second time at the ELEMENT level: any
+list element that isn't a dict, or is missing a string `id`/`label`, or
+carries an `agent_kind` outside {"local", "node-agent"}, is silently
+dropped rather than surfaced. Same quality bar, one level down — a
+hand-edited bad element in nodes.json must never take the deck down (it
+would otherwise crash `get()`/`list()` callers throughout the app, up to
+and including the module-level `app = create_app()` in app/main.py, i.e.
+an import-time crash loop). Every consumer of this store — the observer,
+the routers, `_build_deck` — is entitled to assume every element in every
+list this store returns already has that shape. Do not re-guard for it at
+those call sites; if a new shape concern shows up, it belongs here.
 """
 
 from __future__ import annotations
@@ -30,6 +44,22 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _AGENT_KINDS = {"local", "node-agent"}
 _PATCHABLE = {"label", "address", "serving_address"}
 _ALLOWED = {"id", "label", "agent_kind", "address", "serving_address"}
+
+
+def _well_formed(entry: object) -> bool:
+    """The element-level shape gate applied by `NodeStore._load()`. Deliberately
+    lighter than `_validate()`: only what every downstream consumer indexes
+    unconditionally (`entry["id"]`, `entry["label"]`, `entry["agent_kind"]`)
+    is checked here. `address`/`serving_address` stay unchecked by design —
+    their presence is a per-agent-kind SEMANTIC rule (node-agent needs one,
+    local doesn't), not a shape rule, and callers that care already handle
+    "absent" (e.g. app/node_observer.py's node-agent-without-address skip)."""
+    return (
+        isinstance(entry, dict)
+        and isinstance(entry.get("id"), str)
+        and isinstance(entry.get("label"), str)
+        and entry.get("agent_kind") in _AGENT_KINDS
+    )
 
 
 def _validate(spec: dict) -> None:
@@ -65,7 +95,12 @@ class NodeStore:
             data = json.loads(self._path.read_text())
         except (OSError, json.JSONDecodeError):
             return []
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        # Element-level gate (see module docstring): a hand-edited malformed
+        # entry is dropped here, silently, same as the file-level self-heal
+        # above — every caller downstream may assume the shape holds.
+        return [entry for entry in data if _well_formed(entry)]
 
     def _save(self, data: list[dict]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

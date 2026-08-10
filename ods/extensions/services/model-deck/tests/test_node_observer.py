@@ -3,6 +3,8 @@
 Status vocabulary (the UI compares these strings — vocabulary rule):
 online | offline | error | unconfigured, produced ONLY here.
 """
+import json
+
 import pytest
 
 from app.engines import EngineError
@@ -66,6 +68,22 @@ def test_gpu_probe_governs_online(store, tmp_path):
     assert client.closed
 
 
+def test_answers_but_reports_collector_failure_stays_online_with_message(store, tmp_path):
+    # app/node_observer.py:132 `"error": gpu.get("error")` — the gpu probe
+    # answered (2xx, well-formed body) but the body itself says its own
+    # collector is broken. status stays "online" (the probe DID answer;
+    # `error` is a passthrough of what it said, not a probe failure), and
+    # the message must not be dropped. Every other FakeClient in this file
+    # uses error=None, so this is the only test that can catch a dropped
+    # passthrough.
+    obs = _observer(store, tmp_path, FakeClient(
+        gpu={"backend": "cuda", "gpus": [], "error": "collector unavailable"}))
+    obs.tick()
+    snap = obs.snapshot()["hera"]
+    assert snap["status"] == "online"
+    assert snap["error"] == "collector unavailable"
+
+
 def test_serving_failure_only_degrades_serving(store, tmp_path):
     # dashboard-api remote_nodes.py:12-19 semantics: the gpu probe ALONE
     # governs status; a dead serving probe degrades serving to None.
@@ -127,29 +145,43 @@ def test_registry_is_reread_every_tick(store, tmp_path):
 
 
 def test_malformed_nodes_do_not_stall_well_formed_siblings(store, tmp_path):
-    """Per-entry isolation: non-dict elements and missing id/address don't abort
-    the whole tick. Well-formed siblings are still probed and snapshot swaps."""
-    # Add a second well-formed node
+    """Per-entry isolation, now split across two layers:
+
+    - NodeStore._load() gates SHAPE (app/node_store.py) — a non-dict
+      element, a dict with a non-string label, and a dict with a bogus
+      agent_kind never even reach the observer; they're written straight
+      into the FILE (bypassing store.add()'s _validate()) to prove the
+      store's own boundary gate is what drops them, not anything here.
+    - The observer still gates one SEMANTIC: a node-agent entry with no
+      address is shape-valid (address is legitimately optional at the
+      store layer) but can't be probed, so it's skipped, not crashed on.
+
+    Either way, well-formed siblings are still probed and the snapshot swaps.
+    """
     store.add({"id": "atlas", "label": "Atlas Box", "agent_kind": "node-agent",
                "address": "http://atlas:7720"}, credential="s3cr3t")
-    # Inject malformed entries directly into the persisted list
-    data = store._load()
-    data.append("not a dict")  # non-dict element
-    data.append({"id": "bad-entry", "label": "Bad", "agent_kind": "node-agent"})
-    # missing address
-    store._save(data)
-    # Probe with a client that tracks calls
+    data = json.loads((tmp_path / "nodes.json").read_text())
+    data.append("not a dict")                                     # shape: not a dict
+    data.append({"id": "bad-entry", "label": "Bad",
+                 "agent_kind": "node-agent"})                      # semantics: no address
+    data.append({"id": "bad-label", "label": 123, "agent_kind": "node-agent",
+                 "address": "http://bad-label:7720"})              # shape: label not a string
+    data.append({"id": "bad-kind", "label": "Weird", "agent_kind": "vampire",
+                 "address": "http://bad-kind:7720"})                # shape: bogus agent_kind
+    (tmp_path / "nodes.json").write_text(json.dumps(data))
+
     obs = _observer(store, tmp_path, FakeClient())
     obs.tick()
     snap = obs.snapshot()
-    # Both well-formed nodes should be present (hera and atlas)
     assert "hera" in snap
     assert "atlas" in snap
     assert snap["hera"]["status"] == "online"
     assert snap["atlas"]["status"] == "online"
-    # Malformed entries should not appear
+    # None of the malformed entries appear, however they were dropped.
     assert "bad-entry" not in snap
-    # Only the two well-formed nodes should have been probed
+    assert "bad-label" not in snap
+    assert "bad-kind" not in snap
+    # Only the two well-formed nodes were probed.
     assert len(obs.calls) == 2
     assert ("http://hera:7720", "s3cret") in obs.calls
     assert ("http://atlas:7720", "s3cr3t") in obs.calls

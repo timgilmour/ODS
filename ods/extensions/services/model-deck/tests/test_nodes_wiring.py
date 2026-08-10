@@ -81,6 +81,25 @@ def test_nodes_block_shape_without_observer(monkeypatch):
     assert nodes["sparky"]["address"] == "http://192.168.1.7:7720"
 
 
+def test_state_200s_with_a_malformed_element_in_nodes_json(monkeypatch):
+    # _nodes_block (app/routers/status.py) indexes entry["label"]/
+    # entry["agent_kind"] directly, trusting NodeStore's element-level
+    # boundary gate (app/node_store.py._load()). A hand-edited malformed
+    # element must be dropped there, not 500 this endpoint.
+    app = _app(monkeypatch, MODEL_DECK_NODE_LABEL="autarch")
+    node_store = app.state.deck["node_store"]
+    data = json.loads(node_store._path.read_text())
+    data.append({"id": "ghost", "label": 999, "agent_kind": "node-agent",
+                "address": "http://ghost:7720"})   # non-string label: dropped
+    node_store._path.write_text(json.dumps(data))
+    with TestClient(app) as c:
+        resp = c.get("/api/state")
+    assert resp.status_code == 200
+    ids = {n["id"] for n in resp.json()["nodes"]}
+    assert "local" in ids
+    assert "ghost" not in ids
+
+
 def test_intent_json_is_never_touched_by_node_machinery(monkeypatch, tmp_path):
     monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path / "data"))
     app = _app(monkeypatch)

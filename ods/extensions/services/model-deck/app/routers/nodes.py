@@ -119,8 +119,19 @@ def test_connection(body: NodeTestBody, request: Request) -> dict:
         key = store.credential_for(body.node_id)
         target = body.node_id
     elif body.address:
+        # Never-coerce: an explicitly-empty credential is already refused
+        # below by _checked_credential ("credential must be a non-empty
+        # string when provided"). A credential that's simply ABSENT used to
+        # fall through as `None or ""` — an empty bearer the node-agent
+        # 401s on, surfacing as an unhelpful {"ok": false, "error": ""}.
+        # Refuse that too, with the same message the "neither target"
+        # branch below uses: both are "an address with no way to
+        # authenticate it".
+        key = _checked_credential(body.credential)
+        if key is None:
+            raise ValueError(
+                "provide node_id (stored credential) or address+credential")
         address = body.address
-        key = _checked_credential(body.credential) or ""
         target = body.address
     else:
         raise ValueError("provide node_id (stored credential) or address+credential")

@@ -114,6 +114,64 @@ def test_corrupt_files_self_heal_to_empty(store, tmp_path):
     assert store.credential_for("hera") == ""
 
 
+# ---- element-level gate: a hand-edited bad element must never take the
+# deck down (guard-at-the-boundary — see the module docstring). Each test
+# writes nodes.json directly so the malformed element never has to survive
+# _validate() to get on disk. ----
+
+def _write_nodes(tmp_path, entries):
+    (tmp_path / "nodes.json").write_text(json.dumps(entries))
+
+
+def test_load_drops_non_dict_elements(store, tmp_path):
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                       "address": "http://hera:7720"})
+    _write_nodes(tmp_path, [good, "not a dict", 42, None, ["nested", "list"]])
+    assert [n["id"] for n in store.list()] == ["hera"]
+    assert store.get("hera") is not None
+
+
+def test_load_drops_dict_missing_id(store, tmp_path):
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                       "address": "http://hera:7720"})
+    bad = {"label": "No Id", "agent_kind": "node-agent", "address": "http://x:1"}
+    _write_nodes(tmp_path, [good, bad])
+    assert [n["id"] for n in store.list()] == ["hera"]
+
+
+def test_load_drops_dict_with_non_string_label(store, tmp_path):
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                       "address": "http://hera:7720"})
+    bad = {"id": "zeus", "label": 123, "agent_kind": "node-agent", "address": "http://z:1"}
+    _write_nodes(tmp_path, [good, bad])
+    assert [n["id"] for n in store.list()] == ["hera"]
+    assert store.get("zeus") is None
+
+
+def test_load_drops_dict_with_bogus_agent_kind(store, tmp_path):
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                       "address": "http://hera:7720"})
+    bad = {"id": "zeus", "label": "Zeus Box", "agent_kind": "vampire", "address": "http://z:1"}
+    _write_nodes(tmp_path, [good, bad])
+    assert [n["id"] for n in store.list()] == ["hera"]
+
+
+def test_get_never_raises_on_malformed_siblings(store, tmp_path):
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                       "address": "http://hera:7720"})
+    _write_nodes(tmp_path, [
+        good,
+        "not a dict",
+        {"label": "No Id", "agent_kind": "node-agent"},
+        {"id": "z", "label": 1, "agent_kind": "node-agent"},
+        {"id": "zombie", "label": "Zombie", "agent_kind": "vampire"},
+    ])
+    assert store.get("hera")["id"] == "hera"
+    assert store.get("missing") is None
+    assert store.get("z") is None
+    assert store.get("zombie") is None
+
+
 # ---- seed_if_missing: one-time env→registry migration ----
 
 from app.node_store import seed_if_missing

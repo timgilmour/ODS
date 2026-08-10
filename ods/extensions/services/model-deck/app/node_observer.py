@@ -90,15 +90,17 @@ class NodeObserver:
         previous = self._snap
         snap: dict[str, dict] = {}
         for entry in self._store.list():
-            # Skip non-dict entries (nodes.json is human-editable)
-            if not isinstance(entry, dict):
+            # Shape is guaranteed by NodeStore._load()'s boundary gate
+            # (app/node_store.py): every entry here is a dict with a string
+            # id/label and a known agent_kind. Only SEMANTICS remain to
+            # check here, not shape.
+            if entry["agent_kind"] != "node-agent":
                 continue
-            # Skip non-node-agent entries
-            if entry.get("agent_kind") != "node-agent":
-                continue
-            # Skip malformed node-agent entries (missing required id or address)
-            node_id = entry.get("id")
-            if not node_id or not entry.get("address"):
+            node_id = entry["id"]
+            if not entry.get("address"):
+                # address is legitimately optional shape-wise (local has
+                # none); a node-agent entry missing one just can't be
+                # probed — skip it, same as before the boundary gate.
                 continue
             if not self._store.credential_set(node_id):
                 snap[node_id] = {"status": "unconfigured", "last_seen": None,
