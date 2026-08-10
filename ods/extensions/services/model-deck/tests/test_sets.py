@@ -1085,9 +1085,9 @@ def test_apply_is_serialized_second_waits_for_first(tmp_path):
     t1.start()
     assert entered.wait(timeout=5), "first apply never reached its blocking step"
 
-    import app.sets as sets_mod
+    from app import actuation
 
-    assert sets_mod._apply_lock.locked()
+    assert actuation.LOCK.locked()
 
     t2 = threading.Thread(
         target=lambda: results.__setitem__(
@@ -1223,10 +1223,14 @@ def test_policy_patch_unknown_tenant_still_fails(tmp_path):
 
 
 def test_apply_in_progress_reflects_lock_state():
-    import app.sets as sets_mod
+    """apply_in_progress() is a re-exported delegation to app.actuation.LOCK
+    (task 6: the module lock moved so tick()/apply()/the pull-through hook
+    share ONE lock) — this proves the delegation still reflects real lock
+    state, byte-identical to what this test verified before the move."""
+    from app import actuation
 
     assert apply_in_progress() is False
-    with sets_mod._apply_lock:
+    with actuation.LOCK:
         assert apply_in_progress() is True
     assert apply_in_progress() is False
 

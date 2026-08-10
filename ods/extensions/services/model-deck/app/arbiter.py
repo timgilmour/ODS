@@ -60,9 +60,17 @@ Design notes that are load-bearing (and tested):
   proxy) so healing can distinguish "user unloaded on purpose" from "a load
   actually OOM'd".
 
-* The watcher YIELDS to an in-flight set apply: if ``app.sets`` holds its
-  apply lock, ``tick()`` returns immediately (no snapshot, no actions) so the
-  two never interleave real evictions/loads on the live box.
+* The watcher YIELDS to an in-flight actuator (task 6, ``app.actuation``): the
+  snapshot and ``decide()`` still run every tick (cheap, read-only), but the
+  actuation+reconcile phase TRY-acquires ``app.actuation.LOCK`` and skips
+  cleanly — no engine calls, no restores — whenever a set apply or the
+  pull-through completion hook already holds it. This replaced a start-of-
+  tick PEEK against ``app.sets.apply_in_progress()``: a tick already past
+  that peek kept actuating even after an apply had since started, so its
+  restores could interleave with the apply's own evictions/loads
+  [max-review #7]. Gating at the actuation boundary instead of at tick start
+  closes that window structurally — there is no point after the try-acquire
+  where "someone else is now actuating" can go unnoticed.
 
 * The watcher also YIELDS to an in-flight host-agent lifecycle operation
   (activation/download/delete): that machinery owns the box's model state
@@ -107,7 +115,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app import provenance_collect
+from app import actuation, provenance_collect
 from app.derive_checkpoint import derive_checkpoint
 from app.derive_live import derive_live_models
 from app.engines import BusyError, EngineError, GuardError
@@ -124,7 +132,6 @@ from app.observe import (
     spark_node_id,
 )
 from app.reconcile import plan_reconcile
-from app.sets import apply_in_progress
 
 # VRAM overhead slack subtracted when estimating comfyui's reclaimable bytes
 # from raw GPU usage (fragmentation, driver/runtime overhead, small tenants).
@@ -618,13 +625,6 @@ class Watcher:
     # --- one tick ----------------------------------------------------------
 
     def tick(self) -> None:
-        # Yield to an in-flight set apply: the two must never interleave real
-        # evictions/loads on the live box. Checked WITHOUT acquiring the lock
-        # (a peek), so a running apply makes this tick a clean no-op — no
-        # snapshot, no actions.
-        if apply_in_progress():
-            return
-
         # DELIBERATE broad catch: this is a supervisor loop. A crash in any
         # single tick (malformed engine body, transient client bug, a bad
         # snapshot) must NOT take the whole arbiter down — loop survival
@@ -658,8 +658,23 @@ class Watcher:
                         "target": lifecycle["target"],
                     })
                     return
-            actuated_keys = self._execute(actions, pending)
-            self._reconcile_pass(world, actuated_keys)
+
+            # The one process-wide actuation lock (app.actuation, task 6),
+            # shared with set-apply and the pull-through completion hook.
+            # TRY-acquire: someone else actuating real engine state right now
+            # makes this tick a clean no-op from here on — same observable
+            # yield as the old start-of-tick peek, minus its race [max-review
+            # #7], since this check happens at the actual moment of
+            # actuation rather than once before the snapshot. Re-plan from a
+            # fresh snapshot next tick; nothing above this line touched
+            # engine state, so there is nothing to undo.
+            if not actuation.LOCK.acquire(blocking=False):
+                return
+            try:
+                actuated_keys = self._execute(actions, pending)
+                self._reconcile_pass(world, actuated_keys)
+            finally:
+                actuation.LOCK.release()
             self._derive_pass()
             self._provenance_pass()
         except Exception as exc:  # noqa: BLE001 — supervisor loop, see comment above

@@ -578,6 +578,56 @@ def test_pull_through_readiness_timeout_fails_job(tmp_path, monkeypatch):
     assert deck["lemonade"].calls == []
 
 
+def test_pull_through_hook_skips_load_when_superseded(tmp_path, monkeypatch):
+    """[c41] semantic half, task 6: the completion hook is a third actuator
+    (mover thread, minutes after the request returned "pulling") that used
+    to coordinate with nobody. Submit the pull at t0; while the copy is "in
+    flight" (synchronous here, but the intent record below stands in for
+    whatever happened during the real minutes-long window), the operator's
+    own set parks lemonade — recorded at t1 > t0. The completion hook must
+    see that deliberate action outranks the pull it would otherwise finish
+    with a load: it must NOT restart/load, must log
+    'pull-through-superseded', and must leave the superseding intent exactly
+    as the operator recorded it (no re-stamp, no silent overwrite)."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    cold = _register(client, tmp_path, "cold", engine="none")
+    _register(client, tmp_path, "hot", engine="lemonade")
+    _write_gguf(cold, "a.gguf")
+    deck["catalog"].scan()
+
+    resp = client.post("/api/tenants/lemonade/load?pull=true", json={"model": "a.gguf"})
+    job_id = resp.json()["job"]
+
+    # t1: recorded strictly after submission — a far-future ISO stamp so the
+    # native-representation string comparison in control.py's after() is
+    # unambiguous regardless of how fast this test runs (app/intent.py:41-42
+    # stamps updated_ts with datetime.now(UTC).isoformat(); the hook compares
+    # in that exact representation, never coerced to epoch seconds).
+    deck["intent_store"].record(
+        "local/lemonade", state="unloaded", model=None, engine="lemonade",
+        now="2999-01-01T00:00:00+00:00",
+    )
+
+    pending = deck["job_queue"]._pending.pop(0)
+    deck["job_queue"]._process(pending)
+
+    done = deck["job_queue"].get(job_id)
+    assert done["state"] == "done"  # the move itself still succeeded
+    assert deck["lemonade"].calls == []  # but no restart-driven load happened
+
+    events = tail_events(deck["events_path"])
+    superseded = [e for e in events if e["kind"] == "pull-through-superseded"]
+    assert len(superseded) == 1
+    assert superseded[0]["detail"]["job"] == job_id
+    assert superseded[0]["detail"]["model"] == "a.gguf"
+    assert superseded[0]["detail"]["intent_state"] == "unloaded"
+
+    record = deck["intent_store"].get()["local/lemonade"]
+    assert record["state"] == "unloaded"
+    assert record["updated_ts"] == "2999-01-01T00:00:00+00:00"
+
+
 def test_hot_load_notes_last_used(tmp_path, monkeypatch):
     app, deck = make_app(
         tmp_path, monkeypatch,

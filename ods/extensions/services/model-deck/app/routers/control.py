@@ -32,6 +32,16 @@ deliberate park from a dead backend. Two placement rules, both load-bearing:
 ``comfyui/free`` deliberately records nothing: it drops cached VRAM while
 the server stays up and keeps observing as loaded, so an "unloaded" intent
 would derive as a permanent ``unexpected``.
+
+The routes above run synchronously in the HTTP request thread and keep their
+existing coordination (intent-record-first + ``load_in_flight`` + the heal
+suppressor) unchanged — folding them into ``app.actuation`` is a design pass
+for another day. ``_pull_through``'s completion hook is different: it fires
+on the MOVER's worker thread, minutes after its request returned "pulling",
+so it holds ``app.actuation.LOCK`` (task 6, the same lock ``app.sets.apply``
+and the watcher tick's actuation phase share) around its restart+load, and
+checks whether a deliberately-recorded intent has superseded it before doing
+either — see ``_pull_through``.
 """
 
 import time
@@ -135,6 +145,8 @@ def _find_cold_gguf(deck, bare: str):
 
 
 def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
+    from datetime import UTC, datetime
+
     from app.engines import EngineError, GuardError
     from app.events import log_event
     from app.notify import notify_engine
@@ -152,41 +164,65 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
         raise GuardError("no available hot lemonade location is registered")
     hot = max(hot_locs, key=lambda loc: loc["free_bytes"])   # most free space wins (spec)
 
+    # Captured before submit_move — the copy this hook waits behind can run
+    # minutes. app.intent.IntentStore.record stamps `updated_ts` with
+    # datetime.now(UTC).isoformat() (app/intent.py:41-42,112) — an ISO
+    # string, NOT epoch seconds — so this is captured in that exact native
+    # representation; the supersession check below compares apples to
+    # apples instead of coercing to a float.
+    submitted_at = datetime.now(UTC).isoformat()
+
     def after(job: dict) -> None:
-        warning = notify_engine(hot, deck)
-        if warning is not None:
-            # A model is already loaded — notify_engine deliberately
-            # deferred the restart (never yanks a loaded model to register
-            # a file). The move itself still succeeded; a load attempt here
-            # is guaranteed to fail (the file isn't registered until the
-            # next restart), so don't make one. The pre-armed suppressor
-            # just expires — "on failure the window simply expires".
-            log_event(deck["events_path"], "storage_notify_deferred",
-                      {"job": job["id"], "warning": warning, "model": bare})
-            return
-        # Restart happened: poll for readiness before handing lemonade a
-        # load (see _READY_TIMEOUT_S/_READY_POLL_S above).
-        deadline = time.monotonic() + _READY_TIMEOUT_S
-        ready = False
-        while time.monotonic() < deadline:
-            try:
-                deck["lemonade"].status()
-                ready = True
-                break
-            except EngineError:
-                time.sleep(_READY_POLL_S)
-        if not ready:
-            raise RuntimeError(f"lemonade not ready {_READY_TIMEOUT_S}s after restart")
-        # The pull-through load lands here, minutes after the request
-        # returned "pulling" — it is no less deliberate, so it records too,
-        # and BEFORE the call for the same reason as the hot path above.
-        deck["intent_store"].record(
-            LOCAL_LEMONADE_KEY, state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
-            engine="lemonade",
-        )
-        deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
-        deck["heal_suppressor"].clear()
-        deck["catalog"].note_used_gguf(bare)
+        from app import actuation
+        with actuation.LOCK:
+            # A deliberate action may have superseded this pull while the
+            # copy ran (minutes): an operator's set parking lemonade must
+            # not be undone by a load they asked for BEFORE it. Any intent
+            # recorded after submission outranks this hook — skip the
+            # restart AND the load; the file is moved and registers on the
+            # next natural restart.
+            entry = deck["intent_store"].get().get(LOCAL_LEMONADE_KEY)
+            if entry is not None and entry.get("updated_ts", "") > submitted_at:
+                log_event(deck["events_path"], "pull-through-superseded",
+                          {"job": job["id"], "model": bare,
+                           "intent_state": entry.get("state")})
+                return
+            warning = notify_engine(hot, deck)
+            if warning is not None:
+                # A model is already loaded — notify_engine deliberately
+                # deferred the restart (never yanks a loaded model to
+                # register a file). The move itself still succeeded; a load
+                # attempt here is guaranteed to fail (the file isn't
+                # registered until the next restart), so don't make one.
+                # The pre-armed suppressor just expires — "on failure the
+                # window simply expires".
+                log_event(deck["events_path"], "storage_notify_deferred",
+                          {"job": job["id"], "warning": warning, "model": bare})
+                return
+            # Restart happened: poll for readiness before handing lemonade a
+            # load (see _READY_TIMEOUT_S/_READY_POLL_S above).
+            deadline = time.monotonic() + _READY_TIMEOUT_S
+            ready = False
+            while time.monotonic() < deadline:
+                try:
+                    deck["lemonade"].status()
+                    ready = True
+                    break
+                except EngineError:
+                    time.sleep(_READY_POLL_S)
+            if not ready:
+                raise RuntimeError(f"lemonade not ready {_READY_TIMEOUT_S}s after restart")
+            # The pull-through load lands here, minutes after the request
+            # returned "pulling" — it is no less deliberate, so it records
+            # too, and BEFORE the call for the same reason as the hot path
+            # above.
+            deck["intent_store"].record(
+                LOCAL_LEMONADE_KEY, state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
+                engine="lemonade",
+            )
+            deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
+            deck["heal_suppressor"].clear()
+            deck["catalog"].note_used_gguf(bare)
 
     # Pre-arm: the multi-minute pull must not fight the VRAM watcher's
     # pending-load inference (spec section 3). on_progress re-arms it on every

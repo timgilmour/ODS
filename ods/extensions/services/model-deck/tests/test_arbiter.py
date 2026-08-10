@@ -1108,23 +1108,191 @@ def test_watcher_heal_load_clears_suppressor(tmp_path):
 
 
 # ===========================================================================
-# I1 — watcher yields to an in-flight set apply
+# I1 — watcher yields to an in-flight actuator holding app.actuation.LOCK
+# (max-review #7: the tick's yield used to be a start-of-tick PEEK against
+# app.sets.apply_in_progress(); a tick already past that peek kept actuating
+# even though an apply had since started, interleaving restores with the
+# apply's own evictions/loads. The peek is gone — tick() now takes its
+# (cheap, read-only) snapshot unconditionally, then TRY-ACQUIRES
+# app.actuation.LOCK around the actuation+reconcile phase specifically. The
+# three tests below prove: (1) lock-held-for-the-whole-tick still yields
+# actuation cleanly, same observable effect as the old peek; (2) a lock that
+# materializes only AFTER the snapshot — the exact race the peek could not
+# see — is still caught, because the try-acquire is checked at the moment of
+# actuation, not at tick start; (3) the direction that matters most on a live
+# box: an apply blocks out a tick's in-flight actuation, never interleaves
+# with it.)
 # ===========================================================================
 
 
-def test_watcher_tick_noop_while_apply_holds_lock(tmp_path):
-    """While a set apply holds the module lock, tick() is a clean no-op: no
-    snapshot is taken and no event is logged."""
-    import app.sets as sets_mod
+def test_tick_actuation_yields_while_lock_held(tmp_path):
+    """Hold actuation.LOCK on another thread for the whole tick; a tick with
+    a due idle-release unload must perform ZERO engine calls. The snapshot
+    itself still runs (unconditionally, cheap, read-only) — only the
+    actuation+reconcile phase is gated. [c42]"""
+    from app import actuation
 
-    world = FakeWorld(_world())
-    watcher, events_path = _make_watcher(tmp_path, world, FakeRegistry(), _policy())
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=20 * GIB)],
+        lemonade=_lem(state="loaded", model="m.gguf", idle_s=1000),
+    )
+    world = FakeWorld(snapshot)
+    lemonade = FakeLemonade()
+    watcher, events_path = _make_watcher(
+        tmp_path, world, FakeRegistry(), _policy(lem_idle=300), lemonade=lemonade
+    )
 
-    with sets_mod._apply_lock:
+    with actuation.LOCK:
         watcher.tick()
 
-    assert world.calls == 0  # no snapshot attempted
-    assert tail_events(events_path) == []  # nothing logged
+    assert world.calls == 1  # the snapshot DOES run now — no start-of-tick peek
+    assert lemonade.unloaded == []  # but nothing was actuated
+    assert tail_events(events_path) == []  # and nothing was logged
+
+
+def test_tick_yields_when_lock_acquired_after_the_snapshot(tmp_path):
+    """The race [c42] flags and the old start-of-tick peek could not catch:
+    the lock is free when the tick's snapshot is taken, and only acquired by
+    another actor (simulating a set apply's HTTP thread) WHILE the snapshot
+    call is in flight — i.e. strictly after where the old peek ran. The
+    try-acquire at the actuation boundary must still yield cleanly; a peek
+    checked only at tick start could not have seen this."""
+    from app import actuation
+
+    class _LockGrabbedDuringSnapshot:
+        """Like FakeWorld, but the moment snapshot() is called it hands the
+        lock to another thread and waits for confirmation THAT THREAD holds
+        it before returning — reproducing "someone else acquired the lock
+        after this tick's peek would have already passed"."""
+
+        def __init__(self, snapshot):
+            self._snapshot = snapshot
+            self.calls = 0
+            self._release = threading.Event()
+            self._locker = None
+
+        def snapshot(self, gpus, lemonade, comfy, hipfire, litellm, registry):
+            self.calls += 1
+            acquired = threading.Event()
+
+            def _hold():
+                actuation.LOCK.acquire()
+                acquired.set()
+                self._release.wait(timeout=5)
+                actuation.LOCK.release()
+
+            self._locker = threading.Thread(target=_hold, daemon=True)
+            self._locker.start()
+            assert acquired.wait(timeout=5), "other actor never acquired the lock"
+            return self._snapshot
+
+        def release_other_lock_holder(self):
+            self._release.set()
+            self._locker.join(timeout=5)
+            assert not self._locker.is_alive()
+
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=20 * GIB)],
+        lemonade=_lem(state="loaded", model="m.gguf", idle_s=1000),
+    )
+    world = _LockGrabbedDuringSnapshot(snapshot)
+    lemonade = FakeLemonade()
+    watcher, events_path = _make_watcher(
+        tmp_path, world, FakeRegistry(), _policy(lem_idle=300), lemonade=lemonade
+    )
+
+    try:
+        watcher.tick()
+
+        assert world.calls == 1  # the snapshot ran BEFORE the lock was ever held
+        assert lemonade.unloaded == []  # yet the actuation phase still yielded
+        assert tail_events(events_path) == []
+    finally:
+        # try/finally, not a bare call after the asserts: a failed assertion
+        # above must not leak the OTHER thread's held actuation.LOCK past
+        # this test — every later test in the process shares this same
+        # module-level lock, and a still-locked LOCK would falsely make the
+        # NEXT test's tick look like it's yielding to something.
+        world.release_other_lock_holder()
+    assert actuation.in_progress() is False  # sanity: fully cleaned up
+
+
+def test_apply_waits_for_an_in_flight_tick_actuation(tmp_path):
+    """The other direction: a tick's actuation (fake unload) blocks on an
+    event; a concurrent apply() must not reach its own first engine call
+    until the tick releases the lock. Bounded — a deadlock fails the test,
+    not the suite."""
+    from tests.test_sets import RecComfy, RecHipfire, RecHostAgent, RecLemonade, RecPolicyStore
+    from tests.test_sets import make_world as sets_make_world
+
+    from app.sets import ConfigSet, SetStore, apply
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingLemonade(FakeLemonade):
+        """unload() signals entry then blocks — holds actuation.LOCK open
+        from inside a tick so a concurrent apply() can be proven to wait."""
+
+        def unload(self, model):
+            entered.set()
+            release.wait(timeout=5)
+            super().unload(model)
+
+    tick_snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=20 * GIB)],
+        lemonade=_lem(state="loaded", model="m.gguf", idle_s=1000),
+    )
+    tick_world = FakeWorld(tick_snapshot)
+    tick_lemonade = BlockingLemonade()
+    watcher, _ = _make_watcher(
+        tmp_path, tick_world, FakeRegistry(), _policy(lem_idle=300), lemonade=tick_lemonade
+    )
+
+    tick_thread = threading.Thread(target=watcher.tick)
+    tick_thread.start()
+    assert entered.wait(timeout=5), "tick never reached its blocking unload"
+
+    apply_world = sets_make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
+    cfg = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+    apply_lemonade = RecLemonade()
+    apply_clients = {
+        "lemonade": apply_lemonade,
+        "comfy": RecComfy(),
+        "hipfire": RecHipfire(),
+        "hostagent": RecHostAgent(),
+        "policy_store": RecPolicyStore(),
+        "store": SetStore(tmp_path / "sets"),
+        "events_path": tmp_path / "apply-events.jsonl",
+    }
+
+    results = {}
+    apply_thread = threading.Thread(
+        target=lambda: results.__setitem__(
+            "apply", apply(cfg, world=apply_world, **apply_clients)
+        )
+    )
+    apply_thread.start()
+
+    try:
+        # While the tick holds the lock (blocked mid-unload), the apply must
+        # not get anywhere near its own engine call.
+        apply_thread.join(timeout=0.5)
+        assert apply_thread.is_alive(), "apply proceeded despite the tick's held lock"
+        assert apply_lemonade.calls == []
+    finally:
+        # try/finally: a failed assertion above must not leave the tick
+        # thread's blocking unload() waiting out its own 5 s internal
+        # timeout while later tests run — release it immediately either way.
+        release.set()
+    tick_thread.join(timeout=5)
+    apply_thread.join(timeout=5)
+    assert not tick_thread.is_alive()
+    assert not apply_thread.is_alive()
+
+    assert tick_lemonade.unloaded == ["m.gguf"]
+    assert apply_lemonade.calls == [("load", "extra.d.gguf")]
+    assert results["apply"]["failed"] is None
 
 
 # ===========================================================================

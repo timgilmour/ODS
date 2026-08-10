@@ -26,12 +26,15 @@ Three layers, cleanly separated for testability:
 * ``plan_apply(cfgset, world)`` — a PURE diff of a set against one world
   snapshot, emitting only the steps that actually change reality, in a fixed
   safety order (evictions first, loads last). No I/O, no clients.
-* ``apply(cfgset, ...)`` — the imperative shell. Serialized under a module
-  lock (two applies never interleave real evictions/activations on a live
-  box). It FIRST snapshots pre-apply reality as the ``_previous`` revert set,
-  then records the set's DECLARED goals as intent (``_record_goal_intents``,
-  before any step actuates), then executes the plan step by step, halting on
-  the first failure with an exact report, logging every step.
+* ``apply(cfgset, ...)`` — the imperative shell. Serialized under
+  ``app.actuation.LOCK`` (task 6) — the ONE process-wide actuation lock also
+  held by the watcher tick's actuation phase and the pull-through completion
+  hook, so no two of those three ever interleave real evictions/loads on a
+  live box, not just two applies against each other. It FIRST snapshots
+  pre-apply reality as the ``_previous`` revert set, then records the set's
+  DECLARED goals as intent (``_record_goal_intents``, before any step
+  actuates), then executes the plan step by step, halting on the first
+  failure with an exact report, logging every step.
 
 Why _previous is captured first and unconditionally: apply performs real,
 partially-irreversible actions (unloading models, parking containers,
@@ -46,12 +49,12 @@ always works.
 import copy
 import os
 import re
-import threading
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
+from app import actuation
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.observe import LOCAL_HIPFIRE_KEY, LOCAL_LEMONADE_KEY
@@ -548,19 +551,18 @@ def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None)
 # apply — imperative shell (serialized)
 # ===========================================================================
 
-# Non-reentrant: a second apply blocks until the first releases. Two applies
-# must never interleave real evictions/parks/activations on a live box.
-_apply_lock = threading.Lock()
-
 
 def apply_in_progress() -> bool:
-    """True if an apply currently holds the module lock, WITHOUT acquiring it.
+    """True if ``app.actuation.LOCK`` is currently held, WITHOUT acquiring it.
 
-    A non-blocking peek the arbiter watcher uses to yield a tick to an
-    in-flight set apply — the two must never interleave real evictions/loads
-    on the live box.
+    Delegates to ``app.actuation.in_progress()`` (task 6: the lock this used
+    to peek moved to app.actuation, shared by the watcher tick's actuation
+    phase and the pull-through completion hook too, not just apply()). Kept
+    as a re-export under its original name — ``app.storage`` imports it by
+    this name (a non-blocking peek: the storage watcher yields a pass
+    without needing to acquire anything).
     """
-    return _apply_lock.locked()
+    return actuation.in_progress()
 
 # The set of exceptions that halt an apply mid-plan (vs. crashing it). Each is
 # a known, meaningful "this step could not proceed" signal from a client.
@@ -658,7 +660,10 @@ def apply(
     settings_store=None,
     intent_store=None,
 ) -> dict:
-    """Execute ``cfgset`` against the live box, serialized under a module lock.
+    """Execute ``cfgset`` against the live box, serialized under
+    ``app.actuation.LOCK`` — the one process-wide actuation lock (task 6),
+    also held by the watcher tick's actuation phase and the pull-through
+    completion hook.
 
     ``heal_suppressor`` (optional; None tolerated) is the arbiter's shared
     ``HealSuppressor``: an ``unload_lemonade`` step arms it so contention
@@ -695,7 +700,7 @@ def apply(
         {"completed": [<step>, ...], "failed": <step>|None,
          "error": <str>|None, "warnings": [<reason>, ...]}
     """
-    with _apply_lock:
+    with actuation.LOCK:
         return _run_apply(
             cfgset,
             world=world,
