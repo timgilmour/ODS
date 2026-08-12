@@ -193,3 +193,55 @@ def test_delete_of_an_unbound_node_has_no_restart_flag(client):
     body = client.delete("/api/nodes/hera").json()
 
     assert body == {"status": "ok"}
+
+
+# --- N1 T2: control on the wire ---------------------------------------------
+
+def test_create_with_control_swap_and_prereqs(client):
+    r = client.post("/api/nodes", json={
+        "id": "boxa", "label": "Box Alpha", "address": "http://boxa:7720",
+        "serving_address": "http://boxa:8000", "credential": "key-boxa",
+        "control": "swap"})
+    assert r.status_code == 200
+    assert r.json()["control"] == "swap"
+
+
+def test_create_swap_without_credential_is_422_naming_it(client):
+    r = client.post("/api/nodes", json={
+        "id": "boxa", "label": "Box Alpha", "address": "http://boxa:7720",
+        "serving_address": "http://boxa:8000", "control": "swap"})
+    assert r.status_code == 422
+    assert "credential" in r.json()["detail"]
+    assert "key-boxa" not in r.text        # value never echoes (write-only)
+
+
+def test_patch_control_swap_then_delete_refused(client):
+    client.post("/api/nodes", json={
+        "id": "boxa", "label": "Box Alpha", "address": "http://boxa:7720",
+        "serving_address": "http://boxa:8000", "credential": "key-boxa"})
+    r = client.put("/api/nodes/boxa", json={"control": "swap"})
+    assert r.status_code == 200 and r.json()["control"] == "swap"
+    r = client.delete("/api/nodes/boxa")
+    assert r.status_code == 409
+    assert "control" in r.json()["detail"]
+    # Two-step: demote, then delete succeeds.
+    client.put("/api/nodes/boxa", json={"control": "none"})
+    assert client.delete("/api/nodes/boxa").status_code == 200
+
+
+def test_control_none_with_serving_address_gets_no_inference(client):
+    """Declared, never inferred: data presence alone must not flip control."""
+    r = client.post("/api/nodes", json={
+        "id": "boxb", "label": "Box Beta", "address": "http://boxb:7720",
+        "serving_address": "http://boxb:8000", "credential": "key-boxb"})
+    assert r.json()["control"] == "none"
+
+
+def test_node_updated_event_names_control_field(client):
+    client.post("/api/nodes", json={
+        "id": "boxa", "label": "Box Alpha", "address": "http://boxa:7720",
+        "serving_address": "http://boxa:8000", "credential": "key-boxa"})
+    client.put("/api/nodes/boxa", json={"control": "swap"})
+    events = client.get("/api/events").json()["events"]
+    updated = [e for e in events if e["kind"] == "node-updated"]
+    assert updated and "control" in updated[-1]["detail"]["fields"]

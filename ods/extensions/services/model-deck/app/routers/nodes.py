@@ -35,6 +35,9 @@ class NodeCreate(BaseModel):
     address: str
     serving_address: str | None = None
     credential: str | None = None
+    # Declared operability (app/node_store.py _CONTROLS). Default "none":
+    # adding a node never grants verbs implicitly.
+    control: str = "none"
 
 
 class NodePatch(BaseModel):
@@ -42,6 +45,7 @@ class NodePatch(BaseModel):
     address: str | None = None
     serving_address: str | None = None
     credential: str | None = None
+    control: str | None = None
 
 
 class NodeTestBody(BaseModel):
@@ -89,7 +93,8 @@ def create_node(body: NodeCreate, request: Request) -> dict:
     credential = _checked_credential(body.credential)
     entry = store.add({"id": body.id, "label": body.label,
                        "agent_kind": "node-agent", "address": body.address,
-                       "serving_address": body.serving_address},
+                       "serving_address": body.serving_address,
+                       "control": body.control},
                       credential=credential)
     log_event(deck["events_path"], "node-added",
               {"node": entry["id"], "label": entry["label"]})
