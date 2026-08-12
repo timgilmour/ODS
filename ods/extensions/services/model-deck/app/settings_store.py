@@ -106,13 +106,12 @@ This store now normalizes on write purely by delegating to that function;
 its own behavior, including the warn-and-drop posture above, is unchanged.
 """
 
-import json
-import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app.argline import normalize_args_map
+from app.store_io import load_json, save_json
 
 KINDS = ("engines", "models", "engine_models")
 NAMESPACES = ("args", "env", "container")
@@ -142,10 +141,7 @@ class SettingsStore:
         self._lock = threading.Lock()
 
     def _load(self) -> dict:
-        try:
-            data = json.loads(self._path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return empty_store()
+        data = load_json(self._path)
         if not isinstance(data, dict):
             return empty_store()
         merged = empty_store()
@@ -200,10 +196,7 @@ class SettingsStore:
         return healed
 
     def _save(self, data: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(data, indent=1, sort_keys=True))
-        os.replace(tmp_path, self._path)
+        save_json(self._path, data, indent=1, sort_keys=True)
 
     def get(self) -> dict:
         return self._load()

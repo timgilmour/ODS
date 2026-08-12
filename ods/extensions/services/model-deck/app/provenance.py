@@ -50,6 +50,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app import origins, provenance_history, updates
+from app.store_io import save_json
 
 _log = logging.getLogger(__name__)
 
@@ -309,10 +310,7 @@ class ProvenanceStore:
             _log.warning("could not quarantine corrupt %s: %s", self._path, exc)
 
     def _save(self, data: dict[str, dict]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=1))
-        os.replace(tmp, self._path)
+        save_json(self._path, data, indent=1)
 
     def _record(self, artifact_id, field, before, after, cause, actor, now) -> None:
         provenance_history.append(self._history_path, {

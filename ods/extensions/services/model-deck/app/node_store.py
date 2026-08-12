@@ -34,13 +34,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app.engines import GuardError
+from app.store_io import load_json, save_json
 
 # `\Z`, not `$`: Python's `$` also matches just BEFORE a trailing newline, so
 # "sparky\n" satisfied a pattern meant to be fully anchored. The UI mirrors
@@ -110,10 +110,7 @@ class NodeStore:
     # -- persistence (LocationStore idiom) ----------------------------------
 
     def _load(self) -> list[dict]:
-        try:
-            data = json.loads(self._path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return []
+        data = load_json(self._path)
         if not isinstance(data, list):
             return []
         # Element-level gate (see module docstring): a hand-edited malformed
@@ -122,26 +119,16 @@ class NodeStore:
         return [entry for entry in data if _well_formed(entry)]
 
     def _save(self, data: list[dict]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, self._path)
+        save_json(self._path, data)
 
     def _load_creds(self) -> dict:
-        try:
-            data = json.loads(self._creds_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return {}
+        data = load_json(self._creds_path)
         return data if isinstance(data, dict) else {}
 
     def _save_creds(self, data: dict) -> None:
-        self._creds_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._creds_path.with_suffix(self._creds_path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data))
-        # chmod the TMP file, before replace: the final path must never
-        # exist world-readable, not even for one rename's duration.
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self._creds_path)
+        # chmod=0o600 lands on the TMP file, before replace: the final path
+        # must never exist world-readable, not even for one rename's duration.
+        save_json(self._creds_path, data, chmod=0o600)
 
     # -- API ----------------------------------------------------------------
 

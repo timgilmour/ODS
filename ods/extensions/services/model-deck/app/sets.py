@@ -47,7 +47,6 @@ always works.
 """
 
 import copy
-import os
 import re
 import threading
 from pathlib import Path
@@ -60,6 +59,7 @@ from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.observe import LOCAL_HIPFIRE_KEY, LOCAL_LEMONADE_KEY
 from app.settings_store import KINDS, NAMESPACES, empty_store
+from app.store_io import write_atomic
 
 # Reserved on-disk slug for the auto-captured pre-apply snapshot. Written only
 # by apply(); user sets are forbidden from slugging to it (or to "previous",
@@ -187,11 +187,7 @@ class SetStore:
         return self._dir / f"{slug}.json"
 
     def _write(self, slug: str, cfgset: ConfigSet) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        path = self._path(slug)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(cfgset.model_dump_json(indent=2))
-        os.replace(tmp, path)
+        write_atomic(self._path(slug), cfgset.model_dump_json(indent=2))
 
     def save(self, cfgset: ConfigSet) -> str:
         """Persist a user set under the slug of its name; returns the slug.

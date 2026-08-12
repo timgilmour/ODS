@@ -22,10 +22,9 @@ half). Missing/corrupt reads as empty and self-heals, writes are atomic —
 same quality bar as app.policy and app.intent.
 """
 
-import json
-import os
 import threading
 from pathlib import Path
+from app.store_io import load_json, save_json
 
 _REQUIRED_FIELD_KEYS = ("value", "source", "derived_ts")
 
@@ -43,21 +42,11 @@ class CharacteristicsStore:
         self._lock = threading.Lock()
 
     def _load(self) -> dict:
-        try:
-            text = self._path.read_text()
-        except OSError:
-            return {}
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
+        data = load_json(self._path)
         return data if isinstance(data, dict) else {}
 
     def _save(self, data: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(data, indent=1, sort_keys=True))
-        os.replace(tmp_path, self._path)
+        save_json(self._path, data, indent=1, sort_keys=True)
 
     def get(self) -> dict:
         return self._load()

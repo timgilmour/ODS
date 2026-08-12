@@ -32,10 +32,9 @@ heal, even two concurrent READS are two writers on a partial file. The
 supervisor is the sole owner of policy.json.
 """
 
-import json
-import os
 import threading
 from pathlib import Path
+from app.store_io import load_json, save_json
 
 TenantPolicy = dict[str, int | bool]
 
@@ -131,14 +130,7 @@ class PolicyStore:
         the boundary gate (`_gated`) and the heal is persisted immediately
         if anything changed — the sole gating site (module docstring); no
         consumer below re-gates its result."""
-        try:
-            text = self._path.read_text()
-        except OSError:
-            return None
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return None
+        data = load_json(self._path)
         if not isinstance(data, dict):
             return None
         gated = self._gated(data)
@@ -147,10 +139,7 @@ class PolicyStore:
         return gated
 
     def _save(self, data: dict[str, TenantPolicy]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(data))
-        os.replace(tmp_path, self._path)
+        save_json(self._path, data)
 
     def get(self) -> dict[str, TenantPolicy]:
         """Full tenant->policy mapping, excluding reserved config keys.
@@ -249,19 +238,13 @@ class StoragePolicyStore:
         self._lock = threading.Lock()
 
     def _load(self) -> dict | None:
-        try:
-            data = json.loads(self._path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
+        data = load_json(self._path)
         if not isinstance(data, dict) or set(data) != {"auto"} or not isinstance(data.get("auto"), bool):
             return None
         return data
 
     def _save(self, data: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, self._path)
+        save_json(self._path, data)
 
     def get(self) -> dict:
         with self._lock:

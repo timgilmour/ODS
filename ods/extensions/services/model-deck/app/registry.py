@@ -15,9 +15,8 @@ This is single-process, in-process state only — no cross-process locking.
 The supervisor is the sole owner of registry.json.
 """
 
-import json
-import os
 from pathlib import Path
+from app.store_io import load_json, save_json
 
 # Hipfire has no live VRAM introspection of its own; this is the fixed
 # footprint budgeted for it regardless of which model it's serving.
@@ -38,23 +37,11 @@ class Registry:
         self._gguf_dir = gguf_dir
 
     def _load(self) -> dict[str, int]:
-        try:
-            text = self._path.read_text()
-        except OSError:
-            return {}
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        return data
+        data = load_json(self._path)
+        return data if isinstance(data, dict) else {}
 
     def _save(self, data: dict[str, int]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(data))
-        os.replace(tmp_path, self._path)
+        save_json(self._path, data)
 
     def estimate(self, model_file: str) -> int:
         """Cold-start footprint estimate: on-disk size x1.2.

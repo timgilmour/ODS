@@ -25,12 +25,11 @@ quality bar. Writes are serialized across uvicorn handler threads and the
 watcher daemon thread via an internal lock; callers need not coordinate.
 """
 
-import json
 import logging
-import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from app.store_io import load_json, save_json
 
 # Consecutive restore failures before a key is quarantined (stops the
 # reconciler from crash-looping a resource whose config is simply wrong).
@@ -117,14 +116,7 @@ class IntentStore:
         on the next ``_save()`` instead; until then no consumer can see the
         bad record anyway, which is the property that matters.
         """
-        try:
-            text = self._path.read_text()
-        except OSError:
-            return {}
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
+        data = load_json(self._path)
         if not isinstance(data, dict):
             return {}
         gated = {}
@@ -141,10 +133,7 @@ class IntentStore:
         return gated
 
     def _save(self, data: dict[str, dict]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(data, indent=1))
-        os.replace(tmp_path, self._path)
+        save_json(self._path, data, indent=1)
 
     # --- reads -------------------------------------------------------------
 

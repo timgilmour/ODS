@@ -17,13 +17,12 @@ answering "how big does it run" (VRAM footprints). They stay separate.
 No Settings import — everything injected.
 """
 
-import json
-import os
 import threading
 import time
 from pathlib import Path
 
 from app.locations import MARKER_NAME
+from app.store_io import load_json, save_json
 
 _SKIP_SUFFIXES = (".part", ".deck-staging")
 _STICKY = ("pinned", "last_used")
@@ -91,17 +90,11 @@ class Catalog:
     # -- persistence ---------------------------------------------------------
 
     def _load(self) -> list[dict]:
-        try:
-            data = json.loads(self._path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return []
+        data = load_json(self._path)
         return data if isinstance(data, list) else []
 
     def _save(self, units: list[dict]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(units))
-        os.replace(tmp, self._path)
+        save_json(self._path, units)
 
     # -- API -----------------------------------------------------------------
 
