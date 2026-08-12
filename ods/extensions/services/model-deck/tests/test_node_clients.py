@@ -5,6 +5,7 @@ serving_address ([[defaults-that-hide-bugs]]): operability must come from
 the declaration alone, never inferred from data presence.
 """
 
+import httpx
 import pytest
 
 from app.node_clients import NodeClients, NodeObservers
@@ -92,6 +93,52 @@ def test_two_nodes_two_clients(clients):
     a, b = clients.client_for("boxa"), clients.client_for("boxb")
     assert a is not None and b is not None and a is not b
     assert (a.credential, b.credential) == ("key-boxa", "key-boxb")
+
+
+# --- N1 T8 review: a factory construction failure heals to None, not a raise
+# (a hand-edited row the write-side gate in app.node_store never saw -- its
+# usable-URL check is refused on the wire now, but this is defense at the
+# repair boundary too: httpx.Client(base_url=...) can still raise
+# httpx.InvalidURL, which is NOT a ValueError subclass, so both must be
+# caught explicitly).
+
+
+def test_client_for_heals_to_none_when_factory_raises_value_error(store):
+    def factory(entry, credential):
+        raise ValueError("bad url")
+
+    clients = NodeClients(store, factory)
+
+    assert clients.client_for("boxa") is None
+
+
+def test_client_for_heals_to_none_when_factory_raises_httpx_invalid_url(store):
+    def factory(entry, credential):
+        raise httpx.InvalidURL("bad url")
+
+    clients = NodeClients(store, factory)
+
+    assert clients.client_for("boxa") is None
+
+
+def test_client_for_construction_failure_does_not_poison_the_cache(store):
+    """First attempt raises (simulating a bad row); nothing is cached, so a
+    later call with a working factory result still succeeds -- proves the
+    failed build never got stored in `_built`."""
+    calls = {"n": 0}
+
+    def factory(entry, credential):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("bad url")
+        return FakeClient(entry, credential)
+
+    clients = NodeClients(store, factory)
+
+    assert clients.client_for("boxa") is None       # first attempt: raises
+    second = clients.client_for("boxa")              # retried, not poisoned
+    assert second is not None
+    assert calls["n"] == 2
 
 
 # --- NodeObservers -----------------------------------------------------------

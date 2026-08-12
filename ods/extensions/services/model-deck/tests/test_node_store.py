@@ -62,6 +62,37 @@ def test_node_agent_kind_requires_an_address(store):
         store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent"})
 
 
+# --- N1 T8 review: a malformed address must never reach a client factory ---
+# (httpx.Client(base_url=...) / urlparse raise on "http://h:port" or
+# "http://[::1", and the old isinstance(str)-only gate let both through to
+# app.node_clients.NodeClients.client_for, where the raise escaped into
+# Watcher.tick()'s supervisor catch every tick. Refused at the write
+# boundary instead -- [[guard-at-the-boundary]].)
+
+
+def test_add_unparseable_port_address_is_refused(store):
+    with pytest.raises(ValueError) as exc:
+        store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                   "address": "http://h:port"})
+    assert "address" in str(exc.value)
+
+
+def test_update_malformed_ipv6_serving_address_is_refused(store):
+    store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+               "address": "http://hera:7720"})
+    with pytest.raises(ValueError) as exc:
+        store.update("hera", {"serving_address": "http://[::1"})
+    assert "serving_address" in str(exc.value)
+
+
+def test_add_a_normal_address_still_passes(store):
+    entry = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                       "address": "http://boxa:7720",
+                       "serving_address": "http://boxa:8000"})
+    assert entry["address"] == "http://boxa:7720"
+    assert entry["serving_address"] == "http://boxa:8000"
+
+
 def test_local_kind_cannot_be_added_via_add(store):
     # local is seeded (Task 2), never operator-created.
     with pytest.raises(ValueError):

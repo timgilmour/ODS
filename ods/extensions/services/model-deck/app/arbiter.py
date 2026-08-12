@@ -1368,10 +1368,10 @@ class Watcher:
             # have produced -- BadWatch and BadArtifactId are both
             # ValueErrors. Unhandled, that escaped into _provenance_pass's
             # catch-all above and abandoned everything after this artifact:
-            # local weights AND the whole sparky sweep, once per
-            # provenance_interval_s, forever. Logged, never swallowed --
-            # nothing else on this path can tell the operator their file is
-            # unusable.
+            # local weights AND the rest of the _provenance_nodes sweep,
+            # once per provenance_interval_s, forever. Logged, never
+            # swallowed -- nothing else on this path can tell the operator
+            # their file is unusable.
             self._log("provenance-seed-watch-failed",
                       {"artifact_id": artifact_id, "error": str(exc)})
 

@@ -38,6 +38,7 @@ import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.engines import GuardError
 from app.store_io import load_json, save_json
@@ -86,6 +87,21 @@ def _well_formed(entry: object) -> bool:
     )
 
 
+def _usable_url(value: str) -> bool:
+    """Enough URL validity that an httpx.Client can be CONSTRUCTED from it —
+    the write-side gate that keeps a typo from ever reaching a client
+    factory ([[guard-at-the-boundary]]). urlsplit raises on malformed IPv6
+    brackets; .port raises on a non-numeric port; scheme/host cover bare
+    or relative strings. Deliberately permissive past that — no DNS, no
+    reachability."""
+    try:
+        parts = urlsplit(value)
+        parts.port
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
 def _heal_control(entry: dict) -> dict:
     control = entry.get("control")
     if not isinstance(control, str) or control not in _CONTROLS:
@@ -107,8 +123,11 @@ def _validate(spec: dict) -> None:
     if spec["agent_kind"] == "node-agent" and not spec.get("address"):
         raise ValueError("a node-agent node requires an address")
     for field in ("address", "serving_address"):
-        if field in spec and spec[field] is not None and not isinstance(spec[field], str):
-            raise ValueError(f"{field} must be a string or null")
+        if field in spec and spec[field] is not None:
+            if not isinstance(spec[field], str):
+                raise ValueError(f"{field} must be a string or null")
+            if not _usable_url(spec[field]):
+                raise ValueError(f"{field} must be an absolute http(s) URL")
     if "control" in spec:
         if not isinstance(spec["control"], str) or spec["control"] not in _CONTROLS:
             raise ValueError(f"control must be one of {sorted(_CONTROLS)}")

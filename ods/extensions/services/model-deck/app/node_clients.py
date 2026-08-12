@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import threading
 
+import httpx
+
 from app.observe import SparkObserver
 
 
@@ -71,7 +73,15 @@ class NodeClients:
             if built is not None and built[0] == view:
                 return built[1]
             self._retire(node_id)
-            client = self._factory(entry, self._store.credential_for(node_id))
+            try:
+                client = self._factory(entry, self._store.credential_for(node_id))
+            except (ValueError, httpx.InvalidURL):
+                # A hand-edited row the write gate never saw (node_store's
+                # _usable_url refuses these on the wire): not operable is
+                # the honest answer, and returning None keeps a bad address
+                # from crashing the arbiter tick that asked. Narrow catch —
+                # construction failures only, never probe errors.
+                return None
             self._built[node_id] = (view, client)
             return client
 

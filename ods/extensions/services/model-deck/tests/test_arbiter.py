@@ -1712,21 +1712,18 @@ class FakeSlotObserver:
     status() returns, e.g. {"profile", "serving", "reachable",
     "swap_in_progress"} -- observe_spark's input, not its output) so a test
     can drive a node's derived state without a real node payload or the
-    real translation/caching. take_error mirrors SparkObserver's "parked,
-    cleared by reading it" contract: construct with errors=[...] to have
-    the first take_error() call return the first one, then None forever
-    after (matching SparkObserver.take_error's one-shot semantics)."""
+    real translation/caching. No error path: a test that needs a parked
+    error wraps a real SparkObserver around a raising client instead (see
+    test_unreachable_event_names_the_node), which exercises the real
+    park/clear mechanism rather than a second, hand-rolled copy of it."""
 
-    def __init__(self, status, errors=None):
+    def __init__(self, status):
         self._status = status
-        self.errors = list(errors) if errors else []
 
     def status(self):
         return self._status
 
     def take_error(self):
-        if self.errors:
-            return self.errors.pop(0)
         return None
 
 
