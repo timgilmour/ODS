@@ -204,3 +204,146 @@ def test_reload_no_profile_serving_409(tmp_path, monkeypatch):
     assert resp.status_code == 409
     assert a.settings_sent is None
     assert a.calls == []
+
+
+# ===========================================================================
+# Reload-guard permutations — recovered per N1 T10 review (controller
+# ruling): T10 deleted these six from test_spark_api.py without a named
+# replacement here; this is that replacement. Ported from the pre-T10
+# tests/test_spark_api.py (git show f36efd8c:.../tests/test_spark_api.py),
+# adapted exactly as T9 adapted the core reload suite above: route ->
+# /api/nodes/boxa/serving/reload, wiring -> wire_swap_node via
+# _reload_node_app/_reload_ready, scope key -> boxa/vllm|<identity>, and a
+# `not b.calls` assertion added throughout to keep the two-node isolation
+# discipline this file establishes.
+# ===========================================================================
+
+
+def test_reload_ships_env_most_specific_wins(tmp_path, monkeypatch):
+    """Review fix round 1, IMPORTANT 1: _resolve_env had zero coverage
+    anywhere in the suite — every other reload test seeds args only, and
+    test_configure.py's env test passes env= straight into the mech (pins
+    the mech, not the resolution). A copy-paste slip in _resolve_env (the
+    wrong namespace, or a wrong scope key) would ship the wrong environment
+    to a live vLLM launch with the rest of the suite green. Seeds a
+    conflicting key at two scopes plus one key unique to each, and asserts
+    document['env'] is exactly the per-key, most-specific-wins merge — the
+    same ladder app.ladder.resolve_settings gives args, reused for env with
+    both derived layers empty (app.routers.settings._resolve_env)."""
+    app, deck, a, b = _reload_node_app(tmp_path, monkeypatch,
+                                       identities=_HERETIC_IDENTITIES)
+    a._status["swap_status"] = {
+        "state": "done", "profile": "heretic", "id": "u0",
+        "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
+
+    # Launch-shaped args are a reload PRECONDITION (the positional guard
+    # below): an env-only document ships an empty argv, which the helper
+    # treats as "asserts nothing" and falls back to swap.sh — the env would
+    # silently never apply.
+    deck["settings_store"].put(
+        "engine_models", f"boxa/vllm|{_IDENTITY}", "args",
+        {"_positional": ["serve", "/model"]})
+    deck["settings_store"].put("engines", "boxa/vllm", "env", {
+        "VLLM_USE_FLASHINFER_SAMPLER": "1",   # unique to 'engines'
+        "VLLM_LOGGING_LEVEL": "engine-level",  # overridden by engine_models
+    })
+    deck["settings_store"].put(
+        "engine_models", f"boxa/vllm|{_IDENTITY}", "env", {
+            "VLLM_LOGGING_LEVEL": "engine-model-level",  # most specific wins
+            "CUDA_VISIBLE_DEVICES": "0",  # unique to 'engine_models'
+        })
+
+    resp = TestClient(app).post("/api/nodes/boxa/serving/reload", json={})
+
+    assert resp.status_code == 200
+    _, document = a.settings_sent
+    assert document["env"] == {
+        "VLLM_USE_FLASHINFER_SAMPLER": "1",
+        "VLLM_LOGGING_LEVEL": "engine-model-level",
+        "CUDA_VISIBLE_DEVICES": "0",
+    }
+    assert not b.calls
+
+
+def test_reload_unadopted_profile_409(tmp_path, monkeypatch):
+    """No identity-map entry for the requested profile -> 409 telling the
+    operator to adopt first; put_settings must not have been called."""
+    app, deck, a, b = _reload_node_app(tmp_path, monkeypatch,
+                                       identities=_HERETIC_IDENTITIES)
+
+    resp = TestClient(app).post("/api/nodes/boxa/serving/reload",
+                                json={"profile": "ghost"})
+
+    assert resp.status_code == 409
+    assert "adopt" in resp.json()["detail"].lower()
+    assert a.settings_sent is None
+    assert a.calls == []
+    assert not b.calls
+
+
+def test_reload_explicit_profile_overrides_serving(tmp_path, monkeypatch):
+    """An explicit body profile wins over whatever swap_status reports as
+    currently serving."""
+    app, deck, a, b = _reload_node_app(tmp_path, monkeypatch,
+                                       identities=_HERETIC_IDENTITIES)
+    a._status["swap_status"] = {
+        "state": "done", "profile": "mm27b", "id": "u0",
+        "message": "swap launched", "ts": "2020-01-01T00:00:00Z"}
+    deck["settings_store"].put(
+        "engine_models", f"boxa/vllm|{_IDENTITY}", "args",
+        {"max-model-len": "131072", "_positional": ["serve", "/model"]})
+
+    resp = TestClient(app).post("/api/nodes/boxa/serving/reload",
+                                json={"profile": "heretic"})
+
+    assert resp.status_code == 200
+    assert resp.json()["profile"] == "heretic"
+    assert a.settings_sent[0] == "heretic"
+    assert a.calls == [("swap", "heretic", False)]
+    assert not b.calls
+
+
+def test_reload_no_positionals_409(tmp_path, monkeypatch):
+    """A pre-C2 'kept' scope holds args but no `serve /model` positionals.
+    That argv is non-empty, so the helper OWNS the launch with it — and the
+    engine never gets its subcommand. Refuse, naming adopt."""
+    app, deck, a, b = _reload_ready(tmp_path, monkeypatch,
+                                    args={"max-model-len": "131072"})
+
+    resp = TestClient(app).post("/api/nodes/boxa/serving/reload", json={})
+
+    assert resp.status_code == 409
+    assert "adopt" in resp.json()["detail"].lower()
+    assert a.settings_sent is None
+    assert a.calls == []
+    assert not b.calls
+
+
+def test_force_bypasses_the_positional_guard(tmp_path, monkeypatch):
+    """Documented in serving_reload's docstring: force is the operator
+    saying the entrypoint supplies the subcommand. It ships and swaps."""
+    app, deck, a, b = _reload_ready(tmp_path, monkeypatch,
+                                    args={"max-model-len": "131072"})
+
+    resp = TestClient(app).post("/api/nodes/boxa/serving/reload",
+                                json={"profile": "heretic", "force": True})
+
+    assert resp.status_code == 200
+    assert a.settings_sent[0] == "heretic"
+    assert a.calls == [("swap", "heretic", True)]
+    assert not b.calls
+
+
+def test_reload_empty_declared_args_409(tmp_path, monkeypatch):
+    """An empty declared set ships an empty argv, which the helper reads as
+    'asserts nothing' and delegates to swap.sh — the env in the same
+    document then silently never applies. Same guard, same remedy."""
+    app, deck, a, b = _reload_ready(tmp_path, monkeypatch, args={})
+    deck["settings_store"].put("engines", "boxa/vllm", "env", {"K": "v"})
+
+    resp = TestClient(app).post("/api/nodes/boxa/serving/reload", json={})
+
+    assert resp.status_code == 409
+    assert a.settings_sent is None
+    assert a.calls == []
+    assert not b.calls
