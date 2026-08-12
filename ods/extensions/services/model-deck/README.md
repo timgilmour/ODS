@@ -547,7 +547,14 @@ Unit rows cover intent, status derivation, reconcile planning, observation, the 
 
 ### Known lifecycle gaps
 
-- `interpret_health` (`app/engines/litellm.py`) — the "not-loaded ≠ down" reading of LiteLLM's health payload — is built and unit-tested but **not yet consumed** by status derivation. Local engines are observed directly, which is strictly better information; wiring it in for *remote* routes waits for the multi-node work that makes a route's node knowable.
+- LiteLLM's `/health` payload is **not consumed** by status derivation. An
+  `interpret_health` helper (the "not-loaded ≠ down" reading — a connection
+  error means DOWN, a model-not-found error on a reachable node means NOT
+  LOADED and is never an alarm) was built for it, sat dead for months, and
+  was deleted in the 2026-08-12 simplify sweep (recoverable from git).
+  Local engines are observed directly, which is strictly better
+  information; interpreting `/health` for *remote* routes waits for the
+  multi-node work that makes a route's node knowable.
 - `observe_local` names the three current tenants explicitly. That is the adapter's job (it is the vocabulary boundary), but a fourth local engine does touch that file.
 - **There is no lifecycle UI.** The `lifecycle` block is served and typed (`ui/src/api.ts`), but no component renders status, quarantine release, or adopt — those are curl-level operations today.
 
