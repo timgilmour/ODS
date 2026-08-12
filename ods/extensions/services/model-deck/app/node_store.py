@@ -87,7 +87,8 @@ def _well_formed(entry: object) -> bool:
 
 
 def _heal_control(entry: dict) -> dict:
-    if entry.get("control") not in _CONTROLS:
+    control = entry.get("control")
+    if not isinstance(control, str) or control not in _CONTROLS:
         return {**entry, "control": "none"}
     return entry
 
@@ -109,7 +110,7 @@ def _validate(spec: dict) -> None:
         if field in spec and spec[field] is not None and not isinstance(spec[field], str):
             raise ValueError(f"{field} must be a string or null")
     if "control" in spec:
-        if spec["control"] not in _CONTROLS:
+        if not isinstance(spec["control"], str) or spec["control"] not in _CONTROLS:
             raise ValueError(f"control must be one of {sorted(_CONTROLS)}")
         if spec["control"] == "swap" and spec["agent_kind"] == "local":
             raise ValueError(
@@ -239,18 +240,19 @@ class NodeStore:
     def remove(self, node_id: str) -> None:
         if node_id == "local":
             raise GuardError("the local node cannot be removed")
-        entry = self.get(node_id)
-        if entry is not None and entry.get("control") == "swap":
-            # A declared-operable node must never lose its credential (the
-            # sidecar row dies with the entry) as a side effect of one call;
-            # the operator demotes explicitly, then removes (design §2,
-            # 08-12 refinement). Any FUTURE credential-clear operation must
-            # carry this same gate.
-            raise GuardError(
-                f"node {node_id!r} is declared operable (control: \"swap\"); "
-                'set control to "none" first')
         with self._lock:
-            data = [n for n in self._load() if n["id"] != node_id]
+            data = self._load()
+            entry = next((n for n in data if n["id"] == node_id), None)
+            if entry is not None and entry.get("control") == "swap":
+                # A declared-operable node must never lose its credential (the
+                # sidecar row dies with the entry) as a side effect of one call;
+                # the operator demotes explicitly, then removes (design §2,
+                # 08-12 refinement). Any FUTURE credential-clear operation must
+                # carry this same gate.
+                raise GuardError(
+                    f"node {node_id!r} is declared operable (control: \"swap\"); "
+                    'set control to "none" first')
+            data = [n for n in data if n["id"] != node_id]
             self._save(data)
             creds = self._load_creds()
             if node_id in creds:

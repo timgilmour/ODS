@@ -307,6 +307,23 @@ def test_control_invalid_value_heals_to_none(store, tmp_path):
     assert store.get("boxa")["control"] == "none"
 
 
+def test_control_unhashable_value_heals_to_none(store, tmp_path):
+    # A hand-edited nodes.json with control: [] must heal, not crash --
+    # `["swap"] in _CONTROLS` (a set) raises TypeError if unguarded, which
+    # is exactly the failure the element gate exists to prevent.
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
+         "address": "http://boxa:7720", "control": ["swap"]}]))
+    assert store.get("boxa")["control"] == "none"
+
+
+def test_add_unhashable_control_raises_value_error(store):
+    spec = _swap_spec()
+    spec["control"] = ["swap"]
+    with pytest.raises(ValueError):
+        store.add(spec)
+
+
 def test_add_defaults_control_none(store):
     entry = store.add({"id": "boxa", "label": "Box Alpha",
                        "agent_kind": "node-agent", "address": "http://boxa:7720"})
