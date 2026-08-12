@@ -381,8 +381,7 @@ interface ErrorBody {
   detail?: string | ValidationItem[];
 }
 
-/** The ONE place an error body becomes an operator-facing sentence, shared by
- * request() and getCatalog() (which does its own fetch). */
+/** The ONE place an error body becomes an operator-facing sentence. */
 export function errorMessage(
   body: ErrorBody | null,
   status: number,
@@ -562,15 +561,12 @@ export function putPolicy(policies: PolicyMap): Promise<PolicyMap> {
 // ---------------------------------------------------------------------------
 
 /** GET /api/settings/catalog/{node}/{engine} — returns 200 with JSON null or object;
- * null when no such engine/node. */
-export async function getCatalog(node: string, engine: string): Promise<Catalog | null> {
-  const res = await fetch(`/api/settings/catalog/${encodeURIComponent(node)}/${encodeURIComponent(engine)}`);
-  if (!res.ok) {
-    const body: ErrorBody | null = await res.json().catch(() => null);
-    throw new ApiError(res.status, errorMessage(body, res.status, res.statusText));
-  }
-  const data = await res.json();
-  return data === null ? null : (data as Catalog);
+ * null when no such engine/node (request()'s `(await res.json()) as T` passes
+ * a JSON null body through unchanged). */
+export function getCatalog(node: string, engine: string): Promise<Catalog | null> {
+  return request<Catalog | null>(
+    `/api/settings/catalog/${encodeURIComponent(node)}/${encodeURIComponent(engine)}`
+  );
 }
 
 /** GET /api/settings/effective/{node}/{engine}/{model} */
@@ -602,20 +598,30 @@ export function putSettings(
   );
 }
 
+/** POST /api/settings/preview — one wire helper for both directions of the
+ * same endpoint (parse ships {argline}, render ships {args}) so the shared
+ * ctx contract can't drift between them. */
+function postPreview(
+  body: { argline: string } | { args: Record<string, ArgValue> },
+  ctx?: { node?: string; engine?: string; model?: string }
+): Promise<SettingsPreviewResponse> {
+  const payload: Record<string, unknown> = { ...body };
+  if (ctx?.node) payload.node = ctx.node;
+  if (ctx?.engine) payload.engine = ctx.engine;
+  if (ctx?.model) payload.model = ctx.model;
+  return request<SettingsPreviewResponse>("/api/settings/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 /** POST /api/settings/preview with {argline} body */
 export function previewParse(
   argline: string,
   ctx?: { node?: string; engine?: string; model?: string }
 ): Promise<SettingsPreviewResponse> {
-  const body: {argline: string; node?: string; engine?: string; model?: string} = { argline };
-  if (ctx?.node) body.node = ctx.node;
-  if (ctx?.engine) body.engine = ctx.engine;
-  if (ctx?.model) body.model = ctx.model;
-  return request<SettingsPreviewResponse>("/api/settings/preview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return postPreview({ argline }, ctx);
 }
 
 /** POST /api/settings/preview with {args} body */
@@ -623,15 +629,7 @@ export function previewRender(
   args: Record<string, ArgValue>,
   ctx?: { node?: string; engine?: string; model?: string }
 ): Promise<SettingsPreviewResponse> {
-  const body: {args: Record<string, ArgValue>; node?: string; engine?: string; model?: string} = { args };
-  if (ctx?.node) body.node = ctx.node;
-  if (ctx?.engine) body.engine = ctx.engine;
-  if (ctx?.model) body.model = ctx.model;
-  return request<SettingsPreviewResponse>("/api/settings/preview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return postPreview({ args }, ctx);
 }
 
 /** POST /api/settings/harvest/{node}/{engine} */
