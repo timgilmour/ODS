@@ -48,7 +48,6 @@ BusyError; its 4xx validation answers surface as EngineError.
 """
 
 import json
-import math
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -56,6 +55,7 @@ import httpx
 
 from app.engines import BusyError, EngineError, GuardError
 from app.engines.litellm import LiteLLMClient
+from app.engines.metrics import sum_matching
 from app.engines.node_agent import NodeAgentHTTP
 
 _TIMEOUT = httpx.Timeout(5.0)
@@ -259,20 +259,12 @@ class SparkClient(NodeAgentHTTP):
             raise EngineError(str(exc)) from exc
         if not resp.is_success:
             raise EngineError(resp.text)
-        total = 0.0
-        matched = False
-        for line in resp.text.splitlines():
-            if line.startswith(metric_prefixes):
-                matched = True
-                try:
-                    value = float(line.rsplit(None, 1)[-1])
-                except ValueError:
-                    raise EngineError(f"unparseable metric line: {line!r}")
-                if not math.isfinite(value):
-                    # float('NaN')/float('1e999') parse fine but int(total)
-                    # below would crash outside the EngineError vocabulary.
-                    raise EngineError(f"non-finite metric value: {line!r}")
-                total += value
+        try:
+            total, matched = sum_matching(resp.text, metric_prefixes)
+        except ValueError as exc:
+            # Unparseable/non-finite values raise there so int(total) below
+            # can't crash outside the EngineError vocabulary.
+            raise EngineError(str(exc)) from exc
         if not matched and engine in _STRICT_BUSY_ENGINES:
             raise EngineError(
                 f"/metrics matched none of {metric_prefixes!r} for engine "

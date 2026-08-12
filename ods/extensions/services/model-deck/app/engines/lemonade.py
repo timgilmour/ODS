@@ -27,6 +27,7 @@ import threading
 import httpx
 
 from app.engines import EngineError
+from app.engines.metrics import sum_matching
 
 _TIMEOUT = 5.0
 
@@ -115,21 +116,10 @@ class LemonadeClient:
 def _sum_activity_metrics(metrics_text: str) -> int | None:
     """Sum values of Prometheus lines whose metric name starts with one of
     _ACTIVITY_METRIC_PREFIXES. Returns None if neither metric appears, or on
-    any metric value parse error."""
-    total = 0.0
-    found = False
+    any metric value parse error — activity is best-effort, unlike spark's
+    fail-closed busy guard (posture split documented in app.engines.metrics)."""
     try:
-        for line in metrics_text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(None, 1)
-            if len(parts) != 2:
-                continue
-            name, value = parts
-            if name.startswith(_ACTIVITY_METRIC_PREFIXES):
-                total += float(value)
-                found = True
+        total, matched = sum_matching(metrics_text, _ACTIVITY_METRIC_PREFIXES)
     except ValueError:
         return None
-    return int(round(total)) if found else None
+    return int(round(total)) if matched else None
