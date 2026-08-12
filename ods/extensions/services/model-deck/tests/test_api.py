@@ -2817,28 +2817,50 @@ def _adopt_app(tmp_path, monkeypatch, spark="default"):
     """Same shape as test_spark_api.py's _spark_app: the adopt route needs
     settings_store AND characteristics_store pointed at tmp_path — the
     default deck's copies point at the container's /data, which does not
-    exist under test."""
+    exist under test.
+
+    Node id is "boxa" (N1 generalized the adopt gate off the single spark
+    node — [[defaults-that-hide-bugs]], a fixture id of "sparky" could not
+    have caught a handler that still secretly resolved the old single
+    pair). ``spark=None`` declares boxa control:"swap" (all three
+    prerequisites present, so the registry gate passes) but wires an EMPTY
+    FakeNodeClients — no client bound for boxa — so client_for(boxa)
+    answers None and the route 503s the same "known node, not operable" way
+    every other swap node does; a real NodeClients here would instead build
+    a genuine networked SparkClient (every prerequisite IS present) and the
+    sweep's first network call would 502, not 503."""
     from app.characteristics import CharacteristicsStore
+    from app.node_clients import NodeObservers
     from app.settings_store import SettingsStore
 
     app, deck = make_app(tmp_path, monkeypatch)
-    deck["spark"] = FakeSparkForAdopt() if spark == "default" else spark
+    if spark is None:
+        deck["node_store"].add(
+            {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
+             "address": "http://boxa:7720", "serving_address": "http://boxa:8000",
+             "control": "swap"}, credential="key-boxa")
+        deck["node_clients"] = FakeNodeClients()
+        deck["node_observers"] = NodeObservers(deck["node_store"], deck["node_clients"])
+    else:
+        wire_swap_node(deck, "boxa",
+                       FakeSparkForAdopt() if spark == "default" else spark,
+                       label="Box Alpha")
     deck["settings_store"] = SettingsStore(tmp_path / "s.json")
     deck["characteristics_store"] = CharacteristicsStore(tmp_path / "c.json")
     return app, deck
 
 
 def test_adopt_imports_vllm_profiles_into_engine_models_scope(tmp_path, monkeypatch):
-    """POST /api/settings/adopt/sparky/vllm ->
-    engine_models scope 'sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4' has the
+    """POST /api/settings/adopt/boxa/vllm ->
+    engine_models scope 'boxa/vllm|Qwen3.6-35B-A3B-heretic-NVFP4' has the
     imported args (max-model-len 262144, _positional [serve, /model]) and
     the modelopt note; response lists it under 'adopted'."""
     from app.argline import POSITIONAL_KEY
 
     app, deck = _adopt_app(tmp_path, monkeypatch)
-    key = "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4"
+    key = "boxa/vllm|Qwen3.6-35B-A3B-heretic-NVFP4"
 
-    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
     assert resp.status_code == 200
     assert resp.json()["adopted"] == [key]
@@ -2854,7 +2876,7 @@ def test_adopt_skips_non_vllm_profiles(tmp_path, monkeypatch):
     written."""
     app, deck = _adopt_app(tmp_path, monkeypatch)
 
-    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
     body = resp.json()
     assert {"profile": "ds4", "engine": "ds4"} in body["skipped"]
@@ -2867,10 +2889,10 @@ def test_adopt_never_clobbers_an_existing_scope(tmp_path, monkeypatch):
     """Pre-seed the heretic identity scope with one arg; adopt again ->
     response lists it under 'kept' and the pre-seeded value survives."""
     app, deck = _adopt_app(tmp_path, monkeypatch)
-    key = "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4"
+    key = "boxa/vllm|Qwen3.6-35B-A3B-heretic-NVFP4"
     deck["settings_store"].put("engine_models", key, "args", {"max-model-len": "999"})
 
-    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
     body = resp.json()
     assert body["kept"] == [key]
@@ -2881,14 +2903,14 @@ def test_adopt_never_clobbers_an_existing_scope(tmp_path, monkeypatch):
 
 
 def test_adopt_records_the_identity_map(tmp_path, monkeypatch):
-    """characteristics entry engine/sparky/vllm gains profile_identities
+    """characteristics entry engine/boxa/vllm gains profile_identities
     with heretic -> {identity, service='aeon-vllm',
     container_name='aeon-vllm'}, carrying value/source/derived_ts."""
     app, deck = _adopt_app(tmp_path, monkeypatch)
 
-    TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
-    field = deck["characteristics_store"].entry("engine/sparky/vllm")["profile_identities"]
+    field = deck["characteristics_store"].entry("engine/boxa/vllm")["profile_identities"]
     assert set(field) == {"value", "source", "derived_ts"}
     assert field["value"]["heretic"] == {
         "identity": "Qwen3.6-35B-A3B-heretic-NVFP4",
@@ -2898,20 +2920,49 @@ def test_adopt_records_the_identity_map(tmp_path, monkeypatch):
 
 
 def test_adopt_on_unknown_node_or_engine_is_422(tmp_path, monkeypatch):
-    """POST /api/settings/adopt/local/vllm and /sparky/spark -> 422; only
-    the (spark_node_id(), 'vllm') pair is adoptable in C2."""
+    """POST /api/settings/adopt/local/vllm and /boxa/spark -> 422: local is
+    control:"none" (not a swap node) and spark is the wrong engine — only a
+    swap node's vllm is adoptable (N1 generalized this off the single
+    (spark_node_id(), 'vllm') pair C2 had)."""
     app, deck = _adopt_app(tmp_path, monkeypatch)
     client = TestClient(app)
 
     assert client.post("/api/settings/adopt/local/vllm").status_code == 422
-    assert client.post("/api/settings/adopt/sparky/spark").status_code == 422
+    assert client.post("/api/settings/adopt/boxa/spark").status_code == 422
+
+
+def test_adopt_any_swap_node(tmp_path, monkeypatch):
+    """(boxa, vllm) is adoptable once boxa is control:"swap" — the C2
+    single-pair gate generalizes to the declaration, not a hardcoded id."""
+    app, deck = _adopt_app(tmp_path, monkeypatch)
+    key = "boxa/vllm|Qwen3.6-35B-A3B-heretic-NVFP4"
+
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
+
+    assert resp.status_code == 200
+    assert resp.json()["adopted"] == [key]
+
+
+def test_adopt_control_none_node_422(tmp_path, monkeypatch):
+    """A node with a serving_address but control:"none" is NOT adoptable —
+    declared, never inferred."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["node_store"].add(
+        {"id": "boxc", "label": "Box Gamma", "agent_kind": "node-agent",
+         "address": "http://boxc:7720", "serving_address": "http://boxc:8000",
+         "control": "none"}, credential="key-boxc")
+
+    resp = TestClient(app).post("/api/settings/adopt/boxc/vllm")
+
+    assert resp.status_code == 422
 
 
 def test_adopt_with_no_spark_configured_is_503(tmp_path, monkeypatch):
-    """deck['spark'] is None -> 503, matching routers/spark.py's _spark."""
+    """A declared control:"swap" node with no operable client bound -> 503,
+    the same "known node, not operable" answer every swap node gets."""
     app, deck = _adopt_app(tmp_path, monkeypatch, spark=None)
 
-    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
     assert resp.status_code == 503
 
@@ -2952,9 +3003,9 @@ def test_adopt_isolates_a_malformed_profile_and_continues_the_sweep(tmp_path, mo
     profiles that DID import cleanly."""
     fake = FakeSparkForAdoptWithFailure(compose_overrides={"heretic": "services: [unclosed"})
     app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
-    good_key = "sparky/vllm|Qwen3.6-27B-AEON-MM-MTP"
+    good_key = "boxa/vllm|Qwen3.6-27B-AEON-MM-MTP"
 
-    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -2968,7 +3019,7 @@ def test_adopt_isolates_a_malformed_profile_and_continues_the_sweep(tmp_path, mo
 
     # The identity map covers the good profile despite the other's failure;
     # the failed one never got far enough to have an identity to record.
-    field = deck["characteristics_store"].entry("engine/sparky/vllm")["profile_identities"]
+    field = deck["characteristics_store"].entry("engine/boxa/vllm")["profile_identities"]
     assert "mm27b" in field["value"]
     assert "heretic" not in field["value"]
 
@@ -2982,9 +3033,9 @@ def test_adopt_isolates_a_compose_fetch_failure_and_continues_the_sweep(tmp_path
 
     fake = FakeSparkForAdoptWithFailure(raise_for={"heretic": EngineError("node down")})
     app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
-    good_key = "sparky/vllm|Qwen3.6-27B-AEON-MM-MTP"
+    good_key = "boxa/vllm|Qwen3.6-27B-AEON-MM-MTP"
 
-    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -3009,11 +3060,11 @@ def test_adopt_isolates_an_unsupported_environment_shape(tmp_path, monkeypatch):
     fake = FakeSparkForAdoptWithFailure(compose_overrides={"heretic": junk})
     app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
 
-    resp = TestClient(app).post("/api/settings/adopt/sparky/vllm")
+    resp = TestClient(app).post("/api/settings/adopt/boxa/vllm")
 
     assert resp.status_code == 200
     body = resp.json()
-    assert "sparky/vllm|Qwen3.6-27B-AEON-MM-MTP" in body["adopted"]
+    assert "boxa/vllm|Qwen3.6-27B-AEON-MM-MTP" in body["adopted"]
     bad_skip = next(s for s in body["skipped"] if s["profile"] == "heretic")
     assert "ValueError" in bad_skip["reason"]
 
@@ -3033,37 +3084,38 @@ def test_readopt_keeps_the_identity_of_a_transiently_failing_profile(
     exists to prevent) and 409s its reload.
     """
     from app.engines import EngineError
-    from app.observe import SPARK_SLOT_KEY
+    from app.observe import slot_key
     from app.routers import _settings_drift
 
     fake = FakeSparkForAdoptWithFailure()
     app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
     client = TestClient(app)
-    client.post("/api/settings/adopt/sparky/vllm")
+    client.post("/api/settings/adopt/boxa/vllm")
     first = deck["characteristics_store"].entry(
-        "engine/sparky/vllm")["profile_identities"]["value"]
+        "engine/boxa/vllm")["profile_identities"]["value"]
     assert "heretic" in first
 
     fake._raise_for = {"heretic": EngineError("node down")}
-    resp = client.post("/api/settings/adopt/sparky/vllm")
+    resp = client.post("/api/settings/adopt/boxa/vllm")
 
     assert resp.status_code == 200
     assert any(s["profile"] == "heretic" for s in resp.json()["skipped"])
     field = deck["characteristics_store"].entry(
-        "engine/sparky/vllm")["profile_identities"]["value"]
+        "engine/boxa/vllm")["profile_identities"]["value"]
     assert field["heretic"] == first["heretic"]
     assert "mm27b" in field
 
-    # The consequence, not just the storage: drift for the spark slot is
-    # only visible THROUGH this map (app/routers/__init__.py's spark-slot
+    # The consequence, not just the storage: drift for the swap node's slot
+    # is only visible THROUGH this map (app/routers/__init__.py's slot
     # translation), so an evicted entry is drift going dark.
-    deck["intent_store"].record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+    key = slot_key("boxa")
+    deck["intent_store"].record(key, state="loaded", model="heretic",
                                 engine="spark", now="2020-01-01T00:00:00+00:00")
-    intent = deck["intent_store"].get()[SPARK_SLOT_KEY]
+    intent = deck["intent_store"].get()[key]
     settings_data = deck["settings_store"].get()
-    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent,
+    assert _settings_drift(settings_data, key, intent,
                            identity_map=field) is not None
-    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent,
+    assert _settings_drift(settings_data, key, intent,
                            identity_map={k: v for k, v in field.items()
                                          if k != "heretic"}) is None
 
@@ -3075,17 +3127,17 @@ def test_readopt_drops_a_profile_that_left_the_node(tmp_path, monkeypatch):
     fake = FakeSparkForAdoptWithFailure()
     app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
     client = TestClient(app)
-    client.post("/api/settings/adopt/sparky/vllm")
+    client.post("/api/settings/adopt/boxa/vllm")
     assert "heretic" in deck["characteristics_store"].entry(
-        "engine/sparky/vllm")["profile_identities"]["value"]
+        "engine/boxa/vllm")["profile_identities"]["value"]
 
     fake.status = lambda: {"profiles": [
         {"name": "mm27b", "engine": "vllm", "health_url": None, "container": None},
     ], "swap_status": None, "serving": None}
-    client.post("/api/settings/adopt/sparky/vllm")
+    client.post("/api/settings/adopt/boxa/vllm")
 
     field = deck["characteristics_store"].entry(
-        "engine/sparky/vllm")["profile_identities"]["value"]
+        "engine/boxa/vllm")["profile_identities"]["value"]
     assert set(field) == {"mm27b"}
 
 
@@ -3099,15 +3151,15 @@ def test_readopt_with_every_profile_failing_keeps_the_whole_map(
     fake = FakeSparkForAdoptWithFailure()
     app, deck = _adopt_app(tmp_path, monkeypatch, spark=fake)
     client = TestClient(app)
-    client.post("/api/settings/adopt/sparky/vllm")
+    client.post("/api/settings/adopt/boxa/vllm")
     before = deck["characteristics_store"].entry(
-        "engine/sparky/vllm")["profile_identities"]["value"]
+        "engine/boxa/vllm")["profile_identities"]["value"]
 
     fake._raise_for = {"heretic": EngineError("down"), "mm27b": EngineError("down")}
-    client.post("/api/settings/adopt/sparky/vllm")
+    client.post("/api/settings/adopt/boxa/vllm")
 
     after = deck["characteristics_store"].entry(
-        "engine/sparky/vllm")["profile_identities"]["value"]
+        "engine/boxa/vllm")["profile_identities"]["value"]
     assert after == before
 
 

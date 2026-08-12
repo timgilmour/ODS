@@ -90,7 +90,6 @@ from app.engines import EngineError
 from app.events import log_event
 from app.facts import resolve_facts
 from app.ladder import LAYERS, resolve_settings
-from app.observe import spark_node_id
 from app.settings_store import KINDS
 from app.validate_settings import validate_settings
 
@@ -215,11 +214,12 @@ def preview(body: dict, request: Request) -> dict:
 @router.post("/settings/adopt/{node}/{engine}")
 def adopt(node: str, engine: str, request: Request) -> dict:
     """Sweep a node's real compose profiles into the settings store — the
-    "adopt" half of adopt-then-own (Plan C2). Only ``(spark_node_id(),
-    "vllm")`` is adoptable in C2 (an unknown pair is a ValueError -> 422,
-    same family as this router's other save-time rejections); every other
-    profile on the node (ds4, comfyui, ...) is reported 'skipped' rather
-    than guessed at.
+    "adopt" half of adopt-then-own (Plan C2, generalized to any node by
+    N1). Only ``(<node>, "vllm")`` is adoptable, and only when ``<node>``
+    is declared ``control: "swap"`` (an unadoptable pair is a ValueError ->
+    422, same family as this router's other save-time rejections); every
+    other profile on the node (ds4, comfyui, ...) is reported 'skipped'
+    rather than guessed at.
 
     Never clobbers: a scope whose args namespace already has something in
     it is left untouched and reported 'kept', not overwritten — adopt runs
@@ -259,11 +259,16 @@ def adopt(node: str, engine: str, request: Request) -> dict:
     whole-request preconditions, not per-profile outcomes.
     """
     deck = request.app.state.deck
-    if (node, engine) != (spark_node_id(), "vllm"):
-        raise ValueError(f"only {spark_node_id()}/vllm is adoptable in C2")
-    spark = deck.get("spark")
+    entry = deck["node_store"].get(node)
+    if engine != "vllm" or entry is None or entry.get("control") != "swap":
+        # Declared, never inferred: a node with a serving_address but
+        # control:"none" is not adoptable (design §2).
+        raise ValueError(
+            f"only a swap node's vllm is adoptable (got {node}/{engine})")
+    spark = deck["node_clients"].client_for(node)
     if spark is None:
-        raise HTTPException(status_code=503, detail="spark engine is not configured")
+        raise HTTPException(status_code=503, detail=(
+            f"node {node!r} is not operable"))
 
     store = deck["settings_store"]
     characteristics = deck["characteristics_store"]
