@@ -50,7 +50,7 @@ def test_spark_catalog_exec_returns_version_and_output():
                                 "harvested_ts": "2026-08-07T02:00:00Z",
                                 "engine": "vllm", "probe_output": "SENTINEL..."}}
 
-    version, output = SparkCatalogExec(FakeClient())("sparky", "vllm", "python3", "src")
+    version, output = SparkCatalogExec(lambda: FakeClient())("sparky", "vllm", "python3", "src")
 
     assert (version, output) == ("sha256:abc", "SENTINEL...")
 
@@ -61,7 +61,7 @@ def test_spark_catalog_exec_raises_engine_error_when_none_yet():
             return {"catalog": None}
 
     with pytest.raises(EngineError):
-        SparkCatalogExec(FakeClient())("sparky", "vllm", "python3", "src")
+        SparkCatalogExec(lambda: FakeClient())("sparky", "vllm", "python3", "src")
 
 
 def test_spark_catalog_exec_raises_engine_error_for_partial_catalog():
@@ -74,7 +74,40 @@ def test_spark_catalog_exec_raises_engine_error_for_partial_catalog():
             return {"catalog": {"harvested_ts": "2026-08-10"}}
 
     with pytest.raises(EngineError):
-        SparkCatalogExec(FakeClient())("sparky", "vllm", "python3", "src")
+        SparkCatalogExec(lambda: FakeClient())("sparky", "vllm", "python3", "src")
+
+
+def test_catalog_exec_resolves_client_per_call():
+    """The provider is a ZERO-ARG callable, resolved on every __call__ --
+    never captured once at construction. NodeClients' real client_for is
+    exactly this shape: live-rebound as the registry changes."""
+    class FakeClient:
+        def get_catalog(self):
+            return {"catalog": {"image_id": "sha256:abc",
+                                "harvested_ts": "2026-08-07T02:00:00Z",
+                                "engine": "vllm", "probe_output": "SENTINEL..."}}
+
+    calls = {"n": 0}
+    client = FakeClient()
+
+    def provider():
+        calls["n"] += 1
+        return client
+
+    exec_ = SparkCatalogExec(provider)
+    exec_("boxa", "vllm", "python3", "src")
+    exec_("boxa", "vllm", "python3", "src")
+
+    assert calls["n"] == 2  # late-bound, never captured
+
+
+def test_catalog_exec_refuses_inoperable_node():
+    """None from the provider (NodeClients' `unconfigured` vocabulary) is
+    refused with EngineError, not a crash on `.get_catalog()`."""
+    exec_ = SparkCatalogExec(lambda: None)
+
+    with pytest.raises(EngineError, match="not operable"):
+        exec_("boxa", "vllm", "python3", "src")
 
 
 def test_router_dispatches_on_the_pair_and_rejects_unknown():

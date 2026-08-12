@@ -303,18 +303,18 @@ def _build_deck(settings: Settings) -> dict:
     # Catalog harvest (app.arbiter.Watcher._harvest_catalogs, and the manual
     # force-harvest route app.routers.settings.harvest_now): routes maps
     # each configurable (node, engine) pair to the one adapter that can
-    # actually produce a catalog for it. Spark is this box's one real
-    # vLLM-backed target (live-verified 2026-08-07 — see
+    # actually produce a catalog for it. vLLM-over-the-swap-protocol is the
+    # only route-worthy engine today (live-verified 2026-08-07 — see
     # Watcher._configurable_engines's docstring: hipfire is confirmed a
     # Bun daemon, not vLLM, so no local docker-exec route belongs here).
     # DockerEngineExec (app.engines.docker_ctl) stays defined for a future
     # local vLLM engine but is deliberately not constructed below — there
     # is nothing local to route it to today. routes stays {} (engine_exec
-    # None, harvest disabled entirely, same as every pre-C2 build) on a
-    # box with no spark configured — the node half of the pair always
-    # comes from spark_node_id(), never settings.node_label or
-    # settings.spark_node_name (see _configurable_engines' docstring for
-    # the historical bug that rule guards against).
+    # None, harvest disabled entirely, same as every pre-C2 build) when no
+    # control:"swap" node is registered — the node half of each pair always
+    # comes from the registry id, never settings.node_label or a node's
+    # label (see _configurable_engines' docstring for the historical bug
+    # that rule guards against).
     #
     # Built HERE, in _build_deck, not in _build_watcher (moved 2026-08-08,
     # task 3 review finding 1): _build_deck runs in EVERY mode, including
@@ -323,15 +323,22 @@ def _build_deck(settings: Settings) -> dict:
     # docstring) — lifespan() skips _build_watcher ENTIRELY under that env
     # var. Building the routes here means deck["engine_exec"]/
     # deck["configurable_engines"] (and therefore app.state.deck, the same
-    # dict via the cache above) are always populated whenever spark is
-    # configured, watcher running or not, so harvest_now's pair check can
-    # never misdiagnose "watcher never wired" as "pair not configured".
+    # dict via the cache above) are always populated whenever a swap node
+    # is configured, watcher running or not, so harvest_now's pair check
+    # can never misdiagnose "watcher never wired" as "pair not configured".
     from app.engines.docker_ctl import EngineExecRouter
     from app.engines.spark import SparkCatalogExec
 
     routes = {}
-    if deck["spark"] is not None:
-        routes[(LEGACY_SPARK_SEED_ID, "vllm")] = SparkCatalogExec(deck["spark"])
+    # One pair per control:"swap" node. The PAIR SET is enumerated here, at
+    # app build (a node added later harvests after the next restart); the
+    # CLIENT behind each pair is node_clients' — live-rebound, None while
+    # the node is inoperable, so the exec refuses instead of going stale.
+    for _entry in node_store.list():
+        if _entry.get("control") != "swap":
+            continue
+        routes[(_entry["id"], "vllm")] = SparkCatalogExec(
+            lambda _nid=_entry["id"]: node_clients.client_for(_nid))
     deck["engine_exec"] = EngineExecRouter(routes) if routes else None
     deck["configurable_engines"] = sorted(routes)
 

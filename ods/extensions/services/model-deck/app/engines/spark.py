@@ -376,11 +376,18 @@ class SparkCatalogExec:
     reached over the network instead of a local docker exec.
     """
 
-    def __init__(self, client: SparkClient) -> None:
-        self._client = client
+    def __init__(self, client_fn) -> None:
+        # A zero-arg PROVIDER, not a client: the route map is built once at
+        # app assembly, but the client behind it is NodeClients' — rebound
+        # on registry change, None when the node stops being operable. Late
+        # binding keeps harvest pointed at the current binding (design §3).
+        self._client_fn = client_fn
 
     def __call__(self, node: str, engine: str, interpreter: str, source: str) -> tuple[str, str]:
-        catalog = self._client.get_catalog().get("catalog")
+        client = self._client_fn()
+        if client is None:
+            raise EngineError(f"node {node!r} is not operable")
+        catalog = client.get_catalog().get("catalog")
         if catalog is None:
             raise EngineError("no harvested catalog on the node yet")
         image_id = catalog.get("image_id")

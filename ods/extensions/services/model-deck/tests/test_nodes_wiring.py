@@ -272,6 +272,62 @@ def test_boot_stamps_control_on_legacy_seeded_spark(tmp_path, monkeypatch):
     assert entry["control"] == "swap"
 
 
+# --- harvest routes per swap node (N1 T11) ----------------------------------
+#
+# main._build_deck builds one (node_id, "vllm") route per control:"swap"
+# registry entry (design §4's disclosed limitation: the PAIR SET is
+# enumerated at app build, the CLIENT behind each pair is live-rebound
+# through node_clients). Prepares nodes.json/node_credentials.json via a
+# NodeStore pointed at the same data dir BEFORE create_app() — the loop that
+# builds routes only runs at build, so the store has to be seeded first,
+# mirroring test_boot_stamps_control_on_legacy_seeded_spark above.
+
+
+def test_routes_built_per_swap_node(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    from app.node_store import NodeStore
+
+    store = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+    store.add({"id": "local", "label": "local", "agent_kind": "local"})
+    for node_id in ("boxa", "boxb"):
+        store.add({"id": node_id, "label": node_id, "agent_kind": "node-agent",
+                   "address": f"http://{node_id}:7720",
+                   "serving_address": f"http://{node_id}:8000",
+                   "control": "swap"},
+                  credential="k")
+
+    from app.main import create_app
+    app = create_app()
+    deck = app.state.deck
+
+    assert deck["configurable_engines"] == [("boxa", "vllm"), ("boxb", "vllm")]
+    assert deck["engine_exec"] is not None
+
+
+def test_none_control_swap_capable_node_yields_no_route(tmp_path, monkeypatch):
+    """A node with every swap prerequisite present (address, serving_address,
+    credential) but control left at "none" gets no harvest pair -- control is
+    the gate, not mere capability."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    from app.node_store import NodeStore
+
+    store = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+    store.add({"id": "local", "label": "local", "agent_kind": "local"})
+    store.add({"id": "boxc", "label": "boxc", "agent_kind": "node-agent",
+              "address": "http://boxc:7720", "serving_address": "http://boxc:8000",
+              "control": "none"},
+              credential="k")
+
+    from app.main import create_app
+    app = create_app()
+    deck = app.state.deck
+
+    assert deck["configurable_engines"] == []
+    assert deck["engine_exec"] is None
+
+
 def test_addresses_without_a_credential_is_not_stale(monkeypatch):
     """CLOSES A MUTATION-DEAD TERM [T8 review]. seed_if_missing seeds spark
     with BOTH addresses and NO credential when ODS_REMOTE_NODE_KEYS is absent
