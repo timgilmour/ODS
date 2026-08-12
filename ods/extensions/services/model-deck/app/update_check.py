@@ -368,7 +368,7 @@ class UpdateChecker:
             except Exception as exc:  # noqa: BLE001 — supervisor loop, never silent
                 # `update-check-error`, NOT `update-check-failed`: that kind
                 # is the per-source verdict and carries
-                # {"artifact_id","source","note"} (:245-248, _log_transitions).
+                # {"artifact_id","source","note"} (see _log_transitions).
                 # One kind with two incompatible detail shapes is the exact
                 # vocabulary defect this codebase has already shipped four
                 # times. Both end in a suffix ui/src/model/eventSeverity.ts

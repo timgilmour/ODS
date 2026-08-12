@@ -578,3 +578,36 @@ def test_restore_preserves_an_unset_positional_marker(tmp_path):
     args = store.scope("engines", "sparky/vllm")["args"]
     assert "_positional" in args and args["_positional"] is None
     assert args["keep"] == "v"
+
+
+def test_concurrent_puts_lose_no_writes_and_never_crash(tmp_path):
+    """The T9b thread discipline, finally pinned for THIS store (the T9b
+    review flagged that Settings claimed sibling coverage it did not have).
+    Two real threads hammer put() on DIFFERENT keys of the SAME entry: an
+    unlocked load-modify-save loses one side's writes, and the fixed .tmp
+    sibling path makes the loser's os.replace raise FileNotFoundError. The
+    keys' final values are distinct non-defaults so a lost write is visible
+    in the end state, not coincidentally correct."""
+    import threading
+
+    store = SettingsStore(tmp_path / "s.json")
+    errors = []
+
+    def hammer(key, prefix):
+        try:
+            for i in range(150):
+                store.put("engines", "sparky/vllm", "args",
+                          {key: f"{prefix}-{i}"})
+        except Exception as exc:  # noqa: BLE001 — a crash IS the finding
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer, args=("max-num-seqs", "a")),
+               threading.Thread(target=hammer, args=("gpu-memory-utilization", "b"))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert errors == []
+    final = store.scope("engines", "sparky/vllm")["args"]
+    assert final["max-num-seqs"] == "a-149"
+    assert final["gpu-memory-utilization"] == "b-149"

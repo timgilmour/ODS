@@ -60,10 +60,19 @@ def _well_formed(entry: object) -> bool:
     is checked here. `address`/`serving_address` stay unchecked by design —
     their presence is a per-agent-kind SEMANTIC rule (node-agent needs one,
     local doesn't), not a shape rule, and callers that care already handle
-    "absent" (e.g. app/node_observer.py's node-agent-without-address skip)."""
+    "absent" (e.g. app/node_observer.py's node-agent-without-address skip).
+
+    The id must also match `_ID_RE`: an id is a KEY (intent, settings
+    scopes, `oci:<id>:` provenance all attach through it), and a hand-edited
+    id the write-side `_validate()` would refuse — pre-`\\Z`-fix legacy data
+    like ``"sparky\\n"`` — is otherwise a ghost row no PATCH can ever touch
+    (every patch re-validates the id → 422 forever) [T9 review m-item].
+    Dropping it at the load gate matches this module's documented posture:
+    the row disappears, and the node can be re-added properly."""
     return (
         isinstance(entry, dict)
         and isinstance(entry.get("id"), str)
+        and _ID_RE.match(entry["id"]) is not None
         and isinstance(entry.get("label"), str)
         and entry.get("agent_kind") in _AGENT_KINDS
     )

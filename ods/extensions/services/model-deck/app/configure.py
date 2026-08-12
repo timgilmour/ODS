@@ -34,6 +34,15 @@ from app.engines import EngineError
 MECHS = ("api", "env+restart", "node-settings", "none")
 
 
+class UnbuiltMechError(EngineError):
+    """A MECHS name whose dispatch was never built (see the refusal at the
+    bottom of apply_settings). Subclasses EngineError so every non-HTTP
+    caller's ``except EngineError`` treatment is unchanged; the app-wide
+    handler renders it 501 Not Implemented instead of EngineError's 502 —
+    502 says "the engine is broken", which sends an operator debugging the
+    wrong side of the wire [T9 review m-item, 2026-08-10]."""
+
+
 def apply_settings(
     mech: str,
     *,
@@ -93,5 +102,5 @@ def apply_settings(
     # Placed AFTER the empty-values check above deliberately: applying
     # nothing stays a no-op rather than becoming an error, which is what
     # keeps "a save with no settings must not wipe an engine's config" true.
-    raise EngineError(
+    raise UnbuiltMechError(
         f"configure mech {mech!r} is declared but not implemented by any engine client")

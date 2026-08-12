@@ -39,6 +39,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.configure import UnbuiltMechError
 from app.engines import BusyError, EngineError, GuardError
 from app.gateway import detect_default_gateway
 from app.routers import (
@@ -467,6 +468,14 @@ def create_app() -> FastAPI:
     @app.exception_handler(EngineError)
     async def _handle_engine_error(request: Request, exc: EngineError) -> JSONResponse:
         return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+    # Registered alongside its parent EngineError: Starlette resolves
+    # handlers by MRO, so the subclass wins here while every non-HTTP
+    # `except EngineError` keeps catching it unchanged. 501, not 502 — an
+    # unbuilt configure mech is the DECK declining, not the engine failing.
+    @app.exception_handler(UnbuiltMechError)
+    async def _handle_unbuilt_mech(request: Request, exc: UnbuiltMechError) -> JSONResponse:
+        return JSONResponse(status_code=501, content={"detail": str(exc)})
 
     @app.exception_handler(ValueError)
     async def _handle_value_error(request: Request, exc: ValueError) -> JSONResponse:

@@ -3378,3 +3378,85 @@ def test_failed_unload_does_not_revert_an_operator_action_that_raced_it(tmp_path
     kinds = [e["kind"] for e in tail_events(events_path)]
     assert "unload-failed" in kinds
     assert "unload-rollback-skipped" in kinds
+
+
+def test_repeated_identical_load_failures_are_deduped(tmp_path):
+    """One degraded backend used to write an identical load-failed line
+    every 2 s tick for the whole outage — the reachable events-trim-thrash
+    input [T10 review]. The failure memo is per-kind, NOT the one-slot
+    _last_event_key: this fixture's ticks interleave a free_comfyui event
+    with every failure, exactly the shape that defeated a global
+    last-event check. Identical failures log ONCE across the outage."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],  # free = 12 GiB < footprint
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    lemonade = FakeLemonade(raise_on_load=EngineError("connection refused"))
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(), lemonade=lemonade, comfy=FakeComfy(),
+    )
+
+    watcher.tick()
+    watcher.tick()
+    watcher.tick()
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert kinds.count("load-failed") == 1
+
+
+def test_load_failure_after_recovery_is_logged_again(tmp_path):
+    """fail -> recover -> identical fail must log BOTH failures — the
+    dedup-key-never-cleared flap-blindness the T9-fix review named as this
+    codebase's forbidden dedup class. The successful load in between
+    re-arms the memo explicitly."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    lemonade = FakeLemonade(raise_on_load=EngineError("connection refused"))
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(), lemonade=lemonade, comfy=FakeComfy(),
+    )
+
+    watcher.tick()                       # fail #1 -> logged
+    lemonade._raise_on_load = None
+    watcher.tick()                       # recovery: load succeeds
+    lemonade._raise_on_load = EngineError("connection refused")
+    watcher.tick()                       # fail #2, identical -> must log
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert kinds.count("load-failed") == 2
+
+
+def test_load_failure_detail_is_bounded(tmp_path):
+    """EngineError carries raw HTTP bodies; a body over events.py's
+    2500 B/line hysteresis ratio used to ride into the log verbatim. The
+    fixture is 4000 chars — deliberately ABOVE that ratio, where the
+    pre-fix behavior and the truncated one visibly differ."""
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    lemonade = FakeLemonade(raise_on_load=EngineError("x" * 4000))
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(), lemonade=lemonade, comfy=FakeComfy(),
+    )
+
+    watcher.tick()
+
+    failed = next(e for e in tail_events(events_path)
+                  if e["kind"] == "load-failed")
+    assert len(failed["detail"]["error"]) < 600
+    assert failed["detail"]["error"].endswith("[truncated]")

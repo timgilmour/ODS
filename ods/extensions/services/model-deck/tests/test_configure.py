@@ -149,3 +149,15 @@ def test_empty_settings_is_a_no_op_not_a_wipe():
 
     assert engine.configured is None
     assert result["applied"] is False
+
+
+def test_unbuilt_mech_refusal_is_the_dedicated_subtype():
+    """UnbuiltMechError subclasses EngineError so every non-HTTP
+    ``except EngineError`` treatment is unchanged; the HTTP layer alone
+    distinguishes it (501, see test_api's handler test)."""
+    from app.configure import UnbuiltMechError
+
+    with pytest.raises(UnbuiltMechError):
+        apply_settings("api", engine_client=FakeApiEngine(),
+                       resolved={"a": {"value": "1"}})
+    assert issubclass(UnbuiltMechError, EngineError)

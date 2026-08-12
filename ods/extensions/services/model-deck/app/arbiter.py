@@ -166,6 +166,21 @@ _DERIVE_RESTORE_FLOOR_S = 30.0
 # charged.
 _RESTORE_COOLDOWN_S = 30.0
 
+# Engine failures carry raw HTTP bodies (`EngineError(resp.text)`), and a
+# multi-KB body re-logged per 2 s tick is exactly the trim-thrash input
+# app/events.py's byte-denominated trim bounds [T10]. Bound the DETAIL too:
+# 500 chars keeps a failed-load line well under events' 2500 B/line
+# hysteresis ratio even when the body is unstable tick to tick (timestamps
+# in an error page defeat dedup, so truncation is the backstop dedup needs).
+_ERROR_TEXT_MAX = 500
+
+
+def _error_text(exc: BaseException) -> str:
+    text = str(exc)
+    if len(text) <= _ERROR_TEXT_MAX:
+        return text
+    return text[:_ERROR_TEXT_MAX] + " …[truncated]"
+
 
 # ===========================================================================
 # Heal suppression — shared flag guarding deliberate unloads
@@ -599,6 +614,7 @@ class Watcher:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_event_key = None
+        self._last_failure_key = None
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -754,7 +770,8 @@ class Watcher:
                     # what tells an operator this happened at all, so it must
                     # not be contingent on the rollback succeeding [T7 review].
                     self._log("unload-failed",
-                              {"model": action["model"], "error": str(exc)})
+                              {"model": action["model"],
+                               "error": _error_text(exc)})
                     # A real compare-and-swap: the predicate and the write
                     # run in ONE critical section inside the store
                     # (put_back_if). An operator can record a deliberate
@@ -792,6 +809,10 @@ class Watcher:
                     # forget() to undo it with. Rare, and no worse than the
                     # behavior this fix replaces.
                 else:
+                    # Same re-arm as the load arm's success path: a
+                    # successful unload between two identical unload
+                    # failures must not swallow the second one.
+                    self._last_failure_key = None
                     # Deck-initiated unload (idle release OR contention
                     # eviction): arm suppression so healing can't immediately
                     # revert it.
@@ -843,8 +864,13 @@ class Watcher:
             except EngineError as exc:
                 # Load failed (engine unreachable, bad response, etc.) — log
                 # and let the loop survive; the next tick re-evaluates.
-                self._log("load-failed", {"error": str(exc)})
+                self._log("load-failed", {"error": _error_text(exc)})
             else:
+                # Re-arm the failure-dedup memo: a recovery between two
+                # IDENTICAL failures must not swallow the second one —
+                # fail→recover→fail is the flap the T9-fix review named as
+                # this codebase's forbidden dedup class.
+                self._last_failure_key = None
                 # Deck-initiated load: the model is wanted resident again, so
                 # clear any suppression left by a prior deliberate unload.
                 self._heal_suppressor.clear()
@@ -1367,9 +1393,23 @@ class Watcher:
                           "lifecycle-spark-unreachable", "harvest-empty",
                           "harvest-failed", "provenance-seed-watch-failed"})
 
+    # load/unload failures get their OWN memo, not the one-slot
+    # _last_event_key: a contention tick interleaves free_comfyui with every
+    # load-failed, so the global "same as the immediately-previous event"
+    # check never fires for exactly the outage that spams — one degraded
+    # backend writing an identical failure line every 2 s tick, the
+    # reachable trim-thrash input [T10 review]. The success arms clear this
+    # memo so a fail→recover→identical-fail flap logs both failures (the
+    # dedup-key-never-cleared class the T9-fix review forbade).
+    _FAILURE_DEDUP_KINDS = frozenset({"load-failed", "unload-failed"})
+
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))
-        if kind in self._DEDUP_KINDS and key == self._last_event_key:
+        if kind in self._FAILURE_DEDUP_KINDS:
+            if key == self._last_failure_key:
+                return
+            self._last_failure_key = key
+        elif kind in self._DEDUP_KINDS and key == self._last_event_key:
             return
         log_event(self._events_path, kind, detail)
         self._last_event_key = key

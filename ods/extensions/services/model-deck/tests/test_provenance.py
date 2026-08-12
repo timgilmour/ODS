@@ -1343,3 +1343,37 @@ def test_failed_quarantine_is_logged_not_swallowed(tmp_path, caplog):
     assert any("could not quarantine" in r.message.lower()
                or "could not quarantine" in r.getMessage().lower()
                for r in caplog.records)
+
+
+def test_concurrent_observes_lose_no_writes_and_never_crash(tmp_path):
+    """The T9b thread discipline pinned for THIS store (the T9b review
+    flagged that Provenance claimed sibling coverage it did not have). Two
+    threads hammer observe() on DIFFERENT artifacts: an unlocked
+    load-modify-save loses one artifact's entry outright, and the fixed
+    .tmp path makes the losing os.replace raise FileNotFoundError into the
+    collector pass. Distinct per-iteration versions make a lost write
+    visible in the end state."""
+    import threading
+
+    store = _store(tmp_path)
+    errors = []
+
+    def hammer(artifact, prefix):
+        try:
+            for i in range(100):
+                store.observe(artifact, kind="oci", node="local", role="engine",
+                              current=_identity(f"sha256:{prefix}{i}", f"{prefix}:{i}"),
+                              now=T1)
+        except Exception as exc:  # noqa: BLE001 — a crash IS the finding
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer, args=("oci:local:alpha", "a")),
+               threading.Thread(target=hammer, args=("oci:local:beta", "b"))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert errors == []
+    data = store.get()
+    assert data["oci:local:alpha"]["current"]["version"] == "sha256:a99"
+    assert data["oci:local:beta"]["current"]["version"] == "sha256:b99"

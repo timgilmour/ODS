@@ -264,3 +264,20 @@ def test_credential_fingerprint_contract(store):
 
     store.update("hera", {}, credential="rotated")
     assert store.credential_fingerprint("hera") != fp   # rotation is visible
+
+
+def test_load_drops_a_legacy_id_the_write_side_would_refuse(tmp_path):
+    """An id is a KEY; pre-`\\Z`-fix data like ``"sparky\\n"`` passed the
+    old anchor, and a row the write-side `_validate()` refuses is otherwise
+    a ghost no PATCH can ever touch (every patch re-validates the id -> 422
+    forever). The load gate drops it like any other malformed element; the
+    clean sibling row must survive untouched."""
+    path = tmp_path / "nodes.json"
+    path.write_text(json.dumps([
+        {"id": "sparky\n", "label": "ghost", "agent_kind": "node-agent",
+         "address": "http://sparky:7720"},
+        {"id": "local", "label": "autarch", "agent_kind": "local"},
+    ]))
+    store = NodeStore(path, tmp_path / "creds.json")
+    ids = [n["id"] for n in store.list()]
+    assert ids == ["local"]

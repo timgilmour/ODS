@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from app.engines import EngineError
 from app.events import log_event
 from app.node_binding import entry_actuation_stale
+from app.observe import spark_node_id
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -111,8 +112,23 @@ def update_node(node_id: str, body: NodePatch, request: Request) -> dict:
 @router.delete("/{node_id}")
 def delete_node(node_id: str, request: Request) -> dict:
     deck = request.app.state.deck
+    # The SparkClient is bound ONCE, at app build (app.main's spark_bound
+    # stash) — deleting its registry row does NOT unbind it, so the deck
+    # keeps actuating a node the operator just removed until a restart
+    # re-binds from the (now rowless) registry. Refusing here would deadlock
+    # removal outright (a restart re-binds from a registry that still holds
+    # the row), so the delete proceeds and the residual binding is surfaced
+    # loudly instead. Full live unbinding is the provider-rebinding design
+    # pass [08-10 wave report, parked].
+    bound_client_remains = (
+        deck.get("spark") is not None and node_id == spark_node_id())
     deck["node_store"].remove(node_id)
-    log_event(deck["events_path"], "node-removed", {"node": node_id})
+    log_event(deck["events_path"], "node-removed",
+              {"node": node_id, "bound_client_remains": bound_client_remains})
+    if bound_client_remains:
+        return {"status": "ok", "restart_required": True,
+                "detail": "the live actuation client remains bound to this "
+                          "node until the deck restarts"}
     return {"status": "ok"}
 
 

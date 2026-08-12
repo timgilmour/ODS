@@ -3100,3 +3100,27 @@ def test_drift_without_journal_keeps_c1_shape():
     drift = _settings_drift(data, "local/lemonade", intent)
     assert sorted(drift["changed"]) == ["args:seed", "args:top-k"]
     assert drift["entries"] == []
+
+
+def test_unbuilt_mech_error_renders_501_not_502(tmp_path, monkeypatch):
+    """502 says "the engine is broken" and sends an operator debugging the
+    wrong side of the wire; an unbuilt configure mech is the DECK declining
+    — 501. Starlette resolves handlers by MRO, so the subclass handler must
+    win over EngineError's 502 [T9 review m-item]."""
+    from app.configure import UnbuiltMechError
+
+    app, _ = make_app(tmp_path, monkeypatch)
+
+    def _boom():
+        raise UnbuiltMechError("configure mech 'api' is declared but not implemented")
+
+    # Inserted at the FRONT: the SPA catch-all registered by create_app()
+    # shadows any route added after it.
+    from fastapi.routing import APIRoute
+    app.router.routes.insert(
+        0, APIRoute("/__test/unbuilt-mech", _boom, methods=["GET"]))
+
+    client = TestClient(app)
+    resp = client.get("/__test/unbuilt-mech")
+    assert resp.status_code == 501
+    assert "not implemented" in resp.json()["detail"]
