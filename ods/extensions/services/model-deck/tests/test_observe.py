@@ -109,7 +109,7 @@ def test_spark_identity_is_the_profile_not_the_served_name():
     served under a different --served-model-name."""
     status = {"profile": "heretic", "serving": {"model": "heretic"}, "reachable": True}
 
-    result = observe_spark(status)
+    result = observe_spark(status, "sparky")
 
     assert result["sparky/slot0"] == {
         "reachable": True, "loaded": True, "model": "heretic", "transitioning": False,
@@ -119,7 +119,7 @@ def test_spark_identity_is_the_profile_not_the_served_name():
 def test_spark_profile_serving_under_a_different_name_is_not_drift():
     status = {"profile": "mm27b", "serving": {"model": "aeon"}, "reachable": True}
 
-    result = observe_spark(status)
+    result = observe_spark(status, "sparky")
 
     assert result["sparky/slot0"]["model"] == "mm27b"
 
@@ -127,7 +127,7 @@ def test_spark_profile_serving_under_a_different_name_is_not_drift():
 def test_spark_reachable_but_nothing_serving():
     status = {"profile": "heretic", "serving": None, "reachable": True}
 
-    result = observe_spark(status)
+    result = observe_spark(status, "sparky")
 
     assert result["sparky/slot0"] == {
         "reachable": True, "loaded": False, "model": None, "transitioning": False,
@@ -137,13 +137,13 @@ def test_spark_reachable_but_nothing_serving():
 def test_spark_absent_client_yields_nothing():
     """No spark configured is not the same as spark being down — emit no
     key at all rather than a phantom unreachable resource."""
-    assert observe_spark(None) == {}
+    assert observe_spark(None, "sparky") == {}
 
 
 def test_spark_unreachable():
     status = {"profile": None, "serving": None, "reachable": False}
 
-    result = observe_spark(status)
+    result = observe_spark(status, "sparky")
 
     assert result["sparky/slot0"]["reachable"] is False
 
@@ -224,7 +224,7 @@ def test_spark_observer_translates_the_node_payload():
     assert status["profile"] == "heretic"
     assert status["reachable"] is True
     assert status["swap_in_progress"] is False
-    assert observe_spark(status)["sparky/slot0"]["model"] == "heretic"
+    assert observe_spark(status, "sparky")["sparky/slot0"]["model"] == "heretic"
 
 
 def test_spark_observer_returns_none_without_a_spark():
@@ -391,3 +391,43 @@ def test_spark_observer_invalidate_forces_a_fresh_probe():
     obs.status()
 
     assert spark.calls == 2
+
+
+# ===========================================================================
+# N1 T3 — node-parametrized key vocabulary
+# ===========================================================================
+
+from app.observe import engine_for, observe_spark, slot_key
+
+
+def test_slot_key_is_node_slash_slot0():
+    assert slot_key("boxa") == "boxa/slot0"
+
+
+def test_observe_spark_emits_the_given_nodes_key():
+    status = {"profile": "laguna", "serving": {"model": "aeon"},
+              "reachable": True, "swap_in_progress": False}
+    obs = observe_spark(status, "boxa")
+    assert set(obs) == {"boxa/slot0"}
+    assert obs["boxa/slot0"]["loaded"] is True
+    assert obs["boxa/slot0"]["model"] == "laguna"   # identity is the PROFILE
+
+
+def test_observe_spark_none_emits_no_key_for_any_node():
+    assert observe_spark(None, "boxa") == {}
+
+
+def test_engine_for_swap_key_requires_declared_node():
+    assert engine_for("boxa/slot0", frozenset({"boxa", "boxb"})) == "spark"
+    assert engine_for("boxa/slot0", frozenset()) is None
+    assert engine_for("boxa/slot0", frozenset({"boxb"})) is None
+
+
+def test_engine_for_only_slot0_maps_to_spark():
+    assert engine_for("boxa/slot1", frozenset({"boxa"})) is None
+    assert engine_for("boxa", frozenset({"boxa"})) is None
+
+
+def test_engine_for_local_keys_ignore_the_id_set():
+    assert engine_for("local/hipfire") == "hipfire"
+    assert engine_for("local/lemonade", frozenset({"local"})) == "lemonade"

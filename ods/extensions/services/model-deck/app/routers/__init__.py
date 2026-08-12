@@ -56,11 +56,11 @@ def build_observations(deck: dict, world: dict) -> dict[str, dict]:
     backed-off probe shared with the watcher, because an unreachable sparky
     is its normal state and each probe costs two 5 s timeouts.
     """
-    from app.observe import merge_observations, observe_local, observe_spark
+    from app.observe import merge_observations, observe_local, observe_spark, spark_node_id
 
     observer = deck.get("spark_observer")
     spark_status = observer.status() if observer is not None else None
-    return merge_observations(observe_local(world), observe_spark(spark_status))
+    return merge_observations(observe_local(world), observe_spark(spark_status, spark_node_id()))
 
 
 def build_lifecycle_view(deck: dict, world: dict) -> dict:

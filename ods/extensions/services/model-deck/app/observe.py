@@ -50,6 +50,15 @@ def spark_node_id() -> str:
     return SPARK_SLOT_KEY.split("/", 1)[0]
 
 
+def slot_key(node_id: str) -> str:
+    """The serving-slot resource key for a swap node. "slot0" is the
+    documented single-slot convention (multi-slot is out of scope, design
+    §4). Writers (app.routers.serving) and readers (app.arbiter,
+    app.routers.build_observations) derive the key from HERE so actuation
+    and observation can never disagree on it."""
+    return f"{node_id}/slot0"
+
+
 def observe_local(world: dict) -> dict[str, dict]:
     """Map a World snapshot's tenants to observation records."""
     tenants = world["tenants"]
@@ -85,18 +94,20 @@ def observe_local(world: dict) -> dict[str, dict]:
     }
 
 
-def observe_spark(spark_status: dict | None) -> dict[str, dict]:
-    """Map the spark node's status to its single slot resource.
+def observe_spark(spark_status: dict | None, node_id: str) -> dict[str, dict]:
+    """Map one swap node's status to its single slot resource.
 
-    ``None`` means no spark is configured at all, which emits no key —
-    a resource nobody declared must not appear as a phantom failure.
+    ``None`` means the node is not observable at all (no observer, no
+    operable client), which emits no key — a resource nobody declared must
+    not appear as a phantom failure.
     """
     if spark_status is None:
         return {}
 
+    key = slot_key(node_id)
     if not spark_status.get("reachable", False):
         return {
-            SPARK_SLOT_KEY: {
+            key: {
                 "reachable": False, "loaded": False, "model": None, "transitioning": False,
             }
         }
@@ -108,7 +119,7 @@ def observe_spark(spark_status: dict | None) -> dict[str, dict]:
     # report permanent drift for a perfectly correct placement.
     profile = spark_status.get("profile")
     return {
-        SPARK_SLOT_KEY: {
+        key: {
             "reachable": True,
             "loaded": serving.get("model") is not None,
             "model": profile if serving.get("model") is not None else None,
@@ -127,9 +138,20 @@ _ENGINE_BY_KEY = {
 }
 
 
-def engine_for(key: str) -> str | None:
-    """The engine that owns `key`, or None if the key is unknown."""
-    return _ENGINE_BY_KEY.get(key)
+def engine_for(key: str, swap_node_ids: frozenset[str] | set[str] = frozenset()) -> str | None:
+    """The engine that owns `key`, or None if the key is unknown.
+
+    Local mappings are static; a ``<node>/slot0`` key maps to ``"spark"``
+    iff ``<node>`` is in `swap_node_ids` — a PREPARED id-set, not the store,
+    so this stays a pure function and each caller decides its own registry
+    read (design §4)."""
+    engine = _ENGINE_BY_KEY.get(key)
+    if engine is not None:
+        return engine
+    node, sep, resource = key.partition("/")
+    if sep and resource == "slot0" and node in swap_node_ids:
+        return "spark"
+    return None
 
 
 def merge_observations(*maps: dict[str, dict]) -> dict[str, dict]:

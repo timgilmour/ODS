@@ -903,7 +903,7 @@ class Watcher:
         spark_status = self._spark_status()
         observed = merge_observations(
             observe_local(world),
-            observe_spark(spark_status),
+            observe_spark(spark_status, spark_node_id()),
         )
 
         # A key `_execute` actuated THIS tick predates its own action by
