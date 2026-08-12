@@ -49,8 +49,16 @@ from app.store_io import load_json, save_json
 # provenance all attach through it) [max-review c33].
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 _AGENT_KINDS = {"local", "node-agent"}
-_PATCHABLE = {"label", "address", "serving_address"}
-_ALLOWED = {"id", "label", "agent_kind", "address", "serving_address"}
+_CONTROLS = {"none", "swap"}
+_PATCHABLE = {"label", "address", "serving_address", "control"}
+_ALLOWED = {"id", "label", "agent_kind", "address", "serving_address", "control"}
+
+# The OLD env-seeded spark node id — frozen MIGRATION DATA, not coupling:
+# pre-N1 installs seeded exactly this id (it was app.observe.spark_node_id(),
+# deleted in N1), and intent/settings/provenance keys on those installs
+# attach through it. Used only by seed_if_missing callers and
+# stamp_missing_control; never to build a key for a new node.
+LEGACY_SPARK_SEED_ID = "sparky"
 
 
 def _well_formed(entry: object) -> bool:
@@ -78,6 +86,12 @@ def _well_formed(entry: object) -> bool:
     )
 
 
+def _heal_control(entry: dict) -> dict:
+    if entry.get("control") not in _CONTROLS:
+        return {**entry, "control": "none"}
+    return entry
+
+
 def _validate(spec: dict) -> None:
     missing = {"id", "label", "agent_kind"} - set(spec)
     extra = set(spec) - _ALLOWED
@@ -94,6 +108,13 @@ def _validate(spec: dict) -> None:
     for field in ("address", "serving_address"):
         if field in spec and spec[field] is not None and not isinstance(spec[field], str):
             raise ValueError(f"{field} must be a string or null")
+    if "control" in spec:
+        if spec["control"] not in _CONTROLS:
+            raise ValueError(f"control must be one of {sorted(_CONTROLS)}")
+        if spec["control"] == "swap" and spec["agent_kind"] == "local":
+            raise ValueError(
+                'the local node cannot be control: "swap" — local actuation '
+                "is docker-ctl, not the swap protocol (G1 revisits)")
 
 
 class NodeStore:
@@ -125,7 +146,11 @@ class NodeStore:
         # Element-level gate (see module docstring): a hand-edited malformed
         # entry is dropped here, silently, same as the file-level self-heal
         # above — every caller downstream may assume the shape holds.
-        return [entry for entry in data if _well_formed(entry)]
+        # `control` is HEALED rather than dropped (missing/invalid -> "none"):
+        # pre-N1 files have no such key, and an entry losing its whole row
+        # over a field this increment introduced would be the gate punishing
+        # old data for new vocabulary. One gate, here — no per-site guards.
+        return [_heal_control(entry) for entry in data if _well_formed(entry)]
 
     def _save(self, data: list[dict]) -> None:
         save_json(self._path, data)
@@ -151,9 +176,24 @@ class NodeStore:
     def get(self, node_id: str) -> dict | None:
         return next((n for n in self._load() if n["id"] == node_id), None)
 
+    def _require_swap_prereqs(self, entry: dict, credential_present: bool) -> None:
+        """The three-prerequisite rule for `control: "swap"` (design §2):
+        address + serving_address + a credential, present simultaneously.
+        Missing fields are NAMED — the 422 is the operator's checklist."""
+        missing = [f for f in ("address", "serving_address") if not entry.get(f)]
+        if not credential_present:
+            missing.append("credential")
+        if missing:
+            raise ValueError(
+                'control: "swap" requires ' + ", ".join(missing)
+                + " to be set first")
+
     def add(self, spec: dict, credential: str | None = None) -> dict:
         spec = dict(spec)
+        spec.setdefault("control", "none")
         _validate(spec)
+        if spec["control"] == "swap":
+            self._require_swap_prereqs(spec, credential_present=bool(credential))
         with self._lock:
             if spec["agent_kind"] == "local" and self.get("local") is not None:
                 raise ValueError("the local node is seeded, not added")
@@ -182,6 +222,11 @@ class NodeStore:
                 if node["id"] == node_id:
                     merged = {**node, **patch}
                     _validate({k: v for k, v in merged.items() if k != "added_ts"})
+                    if merged.get("control") == "swap":
+                        self._require_swap_prereqs(
+                            merged,
+                            credential_present=bool(credential)
+                            or self.credential_set(node_id))
                     node.update(patch)
                     self._save(data)
                     if credential:
@@ -194,6 +239,16 @@ class NodeStore:
     def remove(self, node_id: str) -> None:
         if node_id == "local":
             raise GuardError("the local node cannot be removed")
+        entry = self.get(node_id)
+        if entry is not None and entry.get("control") == "swap":
+            # A declared-operable node must never lose its credential (the
+            # sidecar row dies with the entry) as a side effect of one call;
+            # the operator demotes explicitly, then removes (design §2,
+            # 08-12 refinement). Any FUTURE credential-clear operation must
+            # carry this same gate.
+            raise GuardError(
+                f"node {node_id!r} is declared operable (control: \"swap\"); "
+                'set control to "none" first')
         with self._lock:
             data = [n for n in self._load() if n["id"] != node_id]
             self._save(data)
@@ -228,6 +283,42 @@ class NodeStore:
             return None
         return hashlib.sha256(value.encode()).hexdigest()
 
+    def stamp_missing_control(self, swap_id: str) -> bool:
+        """One-time migration for pre-N1 files (design §8): stamp `control`
+        ON DISK for every well-formed entry that lacks the key. The entry
+        whose id is `swap_id` (the old env-seeded spark id) gets `"swap"`
+        IFF it has address + serving_address + a stored credential — exactly
+        the condition under which the pre-N1 main.py would have bound a
+        client; anything less stays `"none"` and the board shows the node
+        observe-only (honest, recoverable via the UI toggle).
+
+        Keys on the ABSENCE of `control` in the RAW file, so it runs at most
+        once per entry lifetime: after the first write every entry has the
+        key, and a later operator demotion is never re-promoted. Reads raw
+        (`load_json`, not `_load()`) because `_load()` heals in memory —
+        healed entries would look already-stamped. Malformed elements are
+        left byte-identical (the migration must not be a destructive pass;
+        dropping them stays `_load()`'s job)."""
+        with self._lock:
+            data = load_json(self._path)
+            if not isinstance(data, list):
+                return False
+            changed = False
+            for entry in data:
+                if not _well_formed(entry) or "control" in entry:
+                    continue
+                if (entry["id"] == swap_id
+                        and entry.get("address")
+                        and entry.get("serving_address")
+                        and self.credential_set(entry["id"])):
+                    entry["control"] = "swap"
+                else:
+                    entry["control"] = "none"
+                changed = True
+            if changed:
+                self._save(data)
+            return changed
+
 
 def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
                     spark_node_url: str, spark_serving_url: str,
@@ -237,8 +328,8 @@ def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
     Runs ONLY while nodes.json does not exist; once it does, env is never
     consulted again — no per-boot merge that could resurrect a removed
     entry. The spark entry's id is the caller-passed `spark_id`, which MUST
-    be spark_node_id() (app/observe.py:42-47): every keyed datum — intent,
-    settings scopes, oci:<id>: provenance — attaches through that string.
+    be `LEGACY_SPARK_SEED_ID`: every keyed datum — intent, settings scopes,
+    oci:<id>: provenance — on a pre-N1 install attaches through that string.
 
     The keys-json parse mirrors app/main.py's historical tolerance: a
     malformed map degrades to "no credential" (the node still seeds, the

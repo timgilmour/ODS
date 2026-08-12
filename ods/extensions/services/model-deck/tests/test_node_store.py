@@ -281,3 +281,142 @@ def test_load_drops_a_legacy_id_the_write_side_would_refuse(tmp_path):
     store = NodeStore(path, tmp_path / "creds.json")
     ids = [n["id"] for n in store.list()]
     assert ids == ["local"]
+
+
+# --- N1: the control field -------------------------------------------------
+
+def _swap_spec(node_id="boxa", label="Box Alpha"):
+    return {"id": node_id, "label": label, "agent_kind": "node-agent",
+            "address": f"http://{node_id}:7720",
+            "serving_address": f"http://{node_id}:8000",
+            "control": "swap"}
+
+
+def test_control_heals_to_none_at_load(store, tmp_path):
+    # Hand-written pre-N1 entry: no control key at all.
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
+         "address": "http://boxa:7720"}]))
+    assert store.get("boxa")["control"] == "none"
+
+
+def test_control_invalid_value_heals_to_none(store, tmp_path):
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
+         "address": "http://boxa:7720", "control": "maybe"}]))
+    assert store.get("boxa")["control"] == "none"
+
+
+def test_add_defaults_control_none(store):
+    entry = store.add({"id": "boxa", "label": "Box Alpha",
+                       "agent_kind": "node-agent", "address": "http://boxa:7720"})
+    assert entry["control"] == "none"
+
+
+def test_add_swap_with_prereqs_ok(store):
+    entry = store.add(_swap_spec(), credential="key-boxa")
+    assert entry["control"] == "swap"
+
+
+def test_swap_refused_without_prereqs_names_missing(store):
+    spec = _swap_spec()
+    del spec["serving_address"]
+    with pytest.raises(ValueError) as exc:
+        store.add(spec)          # no credential either
+    assert "serving_address" in str(exc.value)
+    assert "credential" in str(exc.value)
+    assert "address" not in str(exc.value).replace("serving_address", "")
+
+
+def test_patch_to_swap_uses_stored_credential(store):
+    spec = _swap_spec()
+    spec["control"] = "none"
+    store.add(spec, credential="key-boxa")
+    entry = store.update("boxa", {"control": "swap"})
+    assert entry["control"] == "swap"
+
+
+def test_patch_to_swap_refused_without_credential(store):
+    spec = _swap_spec()
+    spec["control"] = "none"
+    store.add(spec)              # no credential stored
+    with pytest.raises(ValueError, match="credential"):
+        store.update("boxa", {"control": "swap"})
+
+
+def test_local_refuses_swap(store):
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    with pytest.raises(ValueError, match="local"):
+        store.update("local", {"control": "swap"})
+
+
+def test_remove_swap_node_refused(store):
+    store.add(_swap_spec(), credential="key-boxa")
+    with pytest.raises(GuardError, match="control"):
+        store.remove("boxa")
+    # Explicit two-step: demote first, then remove works.
+    store.update("boxa", {"control": "none"})
+    store.remove("boxa")
+    assert store.get("boxa") is None
+
+
+def test_demote_to_none_always_allowed(store):
+    store.add(_swap_spec(), credential="key-boxa")
+    entry = store.update("boxa", {"control": "none"})
+    assert entry["control"] == "none"
+    # Credential survives the demotion — demote-then-clear is two steps,
+    # and demote alone must not destroy anything.
+    assert store.credential_set("boxa")
+
+
+# --- N1: migration stamp ----------------------------------------------------
+
+def _legacy_file(tmp_path, entries):
+    (tmp_path / "nodes.json").write_text(json.dumps(entries))
+
+
+def test_stamp_sets_swap_on_matching_entry_with_prereqs(store, tmp_path):
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "This Box", "agent_kind": "local"},
+        {"id": "sparky", "label": "sparky", "agent_kind": "node-agent",
+         "address": "http://sparky:7720", "serving_address": "http://sparky:8000"},
+    ])
+    (tmp_path / "node_credentials.json").write_text(json.dumps({"sparky": "k"}))
+    assert store.stamp_missing_control("sparky") is True
+    assert store.get("sparky")["control"] == "swap"
+    assert store.get("local")["control"] == "none"
+
+
+def test_stamp_without_prereqs_stays_none(store, tmp_path):
+    # No credential: today's main.py would not have bound a client either.
+    _legacy_file(tmp_path, [
+        {"id": "sparky", "label": "sparky", "agent_kind": "node-agent",
+         "address": "http://sparky:7720", "serving_address": "http://sparky:8000"},
+    ])
+    store.stamp_missing_control("sparky")
+    assert store.get("sparky")["control"] == "none"
+
+
+def test_stamp_runs_exactly_once(store, tmp_path):
+    """Mutation check (design §10): after the stamp, a deliberate demotion
+    survives every later boot — the migration keys on the ABSENCE of the
+    control key on disk, which exists only in pre-N1 files."""
+    _legacy_file(tmp_path, [
+        {"id": "sparky", "label": "sparky", "agent_kind": "node-agent",
+         "address": "http://sparky:7720", "serving_address": "http://sparky:8000"},
+    ])
+    (tmp_path / "node_credentials.json").write_text(json.dumps({"sparky": "k"}))
+    assert store.stamp_missing_control("sparky") is True
+    store.update("sparky", {"control": "none"})           # operator demotes
+    assert store.stamp_missing_control("sparky") is False  # never re-stamps
+    assert store.get("sparky")["control"] == "none"
+
+
+def test_stamp_ignores_non_matching_ids(store, tmp_path):
+    _legacy_file(tmp_path, [
+        {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
+         "address": "http://boxa:7720", "serving_address": "http://boxa:8000"},
+    ])
+    (tmp_path / "node_credentials.json").write_text(json.dumps({"boxa": "k"}))
+    store.stamp_missing_control("sparky")
+    assert store.get("boxa")["control"] == "none"
