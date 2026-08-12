@@ -64,28 +64,6 @@ def test_history_for_filters_by_artifact_and_keeps_order(tmp_path):
         "2026-08-01T00:00:00+00:00", "2026-08-03T00:00:00+00:00"]
 
 
-def test_state_at_returns_the_last_block_at_or_before_the_timestamp(tmp_path):
-    path = tmp_path / "h.jsonl"
-    history.append(path, _rec("2026-08-01T00:00:00+00:00", to={"version": "v0.5.3"}))
-    history.append(path, _rec("2026-08-05T00:00:00+00:00", to={"version": "v0.5.6"}))
-    at = history.state_at(path, "oci:local:x", "2026-08-04T00:00:00+00:00")
-    assert at == {"version": "v0.5.3"}
-
-
-def test_state_at_before_any_record_is_none(tmp_path):
-    path = tmp_path / "h.jsonl"
-    history.append(path, _rec("2026-08-05T00:00:00+00:00"))
-    assert history.state_at(path, "oci:local:x", "2026-08-01T00:00:00+00:00") is None
-
-
-def test_state_at_ignores_other_fields(tmp_path):
-    path = tmp_path / "h.jsonl"
-    rec = _rec("2026-08-01T00:00:00+00:00", to={"version": "desired-only"})
-    rec["field"] = "desired"
-    history.append(path, rec)
-    assert history.state_at(path, "oci:local:x", "2026-08-09T00:00:00+00:00") is None
-
-
 def test_unparseable_lines_are_skipped_not_raised(tmp_path):
     path = tmp_path / "h.jsonl"
     history.append(path, _rec("2026-08-01T00:00:00+00:00"))

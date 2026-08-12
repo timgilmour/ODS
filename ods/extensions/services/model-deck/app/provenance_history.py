@@ -19,8 +19,11 @@ torn write is therefore a gap in the narrative — never a wrong current state
 and never an unrestorable system.
 
 ``to`` embeds the WHOLE block rather than a delta. That is what makes
-state_at a single scan instead of a replay, and what keeps one lost line
-from invalidating everything after it.
+"the block in force at time T" a single scan instead of a replay, and what
+keeps one lost line from invalidating everything after it. (A ``state_at``
+reader implementing that scan existed but had no caller anywhere — deleted
+in the 2026-08-12 simplify sweep, recoverable from git when a D6
+restore-point route is actually built.)
 
 History is never rewritten, compacted, or truncated.
 """
@@ -91,18 +94,3 @@ def read_all(path: Path) -> list[dict]:
 
 def history_for(path: Path, artifact_id: str) -> list[dict]:
     return [r for r in read_all(path) if r.get("artifact_id") == artifact_id]
-
-
-def state_at(path: Path, artifact_id: str, ts: str,
-             field: str = "current") -> dict | None:
-    """The `field` block in force for `artifact_id` at `ts` — the last
-    transition at or before it, or None if the artifact had no such block
-    yet. ISO-8601 timestamps with a fixed offset sort correctly as plain
-    strings, the same assumption node-agent's read_newest_catalog makes."""
-    latest = None
-    for record in history_for(path, artifact_id):
-        if record.get("field") != field:
-            continue
-        if record.get("ts", "") <= ts:
-            latest = record
-    return None if latest is None else latest.get("to")
