@@ -23,7 +23,7 @@ queue, we don't free.
 
 import httpx
 
-from app.engines import EngineError, GuardError
+from app.engines import GuardError, engine_request
 
 _TIMEOUT = 5.0
 
@@ -37,23 +37,13 @@ class ComfyClient:
         )
 
     def queue_len(self) -> int:
-        try:
-            resp = self._client.get("/queue")
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        resp = engine_request(lambda: self._client.get("/queue"))
         data = resp.json()
         return len(data["queue_running"]) + len(data["queue_pending"])
 
     def free(self) -> None:
         if self.queue_len() > 0:
             raise GuardError("ComfyUI queue is not empty; refusing to free VRAM")
-        try:
-            resp = self._client.post(
-                "/free", json={"unload_models": True, "free_memory": True}
-            )
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        engine_request(lambda: self._client.post(
+            "/free", json={"unload_models": True, "free_memory": True}
+        ))

@@ -61,7 +61,7 @@ its comment for the full reasoning.
 
 import httpx
 
-from app.engines import EngineError, GuardError
+from app.engines import EngineError, GuardError, engine_request
 
 _TIMEOUT = 5.0
 _STOP_GRACE_S = 5
@@ -136,12 +136,7 @@ class DockerCtl:
         return self._inspect(name)
 
     def _inspect(self, name: str) -> dict:
-        try:
-            resp = self._client.get(f"/containers/{name}/json")
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        resp = engine_request(lambda: self._client.get(f"/containers/{name}/json"))
         return resp.json()
 
     def stop(self, name: str) -> None:
@@ -180,33 +175,23 @@ class DockerCtl:
         return self._exec_start(exec_id)
 
     def _exec_create(self, name: str, interpreter: str, source: str) -> str:
-        try:
-            resp = self._client.post(
-                f"/containers/{name}/exec",
-                json={
-                    "Cmd": [interpreter, "-c", source],
-                    "AttachStdout": True,
-                    "AttachStderr": True,
-                    "Tty": False,
-                },
-            )
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        resp = engine_request(lambda: self._client.post(
+            f"/containers/{name}/exec",
+            json={
+                "Cmd": [interpreter, "-c", source],
+                "AttachStdout": True,
+                "AttachStderr": True,
+                "Tty": False,
+            },
+        ))
         return resp.json()["Id"]
 
     def _exec_start(self, exec_id: str) -> str:
-        try:
-            resp = self._client.post(
-                f"/exec/{exec_id}/start",
-                json={"Detach": False, "Tty": False},
-                timeout=_EXEC_TIMEOUT,
-            )
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        resp = engine_request(lambda: self._client.post(
+            f"/exec/{exec_id}/start",
+            json={"Detach": False, "Tty": False},
+            timeout=_EXEC_TIMEOUT,
+        ))
         return _demux_stdout(resp.content)
 
     def _guard(self, name: str) -> None:
@@ -214,13 +199,9 @@ class DockerCtl:
             raise GuardError(f"container {name!r} is not in the park allowlist")
 
     def _lifecycle_post(self, name: str, action: str, **kwargs) -> None:
-        try:
-            resp = self._client.post(f"/containers/{name}/{action}", **kwargs)
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if resp.status_code == _ALREADY_DONE or resp.is_success:
-            return
-        raise EngineError(resp.text)
+        engine_request(lambda: self._client.post(f"/containers/{name}/{action}",
+                                                 **kwargs),
+                       also_ok=(_ALREADY_DONE,))
 
 
 def _demux_stdout(data: bytes) -> str:

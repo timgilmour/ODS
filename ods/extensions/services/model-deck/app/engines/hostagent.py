@@ -31,7 +31,7 @@ flight and the deck must keep working when the agent is down.
 
 import httpx
 
-from app.engines import BusyError, EngineError
+from app.engines import BusyError, engine_request
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
 _LIFECYCLE_TIMEOUT = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
@@ -55,14 +55,12 @@ class HostAgent:
         )
 
     def activate(self, model_id: str) -> dict:
-        try:
-            resp = self._client.post("/v1/model/activate", json={"model_id": model_id})
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
+        resp = engine_request(
+            lambda: self._client.post("/v1/model/activate",
+                                      json={"model_id": model_id}),
+            also_ok=(409,))
         if resp.status_code == 409:
             raise BusyError(resp.text)
-        if not resp.is_success:
-            raise EngineError(resp.text)
         return resp.json()
 
     def lifecycle(self) -> dict:

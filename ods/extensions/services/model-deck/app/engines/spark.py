@@ -53,7 +53,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.engines import BusyError, EngineError, GuardError
+from app.engines import BusyError, EngineError, GuardError, engine_request
 from app.engines.litellm import LiteLLMClient
 from app.engines.metrics import sum_matching
 from app.engines.node_agent import NodeAgentHTTP
@@ -174,12 +174,7 @@ class SparkClient(NodeAgentHTTP):
         one source of truth for a remote model's live facts (context length,
         etc.), consumed by the characteristics derive pass
         (app.arbiter.Watcher._derive_pass / app.derive_live)."""
-        try:
-            resp = self._serving.get("/v1/models")
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        resp = engine_request(lambda: self._serving.get("/v1/models"))
         try:
             return resp.json()
         except json.JSONDecodeError as exc:
@@ -226,12 +221,8 @@ class SparkClient(NodeAgentHTTP):
         EngineError on a transport failure or a non-2xx response. The
         node-agent echoes the document back on success; this client ignores
         the body — the caller already knows what it sent."""
-        try:
-            resp = self._node.put(f"/v1/node/profile/{profile}/settings", json=document)
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        engine_request(lambda: self._node.put(
+            f"/v1/node/profile/{profile}/settings", json=document))
 
     def swap_in_progress(self) -> bool:
         """True while a previous swap is still booting. Same judgement the
@@ -253,12 +244,7 @@ class SparkClient(NodeAgentHTTP):
         comment for why ds4 is the one engine that needs this.
         """
         metric_prefixes = _BUSY_METRICS[engine]
-        try:
-            resp = self._serving.get("/metrics")
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        resp = engine_request(lambda: self._serving.get("/metrics"))
         try:
             total, matched = sum_matching(resp.text, metric_prefixes)
         except ValueError as exc:
@@ -335,14 +321,11 @@ class SparkClient(NodeAgentHTTP):
                     "(a first boot can autotune ~15 min); wait for the "
                     "endpoint or use force to interrupt it")
 
-        try:
-            resp = self._node.post("/v1/node/swap", json={"profile": profile})
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
+        resp = engine_request(
+            lambda: self._node.post("/v1/node/swap", json={"profile": profile}),
+            also_ok=(409,))
         if resp.status_code == 409:
             raise BusyError(resp.text)
-        if not resp.is_success:
-            raise EngineError(resp.text)
         try:
             body = resp.json()
         except json.JSONDecodeError as exc:

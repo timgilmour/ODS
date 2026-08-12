@@ -20,7 +20,7 @@ text) or on an httpx.TransportError.
 
 import httpx
 
-from app.engines import EngineError
+from app.engines import engine_request
 
 _TIMEOUT = 5.0
 
@@ -55,10 +55,5 @@ class LiteLLMClient:
         return self._model_info()
 
     def _model_info(self) -> list[dict]:
-        try:
-            resp = self._client.get("/model/info")
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
+        resp = engine_request(lambda: self._client.get("/model/info"))
         return resp.json()["data"]

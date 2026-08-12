@@ -66,7 +66,7 @@ import time
 
 import httpx
 
-from app.engines import EngineError, GuardError
+from app.engines import EngineError, GuardError, guarded_send
 from app.engines.docker_ctl import DockerCtl
 from app.engines.litellm import LiteLLMClient
 
@@ -100,17 +100,11 @@ class HipfireClient:
     def status(self) -> str:
         if not self._dockerctl.running(self._container):
             return "parked"
-        try:
-            resp = self._client.get(self._health_url)
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
+        resp = guarded_send(lambda: self._client.get(self._health_url))
         return "running" if resp.status_code == _HEALTHY else "loading"
 
     def stats(self) -> dict:
-        try:
-            resp = self._client.get(self._stats_url)
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
+        resp = guarded_send(lambda: self._client.get(self._stats_url))
         if resp.status_code != _HEALTHY:
             raise EngineError(f"GET {self._stats_url} -> {resp.status_code}")
         body = resp.json()

@@ -22,6 +22,11 @@ later" need these to be unrelated exception types.
 """
 
 
+from collections.abc import Callable
+
+import httpx
+
+
 class EngineError(Exception):
     """An engine HTTP call failed: non-2xx response or transport error."""
 
@@ -32,3 +37,30 @@ class GuardError(Exception):
 
 class BusyError(Exception):
     """The host agent returned HTTP 409: it is already busy with another activation."""
+
+
+def guarded_send(send: Callable[[], "httpx.Response"]) -> "httpx.Response":
+    """The transport half of the wire idiom: run one httpx call, mapping
+    httpx.TransportError to EngineError. For callers whose STATUS handling
+    is their own vocabulary (hipfire's healthy/loading split) — everyone
+    else wants engine_request below."""
+    try:
+        return send()
+    except httpx.TransportError as exc:
+        raise EngineError(str(exc)) from exc
+
+
+def engine_request(send: Callable[[], "httpx.Response"], *,
+                   also_ok: tuple[int, ...] = ()) -> "httpx.Response":
+    """The engine-client wire idiom, in ONE place instead of hand-copied
+    per call site [max-review c9]: httpx.TransportError becomes
+    EngineError(str(exc)), a non-2xx response becomes EngineError carrying
+    the response text. ``also_ok`` admits status codes with call-specific
+    meaning past the raise for the caller to interpret — docker's 304
+    already-in-that-state, the 409s hostagent.activate and spark.swap turn
+    into BusyError. A diagnosability change to this mapping now lands at
+    every engine at once instead of drifting per copy."""
+    resp = guarded_send(send)
+    if resp.is_success or resp.status_code in also_ok:
+        return resp
+    raise EngineError(resp.text)

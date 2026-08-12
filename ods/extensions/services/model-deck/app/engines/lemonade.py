@@ -26,7 +26,7 @@ import threading
 
 import httpx
 
-from app.engines import EngineError
+from app.engines import engine_request
 from app.engines.metrics import sum_matching
 
 _TIMEOUT = 5.0
@@ -104,13 +104,7 @@ class LemonadeClient:
         return _sum_activity_metrics(resp.text)
 
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        try:
-            resp = self._client.request(method, path, **kwargs)
-        except httpx.TransportError as exc:
-            raise EngineError(str(exc)) from exc
-        if not resp.is_success:
-            raise EngineError(resp.text)
-        return resp
+        return engine_request(lambda: self._client.request(method, path, **kwargs))
 
 
 def _sum_activity_metrics(metrics_text: str) -> int | None:
