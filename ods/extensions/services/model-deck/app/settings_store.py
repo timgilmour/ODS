@@ -123,7 +123,10 @@ _JOURNAL_CAP = 50
 CONTAINER_ALLOWLIST = ("image", "shm_size", "ulimits")
 
 
-def _empty() -> dict:
+def empty_store() -> dict:
+    """One empty settings-store document — shared with app.sets so a future
+    change to the empty shape (e.g. a seeded schema-version field) lands in
+    both the live store and set snapshots at once."""
     return {kind: {} for kind in KINDS}
 
 
@@ -142,10 +145,10 @@ class SettingsStore:
         try:
             data = json.loads(self._path.read_text())
         except (OSError, json.JSONDecodeError):
-            return _empty()
+            return empty_store()
         if not isinstance(data, dict):
-            return _empty()
-        merged = _empty()
+            return empty_store()
+        merged = empty_store()
         for kind in KINDS:
             value = data.get(kind)
             if not isinstance(value, dict):
@@ -299,7 +302,7 @@ class SettingsStore:
         """
         if not isinstance(data, dict):
             data = {}
-        healed = _empty()
+        healed = empty_store()
         for kind in KINDS:
             value = data.get(kind)
             if not isinstance(value, dict):

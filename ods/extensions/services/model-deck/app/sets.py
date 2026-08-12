@@ -59,7 +59,7 @@ from app import actuation
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.observe import LOCAL_HIPFIRE_KEY, LOCAL_LEMONADE_KEY
-from app.settings_store import KINDS, NAMESPACES
+from app.settings_store import KINDS, NAMESPACES, empty_store
 
 # Reserved on-disk slug for the auto-captured pre-apply snapshot. Written only
 # by apply(); user sets are forbidden from slugging to it (or to "previous",
@@ -384,10 +384,6 @@ def diff_snapshot(snapshot: dict | None, current: dict) -> dict:
     return {"changed": changed, "added": added, "removed": removed}
 
 
-def _empty_settings() -> dict:
-    return {kind: {} for kind in KINDS}
-
-
 def adopt_selective(snapshot: dict | None, current: dict, keys: list[dict]) -> dict:
     """Selective adopt (``POST /api/sets/{slug}/adopt``, ``mode="selective"``):
     take ONLY the named diff entries — each ``{"scope", "key"}`` pair, the
@@ -404,7 +400,7 @@ def adopt_selective(snapshot: dict | None, current: dict, keys: list[dict]) -> d
     handler): adopting a key the caller asked for and getting silence
     instead is worse than an explicit error.
     """
-    result = copy.deepcopy(snapshot) if snapshot is not None else _empty_settings()
+    result = copy.deepcopy(snapshot) if snapshot is not None else empty_store()
     for entry in keys:
         if not isinstance(entry, dict) or "scope" not in entry or "key" not in entry:
             raise ValueError(f"adopt key entries need 'scope' and 'key': {entry!r}")
