@@ -158,6 +158,14 @@ class SparkClient(NodeAgentHTTP):
         self._serving_host = urlparse(serving_url).netloc
         self._litellm = litellm
 
+    def close(self) -> None:
+        """Both transports: the node-agent client (base class) and the
+        serving-endpoint client this subclass adds. Rebind retirement
+        (app.node_clients.NodeClients) is the first caller that ever closes
+        a SparkClient — before N1 one client lived for the whole process."""
+        super().close()
+        self._serving.close()
+
     # -- reads ------------------------------------------------------------
 
     def status(self) -> dict:

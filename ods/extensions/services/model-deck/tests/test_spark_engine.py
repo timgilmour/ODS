@@ -689,3 +689,15 @@ def test_get_catalog_raises_engineerror_on_500():
 
     with pytest.raises(EngineError):
         _client(handler).get_catalog()
+
+
+# --- close() (resource cleanup for rebind retirement in N1) ---
+
+def test_close_closes_both_transports():
+    from app.engines.spark import SparkClient
+
+    client = SparkClient(node_url="http://boxa:7720", node_key="k",
+                         serving_url="http://boxa:8000", litellm=None)
+    client.close()
+    assert client._node.is_closed
+    assert client._serving.is_closed
