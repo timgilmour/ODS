@@ -196,6 +196,12 @@ def test_seed_creates_local_and_sparky(store):
 
 def test_seed_runs_exactly_once(store):
     seed_if_missing(store, **_SEED_KW)
+    # _SEED_KW carries a credential, so the seeded entry lands at
+    # control:"swap" (N1 T6 ruling below) — remove() now refuses a "swap"
+    # node directly (T1's declared-operable guard), so demote first; the
+    # demote/remove pair is just setup to reach "sparky gone" for the
+    # mutation check that follows.
+    store.update("sparky", {"control": "none"})
     store.remove("sparky")
     # Changed env after the seed must have NO effect — including resurrecting
     # a deliberately removed node. This is the mutation check the design
@@ -205,6 +211,20 @@ def test_seed_runs_exactly_once(store):
     assert again is False
     assert store.get("sparky") is None
     assert store.get("local")["label"] == "autarch"
+
+
+def test_seed_with_a_credential_stamps_control_swap(store):
+    """N1 T6 ruling: the env-var config WAS the old scheme's declaration of
+    operability (main.py used to bind a client from exactly this
+    condition), so the seed migrates that declaration into `control` too —
+    not the unconditional "none" a bare `add()` defaults to."""
+    seed_if_missing(store, **_SEED_KW)  # _SEED_KW's keys-json has a credential
+    assert store.get("sparky")["control"] == "swap"
+
+
+def test_seed_without_a_credential_stamps_control_none(store):
+    seed_if_missing(store, **{**_SEED_KW, "spark_node_keys_json": "{}"})
+    assert store.get("sparky")["control"] == "none"
 
 
 def test_seed_without_spark_env_creates_local_only(store):

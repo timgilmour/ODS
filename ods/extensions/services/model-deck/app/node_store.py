@@ -336,6 +336,13 @@ def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
     The keys-json parse mirrors app/main.py's historical tolerance: a
     malformed map degrades to "no credential" (the node still seeds, the
     observer reports it unconfigured), never a crash at first boot.
+
+    The seed also migrates the OLD SCHEME's operability declaration (design
+    §8): the env-var configuration alone was what main.py used to bind an
+    actuation client at boot, so a fresh box booting with that same
+    configuration must land in the same state a stamp_missing_control
+    upgrade would — control:"swap" when a credential is present, "none"
+    otherwise — not the unconditional "none" a bare `add()` defaults to.
     """
     if store.exists():
         return False
@@ -346,7 +353,14 @@ def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
         except ValueError:
             node_keys = {}
         key = node_keys.get(spark_node_name, "") if isinstance(node_keys, dict) else ""
+        credential = key if isinstance(key, str) and key else None
         store.add({"id": spark_id, "label": spark_id, "agent_kind": "node-agent",
-                   "address": spark_node_url, "serving_address": spark_serving_url},
-                  credential=key if isinstance(key, str) and key else None)
+                   "address": spark_node_url, "serving_address": spark_serving_url,
+                   # The env-var config WAS the old scheme's declaration of
+                   # operability (main.py bound a client from exactly this
+                   # condition), so the seed migrates the declaration too —
+                   # with no credential the node seeds observe-only, honest
+                   # and recoverable via the UI toggle (design §8).
+                   "control": "swap" if credential else "none"},
+                  credential=credential)
     return True
