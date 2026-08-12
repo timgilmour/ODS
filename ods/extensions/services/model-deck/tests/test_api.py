@@ -252,6 +252,45 @@ def make_app(tmp_path, monkeypatch):
     return app, deck
 
 
+class FakeNodeClients:
+    """Stand-in for app.node_clients.NodeClients: a plain dict lookup, so a
+    test wires exactly the fake client(s) it means to and nothing rebinds
+    underneath it."""
+
+    def __init__(self, clients=None):
+        self._clients = dict(clients or {})
+
+    def set(self, node_id, client):
+        self._clients[node_id] = client
+
+    def client_for(self, node_id):
+        return self._clients.get(node_id)
+
+
+def wire_swap_node(deck, node_id, client, label=None):
+    """Registry row (control:"swap", prereqs present) + a fake client bound
+    for it. Replaces the deck's client map with a FakeNodeClients (once) and
+    rebuilds node_observers over it. Labels ≠ ids on purpose
+    ([[defaults-that-hide-bugs]]).
+
+    NOTE: each node's SparkObserver caches for SPARK_OBSERVE_TTL_S; a test
+    that mutates the fake's status mid-test must call
+    deck["node_observers"].invalidate(node_id) before re-reading state."""
+    from app.node_clients import NodeObservers
+
+    store = deck["node_store"]
+    if store.get(node_id) is None:
+        store.add({"id": node_id, "label": label or f"{node_id.title()} Box",
+                   "agent_kind": "node-agent",
+                   "address": f"http://{node_id}:7720",
+                   "serving_address": f"http://{node_id}:8000",
+                   "control": "swap"}, credential=f"key-{node_id}")
+    if not isinstance(deck["node_clients"], FakeNodeClients):
+        deck["node_clients"] = FakeNodeClients()
+        deck["node_observers"] = NodeObservers(store, deck["node_clients"])
+    deck["node_clients"].set(node_id, client)
+
+
 # ===========================================================================
 
 
@@ -1382,6 +1421,30 @@ def test_lifecycle_block_omits_spark_when_none_configured(tmp_path, monkeypatch)
     body = TestClient(app).get("/api/state").json()
 
     assert "sparky/slot0" not in body["lifecycle"]
+
+
+def test_lifecycle_view_carries_every_swap_nodes_slot(tmp_path, monkeypatch):
+    from tests.test_spark_api import FakeSpark
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    wire_swap_node(deck, "boxa", FakeSpark(), label="Box Alpha")
+    wire_swap_node(deck, "boxb", FakeSpark(), label="Box Beta")
+    client = TestClient(app)
+    lifecycle = client.get("/api/state").json()["lifecycle"]
+    assert "boxa/slot0" in lifecycle
+    assert "boxb/slot0" in lifecycle
+    assert "sparky/slot0" not in lifecycle
+
+
+def test_control_none_node_emits_no_slot(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["node_store"].add(
+        {"id": "watcher", "label": "Watch Only", "agent_kind": "node-agent",
+         "address": "http://watcher:7720",
+         "serving_address": "http://watcher:8000"}, credential="key-watcher")
+    client = TestClient(app)
+    lifecycle = client.get("/api/state").json()["lifecycle"]
+    assert "watcher/slot0" not in lifecycle
 
 
 def test_clear_quarantine_releases_the_key(tmp_path, monkeypatch):
@@ -2657,10 +2720,14 @@ def test_spark_drift_without_map_entry_falls_back_to_old_scopes(tmp_path):
 
 def test_local_keys_are_untouched_by_the_map(tmp_path):
     """A local/hipfire key with a populated identity_map still resolves
-    scopes from intent verbatim — the translation is spark-slot-only,
-    gated on key == SPARK_SLOT_KEY. A populated map must never leak into a
-    local resource's scope resolution even though build_lifecycle_view
-    hoists and passes the same map to every key's _settings_drift call."""
+    scopes from intent verbatim, because the model this intent recorded
+    (None) is not in the map — _settings_drift's own gate is now
+    identity_map-presence + model membership (N1 T7), not a key comparison;
+    the guarantee that a LOCAL key's call never even receives a populated
+    map lives one level up, in build_lifecycle_view, which only resolves an
+    identity_map for a swap node's own slot key (keyed by that node's id).
+    This direct call bypasses that caller-side gate on purpose, to prove
+    the map alone does not leak translation into an unrelated model."""
     from app.intent import IntentStore
     from app.routers import _settings_drift
     from app.settings_store import SettingsStore

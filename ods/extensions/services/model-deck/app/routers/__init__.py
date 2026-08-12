@@ -52,15 +52,20 @@ def build_world_snapshot(deck: dict) -> dict:
 def build_observations(deck: dict, world: dict) -> dict[str, dict]:
     """Every resource the deck can see, in app.observe's one shape.
 
-    The spark half goes through deck["spark_observer"] — one TTL-cached,
-    backed-off probe shared with the watcher, because an unreachable sparky
-    is its normal state and each probe costs two 5 s timeouts.
+    The swap-node half goes through deck["node_observers"] — one TTL-cached,
+    backed-off probe PER NODE, shared with the watcher, because an
+    unreachable node is a normal state and each probe costs two 5 s
+    timeouts. Sorted iteration keeps merge order deterministic (keys are
+    disjoint by construction — each observer emits only its own node's key).
     """
-    from app.observe import merge_observations, observe_local, observe_spark, spark_node_id
+    from app.observe import merge_observations, observe_local, observe_spark
 
-    observer = deck.get("spark_observer")
-    spark_status = observer.status() if observer is not None else None
-    return merge_observations(observe_local(world), observe_spark(spark_status, spark_node_id()))
+    observers = deck.get("node_observers")
+    per_node = []
+    if observers is not None:
+        for node_id, observer in sorted(observers.snapshot().items()):
+            per_node.append(observe_spark(observer.status(), node_id))
+    return merge_observations(observe_local(world), *per_node)
 
 
 def build_lifecycle_view(deck: dict, world: dict) -> dict:
@@ -72,7 +77,6 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
     between a glance telling you something and telling you nothing.
     """
     from app.lifecycle import derive_status
-    from app.observe import spark_node_id
 
     store = deck.get("intent_store")
     if store is None:
@@ -88,22 +92,18 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
     settings_store = deck.get("settings_store")
     settings_data = settings_store.get() if settings_store is not None else None
 
-    # One load of the spark profile->identity map for the whole view build
-    # (Task 6), same idea as the settings_data hoist above: _settings_drift
-    # only consults this for the spark slot key, but every OTHER key's call
-    # still receives it (harmless — see _settings_drift's key gate), so
-    # reading it once here beats a CharacteristicsStore.entry() call per
-    # lifecycle resource. entry()/`.get("profile_identities")` reads as
-    # ``{}``/``None`` when nothing has been adopted yet, which unwraps to
-    # ``None`` below — the pre-Task-5 state, and _settings_drift's C1
-    # fallback handles it identically to no map at all.
+    # One load of each swap node's profile->identity map for the whole view
+    # build (same hoist rationale as settings_data above, per node now).
     characteristics_store = deck.get("characteristics_store")
-    identity_map = None
-    if characteristics_store is not None:
-        identities_field = characteristics_store.entry(
-            f"engine/{spark_node_id()}/vllm"
-        ).get("profile_identities")
-        identity_map = (identities_field or {}).get("value")
+    node_store = deck.get("node_store")
+    identity_maps: dict[str, dict | None] = {}
+    if characteristics_store is not None and node_store is not None:
+        for entry in node_store.list():
+            if entry.get("control") != "swap":
+                continue
+            field = characteristics_store.entry(
+                f"engine/{entry['id']}/vllm").get("profile_identities")
+            identity_maps[entry["id"]] = (field or {}).get("value")
 
     view = {}
     for key, obs in build_observations(deck, world).items():
@@ -114,7 +114,8 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
             "observed": obs,
             "last_healthy_ts": (intent or {}).get("last_healthy_ts"),
             "settings_drift": _settings_drift(
-                settings_data, key, intent, identity_map=identity_map
+                settings_data, key, intent,
+                identity_map=identity_maps.get(key.split("/", 1)[0]),
             ),
         }
     return view
@@ -154,22 +155,26 @@ def _settings_drift(
     ``spark``), so this rebuilds the scope key from ``intent["engine"]``
     rather than assuming `key` itself is the settings key.
 
-    Spark additionally speaks TWO vocabularies at once (Task 6, 5th
-    vocabulary-bug instance caught at plan time): intent records the deck
-    adapter name (``engine: "spark"``) and the PROFILE (``routers/spark.py``
-    deliberately records profiles — swap takes a profile, and mm27b serves
-    under a different --served-model-name, so comparing served names would
-    report permanent false drift). Settings, though, live under the real
-    engine (``"vllm"``) and the checkpoint identity (Task 5's
-    ``CharacteristicsStore`` ``profile_identities`` field maps a profile to
-    its identity/service/container_name). Left untranslated, a PUT to
-    ``engine_models/sparky/vllm|<identity>`` would never register against
-    the verbatim scope key ``sparky/spark|heretic`` intent builds — settings
-    drift silently dead for spark, the exact D11 live-drill flow. So when
-    ``key`` is the spark slot and ``identity_map`` has an entry for the
-    profile intent recorded, the scope list is built from the TRANSLATED
-    engine (``vllm``) and identity instead of the verbatim adapter/profile.
-    Every other key, and a spark call with no (matching) map entry, keeps
+    Every swap node additionally speaks TWO vocabularies at once (Task 6,
+    5th vocabulary-bug instance caught at plan time, generalized to every
+    node by N1): intent records the deck adapter name (``engine: "spark"``)
+    and the PROFILE (``routers/spark.py`` deliberately records profiles —
+    swap takes a profile, and mm27b serves under a different
+    --served-model-name, so comparing served names would report permanent
+    false drift). Settings, though, live under the real engine (``"vllm"``)
+    and the checkpoint identity (Task 5's ``CharacteristicsStore``
+    ``profile_identities`` field maps a profile to its
+    identity/service/container_name). Left untranslated, a PUT to
+    ``engine_models/<node>/vllm|<identity>`` would never register against
+    the verbatim scope key ``<node>/spark|heretic`` intent builds — settings
+    drift silently dead for that node, the exact D11 live-drill flow. So
+    when the caller passes an ``identity_map`` (``build_lifecycle_view``
+    passes one only for a swap node's slot key, keyed by that node's id —
+    map presence alone is the gate here, `key` is never compared) that has
+    an entry for the profile intent recorded, the scope list is built from
+    the TRANSLATED engine (``vllm``) and identity instead of the verbatim
+    adapter/profile. Every other key — every call `build_lifecycle_view`
+    passes no map for, or a swap call with no (matching) map entry — keeps
     C1's verbatim behavior exactly — the translation is opt-in per call, not
     a redefinition of what "engine"/"model" mean everywhere.
 
@@ -206,8 +211,6 @@ def _settings_drift(
     (which takes `statuses`/`intents` directly, not this view) — settings
     drift is a flag, never a restart trigger.
     """
-    from app.observe import SPARK_SLOT_KEY
-
     if not intent or settings_data is None:
         return None
     engine = intent.get("engine")
@@ -218,12 +221,12 @@ def _settings_drift(
     engine_key = f"{node}/{engine}"
     model = intent.get("model")
 
-    # Spark-slot translation (Task 6) — see the docstring above. Gated on
-    # the exact key AND a matching map entry so a spark call with no
-    # (matching) profile_identities is byte-identical to C1: no map yet
-    # adopted, or a profile that was never adopted, still resolves scopes
-    # from intent verbatim rather than silently going dark.
-    if key == SPARK_SLOT_KEY and identity_map and model in identity_map:
+    # Swap-slot translation (Task 6 of the settings-remote plan, generalized
+    # by N1): `identity_map` is non-None ONLY for a swap node's slot key —
+    # build_lifecycle_view keys the maps by swap node id — so map presence
+    # IS the gate; a slot with no (matching) adopted profile keeps C1's
+    # verbatim behavior exactly.
+    if identity_map and model in identity_map:
         engine_key = f"{node}/vllm"
         model = identity_map[model]["identity"]
 
