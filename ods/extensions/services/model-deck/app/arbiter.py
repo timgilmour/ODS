@@ -1233,12 +1233,14 @@ class Watcher:
                 bodies[name] = self._dockerctl.inspect(name)
             except (EngineError, GuardError, KeyError):
                 bodies[name] = None
-        observed: set[str] = set()
-        for entry in provenance_collect.local_oci_entries(bodies, node):
-            observed.add(entry["artifact_id"])
-            current = entry.pop("current")
-            self._provenance_store.observe(**entry, current=current, now=now)
-            self._provenance_seed_watch(entry["artifact_id"], now)
+        # One store round trip for the sweep, not one per artifact
+        # [max-review c15]; the returned document also feeds the watch
+        # seeding and the retention sweep below without further loads.
+        readings = provenance_collect.local_oci_entries(bodies, node)
+        observed = {reading["artifact_id"] for reading in readings}
+        document = self._provenance_store.observe_all(readings, now=now)
+        for reading in readings:
+            self._provenance_seed_watch(reading["artifact_id"], now, document)
 
         # Retention by ABSENCE, not by container name. Identity is the image
         # repository, so a failed inspect no longer tells us which artifact
@@ -1251,7 +1253,7 @@ class Watcher:
         # Deriving the id from the container name instead would silently
         # no-op the moment a name and its repository differ — and they
         # differ for two of the three allowlist containers today.
-        for artifact_id, stored in self._provenance_store.get().items():
+        for artifact_id, stored in document.items():
             if artifact_id in observed:
                 continue
             if stored.get("kind") == "oci" and stored.get("node") == node:
@@ -1260,9 +1262,9 @@ class Watcher:
     def _provenance_local_weights(self, node: str, now: str) -> None:
         if self._catalog is None:
             return
-        for entry in provenance_collect.local_file_entries(self._catalog.units(), node):
-            current = entry.pop("current")
-            self._provenance_store.observe(**entry, current=current, now=now)
+        self._provenance_store.observe_all(
+            provenance_collect.local_file_entries(self._catalog.units(), node),
+            now=now)
 
     def _provenance_spark(self, now: str) -> None:
         """Sparky's engine images, from the two node-agent reads that already
@@ -1293,28 +1295,32 @@ class Watcher:
             catalog = self._spark.get_catalog().get("catalog")
         except (EngineError, BusyError, GuardError, AttributeError):
             catalog = None
-        for entry in provenance_collect.spark_oci_entries(texts, catalog, node):
-            current = entry.pop("current")
-            self._provenance_store.observe(**entry, current=current, now=now)
-            self._provenance_seed_watch(entry["artifact_id"], now)
+        readings = provenance_collect.spark_oci_entries(texts, catalog, node)
+        document = self._provenance_store.observe_all(readings, now=now)
+        for reading in readings:
+            self._provenance_seed_watch(reading["artifact_id"], now, document)
 
-    def _provenance_seed_watch(self, artifact_id: str, now: str) -> None:
+    def _provenance_seed_watch(self, artifact_id: str, now: str,
+                               document: dict[str, dict]) -> None:
         """A derivable origin gains its watch entry without an operator
         typing it (Task 9's ``provenance_collect.merge_seeded_watch``).
 
         Called for every oci artifact this pass just observed above — NOT
         for weights (``_provenance_local_weights``): ``seed_watch`` only
         ever derives from an oci origin, so calling this there would only
-        ever recompute ``[]`` against ``[]``, one extra store read per
-        catalog unit for no possible effect.
+        ever recompute ``[]`` against ``[]``, one extra lookup per catalog
+        unit for no possible effect.
 
         ``merge_seeded_watch`` needs the STORED entry, not the one this
         pass just built: the collector's own entry dict (``local_oci_entries``
         / ``spark_oci_entries``) carries no ``origin`` at all (that is
-        exclusively operator-declared, via ``PUT /origin``) and no ``watch``
-        by the time ``current`` has been popped off it for ``observe()``.
-        Only ``store.entry()`` — read fresh, after ``observe()`` above has
-        landed this pass's identity — has both.
+        exclusively operator-declared, via ``PUT /origin``) and no ``watch``.
+        ``document`` — the document ``observe_all`` just SAVED, handed back
+        precisely so this seeding needs no per-artifact re-load [max-review
+        c15] — has both. A concurrent ``PUT /origin`` landing between that
+        save and this call is the same race the old fresh ``store.entry()``
+        read had, only narrower, and ``set_watch``'s own locked no-op check
+        remains the authority either way.
 
         DOUBLE PROTECTION AGAINST HISTORY SPAM ON UNCHANGED DATA, and they
         are not equally load-bearing. ``ProvenanceStore.set_watch`` is the
@@ -1329,7 +1335,7 @@ class Watcher:
         source), correctness would still hold because ``set_watch`` itself
         would no-op.
         """
-        entry = self._provenance_store.entry(artifact_id)
+        entry = document.get(artifact_id)
         if entry is None:
             return
         merged = provenance_collect.merge_seeded_watch(entry)

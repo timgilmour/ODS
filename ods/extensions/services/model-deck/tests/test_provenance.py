@@ -121,6 +121,41 @@ def test_an_unchanged_observation_writes_no_history(tmp_path):
         tmp_path / "history.jsonl", "oci:local:x")) == 1
 
 
+def test_observe_all_mixed_batch_records_history_only_for_the_changed(tmp_path):
+    # One batch holding a CHANGED artifact and an UNCHANGED one — the two
+    # shapes observe_all treats differently, in the same call so the batch
+    # path (not per-artifact observe) is what's exercised.
+    store = _store(tmp_path)
+    store.observe("oci:local:steady", kind="oci", node="local", role="engine",
+                  current=_identity("sha256:s", "steady:v1"), now=T0)
+    document = store.observe_all([
+        {"artifact_id": "oci:local:steady", "kind": "oci", "node": "local",
+         "role": "engine", "current": _identity("sha256:s", "steady:v1")},
+        {"artifact_id": "oci:local:moved", "kind": "oci", "node": "local",
+         "role": "engine", "current": _identity("sha256:m", "moved:v2")},
+    ], now=T1)
+    # The returned document IS the saved state — both entries present.
+    assert document["oci:local:steady"]["current"]["verified_at"] == T1
+    assert document["oci:local:moved"]["current"]["version"] == "sha256:m"
+    history = tmp_path / "history.jsonl"
+    assert len(provenance_history.history_for(history, "oci:local:steady")) == 1
+    moved = provenance_history.history_for(history, "oci:local:moved")
+    assert len(moved) == 1 and moved[0]["from"] is None
+
+
+def test_observe_all_refuses_the_whole_batch_on_one_bad_reading(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(ValueError):
+        store.observe_all([
+            {"artifact_id": "oci:local:good", "kind": "oci", "node": "local",
+             "role": "engine", "current": _identity()},
+            {"artifact_id": "oci:local:bad", "kind": "nonsense", "node": "local",
+             "role": "engine", "current": _identity()},
+        ], now=T0)
+    # All-or-nothing: the valid reading must not have been half-persisted.
+    assert _store(tmp_path).get() == {}
+
+
 def test_an_unchanged_observation_still_refreshes_verified_at(tmp_path):
     store = _store(tmp_path)
     store.observe("oci:local:x", kind="oci", node="local", role="engine",
@@ -990,6 +1025,9 @@ def _store_calls(store):
         "observe": lambda: store.observe(_AID, kind="oci", node="local",
                                          role="engine", current=_identity(),
                                          now=T1),
+        "observe_all": lambda: store.observe_all(
+            [{"artifact_id": _AID, "kind": "oci", "node": "local",
+              "role": "engine", "current": _identity()}], now=T1),
         "mark_unavailable": lambda: store.mark_unavailable(_AID, now=T1),
         "declare_origin": lambda: store.declare_origin(
             _AID, kind="oci", node="local", role="engine", origin=_origin(),

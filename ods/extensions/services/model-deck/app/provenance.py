@@ -341,33 +341,67 @@ class ProvenanceStore:
         still v0.5.6" is not a transition, and logging it every pass would
         bury the transitions that matter.
         """
-        _validate(artifact_id, kind, node, role)
+        saved = self.observe_all(
+            [{"artifact_id": artifact_id, "kind": kind, "node": node,
+              "role": role, "current": current}], now=now)
+        return saved[artifact_id]
+
+    def observe_all(self, readings: list[dict],
+                    now: str | None = None) -> dict[str, dict]:
+        """Batch ``observe()``: every reading lands under ONE lock/load/save
+        instead of one full file round trip per artifact — the collector
+        pass calls this once per source sweep [max-review c15]. Each reading
+        is ``observe()``'s arguments as a dict (``artifact_id``/``kind``/
+        ``node``/``role``/``current``); history is still recorded per
+        CHANGED artifact, unchanged readings still write none.
+
+        Every reading is validated before any is applied, so one bad entry
+        refuses the whole batch rather than persisting half of it — the
+        same posture ``set_watch`` takes with its sources.
+
+        Returns the saved document (a snapshot; the store re-loads on every
+        read), so a caller seeding watches from what it just observed can
+        consult the stored entries without a per-artifact re-load.
+        """
+        for reading in readings:
+            _validate(reading["artifact_id"], reading["kind"],
+                      reading["node"], reading["role"])
         now = now or _now_iso()
+        if not readings:
+            return self._load()
         with self._lock:
             data = self._load()
-            entry = data.get(artifact_id) or _blank_entry(artifact_id, kind, node, role)
-            before = entry["current"]
-            first = before.get("version") is None and before.get("label") is None
-            changed = (before.get("version") != current.get("version")
-                       or before.get("label") != current.get("label")
-                       or before.get("detail") != (current.get("detail") or {}))
-            after = {
-                "version": current.get("version"),
-                "label": current.get("label"),
-                "detail": current.get("detail") or {},
-                "source": _SOURCE_DERIVED,
-                "observed_at": now if changed else (before.get("observed_at") or now),
-                "verification": current.get("verification", origins.UNKNOWN),
-                "verified_at": now,
-            }
-            entry["current"] = after
-            entry["role"] = role
-            data[artifact_id] = entry
+            transitions = []
+            for reading in readings:
+                artifact_id, current = reading["artifact_id"], reading["current"]
+                entry = (data.get(artifact_id)
+                         or _blank_entry(artifact_id, reading["kind"],
+                                         reading["node"], reading["role"]))
+                before = entry["current"]
+                first = before.get("version") is None and before.get("label") is None
+                changed = (before.get("version") != current.get("version")
+                           or before.get("label") != current.get("label")
+                           or before.get("detail") != (current.get("detail") or {}))
+                after = {
+                    "version": current.get("version"),
+                    "label": current.get("label"),
+                    "detail": current.get("detail") or {},
+                    "source": _SOURCE_DERIVED,
+                    "observed_at": now if changed else (before.get("observed_at") or now),
+                    "verification": current.get("verification", origins.UNKNOWN),
+                    "verified_at": now,
+                }
+                entry["current"] = after
+                entry["role"] = reading["role"]
+                data[artifact_id] = entry
+                if changed:
+                    transitions.append(
+                        (artifact_id, None if first else before, after))
             self._save(data)
-            if changed:
-                self._record(artifact_id, "current", None if first else before,
-                             after, "observed", "watcher", now)
-            return entry
+            for artifact_id, before, after in transitions:
+                self._record(artifact_id, "current", before, after,
+                             "observed", "watcher", now)
+            return data
 
     def mark_unavailable(self, artifact_id: str, now: str | None = None) -> None:
         """The source could not be reached. RETENTION: the last known
