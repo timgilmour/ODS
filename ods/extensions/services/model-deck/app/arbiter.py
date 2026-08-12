@@ -125,11 +125,9 @@ from app.lifecycle import derive_status
 from app.observe import (
     _LOCAL_NODE,
     LOCAL_LEMONADE_KEY,
-    SparkObserver,
     merge_observations,
     observe_local,
     observe_spark,
-    spark_node_id,
 )
 from app.reconcile import plan_reconcile
 
@@ -512,8 +510,8 @@ class Watcher:
         hostagent=None,
         catalog=None,
         intent_store=None,
-        spark=None,
-        spark_observer=None,
+        node_clients=None,
+        node_observers=None,
         characteristics_store=None,
         gguf_dir=None,
         clock=time.monotonic,
@@ -550,16 +548,11 @@ class Watcher:
         # on every deliberate action). None disables the reconcile pass, which
         # is what every pre-lifecycle caller and unit test gets.
         self._intent_store = intent_store
-        # Remote single-slot node. None on a box with no spark configured —
-        # observe_spark then emits no key at all, so an undeclared resource
-        # can never appear as a phantom failure.
-        self._spark = spark
-        # Shared with the HTTP routers when app.main wires it (one cache for
-        # the process); self-built otherwise so a bare Watcher still works.
-        self._spark_observer = (
-            spark_observer if spark_observer is not None
-            else SparkObserver(lambda: self._spark)
-        )
+        # Per-node actuation clients + observation caches (app.node_clients).
+        # None (unit tests, pre-N1 callers) means no swap nodes: observation
+        # emits no slot keys and the spark restore branch refuses.
+        self._node_clients = node_clients
+        self._node_observers = node_observers
         self._interval = settings.watch_interval
 
         # Characteristics derive pass: refreshes app.characteristics from
@@ -594,8 +587,8 @@ class Watcher:
         # (node, engine) pairs to harvest an option catalog from, returned
         # by _configurable_engines VERBATIM (see its docstring) -- C2:
         # Watcher does no pairing of its own anymore. Production (app.main)
-        # builds its one real pair with `(spark_node_id(), "vllm")`, never
-        # `settings.node_label`/`settings.spark_node_name` -- see
+        # builds its one real pair with `(the node's registry id, "vllm")`,
+        # never `settings.node_label`/`settings.spark_node_name` -- see
         # _configurable_engines' docstring for the historical bug that rule
         # guards against. None (every caller except the harvest-scoped unit
         # tests and app.main) leaves _configurable_engines returning [].
@@ -900,10 +893,9 @@ class Watcher:
             return
 
         intents = self._intent_store.get()
-        spark_status = self._spark_status()
         observed = merge_observations(
             observe_local(world),
-            observe_spark(spark_status, spark_node_id()),
+            *self._node_observations(),
         )
 
         # A key `_execute` actuated THIS tick predates its own action by
@@ -957,21 +949,26 @@ class Watcher:
             self._restore_last_attempt_at[key] = now_mono
             self._execute_restore(action)
 
-    def _spark_status(self) -> dict | None:
-        """The spark node's state in app.observe's vocabulary, or None when
-        no spark is configured.
+    def _node_observations(self) -> list[dict]:
+        """Every swap node's slot observation, in app.observe's vocabulary.
 
-        The translation and its TTL cache live in app.observe.SparkObserver,
-        shared with the HTTP paths so a tick and a GET cost one probe. All
-        this adds is the audit trail: the observer parks a probe failure and
+        Translation, TTL cache and backoff live in each node's SparkObserver
+        (app.node_clients.NodeObservers), shared with the HTTP paths. This
+        adds only the audit trail: the observer parks a probe failure and
         the watcher — which owns the events log — reports it here, once,
-        wherever the failing probe actually ran.
-        """
-        status = self._spark_observer.status()
-        error = self._spark_observer.take_error()
-        if error is not None:
-            self._log("lifecycle-spark-unreachable", {"error": error})
-        return status
+        tagged with the node that failed (design §9: existing event kinds
+        carry whichever node id acted)."""
+        if self._node_observers is None:
+            return []
+        out = []
+        for node_id, observer in sorted(self._node_observers.snapshot().items()):
+            status = observer.status()
+            error = observer.take_error()
+            if error is not None:
+                self._log("lifecycle-spark-unreachable",
+                          {"node": node_id, "error": error})
+            out.append(observe_spark(status, node_id))
+        return out
 
     def _execute_restore(self, action: dict) -> None:
         """Perform one restore, recording success or failure against the
@@ -1029,12 +1026,16 @@ class Watcher:
             self._lemonade.load(action["model"])
             return
         if engine == "spark":
-            if self._spark is None:
+            node_id = action["key"].split("/", 1)[0]
+            client = (self._node_clients.client_for(node_id)
+                      if self._node_clients is not None else None)
+            if client is None:
                 raise EngineError(
-                    "spark restore requested but no spark client is configured")
+                    f"restore for {action['key']!r} requested but node "
+                    f"{node_id!r} is not operable")
             # Spark intent stores the PROFILE in `model` — that is what swap
             # takes, and what observe_spark compares against.
-            self._spark.swap(action["model"])
+            client.swap(action["model"])
             return
 
         raise EngineError(f"no restore handler for engine {engine!r}")
@@ -1081,24 +1082,23 @@ class Watcher:
                 if fields:
                     self._characteristics_store.put_fields(f"model/{child.name}", fields)
 
-        for name, client in self._live_fact_sources().items():
-            # Spark alone is gated on the observer's cached verdict: it is
-            # the one source with a backoff (SparkObserver) worth respecting
-            # — a direct client.models() call here would block on the same
-            # 5 s timeouts the backoff exists to avoid. Keyed on `name`, not
-            # applied to the whole loop, so a future non-spark source (see
-            # this method's docstring) still gets probed every pass even
-            # while spark is down.
-            if name == "spark":
-                view = self._spark_observer.status()
+        if self._node_observers is not None and self._node_clients is not None:
+            for node_id, observer in sorted(self._node_observers.snapshot().items()):
+                # Gated on the observer's cached verdict: a down node must
+                # not re-add the 5 s timeouts the backoff exists to avoid.
+                view = observer.status()
                 if view is not None and not view.get("reachable", False):
                     continue
-            try:
-                body = client.models()
-            except (EngineError, BusyError):
-                continue   # unreachable: retain last-known facts
-            for model_id, fields in derive_live_models(body, now).items():
-                self._characteristics_store.put_fields(f"model/{model_id}", fields)
+                client = self._node_clients.client_for(node_id)
+                if client is None:
+                    continue
+                try:
+                    body = client.models()
+                except (EngineError, BusyError):
+                    continue   # unreachable: retain last-known facts
+                for model_id, fields in derive_live_models(body, now).items():
+                    self._characteristics_store.put_fields(
+                        f"model/{model_id}", fields)
 
         self._harvest_catalogs(now)
 
@@ -1118,15 +1118,17 @@ class Watcher:
             return
 
         for node, engine in self._configurable_engines():
-            # Same guard as the live-facts loop and _provenance_spark: the
-            # spark pair's harvest_catalog_pair routes to
-            # SparkCatalogExec.__call__ -> SparkClient.get_catalog(), the
-            # identical node-agent GET _provenance_spark's guard already
-            # avoids (app/engines/spark.py:399-400). Only the spark node is
-            # gated -- other (node, engine) pairs have no SparkObserver
-            # verdict to consult and must still be harvested every pass.
-            if node == spark_node_id():
-                view = self._spark_observer.status()
+            # Same guard as the live-facts loop and _provenance_nodes: a
+            # pair whose node has an observer routes through the identical
+            # node-agent reads those passes already gate (e.g. the spark
+            # pair's harvest_catalog_pair routes to SparkCatalogExec.__call__
+            # -> SparkClient.get_catalog(), app/engines/spark.py:399-400).
+            # Pairs for nodes with no observer (a future local vLLM) are
+            # still harvested every pass.
+            observer = (self._node_observers.observer_for(node)
+                        if self._node_observers is not None else None)
+            if observer is not None:
+                view = observer.status()
                 if view is not None and not view.get("reachable", False):
                     continue
             harvest_catalog_pair(
@@ -1160,7 +1162,7 @@ class Watcher:
         Node vocabulary -- the reason this method takes pairs verbatim
         instead of building them itself: the node half of a pair MUST be a
         node id (``app.observe._LOCAL_NODE``, "local", app/observe.py:28,
-        or ``app.observe.spark_node_id()``, "sparky") -- the same id
+        or a swap node's REGISTRY id, e.g. "sparky") -- the same id
         ``GET /api/settings/catalog/{node}/{engine}`` reads into the
         ``engine/{node}/{engine}`` characteristics key (app/routers/
         settings.py:78-82) and ``_resolve`` looks up by (app/routers/
@@ -1168,14 +1170,14 @@ class Watcher:
         display string, e.g. "autarch" via MODEL_DECK_NODE_LABEL, shown by
         GET /state -- app/routers/status.py:24) or ``settings.
         spark_node_name`` (a credential-lookup name that happens to match
-        the node id today -- see ``spark_node_id``'s own docstring) --
-        that was this method's original bug: a harvest that keyed
-        "engine/autarch/hipfire" while every reader looks under
+        the node id today -- see ``app.observe.spark_node_id``'s own
+        docstring) -- that was this method's original bug: a harvest that
+        keyed "engine/autarch/hipfire" while every reader looks under
         "engine/local/hipfire", silently writing a catalog no API path
         could ever read. Unit tests never caught it because node_label
         defaults to "local", making label == id. app.main's wiring builds
-        spark's pair as ``(spark_node_id(), "vllm")`` for exactly this
-        reason -- never node_label, never spark_node_name.
+        spark's pair as ``(the node's registry id, "vllm")`` for exactly
+        this reason -- never node_label, never spark_node_name.
 
         `_configurable_engine_pairs` (constructor param `configurable_
         engines`, test-only outside app.main) supplies pairs directly for
@@ -1183,19 +1185,10 @@ class Watcher:
         _harvest_catalogs's machinery; returned verbatim here (no internal
         pairing step) means the seam itself has no vocabulary decision left
         to get wrong -- a test can hand it `(_LOCAL_NODE, "hipfire")`,
-        `(spark_node_id(), "vllm")`, or any other pair, and this method
-        cannot silently substitute a label for either half.
+        `("sparky", "vllm")`, or any other pair, and this method cannot
+        silently substitute a label for either half.
         """
         return list(self._configurable_engine_pairs or [])
-
-    def _live_fact_sources(self) -> dict:
-        """Engine clients exposing an OpenAI-style /v1/models surface.
-        Spark is the one that matters — it is the only source of truth for
-        remote model facts until a node-agent increment lands."""
-        sources = {}
-        if self._spark is not None:
-            sources["spark"] = self._spark
-        return sources
 
     # --- provenance --------------------------------------------------------
 
@@ -1239,7 +1232,7 @@ class Watcher:
         try:
             self._provenance_local_oci(node, now)
             self._provenance_local_weights(node, now)
-            self._provenance_spark(now)
+            self._provenance_nodes(now)
         except Exception as exc:  # noqa: BLE001 — see docstring
             self._log("provenance-pass-error", {"error": str(exc)})
 
@@ -1292,39 +1285,38 @@ class Watcher:
             provenance_collect.local_file_entries(self._catalog.units(), node),
             now=now)
 
-    def _provenance_spark(self, now: str) -> None:
-        """Sparky's engine images, from the two node-agent reads that already
-        exist (compose text for the reference, the harvested catalog for the
-        digest). ``spark_node_id()`` — NEVER settings.spark_node_name, a
-        coincidentally-equal different string; see _configurable_engines'
-        docstring for the live-only bug that rule guards against."""
-        if self._spark is None:
+    def _provenance_nodes(self, now: str) -> None:
+        """Every swap node's engine images, from the two node-agent reads
+        that already exist (compose text for the reference, the harvested
+        catalog for the digest). Keys ride the node's REGISTRY id — the
+        same id every other vocabulary uses."""
+        if self._node_observers is None or self._node_clients is None:
             return
-        # The observer's cached verdict, no fresh probe: while sparky is down
-        # every direct call below would block on 5 s timeouts the backoff
-        # exists to avoid — and the pass would learn nothing anyway.
-        view = self._spark_observer.status()
-        if view is not None and not view.get("reachable", False):
-            return
-        node = spark_node_id()
-        try:
-            profiles = [p["name"] for p in self._spark.status()["profiles"]]
-        except (EngineError, BusyError, GuardError, KeyError, TypeError):
-            return
-        texts: dict[str, str] = {}
-        for profile in profiles:
-            try:
-                texts[profile] = self._spark.get_compose(profile)
-            except (EngineError, BusyError, GuardError):
+        for node_id, observer in sorted(self._node_observers.snapshot().items()):
+            view = observer.status()
+            if view is not None and not view.get("reachable", False):
                 continue
-        try:
-            catalog = self._spark.get_catalog().get("catalog")
-        except (EngineError, BusyError, GuardError, AttributeError):
-            catalog = None
-        readings = provenance_collect.spark_oci_entries(texts, catalog, node)
-        document = self._provenance_store.observe_all(readings, now=now)
-        for reading in readings:
-            self._provenance_seed_watch(reading["artifact_id"], now, document)
+            client = self._node_clients.client_for(node_id)
+            if client is None:
+                continue
+            try:
+                profiles = [p["name"] for p in client.status()["profiles"]]
+            except (EngineError, BusyError, GuardError, KeyError, TypeError):
+                continue
+            texts: dict[str, str] = {}
+            for profile in profiles:
+                try:
+                    texts[profile] = client.get_compose(profile)
+                except (EngineError, BusyError, GuardError):
+                    continue
+            try:
+                catalog = client.get_catalog().get("catalog")
+            except (EngineError, BusyError, GuardError, AttributeError):
+                catalog = None
+            readings = provenance_collect.spark_oci_entries(texts, catalog, node_id)
+            document = self._provenance_store.observe_all(readings, now=now)
+            for reading in readings:
+                self._provenance_seed_watch(reading["artifact_id"], now, document)
 
     def _provenance_seed_watch(self, artifact_id: str, now: str,
                                document: dict[str, dict]) -> None:

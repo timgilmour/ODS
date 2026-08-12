@@ -361,14 +361,13 @@ def _build_watcher(settings: Settings):
         hostagent=deck["hostagent"],
         catalog=deck["catalog"],
         # Lifecycle reconciliation: the same intent store the HTTP routers
-        # write on every deliberate action, plus the spark client whose slot
-        # is one of the reconciled resources (None on a box without one).
+        # write on every deliberate action; each swap node's slot (below) is
+        # one of the reconciled resources.
         intent_store=deck["intent_store"],
-        spark=deck["spark"],
-        # One cached spark probe for the whole process, shared with the HTTP
-        # paths: status() costs two node-agent requests and an absent sparky
-        # burns a 5 s timeout on each.
-        spark_observer=deck["spark_observer"],
+        # Per-node actuation clients + observation caches, shared with the
+        # HTTP paths (one cache per node per process).
+        node_clients=deck["node_clients"],
+        node_observers=deck["node_observers"],
         # Characteristics derive pass: same shared store the HTTP routers
         # will read from, and the read-only GGUF mount to scan.
         characteristics_store=deck["characteristics_store"],

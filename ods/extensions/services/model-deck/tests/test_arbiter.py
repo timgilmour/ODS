@@ -36,12 +36,14 @@ from app.harvest import _SENTINEL
 # literal or `settings.node_label`, so a future vocabulary regression here
 # would show up as an import/assertion mismatch, not a silently-passing
 # coincidence (see Watcher._configurable_engines's docstring, app/arbiter.py).
-from app.observe import _LOCAL_NODE
+from app.observe import _LOCAL_NODE, SparkObserver
 
 # The reconcile pass is the first watcher code to call the hipfire client, so
 # it needs a real fake rather than the bare object() the arbitration tests
 # pass. Reuse test_api's rather than growing a second, subtly different one.
-from tests.test_api import FakeHipfire
+# FakeNodeClients (task 8): the node_clients= constructor param's fake -- a
+# plain dict lookup, so a test wires exactly the client(s) it means to.
+from tests.test_api import FakeHipfire, FakeNodeClients
 
 # Catalog-harvest tests (task 8) reuse test_harvest's captured probe output
 # rather than growing a second, subtly different fixture.
@@ -607,7 +609,8 @@ def _settings(**overrides):
 def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
     heal_suppressor=None, hostagent=None, catalog=None, hipfire=None,
-    intent_store=None, spark=None, auto=True, characteristics_store=None,
+    intent_store=None, node_clients=None, node_observers=None, auto=True,
+    characteristics_store=None,
     gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
     configurable_engines=None, provenance_store=None, dockerctl=None, **sett,
 ):
@@ -627,7 +630,8 @@ def _make_watcher(
         hostagent=hostagent,
         catalog=catalog,
         intent_store=intent_store,
-        spark=spark,
+        node_clients=node_clients,
+        node_observers=node_observers,
         characteristics_store=characteristics_store,
         gguf_dir=gguf_dir,
         clock=clock if clock is not None else time.monotonic,
@@ -1684,6 +1688,61 @@ class FakeSpark:
         return self._models_body
 
 
+class FakeObservers:
+    """Minimal NodeObservers stand-in: fixed observer map (task 8). Unlike
+    the real NodeObservers, this never re-reads a registry -- a test wires
+    exactly the node(s) it means to exercise."""
+
+    def __init__(self, observers):
+        self._observers = dict(observers)
+
+    def snapshot(self):
+        return dict(self._observers)
+
+    def observer_for(self, node_id):
+        return self._observers.get(node_id)
+
+    def invalidate(self, node_id):
+        pass
+
+
+class FakeSlotObserver:
+    """Minimal single-node observer stand-in: status() returns a FIXED
+    value in app.observe.SparkObserver's STATUS shape (what its own
+    status() returns, e.g. {"profile", "serving", "reachable",
+    "swap_in_progress"} -- observe_spark's input, not its output) so a test
+    can drive a node's derived state without a real node payload or the
+    real translation/caching. take_error mirrors SparkObserver's "parked,
+    cleared by reading it" contract: construct with errors=[...] to have
+    the first take_error() call return the first one, then None forever
+    after (matching SparkObserver.take_error's one-shot semantics)."""
+
+    def __init__(self, status, errors=None):
+        self._status = status
+        self.errors = list(errors) if errors else []
+
+    def status(self):
+        return self._status
+
+    def take_error(self):
+        if self.errors:
+            return self.errors.pop(0)
+        return None
+
+
+def _sparky_wiring(spark):
+    """node_clients/node_observers kwargs wiring a real SparkObserver
+    around `spark` under the "sparky" node id -- the single-node shape
+    every converted spark test below needs (task 8: node_clients/
+    node_observers replace the old spark=/spark_observer= params). A real
+    SparkObserver, not FakeSlotObserver, so the existing translation/
+    caching/backoff/boot-window coverage keeps exercising the real class."""
+    return {
+        "node_clients": FakeNodeClients({"sparky": spark}),
+        "node_observers": FakeObservers({"sparky": SparkObserver(lambda: spark)}),
+    }
+
+
 def _intent(tmp_path, key="local/hipfire", state="loaded", model=None, engine="hipfire"):
     from app.intent import IntentStore
 
@@ -1886,7 +1945,7 @@ def test_restore_dispatches_a_spark_swap(tmp_path):
     genuine 'down' and the profile is swapped back in."""
     store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
     spark = FakeSpark(profile="heretic", swap_state="error")
-    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+    watcher, _ = _reconcile_watcher(tmp_path, store, **_sparky_wiring(spark))
 
     watcher.tick()
 
@@ -1901,7 +1960,7 @@ def test_restore_dispatches_a_spark_swap_after_the_boot_window_expires(tmp_path)
     old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
     store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
     spark = FakeSpark(profile="heretic", swap_state="done", swap_ts=old)
-    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+    watcher, _ = _reconcile_watcher(tmp_path, store, **_sparky_wiring(spark))
 
     watcher.tick()
 
@@ -1921,7 +1980,7 @@ def test_spark_boot_in_flight_derives_warming_and_is_not_restored(tmp_path):
     store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
     spark = FakeSpark(profile="heretic", swap_state="done",
                       swap_ts=datetime.now(UTC).isoformat())
-    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+    watcher, _ = _reconcile_watcher(tmp_path, store, **_sparky_wiring(spark))
 
     watcher.tick()
 
@@ -1932,7 +1991,7 @@ def test_unreachable_spark_is_not_a_dead_model(tmp_path):
     """Failing to look is not the same as looking and seeing nothing."""
     store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
     spark = FakeSpark(raises=EngineError("connection refused"))
-    watcher, events_path = _reconcile_watcher(tmp_path, store, spark=spark)
+    watcher, events_path = _reconcile_watcher(tmp_path, store, **_sparky_wiring(spark))
 
     watcher.tick()
 
@@ -1944,7 +2003,7 @@ def test_unreachable_spark_is_not_a_dead_model(tmp_path):
 def test_spark_serving_the_intended_profile_is_left_alone(tmp_path):
     store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
     spark = FakeSpark(profile="heretic", serving_model="heretic", endpoint_ok=True)
-    watcher, _ = _reconcile_watcher(tmp_path, store, spark=spark)
+    watcher, _ = _reconcile_watcher(tmp_path, store, **_sparky_wiring(spark))
 
     watcher.tick()
 
@@ -1954,13 +2013,124 @@ def test_spark_serving_the_intended_profile_is_left_alone(tmp_path):
 
 def test_no_spark_configured_emits_no_phantom_key(tmp_path):
     store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
-    watcher, events_path = _reconcile_watcher(tmp_path, store, spark=None)
+    watcher, events_path = _reconcile_watcher(tmp_path, store)
 
     watcher.tick()
 
     kinds = [e["kind"] for e in tail_events(events_path)]
     assert "lifecycle-restore" not in kinds
     assert "lifecycle-restore-failed" not in kinds
+
+
+# --- multi-node swap (task 8: node_clients/node_observers replace spark) ----
+
+
+def test_restore_swaps_the_right_nodes_client(tmp_path):
+    """intent for boxb/slot0 down -> boxb's client (not boxa's) gets
+    swap(profile) -- proves _restore resolves the node id out of the KEY
+    itself, not "whichever client happens to be wired"."""
+    store = _intent(tmp_path, key="boxb/slot0", model="heretic", engine="spark")
+    box_a = FakeSpark(profile="aeon", serving_model="aeon", endpoint_ok=True)
+    box_b = FakeSpark(profile="heretic", swap_state="error")
+    node_clients = FakeNodeClients({"boxa": box_a, "boxb": box_b})
+    node_observers = FakeObservers({
+        "boxb": FakeSlotObserver(
+            # reachable (the node responded) but nothing loaded -- observe_
+            # spark's "down" shape, distinct from a probe FAILURE
+            # ({"reachable": False, ...}), which derives "unreachable"
+            # instead and is never actionable (app.reconcile.plan_reconcile).
+            {"profile": None, "serving": None, "reachable": True,
+             "swap_in_progress": False}),
+    })
+    watcher, _ = _reconcile_watcher(
+        tmp_path, store, node_clients=node_clients, node_observers=node_observers)
+
+    watcher.tick()
+
+    assert box_a.calls == []
+    assert box_b.calls == [("swap", "heretic")]
+
+
+def test_restore_without_operable_client_charges_failure(tmp_path):
+    """client_for returns None (node not operable) -> _restore raises
+    EngineError -> _execute_restore's catch turns that into a
+    lifecycle-restore-failed event, with the failure charged against
+    boxb/slot0's own failure budget."""
+    store = _intent(tmp_path, key="boxb/slot0", model="heretic", engine="spark")
+    node_clients = FakeNodeClients({})  # boxb wired nowhere -> not operable
+    node_observers = FakeObservers({
+        "boxb": FakeSlotObserver(
+            # reachable (the node responded) but nothing loaded -- observe_
+            # spark's "down" shape, distinct from a probe FAILURE
+            # ({"reachable": False, ...}), which derives "unreachable"
+            # instead and is never actionable (app.reconcile.plan_reconcile).
+            {"profile": None, "serving": None, "reachable": True,
+             "swap_in_progress": False}),
+    })
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_clients=node_clients, node_observers=node_observers)
+
+    watcher.tick()
+
+    events = tail_events(events_path)
+    failed = [e for e in events if e["kind"] == "lifecycle-restore-failed"]
+    assert failed
+    assert failed[0]["detail"]["key"] == "boxb/slot0"
+    assert store.get()["boxb/slot0"]["failures"] == 1
+
+
+def test_reconcile_merges_every_nodes_observation(tmp_path):
+    """Two FakeSlotObservers, one reachable-loaded, one down: statuses
+    derive per node from the MERGED observation (app.observe.
+    merge_observations over every node_observations() entry), and only the
+    down one gets a restore action."""
+    from app.intent import IntentStore
+
+    store = IntentStore(tmp_path / "intent.json")
+    store.record("boxa/slot0", state="loaded", model="aeon", engine="spark")
+    store.record("boxb/slot0", state="loaded", model="heretic", engine="spark")
+    box_b = FakeSpark(profile="heretic", swap_state="error")
+    node_clients = FakeNodeClients({"boxb": box_b})
+    node_observers = FakeObservers({
+        "boxa": FakeSlotObserver(
+            {"profile": "aeon", "serving": {"model": "aeon", "endpoint_ok": True},
+             "reachable": True, "swap_in_progress": False}),
+        "boxb": FakeSlotObserver(
+            # reachable (the node responded) but nothing loaded -- observe_
+            # spark's "down" shape, distinct from a probe FAILURE
+            # ({"reachable": False, ...}), which derives "unreachable"
+            # instead and is never actionable (app.reconcile.plan_reconcile).
+            {"profile": None, "serving": None, "reachable": True,
+             "swap_in_progress": False}),
+    })
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_clients=node_clients, node_observers=node_observers)
+
+    watcher.tick()
+
+    assert box_b.calls == [("swap", "heretic")]
+    assert store.get()["boxa/slot0"]["last_healthy_ts"] is not None
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "lifecycle-restore" in kinds
+
+
+def test_unreachable_event_names_the_node(tmp_path):
+    """An observer with a parked error -> lifecycle-spark-unreachable event
+    whose detail includes {"node": "boxb"} -- existing event kind, tagged
+    with whichever node actually failed (design §9), not a new kind."""
+    store = _intent(tmp_path)  # local/hipfire only; not exercised here
+    spark = FakeSpark(raises=EngineError("connection refused"))
+    node_observers = FakeObservers({"boxb": SparkObserver(lambda: spark)})
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_observers=node_observers)
+
+    watcher.tick()
+
+    events = tail_events(events_path)
+    unreachable = [e for e in events if e["kind"] == "lifecycle-spark-unreachable"]
+    assert unreachable
+    assert unreachable[0]["detail"]["node"] == "boxb"
+    assert "connection refused" in unreachable[0]["detail"]["error"]
 
 
 # ===========================================================================
@@ -2116,7 +2286,7 @@ def test_derive_pass_survives_missing_gguf_dir(tmp_path):
     store = CharacteristicsStore(tmp_path / "c.json")
     spark = FakeSpark()  # models() -> {"data": []}, but proves it was called
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
-                       gguf_dir=tmp_path / "does-not-exist", spark=spark)
+                       gguf_dir=tmp_path / "does-not-exist", **_sparky_wiring(spark))
 
     watcher.tick()  # must not raise
 
@@ -2133,7 +2303,7 @@ def test_derive_pass_retains_last_known_facts_when_spark_unreachable(tmp_path):
     store.put_fields("model/heretic", {
         "served": {"value": True, "source": "/v1/models", "derived_ts": "t0"}})
     spark = FakeSpark(models_raises=EngineError("connection refused"))
-    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, spark=spark)
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, **_sparky_wiring(spark))
 
     watcher.tick()  # must not raise
 
@@ -2147,9 +2317,9 @@ def test_derive_pass_skips_spark_probe_while_observer_says_unreachable(tmp_path)
     defeat it every settings.derive_interval_s."""
     store = CharacteristicsStore(tmp_path / "c.json")
     spark = FakeSpark(raises=EngineError("connection refused"))
-    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, spark=spark)
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, **_sparky_wiring(spark))
 
-    watcher._spark_observer.status()  # seed the cache: unreachable
+    watcher._node_observers.observer_for("sparky").status()  # seed the cache: unreachable
     watcher._derive_pass()
 
     assert spark.models_calls == 0
@@ -2773,7 +2943,7 @@ def test_watcher_version_skip_prevents_refetch_after_store(tmp_path):
 def test_harvest_skips_the_spark_pair_while_observer_says_unreachable(tmp_path):
     """The spark pair's harvest_catalog_pair routes to
     SparkCatalogExec.__call__ -> SparkClient.get_catalog() — the identical
-    node-agent GET _provenance_spark's guard already avoids. A derive pass
+    node-agent GET _provenance_nodes's guard already avoids. A derive pass
     must not block on it (or run engine_exec at all for that pair) while
     sparky is down; a non-spark pair would still be unaffected (none is
     exercised here, since production's only remote pair IS spark's --
@@ -2786,11 +2956,12 @@ def test_harvest_skips_the_spark_pair_while_observer_says_unreachable(tmp_path):
         calls.append((node, engine))
         return "sha256:remote", _sentinel_probe_output()
 
-    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store, spark=spark,
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
                        engine_exec=exec_fn,
-                       configurable_engines=[("sparky", "vllm")])
+                       configurable_engines=[("sparky", "vllm")],
+                       **_sparky_wiring(spark))
 
-    watcher._spark_observer.status()  # seed the cache: unreachable
+    watcher._node_observers.observer_for("sparky").status()  # seed the cache: unreachable
     watcher._derive_pass()
 
     assert calls == []
@@ -3171,9 +3342,9 @@ def test_provenance_pass_does_not_resurrect_a_deliberately_cleared_watch(tmp_pat
 
 
 class _FakeSpark:
-    """The three node-agent reads Watcher._provenance_spark makes
-    (app/arbiter.py:1166, 1172, 1176) and nothing else. ``calls`` counts all
-    three, so a test can assert none of them ran."""
+    """The three node-agent reads Watcher._provenance_nodes makes for one
+    node (client.status()/get_compose()/get_catalog()) and nothing else.
+    ``calls`` counts all three, so a test can assert none of them ran."""
 
     def __init__(self, composes, catalog=None, raises=None):
         self.composes = composes
@@ -3207,7 +3378,7 @@ _SPARK_ARTIFACT = "oci:sparky:aeon-7/aeon-vllm-ultimate"
 def _spark_watcher(tmp_path, **kwargs):
     store = _prov_store(tmp_path)
     spark = _FakeSpark({"heretic": _spark_compose(_SPARK_REFERENCE)})
-    watcher = _watcher(tmp_path, provenance_store=store, spark=spark, **kwargs)
+    watcher = _watcher(tmp_path, provenance_store=store, **_sparky_wiring(spark), **kwargs)
     return watcher, store
 
 
@@ -3238,15 +3409,15 @@ def test_provenance_pass_derives_no_spark_watch_without_a_declared_origin(tmp_pa
 
 
 def test_provenance_spark_skips_probes_while_observer_says_unreachable(tmp_path):
-    """With the observer caching 'unreachable', _provenance_spark must make
+    """With the observer caching 'unreachable', _provenance_nodes must make
     ZERO direct spark calls — the backoff exists precisely so a down node
     costs nothing between provenance passes either."""
     store = _prov_store(tmp_path)
     spark = _FakeSpark({"heretic": _spark_compose(_SPARK_REFERENCE)},
                        raises=EngineError("down"))
-    watcher = _watcher(tmp_path, provenance_store=store, spark=spark)
+    watcher = _watcher(tmp_path, provenance_store=store, **_sparky_wiring(spark))
 
-    watcher._spark_observer.status()  # seed the cache: unreachable
+    watcher._node_observers.observer_for("sparky").status()  # seed the cache: unreachable
     spark.calls = 0  # only calls made by the pass under test should count
     watcher._provenance_pass()
 
