@@ -125,6 +125,12 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 | `POST` | `/api/spark/swap` | Hot-swap the node's single slot to a profile (`{profile, force}`) |
 | `POST` | `/api/spark/reload` | Ship the resolved DECLARED-only settings for whatever profile is (or will be) serving to the node, then re-swap that same profile so they actually launch (`{profile?, force?}` — no `profile` reloads whatever last swapped in). The one human action design decision 5 calls for; see [Settings](#settingsjson--what-things-are-launched-and-served-with) below |
 
+### Deprecations
+
+- `/api/spark/*` is a deprecated alias for `/api/nodes/{id}/serving/*`
+  (resolves only while exactly one `control: "swap"` node exists). Removal
+  target: the deploy cycle after N1 ships.
+
 ### Lifecycle
 
 | Method | Path | Description |
