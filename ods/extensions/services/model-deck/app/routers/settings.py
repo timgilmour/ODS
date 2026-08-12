@@ -430,11 +430,16 @@ def _catalog_default(raw):
 
 
 def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:
-    store = deck["settings_store"]
-    characteristics = deck["characteristics_store"]
+    # One load of settings.json and one of characteristics.json for the
+    # whole resolution, not one per scope/entry — the same pure hoist (and
+    # the same argument for it) as build_lifecycle_view's settings_data
+    # [max-review c11]: `.get()` returns the healed shape `.scope()`/
+    # `.entry()` slice from.
+    settings = deck["settings_store"].get()
+    characteristics = deck["characteristics_store"].get()
 
     engine_key = f"{node}/{engine}"
-    catalog_entry = characteristics.entry(f"engine/{engine_key}").get("option_catalog")
+    catalog_entry = characteristics.get(f"engine/{engine_key}", {}).get("option_catalog")
     engine_defaults = {}
     if catalog_entry:
         for name, option in catalog_entry["value"]["options"].items():
@@ -445,7 +450,7 @@ def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:
             if decoded is not _DROP:
                 engine_defaults[name] = decoded
 
-    recommended = characteristics.entry(f"model/{model}").get("recommended_sampling")
+    recommended = characteristics.get(f"model/{model}", {}).get("recommended_sampling")
 
     # AMENDED 2026-08-07 (Task 3 review finding): the two DERIVED layers are
     # assembled outside SettingsStore.put(), the only place the ruled
@@ -458,9 +463,10 @@ def _resolve(deck: dict, node: str, engine: str, model: str) -> dict:
     return resolve_settings(
         engine_defaults=normalize_args_map(engine_defaults),
         checkpoint_recommendations=normalize_args_map((recommended or {}).get("value", {})),
-        engine=store.scope("engines", engine_key).get("args", {}),
-        model=store.scope("models", model).get("args", {}),
-        engine_model=store.scope("engine_models", f"{engine_key}|{model}").get("args", {}),
+        engine=settings.get("engines", {}).get(engine_key, {}).get("args", {}),
+        model=settings.get("models", {}).get(model, {}).get("args", {}),
+        engine_model=settings.get("engine_models", {})
+                             .get(f"{engine_key}|{model}", {}).get("args", {}),
     )
 
 
@@ -480,14 +486,16 @@ def _resolve_env(deck: dict, node: str, engine: str, model: str) -> dict:
     sampling), so this reuses app.ladder.resolve_settings with both derived
     layers empty rather than re-implementing "most specific wins" a second
     time for env."""
-    store = deck["settings_store"]
+    # One settings.json load, not three — see _resolve's hoist comment.
+    settings = deck["settings_store"].get()
     engine_key = f"{node}/{engine}"
     resolved = resolve_settings(
         engine_defaults={},
         checkpoint_recommendations={},
-        engine=store.scope("engines", engine_key).get("env", {}),
-        model=store.scope("models", model).get("env", {}),
-        engine_model=store.scope("engine_models", f"{engine_key}|{model}").get("env", {}),
+        engine=settings.get("engines", {}).get(engine_key, {}).get("env", {}),
+        model=settings.get("models", {}).get(model, {}).get("env", {}),
+        engine_model=settings.get("engine_models", {})
+                             .get(f"{engine_key}|{model}", {}).get("env", {}),
     )
     return {key: entry["value"] for key, entry in resolved.items()}
 
