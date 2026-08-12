@@ -93,11 +93,13 @@ class Registry:
             entries = sorted(self._gguf_dir.glob("*.gguf"))
         except OSError:
             return []
-        return [
-            {
-                "file": entry.name,
-                "size": entry.stat().st_size,
-                "footprint": self.footprint(entry.name),
-            }
-            for entry in entries
-        ]
+        # One registry.json read for the whole scan, not one footprint()
+        # (= one full load) per file — /api/state calls scan() on every
+        # UI poll [max-review c16].
+        measured = self._load()
+        out = []
+        for entry in entries:
+            size = entry.stat().st_size
+            footprint = measured.get(entry.name, int(size * _ESTIMATE_FACTOR))
+            out.append({"file": entry.name, "size": size, "footprint": footprint})
+        return out
