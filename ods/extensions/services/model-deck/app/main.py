@@ -154,8 +154,7 @@ def _build_deck(settings: Settings) -> dict:
     )
     hostagent = HostAgent(hostagent_url, settings.hostagent_key)
 
-    from app.node_store import NodeStore, seed_if_missing
-    from app.observe import spark_node_id
+    from app.node_store import LEGACY_SPARK_SEED_ID, NodeStore, seed_if_missing
 
     node_store = NodeStore(data_dir / "nodes.json", data_dir / "node_credentials.json")
     # One-time migration: env -> registry. Once nodes.json exists env is
@@ -163,11 +162,17 @@ def _build_deck(settings: Settings) -> dict:
     # fresh install seeds itself.
     seed_if_missing(node_store,
                     node_label=settings.node_label,
-                    spark_id=spark_node_id(),
+                    spark_id=LEGACY_SPARK_SEED_ID,
                     spark_node_url=settings.spark_node_url,
                     spark_serving_url=settings.spark_serving_url,
                     spark_node_name=settings.spark_node_name,
                     spark_node_keys_json=settings.spark_node_keys_json)
+    # One-time control stamp for pre-N1 nodes.json files (design §8): the
+    # entry the old env seed created gets control:"swap" IFF it has the
+    # three prerequisites — exactly the condition the pre-N1 boot bind used.
+    # Keys on the raw file's missing `control` key, so an operator demotion
+    # is never re-promoted on a later boot.
+    node_store.stamp_missing_control(LEGACY_SPARK_SEED_ID)
 
     from app.engines.spark import SparkClient
 
@@ -179,9 +184,9 @@ def _build_deck(settings: Settings) -> dict:
     # once, here, at build.
     spark_client = None
     spark_bound = None
-    _spark_entry = node_store.get(spark_node_id())
+    _spark_entry = node_store.get(LEGACY_SPARK_SEED_ID)
     if _spark_entry and _spark_entry.get("address") and _spark_entry.get("serving_address"):
-        _spark_key = node_store.credential_for(spark_node_id())
+        _spark_key = node_store.credential_for(LEGACY_SPARK_SEED_ID)
         if _spark_key:
             spark_client = SparkClient(
                 node_url=_spark_entry["address"],
@@ -199,8 +204,19 @@ def _build_deck(settings: Settings) -> dict:
             spark_bound = {
                 "address": _spark_entry["address"],
                 "serving_address": _spark_entry["serving_address"],
-                "credential_fp": node_store.credential_fingerprint(spark_node_id()),
+                "credential_fp": node_store.credential_fingerprint(LEGACY_SPARK_SEED_ID),
             }
+
+    from app.node_clients import NodeClients, NodeObservers
+
+    def _swap_client_factory(entry: dict, credential: str):
+        from app.engines.spark import SparkClient
+
+        return SparkClient(node_url=entry["address"], node_key=credential,
+                           serving_url=entry["serving_address"], litellm=litellm)
+
+    node_clients = NodeClients(node_store, _swap_client_factory)
+    node_observers = NodeObservers(node_store, node_clients)
 
     location_store = LocationStore(data_dir / "locations.json")
     catalog = Catalog(data_dir / "catalog.json", location_store)
@@ -259,6 +275,11 @@ def _build_deck(settings: Settings) -> dict:
         "mover": mover,
         "job_queue": job_queue,
         "node_store": node_store,
+        # Per-node actuation clients + observation caches (app.node_clients):
+        # lazy, self-healing — every actuation path takes clients from here,
+        # so registry edits apply live with no restart [max-review #13 fix].
+        "node_clients": node_clients,
+        "node_observers": node_observers,
         # The one place a real node-agent client is minted for probes; the
         # nodes router and the observer both go through it, and tests swap
         # THIS entry rather than monkeypatching a module.
@@ -306,11 +327,10 @@ def _build_deck(settings: Settings) -> dict:
     # never misdiagnose "watcher never wired" as "pair not configured".
     from app.engines.docker_ctl import EngineExecRouter
     from app.engines.spark import SparkCatalogExec
-    from app.observe import spark_node_id
 
     routes = {}
     if deck["spark"] is not None:
-        routes[(spark_node_id(), "vllm")] = SparkCatalogExec(deck["spark"])
+        routes[(LEGACY_SPARK_SEED_ID, "vllm")] = SparkCatalogExec(deck["spark"])
     deck["engine_exec"] = EngineExecRouter(routes) if routes else None
     deck["configurable_engines"] = sorted(routes)
 

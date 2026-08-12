@@ -233,6 +233,45 @@ def test_state_nodes_block_carries_actuation_stale(monkeypatch):
         assert after["local"]["actuation_stale"] is False
 
 
+def test_deck_carries_node_clients_and_observers(tmp_path, monkeypatch):
+    from tests.test_api import make_app
+    app, deck = make_app(tmp_path, monkeypatch)
+    from app.node_clients import NodeClients, NodeObservers
+    assert isinstance(deck["node_clients"], NodeClients)
+    assert isinstance(deck["node_observers"], NodeObservers)
+
+
+def test_boot_stamps_control_on_legacy_seeded_spark(tmp_path, monkeypatch):
+    """A pre-N1 install — nodes.json already on disk (written before the
+    `control` field existed) with a sparky entry carrying the three swap
+    prerequisites — comes up with control:"swap" stamped on disk, exactly
+    once (design §8).
+
+    Deliberately pre-populates nodes.json/node_credentials.json directly
+    (the `_legacy_file` idiom tests/test_node_store.py uses) rather than
+    relying on MODEL_DECK_SPARK_NODE_URL/etc + seed_if_missing: on a
+    genuinely fresh box (no nodes.json yet) seed_if_missing's own add()
+    call stamps control:"none" on the entry it creates (NodeStore.add's
+    documented default), so stamp_missing_control's "control" key is
+    already present and it never promotes anything — env-seeding a brand
+    new box is not the same event as upgrading a box that already has
+    data on disk from before the control field shipped, which is what
+    this test — and stamp_missing_control's own docstring ("pre-N1
+    files") — is about."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "local", "label": "local", "agent_kind": "local"},
+        {"id": "sparky", "label": "sparky", "agent_kind": "node-agent",
+         "address": "http://sparky:7720", "serving_address": "http://sparky:8000"},
+    ]))
+    (tmp_path / "node_credentials.json").write_text(json.dumps({"sparky": "k"}))
+    from app.main import create_app
+    app = create_app()
+    entry = app.state.deck["node_store"].get("sparky")
+    assert entry["control"] == "swap"
+
+
 def test_addresses_without_a_credential_is_not_stale(monkeypatch):
     """CLOSES A MUTATION-DEAD TERM [T8 review]. seed_if_missing seeds spark
     with BOTH addresses and NO credential when ODS_REMOTE_NODE_KEYS is absent
