@@ -240,12 +240,16 @@ def test_route_accepts_no_body_at_all(tmp_path, monkeypatch):
 
 
 def test_route_503_when_spark_not_configured(tmp_path, monkeypatch):
-    """Matches app.routers.serving.single_swap_node_id's guard exactly."""
+    """Matches app.routers.serving.single_swap_node_id's guard exactly.
+    The detail is pinned too: with the /api/spark/* alias tests gone, this
+    is the only assertion anywhere on the message's text, which
+    single_swap_node_id and rename_plan's client_for branch share."""
     app, _ = _rename_app(tmp_path, monkeypatch, spark=None)
 
     resp = TestClient(app).post("/api/rename/plan", json={})
 
     assert resp.status_code == 503
+    assert resp.json()["detail"] == "spark engine is not configured"
 
 
 def test_route_409s_with_two_swap_nodes(tmp_path, monkeypatch):

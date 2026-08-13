@@ -1063,7 +1063,7 @@ Model Deck API (:3015, FastAPI)
   │    ├── storage.py ──────────── locations, moves, pins, policy
   │    ├── policy.py ──────────── VRAM policy, autoheal
   │    ├── sets.py ────────────── Set Builder (load groups)
-  │    ├── spark.py ──────────── Remote Spark node swap
+  │    ├── serving.py ─────────── Per-node swap control (/api/nodes/{id}/serving/*)
   │    ├── lifecycle.py ──────── Quarantine release + adoption
   │    └── status.py ──────────── System, tenant, and lifecycle status
   ├── app/
