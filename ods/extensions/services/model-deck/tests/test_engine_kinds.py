@@ -67,3 +67,147 @@ def test_resource_shape_refused_when_slashy():
     # would forge a foreign key ([[literal-declared-inputs]]).
     with pytest.raises(ValueError, match="resource"):
         validate_engines([_entry(resource="local/evil")])
+
+
+# ===========================================================================
+# E1 Task 3: adapters (observe/active/arbiter_verbs/human_verbs/demand) +
+# World generalization. Fixture rule: resources gguf-a/gguf-b/img/agent,
+# GPUs 2 and 3 — none of this may match live topology (lemonade/comfyui/
+# hipfire, GPUs 0/1); tests/test_state.py is where the per-KIND logic
+# (which legitimately needs realistic kind test doubles) is pinned instead.
+# ===========================================================================
+
+
+class _FakeGguf:
+    """Duck-types the lemonade client surface observe() touches."""
+    def __init__(self):
+        self._loaded = "m.gguf"; self._activity = 7
+        self.load_in_flight_v = False
+    def load_in_flight(self): return self.load_in_flight_v
+    def status(self): return {"loaded": self._loaded}
+    def activity(self): return self._activity
+
+
+class _FakeLocalClients:
+    """Dict wrapper mirroring app.local_clients.LocalClients' client_for."""
+    def __init__(self, clients: dict) -> None:
+        self._clients = clients
+
+    def client_for(self, resource: str):
+        return self._clients.get(resource)
+
+
+class _FakeLitellm:
+    def __init__(self, routes: dict | None = None) -> None:
+        self._routes = routes or {}
+
+    def route_table(self) -> dict:
+        return dict(self._routes)
+
+
+class _FakeRegistry:
+    def __init__(self, footprints: dict | None = None) -> None:
+        self._footprints = footprints or {}
+
+    def footprint(self, key: str) -> int:
+        if key not in self._footprints:
+            raise FileNotFoundError(key)
+        return self._footprints[key]
+
+
+def _gpu(index, total=100, used=0):
+    return {"index": index, "vram_total": total, "vram_used": used, "pids": {}}
+
+
+_GPUS_2_3 = [_gpu(2), _gpu(3)]
+
+
+def test_two_lemonade_kind_resources_have_independent_idle_clocks():
+    """The generalization's point: resource keys the memory, not the kind."""
+    from app.state import World
+    t = {"v": 100.0}
+    world = World(clock=lambda: t["v"])
+    engines = [
+        {"resource": "gguf-a", "kind": "lemonade",
+         "connection": {"url": "u", "metrics_url": "m", "container": "c"},
+         "gpu_index": 2,
+         "policy_defaults": {"priority": 1, "pinned": False, "idle_ttl": 60}},
+        {"resource": "gguf-b", "kind": "lemonade",
+         "connection": {"url": "u2", "metrics_url": "m2", "container": "c2"},
+         "gpu_index": 3,
+         "policy_defaults": {"priority": 2, "pinned": False, "idle_ttl": 60}},
+    ]
+    a, b = _FakeGguf(), _FakeGguf()
+    clients = _FakeLocalClients({"gguf-a": a, "gguf-b": b})
+    world.snapshot(_GPUS_2_3, engines, clients, _FakeLitellm(), _FakeRegistry())
+    t["v"] = 150.0
+    a._activity = 8                        # a is active; b stays idle
+    snap = world.snapshot(_GPUS_2_3, engines, clients, _FakeLitellm(), _FakeRegistry())
+    assert snap["tenants"]["gguf-a"]["idle_s"] == 0.0
+    assert snap["tenants"]["gguf-b"]["idle_s"] == 50.0
+    assert snap["tenants"]["gguf-a"]["engine"] == "lemonade"
+    assert snap["placement"] == {"gguf-a": 2, "gguf-b": 3}
+
+
+def test_absent_engine_is_absent_everywhere():
+    """Spec §1: absence representable — no entry, no tenant, no unknown."""
+    from app.state import World
+    world = World(clock=lambda: 0.0)
+    snap = world.snapshot(_GPUS_2_3, [], _FakeLocalClients({}),
+                          _FakeLitellm(), _FakeRegistry())
+    assert snap["tenants"] == {}
+
+
+# --- adapter surface: active / arbiter_verbs / human_verbs / demand -------
+
+
+def test_lemonade_adapter_active_verbs_and_demand():
+    from app.engine_kinds import ENGINE_KINDS
+    lemonade = ENGINE_KINDS["lemonade"]
+    assert lemonade.active({"state": "loaded"}) is True
+    assert lemonade.active({"state": "unloaded"}) is False
+    assert lemonade.arbiter_verbs() == frozenset({"unload"})
+    assert lemonade.human_verbs() == frozenset({"load", "unload"})
+    assert lemonade.demand() is True
+
+
+def test_comfy_adapter_active_verbs_and_demand():
+    from app.engine_kinds import ENGINE_KINDS
+    comfy = ENGINE_KINDS["comfyui"]
+    assert comfy.active({"state": "busy"}) is True
+    assert comfy.active({"state": "idle"}) is False
+    assert comfy.arbiter_verbs() == frozenset({"free"})
+    assert comfy.human_verbs() == frozenset({"free"})
+    assert comfy.demand() is False
+
+
+def test_hipfire_adapter_active_verbs_and_demand():
+    from app.engine_kinds import ENGINE_KINDS
+    hipfire = ENGINE_KINDS["hipfire"]
+    assert hipfire.active({"state": "running"}) is True
+    assert hipfire.active({"state": "parked"}) is False
+    # No arbiter verb at all — park stays human-only (structural omission
+    # made explicit, spec §2).
+    assert hipfire.arbiter_verbs() == frozenset()
+    assert hipfire.human_verbs() == frozenset({"park", "resume"})
+    assert hipfire.demand() is False
+
+
+def test_hipfire_observe_looks_up_its_own_resource_name_in_routes():
+    """The delegated mechanism choice (Task 3 brief): hipfire's model comes
+    from routes.get(RESOURCE), not a hardcoded "hipfire" literal — proven
+    here with a resource name that ISN'T "hipfire"."""
+    from app.engine_kinds import ENGINE_KINDS
+
+    class _FakeHipfireClient:
+        def status(self):
+            return "running"
+
+        def stats(self):
+            return {"queue_depth": 0}
+
+    hipfire = ENGINE_KINDS["hipfire"]
+    ctx = {"registry": _FakeRegistry(), "routes": {"agent": "openai/big-model"},
+           "resource": "agent"}
+    obs = hipfire.observe(_FakeHipfireClient(), {}, 0.0, ctx)
+    assert obs["model"] == "big-model"

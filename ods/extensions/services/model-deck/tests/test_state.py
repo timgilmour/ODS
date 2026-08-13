@@ -1,15 +1,28 @@
 """Tests for app.state — the World snapshot assembler.
 
 World.snapshot() takes already-fetched GPU data (a read_gpus() result) plus
-the four engine clients and the footprint registry, and assembles one
-point-in-time WorldState dict. It owns no I/O of its own; all stubs below
-are plain classes standing in for app.engines.* / app.registry.Registry so
-these tests exercise only app.state's assembly/aggregation logic.
+a declaration (`engines`), a LocalClients-shaped `clients` (E1 Task 3: see
+app.local_clients.LocalClients — `_FakeLocalClients` below stands in for
+it, per the task brief's fixture), the litellm client and the footprint
+registry, and assembles one point-in-time WorldState dict. It owns no I/O
+of its own; all stubs below are plain classes standing in for
+app.engines.* / app.registry.Registry so these tests exercise only
+app.state's assembly/aggregation logic.
 
-A World instance keeps two bits of in-memory state across snapshot() calls
-(lemonade's last-seen activity counter/timestamp, comfyui's last-busy
-timestamp) so idle clocks are tested by driving a fake, manually-advanced
-clock rather than sleeping in real time.
+These tests deliberately keep `_ENGINES`' resource names equal to their
+kind names ("lemonade"/"comfyui"/"hipfire") — this file's job is pinning
+each KIND's per-engine logic (the moved-verbatim observe() bodies: registry
+footprint lookup, HIPFIRE_FOOTPRINT, litellm route-table model lookup),
+which is not generic across kinds, so a resource!=kind name would buy
+nothing here. The generalization itself (resource, not kind, keys
+everything; two same-kind resources are independent) is what
+tests/test_engine_kinds.py's Step-1 tests pin, with fixture-rule names.
+
+A World instance keeps one piece of in-memory state across snapshot()
+calls — `self._mem`, keyed by resource (lemonade's last-seen activity
+counter/timestamp/loaded model, comfyui's last-busy timestamp) — so idle
+clocks are tested by driving a fake, manually-advanced clock rather than
+sleeping in real time.
 """
 
 from app.engines import EngineError
@@ -123,7 +136,44 @@ def _gpu(index=0, total=34_000_000_000, used=0, pids=None):
     return {"index": index, "vram_total": total, "vram_used": used, "pids": pids or {}}
 
 
+class _FakeLocalClients:
+    """Stand-in for app.local_clients.LocalClients: a plain dict wrapper
+    (the task brief's prescribed shape — `client_for` only)."""
+
+    def __init__(self, clients: dict) -> None:
+        self._clients = clients
+
+    def client_for(self, resource: str):
+        return self._clients.get(resource)
+
+
+# The declaration these tests snapshot against: resource names equal kind
+# names (see module docstring for why), gpu_index values matching the old
+# _DEFAULT_PLACEMENT this generalizes away from (hipfire=0, lemonade=1,
+# comfyui=1) so test_snapshot_includes_default_placement's assertion (a
+# pre-E1 holdover, now proving placement DERIVES from the declaration
+# rather than a World constructor arg) needs no numeric changes.
+_ENGINES = [
+    {"resource": "lemonade", "kind": "lemonade",
+     "connection": {"url": "u", "metrics_url": "m", "container": "c"},
+     "gpu_index": 1,
+     "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+    {"resource": "comfyui", "kind": "comfyui",
+     "connection": {"url": "u"}, "gpu_index": 1,
+     "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+    {"resource": "hipfire", "kind": "hipfire",
+     "connection": {"container": "c"}, "gpu_index": 0,
+     "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
+]
+
+
 def _healthy_kwargs(**overrides):
+    """Builds World.snapshot()'s kwargs from the SAME per-engine-client
+    overrides every test below already passes (`lemonade=`, `comfy=`,
+    `hipfire=`, plus `gpus=`/`litellm=`/`registry=`) — only this helper's
+    internals changed for the new (engines, clients) interface, so every
+    call site in this file (and every assertion against
+    `result["tenants"]["lemonade"|"comfyui"|"hipfire"]`) is untouched."""
     kwargs = dict(
         gpus=[_gpu()],
         lemonade=StubLemonade(),
@@ -133,7 +183,17 @@ def _healthy_kwargs(**overrides):
         registry=StubRegistry(),
     )
     kwargs.update(overrides)
-    return kwargs
+    return dict(
+        gpus=kwargs["gpus"],
+        engines=_ENGINES,
+        clients=_FakeLocalClients({
+            "lemonade": kwargs["lemonade"],
+            "comfyui": kwargs["comfy"],
+            "hipfire": kwargs["hipfire"],
+        }),
+        litellm=kwargs["litellm"],
+        registry=kwargs["registry"],
+    )
 
 
 # --- snapshot shape ------------------------------------------------------
@@ -152,7 +212,13 @@ def test_snapshot_has_expected_top_level_keys():
 # --- placement ---------------------------------------------------------
 
 
-def test_snapshot_includes_default_placement():
+def test_snapshot_derives_placement_from_declared_engines():
+    # Pre-E1 this pinned World's own placement CONSTRUCTOR ARG default
+    # (_DEFAULT_PLACEMENT); E1 Task 3 kills that arg — placement is now
+    # DERIVED from each declared entry's own gpu_index, so this now proves
+    # the derivation, not a hardcoded default (_ENGINES' own gpu_index
+    # values happen to equal the old default, see this file's _ENGINES
+    # comment).
     world = World(clock=FakeClock())
 
     result = world.snapshot(**_healthy_kwargs())
@@ -160,10 +226,18 @@ def test_snapshot_includes_default_placement():
     assert result["placement"] == {"hipfire": 0, "lemonade": 1, "comfyui": 1}
 
 
-def test_snapshot_respects_custom_placement():
-    world = World(clock=FakeClock(), placement={"hipfire": 2, "lemonade": 0, "comfyui": 0})
+def test_snapshot_placement_follows_declared_gpu_index_not_a_fixed_default():
+    # Was test_snapshot_respects_custom_placement (World(placement=...)).
+    # E1 Task 3 kills that constructor arg entirely: "custom placement" is
+    # now just "a different declaration", proven by re-declaring the same
+    # three resources on different GPUs.
+    world = World(clock=FakeClock())
+    engines = [{**e, "gpu_index": {"hipfire": 2, "lemonade": 0, "comfyui": 0}[e["resource"]]}
+               for e in _ENGINES]
+    kwargs = _healthy_kwargs()
+    kwargs["engines"] = engines
 
-    result = world.snapshot(**_healthy_kwargs())
+    result = world.snapshot(**kwargs)
 
     assert result["placement"] == {"hipfire": 2, "lemonade": 0, "comfyui": 0}
 
@@ -196,11 +270,15 @@ def test_lemonade_engineerror_sets_tenant_unknown_with_none_fields():
 
     result = world.snapshot(**_healthy_kwargs(lemonade=RaisingLemonade()))
 
+    # gains "engine"/"gpu_index" (E1 Task 3: every tenant is stamped with
+    # its declaration's kind + gpu_index) alongside the unchanged fields.
     assert result["tenants"]["lemonade"] == {
         "state": "unknown",
         "model": None,
         "footprint": None,
         "idle_s": None,
+        "engine": "lemonade",
+        "gpu_index": 1,
     }
 
 
@@ -209,7 +287,10 @@ def test_comfyui_engineerror_sets_tenant_unknown_with_none_fields():
 
     result = world.snapshot(**_healthy_kwargs(comfy=RaisingComfy()))
 
-    assert result["tenants"]["comfyui"] == {"state": "unknown", "queue": None, "idle_s": None}
+    assert result["tenants"]["comfyui"] == {
+        "state": "unknown", "queue": None, "idle_s": None,
+        "engine": "comfyui", "gpu_index": 1,
+    }
 
 
 def test_hipfire_engineerror_sets_tenant_unknown_with_zero_footprint():
@@ -218,7 +299,8 @@ def test_hipfire_engineerror_sets_tenant_unknown_with_zero_footprint():
     result = world.snapshot(**_healthy_kwargs(hipfire=RaisingHipfire()))
 
     assert result["tenants"]["hipfire"] == {
-        "state": "unknown", "model": None, "footprint": 0, "queue_depth": None
+        "state": "unknown", "model": None, "footprint": 0, "queue_depth": None,
+        "engine": "hipfire", "gpu_index": 0,
     }
 
 
@@ -315,6 +397,7 @@ def test_snapshot_reports_loading_while_a_load_is_in_flight():
 
     assert result["tenants"]["lemonade"] == {
         "state": "loading", "model": None, "footprint": None, "idle_s": None,
+        "engine": "lemonade", "gpu_index": 1,
     }
 
 
@@ -398,7 +481,9 @@ def test_comfy_state_idle_when_queue_empty():
 
     result = world.snapshot(**_healthy_kwargs(comfy=StubComfy(queue=0)))
 
-    assert result["tenants"]["comfyui"] == {"state": "idle", "queue": 0, "idle_s": 0}
+    assert result["tenants"]["comfyui"] == {
+        "state": "idle", "queue": 0, "idle_s": 0, "engine": "comfyui", "gpu_index": 1,
+    }
 
 
 def test_comfy_state_busy_when_queue_nonempty():
@@ -447,7 +532,7 @@ def test_comfy_idle_clock_rearms_when_freed():
 
     world.snapshot(**_healthy_kwargs(comfy=StubComfy(queue=0)))
     clock.advance(500)  # idle well past a 300s TTL
-    world.note_comfy_freed()
+    world.note_freed("comfyui")  # was note_comfy_freed() (E1 Task 3)
     clock.advance(30)
     result = world.snapshot(**_healthy_kwargs(comfy=StubComfy(queue=0)))
 

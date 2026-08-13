@@ -155,6 +155,46 @@ class FakeDockerCtl:
 # ===========================================================================
 
 
+# Same posture as tests/test_api.py's _ENGINES/FakeLocalClients (copied, not
+# imported — see this file's own header note on why): a fresh data dir has
+# no presence proof, so World.snapshot would see no declared resources at
+# all, and app.storage.unit_in_use (this file's own subject, plus
+# app.observe.observe_local via the lifecycle block) still assumes the
+# pre-E1 fixed triple. make_app seeds the declaration + wires
+# World.snapshot's clients onto the fakes below unconditionally.
+_ENGINES = [
+    {"resource": "hipfire", "kind": "hipfire",
+     "connection": {"container": "ods-hipfire"}, "gpu_index": 0,
+     "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
+    {"resource": "lemonade", "kind": "lemonade",
+     "connection": {"url": "http://llama-server:8080",
+                    "metrics_url": "http://llama-server:8001/metrics",
+                    "container": "ods-llama-server"},
+     "gpu_index": 1,
+     "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+    {"resource": "comfyui", "kind": "comfyui",
+     "connection": {"url": "http://comfyui:8188"}, "gpu_index": 1,
+     "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+]
+
+
+class FakeLocalClients:
+    """See tests/test_api.py's class of the same name — live dict-key
+    lookup off `deck` so a test's post-make_app `deck["lemonade"] = ...`
+    reassignment is still what World.snapshot observes."""
+
+    _DECK_KEY = {"lemonade": "lemonade", "comfyui": "comfy", "hipfire": "hipfire"}
+
+    def __init__(self, deck: dict) -> None:
+        self._deck = deck
+
+    def client_for(self, resource: str):
+        return self._deck.get(self._DECK_KEY.get(resource, resource))
+
+    def retire_absent(self, keep_resources) -> None:
+        pass
+
+
 def make_app(tmp_path, monkeypatch, **deck_overrides):
     """create_app() with a real, tmp_path-backed data dir (so
     location_store/catalog/storage_policy_store/job_queue are real), no
@@ -182,6 +222,10 @@ def make_app(tmp_path, monkeypatch, **deck_overrides):
             "dockerctl": FakeDockerCtl(),
         }
     )
+    # E1 Task 3: declare the coexistence triple + wire World.snapshot's
+    # clients onto the fakes above (see _ENGINES/FakeLocalClients docstrings).
+    deck["node_store"].update("local", {"engines": _ENGINES})
+    deck["local_clients"] = FakeLocalClients(deck)
     deck.update(deck_overrides)
     return app, deck
 

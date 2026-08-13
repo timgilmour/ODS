@@ -39,11 +39,15 @@ box.
 
 def build_world_snapshot(deck: dict) -> dict:
     gpus = deck["read_gpus"](deck["drm_root"], deck["kfd_root"])
+    # Re-read the declaration fresh on every call (the NodeObservers
+    # precedent: a declaration edit applies live, no restart needed) —
+    # never a boot-time copy.
+    local = deck["node_store"].get("local")
+    engines = local.get("engines", []) if local is not None else []
     return deck["world"].snapshot(
         gpus,
-        deck["lemonade"],
-        deck["comfy"],
-        deck["hipfire"],
+        engines,
+        deck["local_clients"],
         deck["litellm"],
         deck["registry"],
     )

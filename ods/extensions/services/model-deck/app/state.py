@@ -1,22 +1,35 @@
 """
 Model Deck world-state snapshot.
 
-``World.snapshot()`` assembles one point-in-time view of all tenants
-(lemonade, comfyui, hipfire) plus GPU VRAM totals and a best-effort
-"externals" list, from already-fetched engine/GPU data. This module does
-no I/O of its own — the caller owns sysfs reads (``app.gpu.read_gpus``)
-and every engine HTTP call, and passes the results/clients in. That keeps
-the aggregation logic here pure and cheap to test, following the repo's
-functional-core/imperative-shell convention.
+``World.snapshot()`` assembles one point-in-time view of every DECLARED
+local engine (see ``app.engine_kinds``) plus GPU VRAM totals and a
+best-effort "externals" list, from already-fetched engine/GPU data. This
+module does no I/O of its own — the caller owns sysfs reads
+(``app.gpu.read_gpus``) and every engine HTTP call (via ``clients``,
+app.local_clients.LocalClients), and passes the results/clients in. That
+keeps the aggregation logic here pure and cheap to test, following the
+repo's functional-core/imperative-shell convention.
 
-A ``World`` instance holds two pieces of in-memory state across calls: the
-last-seen lemonade activity-counter value/timestamp, and comfyui's
-last-busy timestamp. Both are driven by an injectable ``clock`` (defaults
-to ``time.monotonic``) so tests can move time forward deterministically
-without real sleeps — a fresh ``World()`` per process is expected to be
-re-created at most once (the arbiter/watcher owns exactly one instance
-for its whole lifetime); idle clocks reset to "just started" if the
-process restarts.
+E1 generalization (Task 3): a ``World`` no longer knows lemonade/comfyui/
+hipfire by name. It iterates whatever ``engines`` (the declaration list)
+holds, asks ``app.engine_kinds.ENGINE_KINDS[kind]`` to observe each one,
+and keys everything by RESOURCE, not kind — two lemonade-kind resources
+are two independent tenants with independent idle clocks. Absence is
+representable: a resource nobody declared has no tenant, no mem entry, no
+"unknown" placeholder (spec §1).
+
+A ``World`` instance holds one piece of in-memory state across calls,
+``self._mem``: a dict keyed by RESOURCE of each adapter's own idle-clock
+bookkeeping (lemonade's last-seen activity-counter value/timestamp/loaded
+model, comfyui's last-busy timestamp — see app.engine_kinds' adapters for
+what each kind actually stores there). Driven by an injectable ``clock``
+(defaults to ``time.monotonic``) so tests can move time forward
+deterministically without real sleeps — a fresh ``World()`` per process is
+expected to be re-created at most once (the arbiter/watcher owns exactly
+one instance for its whole lifetime); idle clocks reset to "just started"
+if the process restarts. A resource that disappears from the declaration
+has its mem entry dropped (re-declaring it later starts a fresh clock,
+same as a process restart would).
 
 Per-engine failures: ``EngineError`` raised by an engine call during a
 snapshot degrades only that tenant to ``state="unknown"`` (fields that
@@ -39,36 +52,32 @@ tenant "unknown".
 
 Externals (minimal heuristic, display-only — see task brief for the full
 version this deliberately simplifies): a KFD pid using more than 1 GiB
-counts as "external" only when NO tenant anywhere reports a loaded/running
-state (lemonade "loaded", comfyui "busy", or hipfire "running"). This
-heuristic doesn't scope to "the GPU that tenant is actually on" (that would
-need attributing ``app.gpu.read_gpus`` pids to specific tenants, which is
-explicitly out of scope here) even though ``placement`` now carries the
-tenant->GPU index mapping. Practical effect: as soon as any tenant is
-loaded/running anywhere in the box, all fat pids on all GPUs are treated as
-accounted-for, even ones on a GPU with no tenant activity at all — this
-under-reports externals whenever a tenant is loaded on one GPU while
-unrelated heavy VRAM use happens on another. Acceptable for a display-only
-UI list; do not use this for eviction decisions.
+counts as "external" only when NO tenant anywhere reports itself "active"
+(per that tenant's adapter's ``active(obs)`` — lemonade "loaded", comfyui
+"busy", hipfire "running"). This heuristic doesn't scope to "the GPU that
+tenant is actually on" (that would need attributing ``app.gpu.read_gpus``
+pids to specific tenants, which is explicitly out of scope here) even
+though ``placement`` now carries the resource->GPU index mapping.
+Practical effect: as soon as any tenant is loaded/running anywhere in the
+box, all fat pids on all GPUs are treated as accounted-for, even ones on a
+GPU with no tenant activity at all — this under-reports externals whenever
+a tenant is loaded on one GPU while unrelated heavy VRAM use happens on
+another. Acceptable for a display-only UI list; do not use this for
+eviction decisions.
 
 No Settings import here — pure inputs only.
 """
 
 import time
 
+from app.engine_kinds import ENGINE_KINDS
 from app.engines import EngineError
-from app.registry import HIPFIRE_FOOTPRINT
 
 # Externals heuristic floor: below this, transient/small allocations are
 # noise, not worth surfacing as a tenant-shaped list entry.
 _EXTERNAL_FLOOR_BYTES = 1 * 1024**3  # 1 GiB
 
 _OPENAI_PREFIX = "openai/"
-_EXTRA_PREFIX = "extra."
-
-# Mirrors Settings' fixed engine->GPU placement defaults; _build_deck passes
-# the live Settings values so the UI never has to hardcode the layout.
-_DEFAULT_PLACEMENT = {"hipfire": 0, "lemonade": 1, "comfyui": 1}
 
 
 def _strip_prefix(name: str | None, prefix: str) -> str | None:
@@ -80,19 +89,14 @@ def _strip_prefix(name: str | None, prefix: str) -> str | None:
 class World:
     """In-memory idle-clock state across repeated ``snapshot()`` calls."""
 
-    def __init__(self, clock=time.monotonic, placement: dict[str, int] | None = None) -> None:
+    def __init__(self, clock=time.monotonic) -> None:
         self._clock = clock
-        self._lemonade_last_value: int | None = None
-        self._lemonade_last_activity_time: float | None = None
-        self._lemonade_last_loaded: str | None = None
-        self._comfy_last_activity_time: float | None = None
-        # Static tenant->GPU index mapping, carried explicitly from Settings
-        # (see _DEFAULT_PLACEMENT / app.main._build_deck) — not inferred from
-        # any engine call, so it never fails and never varies across a
-        # process's lifetime.
-        self._placement = dict(placement) if placement is not None else dict(_DEFAULT_PLACEMENT)
+        # resource -> that resource's adapter-owned idle-clock bookkeeping.
+        # Keyed by resource (not kind): two lemonade-kind resources get
+        # independent entries, independent clocks.
+        self._mem: dict[str, dict] = {}
 
-    def snapshot(self, gpus, lemonade, comfy, hipfire, litellm, registry) -> dict:
+    def snapshot(self, gpus, engines, clients, litellm, registry) -> dict:
         now = self._clock()
 
         gpu_list = [
@@ -110,132 +114,59 @@ class World:
         except EngineError:
             routes = None
 
-        lemonade_tenant = self._snapshot_lemonade(lemonade, registry, now)
-        comfy_tenant = self._snapshot_comfy(comfy, now)
-        hipfire_tenant = self._snapshot_hipfire(hipfire, routes)
+        declared = {e["resource"]: e for e in engines}
+        # A resource that disappeared from the declaration since the last
+        # snapshot loses its idle-clock memory — re-declaring it later is
+        # indistinguishable from a fresh process (matches the docstring's
+        # "process restart" framing, generalized to per-resource).
+        for gone in set(self._mem) - set(declared):
+            del self._mem[gone]
+
+        tenants: dict[str, dict] = {}
+        for resource, entry in declared.items():
+            adapter = ENGINE_KINDS[entry["kind"]]
+            client = clients.client_for(resource)
+            mem = self._mem.setdefault(resource, {})
+            # A fresh per-resource ctx (not one shared dict mutated in
+            # place): see app.engine_kinds' module docstring for why
+            # `resource` rides in ctx rather than a fifth `observe` param.
+            ctx = {"registry": registry, "routes": routes, "resource": resource}
+            obs = adapter.observe(client, mem, now, ctx)
+            obs["engine"] = entry["kind"]
+            obs["gpu_index"] = entry["gpu_index"]
+            tenants[resource] = obs
+
         default_route = None if routes is None else _strip_prefix(routes.get("default"), _OPENAI_PREFIX)
 
-        externals = self._externals(gpus, lemonade_tenant, comfy_tenant, hipfire_tenant)
+        externals = self._externals(gpus, engines, tenants)
 
         return {
             "gpus": gpu_list,
-            "tenants": {
-                "lemonade": lemonade_tenant,
-                "comfyui": comfy_tenant,
-                "hipfire": hipfire_tenant,
-            },
+            "tenants": tenants,
             "externals": externals,
             "default_route": default_route,
             # Disambiguates default_route=None: "litellm says there is no
-            # default route" (True) vs "we could not reach litellm to ask"
+            # default route is configured" (True) vs "we could not reach litellm to ask"
             # (False). The storage guards fail CLOSED on the latter — see
             # app.storage.plan_move / storage_decide.
             "routes_known": routes is not None,
-            "placement": dict(self._placement),
+            "placement": {resource: entry["gpu_index"] for resource, entry in declared.items()},
         }
 
-    def _snapshot_lemonade(self, lemonade, registry, now: float) -> dict:
-        # A deck-authored load in flight: llama-server health reports nothing
-        # loaded while weights stream in, which upstream must not read as dead
-        # (derive_status turns 'loading' into the inert 'warming'). Idle-clock
-        # bookkeeping is deliberately skipped: the loaded-value transition on
-        # the first post-load snapshot resets the activity clock as usual.
-        if lemonade.load_in_flight():
-            return {"state": "loading", "model": None, "footprint": None, "idle_s": None}
+    def note_freed(self, resource: str) -> None:
+        """A successful VRAM free (any kind whose arbiter verb is "free" —
+        comfyui-kind today) re-arms that resource's idle TTL. Without this,
+        idle_s only grows once the resource is idle (freeing changes none of
+        the idle-release rule's inputs), so the watcher re-emits its free
+        action on every tick — flooding the event ring and the engine's
+        free endpoint. A no-op (mem entry harmlessly created, then pruned
+        next snapshot) if `resource` isn't currently declared."""
+        self._mem.setdefault(resource, {})["last_activity_time"] = self._clock()
 
-        try:
-            status = lemonade.status()
-        except EngineError:
-            return {"state": "unknown", "model": None, "footprint": None, "idle_s": None}
-
-        loaded = status["loaded"]
-        activity = lemonade.activity()  # never raises
-
-        # A load transition is activity: llama.cpp's counters restart at 0 on
-        # every load, so a fresh model can report the same counter value the
-        # previous one ended with and the value-change check alone would let
-        # it inherit a stale idle clock (and be evicted on the next tick).
-        if loaded != self._lemonade_last_loaded:
-            self._lemonade_last_activity_time = now
-        self._lemonade_last_loaded = loaded
-
-        if activity is not None:
-            if self._lemonade_last_value is None or activity != self._lemonade_last_value:
-                self._lemonade_last_activity_time = now
-            self._lemonade_last_value = activity
-            idle_s = now - self._lemonade_last_activity_time
-        else:
-            idle_s = None
-
-        footprint = None
-        if loaded:
-            key = _strip_prefix(loaded, _EXTRA_PREFIX)
-            try:
-                footprint = registry.footprint(key)
-            except FileNotFoundError:
-                footprint = None
-
-        return {
-            "state": "loaded" if loaded else "unloaded",
-            "model": loaded,
-            "footprint": footprint,
-            "idle_s": idle_s,
-        }
-
-    def note_comfy_freed(self) -> None:
-        """A successful comfy VRAM free re-arms the idle TTL. Without this,
-        idle_s only grows once comfy is idle (freeing changes none of the
-        idle-release rule's inputs), so the watcher re-emits free_comfyui on
-        every tick — flooding the event ring and comfy's /free endpoint."""
-        self._comfy_last_activity_time = self._clock()
-
-    def _snapshot_comfy(self, comfy, now: float) -> dict:
-        try:
-            queue = comfy.queue_len()
-        except EngineError:
-            return {"state": "unknown", "queue": None, "idle_s": None}
-
-        if self._comfy_last_activity_time is None:
-            # First-ever snapshot: establish a baseline so idle_s is always
-            # computable from here on, even if the queue happens to be
-            # empty on this very first call.
-            self._comfy_last_activity_time = now
-
-        if queue > 0:
-            self._comfy_last_activity_time = now
-            state = "busy"
-        else:
-            state = "idle"
-
-        idle_s = now - self._comfy_last_activity_time
-        return {"state": state, "queue": queue, "idle_s": idle_s}
-
-    def _snapshot_hipfire(self, hipfire, routes: dict | None) -> dict:
-        try:
-            state = hipfire.status()
-        except EngineError:
-            return {"state": "unknown", "model": None, "footprint": 0, "queue_depth": None}
-
-        # Poll /stats while running: besides surfacing queue_depth, this is
-        # what feeds the HipfireClient conversation-activity tracker every
-        # watcher tick (the park/apply busy guard reads that tracker). A
-        # stats failure must not take down the snapshot — unknown, not fatal.
-        queue_depth = None
-        if state == "running":
-            try:
-                queue_depth = hipfire.stats().get("queue_depth")
-            except EngineError:
-                queue_depth = None
-
-        model = None if routes is None else _strip_prefix(routes.get("hipfire"), _OPENAI_PREFIX)
-        footprint = HIPFIRE_FOOTPRINT if state == "running" else 0
-        return {"state": state, "model": model, "footprint": footprint, "queue_depth": queue_depth}
-
-    def _externals(self, gpus, lemonade_tenant, comfy_tenant, hipfire_tenant) -> list[dict]:
-        any_tenant_active = (
-            lemonade_tenant["state"] == "loaded"
-            or comfy_tenant["state"] == "busy"
-            or hipfire_tenant["state"] == "running"
+    def _externals(self, gpus, engines, tenants: dict[str, dict]) -> list[dict]:
+        any_tenant_active = any(
+            ENGINE_KINDS[entry["kind"]].active(tenants[entry["resource"]])
+            for entry in engines
         )
         if any_tenant_active:
             return []

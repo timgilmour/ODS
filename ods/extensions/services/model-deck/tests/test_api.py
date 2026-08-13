@@ -221,6 +221,51 @@ class FakeReadGpus:
 # ===========================================================================
 
 
+# The coexistence-triple declaration (E1 Task 3): a fresh data dir has no
+# presence proof, so app.node_store.seed_engines_if_missing stamps `engines:
+# []` — World.snapshot would then see NO declared resources at all, and
+# every downstream consumer that still assumes the pre-E1 fixed triple
+# (app.observe.observe_local, app.storage.unit_in_use, ...) would either
+# emit nothing or KeyError. This file's tests are about THOSE consumers
+# behaving as if lemonade/comfyui/hipfire are declared and running the
+# fakes below — the fixture's job, not each individual test's — so
+# make_app seeds this declaration unconditionally, post-construction (same
+# posture as policy_store/set_store/intent_store being swapped below).
+_ENGINES = [
+    {"resource": "hipfire", "kind": "hipfire",
+     "connection": {"container": "ods-hipfire"}, "gpu_index": 0,
+     "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
+    {"resource": "lemonade", "kind": "lemonade",
+     "connection": {"url": "http://llama-server:8080",
+                    "metrics_url": "http://llama-server:8001/metrics",
+                    "container": "ods-llama-server"},
+     "gpu_index": 1,
+     "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+    {"resource": "comfyui", "kind": "comfyui",
+     "connection": {"url": "http://comfyui:8188"}, "gpu_index": 1,
+     "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+]
+
+
+class FakeLocalClients:
+    """Stand-in for app.local_clients.LocalClients: resolves each resource
+    to the deck's CURRENT `lemonade`/`comfy`/`hipfire` fake, read LIVE off
+    `deck` on every call — not captured at construction time — so a test
+    that reassigns e.g. ``deck["lemonade"] = FakeLemonade(...)`` mid-test
+    (many below do) is still what any later World.snapshot call observes."""
+
+    _DECK_KEY = {"lemonade": "lemonade", "comfyui": "comfy", "hipfire": "hipfire"}
+
+    def __init__(self, deck: dict) -> None:
+        self._deck = deck
+
+    def client_for(self, resource: str):
+        return self._deck.get(self._DECK_KEY.get(resource, resource))
+
+    def retire_absent(self, keep_resources) -> None:
+        pass  # nothing built to retire — every lookup is live, see client_for
+
+
 def make_app(tmp_path, monkeypatch):
     """create_app() with MODEL_DECK_NO_WATCHER=1 and every engine client /
     read_gpus swapped for a fake; policy_store/set_store point at tmp_path
@@ -249,6 +294,10 @@ def make_app(tmp_path, monkeypatch):
             "events_path": tmp_path / "events.jsonl",
         }
     )
+    # E1 Task 3: declare the coexistence triple + wire World.snapshot's
+    # clients onto the fakes above (see _ENGINES/FakeLocalClients docstrings).
+    deck["node_store"].update("local", {"engines": _ENGINES})
+    deck["local_clients"] = FakeLocalClients(deck)
     return app, deck
 
 

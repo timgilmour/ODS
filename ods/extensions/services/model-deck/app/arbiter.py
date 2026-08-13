@@ -524,6 +524,8 @@ class Watcher:
         configurable_engines=None,
         provenance_store=None,
         dockerctl=None,
+        node_store=None,
+        local_clients=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -535,6 +537,16 @@ class Watcher:
         self._policy_store = policy_store
         self._events_path = events_path
         self._read_gpus = read_gpus
+        # Declaration + LocalClients (E1 Task 3): what the tick's
+        # World.snapshot call reads through now. Both None (every unit test
+        # except the ones built through app.main._build_watcher) means "no
+        # declared engines" — the tick's own snapshot degrades to an empty
+        # `engines` list, same as a genuinely fresh install with nothing
+        # declared yet (spec §1, seed_engines_if_missing's docstring).
+        # COEXISTENCE: observation only — self._lemonade/_comfy/_hipfire
+        # above still drive every ACTUATION path in this class unchanged.
+        self._node_store = node_store
+        self._local_clients = local_clients
         # Shared across the HTTP routers (set-apply, manual load/unload) via
         # the deck namespace; a standalone default keeps unit tests simple.
         self._heal_suppressor = (
@@ -666,8 +678,19 @@ class Watcher:
         # error is logged so it's never silent.
         try:
             gpus = self._read_gpus(self._settings.drm_root, self._settings.kfd_root)
+            # Re-read the declaration fresh every tick (the NodeObservers
+            # precedent: an edit applies live, no restart) rather than a
+            # boot-time copy. `self._node_store is None` (every unit test
+            # that doesn't go through app.main._build_watcher) means "no
+            # declared engines" — an empty list, not a crash.
+            engines = []
+            if self._node_store is not None:
+                local = self._node_store.get("local")
+                engines = local.get("engines", []) if local is not None else []
+                if self._local_clients is not None:
+                    self._local_clients.retire_absent({e["resource"] for e in engines})
             world = self._world.snapshot(
-                gpus, self._lemonade, self._comfy, self._hipfire, self._litellm, self._registry
+                gpus, engines, self._local_clients, self._litellm, self._registry
             )
             policy = self._policy_store.get()
             # While a deliberate unload's suppression window is active, skip
@@ -855,7 +878,12 @@ class Watcher:
                 else:
                     # Re-arm the idle TTL so the idle-release rule fires once
                     # per TTL while comfy stays idle, not on every tick.
-                    self._world.note_comfy_freed()
+                    # note_comfy_freed() -> note_freed(resource) (E1 Task 3);
+                    # this action type is still comfy-specific pending Task
+                    # 6's per-resource action vocabulary, so the resource
+                    # name is the same "comfyui" literal `_execute`'s
+                    # surrounding block already commits to elsewhere.
+                    self._world.note_freed("comfyui")
                     self._log(kind, {})
             elif kind == "noop":
                 if action["reason"] == "wont-fit":

@@ -5,9 +5,30 @@ E2 turns it into the pluggable descriptor registry. Spec §8 binds: no
 engine name may appear in app/ outside this module (allowed residues are
 listed in the plan's Global Constraints).
 
-This task ships only the declaration half: kind names + connection
-schemas + validate_engines. Adapters (observe/verbs/idle/reclaim) land in
-Task 3."""
+Task 1 shipped the declaration half: kind names + connection schemas +
+validate_engines. Task 3 (this module's other half) adds the adapters:
+`observe`/`active`/`arbiter_verbs`/`human_verbs`/`demand`, moved VERBATIM
+from app/state.py's three `_snapshot_*` methods (see each adapter's
+`observe` for the incident-history comments that travelled with them).
+`idle_action`/`reclaimable` (arbiter generalization) and the actuator
+methods (execute_unload/execute_free/execute_load) are Task 5/6's
+additions to these same classes — this module is the one place every
+later task's per-kind logic lands, per its own docstring above.
+
+hipfire's ``observe`` needs the RESOURCE name (to look up its model in
+litellm's route table, which the pre-E1 code keyed by the literal
+"hipfire"). Delegated mechanism choice (Task 3 brief): `ctx` carries
+`{"registry", "routes", "resource"}` — `resource` added by `World.snapshot`
+per iteration (a fresh per-resource ctx dict, not a mutated shared one) —
+rather than a separate `observe(client, mem, now, resource, ctx)`
+parameter, so every adapter's `observe` keeps the identical 4-arg
+signature whether or not that particular kind needs the resource name."""
+
+from app.engines import EngineError
+from app.registry import HIPFIRE_FOOTPRINT
+
+_OPENAI_PREFIX = "openai/"
+_EXTRA_PREFIX = "extra."
 
 # kind -> {connection field -> required?}
 KNOWN_KINDS: dict[str, dict[str, bool]] = {
@@ -71,3 +92,174 @@ def validate_engines(engines: object) -> None:
                 raise _bad(f"{resource}: policy_defaults.{field} must be int")
             if typ is bool and not isinstance(v, bool):
                 raise _bad(f"{resource}: policy_defaults.{field} must be bool")
+
+
+def _strip_prefix(name: str | None, prefix: str) -> str | None:
+    if name is None:
+        return None
+    return name.removeprefix(prefix)
+
+
+class _LemonadeAdapter:
+    """lemonade-kind: load/unload a GGUF, idle-clock tracked by llama.cpp's
+    monotonic activity counters."""
+
+    def observe(self, client, mem: dict, now: float, ctx: dict) -> dict:
+        # Moved VERBATIM from app.state.World._snapshot_lemonade (app/state.py,
+        # pre-Task-3 lines 137-183) — comments included, they carry incident
+        # history. `self._lemonade_last_*` reads/writes become `mem` dict
+        # reads/writes (keys: last_value, last_activity_time, last_loaded).
+
+        # A deck-authored load in flight: llama-server health reports nothing
+        # loaded while weights stream in, which upstream must not read as dead
+        # (derive_status turns 'loading' into the inert 'warming'). Idle-clock
+        # bookkeeping is deliberately skipped: the loaded-value transition on
+        # the first post-load snapshot resets the activity clock as usual.
+        if client.load_in_flight():
+            return {"state": "loading", "model": None, "footprint": None, "idle_s": None}
+
+        try:
+            status = client.status()
+        except EngineError:
+            return {"state": "unknown", "model": None, "footprint": None, "idle_s": None}
+
+        loaded = status["loaded"]
+        activity = client.activity()  # never raises
+
+        # A load transition is activity: llama.cpp's counters restart at 0 on
+        # every load, so a fresh model can report the same counter value the
+        # previous one ended with and the value-change check alone would let
+        # it inherit a stale idle clock (and be evicted on the next tick).
+        if loaded != mem.get("last_loaded"):
+            mem["last_activity_time"] = now
+        mem["last_loaded"] = loaded
+
+        if activity is not None:
+            if mem.get("last_value") is None or activity != mem.get("last_value"):
+                mem["last_activity_time"] = now
+            mem["last_value"] = activity
+            idle_s = now - mem["last_activity_time"]
+        else:
+            idle_s = None
+
+        footprint = None
+        if loaded:
+            key = _strip_prefix(loaded, _EXTRA_PREFIX)
+            registry = ctx["registry"]
+            try:
+                footprint = registry.footprint(key)
+            except FileNotFoundError:
+                footprint = None
+
+        return {
+            "state": "loaded" if loaded else "unloaded",
+            "model": loaded,
+            "footprint": footprint,
+            "idle_s": idle_s,
+        }
+
+    def active(self, obs: dict) -> bool:
+        return obs["state"] == "loaded"
+
+    def arbiter_verbs(self) -> frozenset:
+        return frozenset({"unload"})
+
+    def human_verbs(self) -> frozenset:
+        return frozenset({"load", "unload"})
+
+    def demand(self) -> bool:
+        return True
+
+
+class _ComfyAdapter:
+    """comfyui-kind: no load/unload, only a VRAM `free()`; idle-clock tracked
+    by queue occupancy."""
+
+    def observe(self, client, mem: dict, now: float, ctx: dict) -> dict:
+        # Moved VERBATIM from app.state.World._snapshot_comfy (app/state.py,
+        # pre-Task-3 lines 192-211). `self._comfy_last_activity_time` becomes
+        # `mem["last_activity_time"]`.
+        try:
+            queue = client.queue_len()
+        except EngineError:
+            return {"state": "unknown", "queue": None, "idle_s": None}
+
+        if mem.get("last_activity_time") is None:
+            # First-ever snapshot: establish a baseline so idle_s is always
+            # computable from here on, even if the queue happens to be
+            # empty on this very first call.
+            mem["last_activity_time"] = now
+
+        if queue > 0:
+            mem["last_activity_time"] = now
+            state = "busy"
+        else:
+            state = "idle"
+
+        idle_s = now - mem["last_activity_time"]
+        return {"state": state, "queue": queue, "idle_s": idle_s}
+
+    def active(self, obs: dict) -> bool:
+        return obs["state"] == "busy"
+
+    def arbiter_verbs(self) -> frozenset:
+        return frozenset({"free"})
+
+    def human_verbs(self) -> frozenset:
+        return frozenset({"free"})
+
+    def demand(self) -> bool:
+        return False
+
+
+class _HipfireAdapter:
+    """hipfire-kind: container lifecycle (park/resume), no arbiter verb —
+    park stays human-only (structural omission made explicit)."""
+
+    def observe(self, client, mem: dict, now: float, ctx: dict) -> dict:
+        # Moved VERBATIM from app.state.World._snapshot_hipfire (app/state.py,
+        # pre-Task-3 lines 213-232). `routes` and `resource` (for the
+        # route-table model lookup, see this module's docstring) come from
+        # `ctx`; hipfire has no per-resource idle-clock state, so `mem` is
+        # unused here (kept in the signature for adapter-interface uniformity).
+        try:
+            state = client.status()
+        except EngineError:
+            return {"state": "unknown", "model": None, "footprint": 0, "queue_depth": None}
+
+        # Poll /stats while running: besides surfacing queue_depth, this is
+        # what feeds the HipfireClient conversation-activity tracker every
+        # watcher tick (the park/apply busy guard reads that tracker). A
+        # stats failure must not take down the snapshot — unknown, not fatal.
+        queue_depth = None
+        if state == "running":
+            try:
+                queue_depth = client.stats().get("queue_depth")
+            except EngineError:
+                queue_depth = None
+
+        routes = ctx["routes"]
+        model = None if routes is None else _strip_prefix(routes.get(ctx["resource"]), _OPENAI_PREFIX)
+        footprint = HIPFIRE_FOOTPRINT if state == "running" else 0
+        return {"state": state, "model": model, "footprint": footprint, "queue_depth": queue_depth}
+
+    def active(self, obs: dict) -> bool:
+        return obs["state"] == "running"
+
+    def arbiter_verbs(self) -> frozenset:
+        return frozenset()
+
+    def human_verbs(self) -> frozenset:
+        return frozenset({"park", "resume"})
+
+    def demand(self) -> bool:
+        return False
+
+
+# kind -> adapter instance. One instance per kind is enough — adapters carry
+# no per-resource state (that lives in World's `_mem`, keyed by resource).
+ENGINE_KINDS: dict[str, object] = {
+    "lemonade": _LemonadeAdapter(),
+    "comfyui": _ComfyAdapter(),
+    "hipfire": _HipfireAdapter(),
+}

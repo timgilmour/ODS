@@ -513,13 +513,21 @@ class FakeWorld:
         self.calls = 0
         self.comfy_freed_notes = 0
 
-    def snapshot(self, gpus, lemonade, comfy, hipfire, litellm, registry):
+    def snapshot(self, gpus, engines, clients, litellm, registry):
+        # E1 Task 3: World.snapshot's signature moved from the fixed
+        # (lemonade, comfy, hipfire) triple to (engines, clients) — an
+        # ARITY-only rename here (this fake never inspected the individual
+        # per-kind params, only counted calls / returned the canned
+        # snapshot), so no test behavior changes.
         self.calls += 1
         if self._raises is not None:
             raise self._raises
         return self._snapshot
 
-    def note_comfy_freed(self):
+    def note_freed(self, resource):
+        # E1 Task 3: note_comfy_freed() -> note_freed(resource); every
+        # existing caller in this file only ever freed comfy, so the
+        # counter's meaning is unchanged.
         self.comfy_freed_notes += 1
 
 
@@ -1319,7 +1327,10 @@ def test_tick_yields_when_lock_acquired_after_the_snapshot(tmp_path):
             self._release = threading.Event()
             self._locker = None
 
-        def snapshot(self, gpus, lemonade, comfy, hipfire, litellm, registry):
+        def snapshot(self, gpus, engines, clients, litellm, registry):
+            # E1 Task 3 arity rename (see the file-level FakeWorld.snapshot
+            # for the same change) — this local class never inspected these
+            # params either.
             self.calls += 1
             acquired = threading.Event()
 

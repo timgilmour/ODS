@@ -178,6 +178,14 @@ def _build_deck(settings: Settings) -> dict:
     # Env defaults are not proof an engine exists (coexistence, spec §6).
     seed_engines_if_missing(node_store, settings, data_dir)
 
+    from app.local_clients import LocalClients
+
+    # Declared local engines' actuation/observation clients (app.local_clients,
+    # Task 3): lazy, self-healing from node_store's local `engines[]` — the
+    # LocalClients counterpart to node_clients below, for the local node's
+    # declaration instead of swap nodes' registry rows.
+    local_clients = LocalClients(node_store, settings)
+
     from app.engines.spark import SparkClient
     from app.node_clients import NodeClients, NodeObservers
 
@@ -195,11 +203,11 @@ def _build_deck(settings: Settings) -> dict:
 
     deck = {
         "settings": settings,
-        "world": World(placement={
-            "hipfire": settings.hipfire_gpu_index,
-            "lemonade": settings.lemonade_gpu_index,
-            "comfyui": settings.lemonade_gpu_index,  # comfy shares the lemonade GPU (settings.py comment)
-        }),
+        # No placement param (E1 Task 3): placement now derives from each
+        # declared entry's own gpu_index (see node_store.seed_engines_if_missing
+        # for where settings.hipfire_gpu_index/lemonade_gpu_index still feed
+        # the coexistence seed's gpu_index values, at seed time, not here).
+        "world": World(),
         "lemonade": lemonade,
         "comfy": comfy,
         "hipfire": hipfire,
@@ -249,6 +257,13 @@ def _build_deck(settings: Settings) -> dict:
         # registry edits apply live with no restart [max-review #13 fix].
         "node_clients": node_clients,
         "node_observers": node_observers,
+        # Declared local engines' clients (app.local_clients.LocalClients,
+        # Task 3): what World.snapshot reads through for every resource in
+        # node_store's local `engines[]`. Actuation (control.py's routes,
+        # the watcher's self._lemonade/_comfy/_hipfire) is deliberately left
+        # on the pre-E1 shared client instances above — COEXISTENCE:
+        # observation only in this task, nothing actuates through here yet.
+        "local_clients": local_clients,
         # The one place a real node-agent client is minted for probes; the
         # nodes router and the observer both go through it, and tests swap
         # THIS entry rather than monkeypatching a module.
@@ -323,6 +338,15 @@ def _build_watcher(settings: Settings):
         hipfire=deck["hipfire"],
         litellm=deck["litellm"],
         registry=deck["registry"],
+        # Declaration + LocalClients (Task 3): what the tick's World.snapshot
+        # call reads through now, re-read live every tick (node_store, not a
+        # boot-time copy — see the NodeObservers precedent this follows).
+        # Everything else about the tick (decide/_execute/_infer_pending)
+        # still reads self._lemonade/_comfy/_hipfire above unchanged —
+        # COEXISTENCE: observation only in this task, nothing actuates
+        # through the declaration yet.
+        node_store=deck["node_store"],
+        local_clients=deck["local_clients"],
         policy_store=deck["policy_store"],
         events_path=deck["events_path"],
         read_gpus=deck["read_gpus"],
