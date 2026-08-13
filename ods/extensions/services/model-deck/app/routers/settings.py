@@ -13,7 +13,7 @@ default or a checkpoint's recommended sampling value shows up in
 ``resolved`` for the UI to display with its provenance, but never as a flag
 on ``argline`` — an engine's own applied behavior is not something the Deck
 re-asserts back at it, and this is also the exact set of layers
-``app.routers.spark.spark_reload`` ships to the node (see
+``app.routers.serving.serving_reload`` ships to the node (see
 ``_declared_only`` below; the two call sites share one filter so they can
 never disagree). The optional ``?layers=`` query param (comma-separated,
 validated against ``app.ladder.LAYERS``, unknown name -> 422) filters
@@ -163,8 +163,8 @@ def get_effective(
     facts = _facts_for(deck, model)
 
     # Design decision 3 (Plan C2, Task 7): the argline — and, by extension,
-    # anything ever SHIPPED to an engine (app.routers.spark.spark_reload) —
-    # renders DECLARED layers (engine/model/engine_model) only. The two
+    # anything ever SHIPPED to an engine (app.routers.serving.serving_reload)
+    # — renders DECLARED layers (engine/model/engine_model) only. The two
     # DERIVED layers (engine_defaults, checkpoint_recommendations) are the
     # engine's own applied behavior, never re-asserted back at it as flags;
     # 'resolved' below still carries them, full provenance intact, for the
@@ -479,8 +479,8 @@ def _declared_only(resolved: dict) -> dict:
     """Design decision 3 (Plan C2, Task 7): the DECLARED layers of a
     resolution — engine/model/engine_model, never engine_defaults or
     checkpoint_recommendations. Shared by get_effective's argline and
-    app.routers.spark.spark_reload's shipped document, so the two can never
-    drift apart on what "declared-only" means."""
+    app.routers.serving.serving_reload's shipped document, so the two can
+    never drift apart on what "declared-only" means."""
     return {k: v for k, v in resolved.items() if v["origin"] == "declared"}
 
 

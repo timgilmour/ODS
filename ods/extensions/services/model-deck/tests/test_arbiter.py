@@ -2565,9 +2565,9 @@ def test_reconciler_skips_a_lemonade_restore_while_a_deck_load_is_in_flight(tmp_
 #
 # Watcher._configurable_engines returns its constructor pairs VERBATIM as of
 # task 8 (C2) — no internal pairing with _LOCAL_NODE happens inside Watcher
-# anymore; app.main builds the one real production pair with
-# `(spark_node_id(), "vllm")`. Every test below (except the C2 remote-pair
-# tests at the end of this section) injects
+# anymore; app.main builds one real production pair per control:"swap"
+# registry node (N1), each `(that node's id, "vllm")`. Every test below
+# (except the C2 remote-pair tests at the end of this section) injects
 # `configurable_engines=[(_LOCAL_NODE, "hipfire")]` purely to keep exercising
 # _harvest_catalogs's machinery against a local engine_exec double; it is not
 # a claim that hipfire is a real harvest target (F2, 2026-08-07: hipfire is
@@ -2816,8 +2816,8 @@ def test_harvest_reruns_against_the_real_dockerengineexec_when_the_image_id_chan
 # That half of the original bug is now covered where the construction
 # actually happens: tests.test_engines.
 # test_build_watcher_routes_spark_catalog_by_node_id_not_label (app.main's
-# real wiring, asserting it uses spark_node_id(), never node_label). This
-# test keeps its ORIGINAL regression duty at the Watcher layer: even with
+# real wiring, asserting it uses the registry node's id, never node_label).
+# This test keeps its ORIGINAL regression duty at the Watcher layer: even with
 # node_label set away from "local" and handed a real node-id pair, the
 # harvest path must consume that pair as given and never consult
 # settings.node_label at all -- a future Watcher change that reintroduced a
@@ -2853,8 +2853,9 @@ def test_harvest_key_uses_node_id_not_node_label(tmp_path):
 # _configurable_engines() no longer pairs anything with _LOCAL_NODE itself —
 # it returns whatever the constructor was handed, verbatim (see its
 # docstring). These two exercise that seam with a pair a real production
-# wiring would build (`(spark_node_id(), "vllm")`, app.main), and — unlike
-# every test above, which reuses tests.test_harvest's PROBE_OUTPUT fixture —
+# wiring would build (`(<swap node's registry id>, "vllm")`, app.main), and
+# — unlike every test above, which reuses tests.test_harvest's PROBE_OUTPUT
+# fixture —
 # build the probe text by hand from app.harvest's REAL `_SENTINEL` wrapped
 # around a real one-option payload, so `parse_probe_output` does the actual
 # parsing. A hand-seeded `option_catalog` dict would exercise none of that
@@ -3084,9 +3085,11 @@ def test_provenance_pass_records_catalog_units_as_weights(tmp_path):
 # (`{"id": "local", "label": node_label}`) -- instead of the node id every
 # other node-scoped key in the deck uses (`app.observe._LOCAL_NODE`).
 #
-# Sparky's collector got it right (`spark_node_id()`, app/arbiter.py:1144),
-# so the ledger keyed local artifacts by label and remote ones by id: one
-# namespace, two vocabularies. Nothing refused it because
+# Sparky's collector got it right (keyed by the registry node id, never a
+# label -- since generalized to every swap node in
+# app.arbiter.Watcher._provenance_nodes), so the ledger keyed local
+# artifacts by label and remote ones by id: one namespace, two
+# vocabularies. Nothing refused it because
 # `origins._NODE_RE` validates the node as a slug, and "autarch" is a
 # perfectly good slug.
 #

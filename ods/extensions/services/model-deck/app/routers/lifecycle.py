@@ -76,7 +76,10 @@ def adopt(key: str, request: Request) -> dict:
     if record is None:
         raise HTTPException(status_code=404, detail=f"unknown resource {key!r}")
 
-    engine = engine_for(key)
+    swap_ids = frozenset(
+        n["id"] for n in deck["node_store"].list()
+        if n.get("control") == "swap")
+    engine = engine_for(key, swap_ids)
     if engine is None:
         raise HTTPException(status_code=404, detail=f"no engine owns {key!r}")
 

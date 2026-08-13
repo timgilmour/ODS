@@ -36,19 +36,6 @@ LOCAL_LEMONADE_KEY = f"{_LOCAL_NODE}/lemonade"
 # Same rationale as LOCAL_LEMONADE_KEY above, for hipfire's intent key.
 LOCAL_HIPFIRE_KEY = f"{_LOCAL_NODE}/hipfire"
 
-# Spark is a single-slot serving node: one resource, always this key. Public
-# so writers (app.routers.spark) and readers (app.arbiter) name it from one
-# place instead of re-typing the literal.
-SPARK_SLOT_KEY = "sparky/slot0"
-
-
-def spark_node_id() -> str:
-    """The spark node's id in every key vocabulary (settings scopes,
-    catalog keys, adopt). Derived from SPARK_SLOT_KEY so there is exactly
-    one source; settings.spark_node_name is a credential-lookup name that
-    happens to match and must never build a key (C1's live-only bug)."""
-    return SPARK_SLOT_KEY.split("/", 1)[0]
-
 
 def slot_key(node_id: str) -> str:
     """The serving-slot resource key for a swap node. "slot0" is the
@@ -128,13 +115,14 @@ def observe_spark(spark_status: dict | None, node_id: str) -> dict[str, dict]:
     }
 
 
-# Which engine owns each resource key. Used by restore dispatch and adopt;
-# a new engine adds a line here rather than editing either caller.
-_ENGINE_BY_KEY = {
+# Which LOCAL engine owns each resource key. Used by restore dispatch and
+# adopt; a new local engine adds a line here rather than editing either
+# caller. No swap-node row lives here — a `<node>/slot0` key's owner depends
+# on the registry (a PREPARED id-set, see engine_for), not a static literal.
+_LOCAL_ENGINE_BY_KEY = {
     LOCAL_LEMONADE_KEY: "lemonade",
     LOCAL_HIPFIRE_KEY: "hipfire",
     "local/comfyui": "comfyui",
-    SPARK_SLOT_KEY: "spark",
 }
 
 
@@ -145,7 +133,7 @@ def engine_for(key: str, swap_node_ids: frozenset[str] | set[str] = frozenset())
     iff ``<node>`` is in `swap_node_ids` — a PREPARED id-set, not the store,
     so this stays a pure function and each caller decides its own registry
     read (design §4)."""
-    engine = _ENGINE_BY_KEY.get(key)
+    engine = _LOCAL_ENGINE_BY_KEY.get(key)
     if engine is not None:
         return engine
     node, sep, resource = key.partition("/")
@@ -180,9 +168,9 @@ def _record(
 # ---------------------------------------------------------------------------
 
 # SparkClient.status() costs TWO node-agent requests, and watch_interval
-# defaults to 2.0 s. When sparky is off — its normal state most of the time —
-# each of those blocks on a 5 s httpx timeout, which would stretch the
-# arbiter's cadence from 2 s to ~12 s exactly when nothing is wrong. So a
+# defaults to 2.0 s. When a swap node is off — its normal state most of the
+# time — each of those blocks on a 5 s httpx timeout, which would stretch
+# the arbiter's cadence from 2 s to ~12 s exactly when nothing is wrong. So a
 # short TTL on success, and a growing backoff on failure.
 SPARK_OBSERVE_TTL_S = 10.0
 SPARK_BACKOFF_BASE_S = 15.0
@@ -251,8 +239,8 @@ class SparkObserver:
 
     def status(self) -> dict | None:
         """The spark observation, or None when no spark is configured at all
-        (``observe_spark(None)`` then emits no key — an undeclared resource
-        must not appear as a phantom failure)."""
+        (``observe_spark(None, node_id)`` then emits no key — an undeclared
+        resource must not appear as a phantom failure)."""
         spark = self._spark_fn()
         if spark is None:
             return None
@@ -271,7 +259,7 @@ class SparkObserver:
                 # Exponent capped: 2**(failures-1) is a Python bignum and
                 # overflows float multiplication at failure #1025 (2**1024
                 # is the first power of two too large for a float; ~3.5
-                # days of a powered-off sparky at the 300 s cap). 2**16
+                # days of a powered-off swap node at the 300 s cap). 2**16
                 # already exceeds every real backoff_max_s.
                 self._backoff_base_s * 2 ** min(self._failures - 1, 16),
                 self._backoff_max_s,

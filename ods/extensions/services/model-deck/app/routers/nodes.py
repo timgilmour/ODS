@@ -23,8 +23,6 @@ from pydantic import BaseModel
 
 from app.engines import EngineError
 from app.events import log_event
-from app.node_binding import entry_actuation_stale
-from app.observe import spark_node_id
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -54,18 +52,8 @@ class NodeTestBody(BaseModel):
     credential: str | None = None
 
 
-def _public(store, entry: dict, spark_bound: dict | None) -> dict:
-    # spark_bound is POSITIONAL-REQUIRED, not defaulted [T8 review m1]: None
-    # is the value that MEANS "no client bound", so a default would let a
-    # future call site that forgets the argument raise a silent, permanent
-    # false "Restart required" alarm instead of failing loudly here.
-    # actuation_stale via app.node_binding, the SAME function
-    # app.routers.status._nodes_block calls — the Nodes screen renders from
-    # /api/state, so a second copy of the rule here would be the one that
-    # drifts unnoticed.
-    return {**entry,
-            "credential_set": store.credential_set(entry["id"]),
-            "actuation_stale": entry_actuation_stale(store, entry, spark_bound)}
+def _public(store, entry: dict) -> dict:
+    return {**entry, "credential_set": store.credential_set(entry["id"])}
 
 
 def _checked_credential(value: str | None) -> str | None:
@@ -82,8 +70,7 @@ def _checked_credential(value: str | None) -> str | None:
 def list_nodes(request: Request) -> dict:
     deck = request.app.state.deck
     store = deck["node_store"]
-    bound = deck["spark_bound"]
-    return {"nodes": [_public(store, n, bound) for n in store.list()]}
+    return {"nodes": [_public(store, n) for n in store.list()]}
 
 
 @router.post("")
@@ -98,7 +85,7 @@ def create_node(body: NodeCreate, request: Request) -> dict:
                       credential=credential)
     log_event(deck["events_path"], "node-added",
               {"node": entry["id"], "label": entry["label"]})
-    return _public(store, entry, deck["spark_bound"])
+    return _public(store, entry)
 
 
 @router.put("/{node_id}")
@@ -111,29 +98,20 @@ def update_node(node_id: str, body: NodePatch, request: Request) -> dict:
     changed = sorted(fields) + (["credential"] if credential else [])
     log_event(deck["events_path"], "node-updated",
               {"node": node_id, "fields": changed})   # names, never values
-    return _public(store, entry, deck["spark_bound"])
+    return _public(store, entry)
 
 
 @router.delete("/{node_id}")
 def delete_node(node_id: str, request: Request) -> dict:
     deck = request.app.state.deck
-    # The SparkClient is bound ONCE, at app build (app.main's spark_bound
-    # stash) — deleting its registry row does NOT unbind it, so the deck
-    # keeps actuating a node the operator just removed until a restart
-    # re-binds from the (now rowless) registry. Refusing here would deadlock
-    # removal outright (a restart re-binds from a registry that still holds
-    # the row), so the delete proceeds and the residual binding is surfaced
-    # loudly instead. Full live unbinding is the provider-rebinding design
-    # pass [08-10 wave report, parked].
-    bound_client_remains = (
-        deck.get("spark") is not None and node_id == spark_node_id())
+    # No residual binding to surface: app.node_clients rebinds every
+    # actuation client live, from the registry, on every call — a deleted
+    # row simply stops resolving to a client on client_for's NEXT call, no
+    # restart involved. The store's own guard (NodeStore.remove) already
+    # refuses deleting an operable (control:"swap") node outright, so a row
+    # reaching this point has nothing for a client to remain bound to.
     deck["node_store"].remove(node_id)
-    log_event(deck["events_path"], "node-removed",
-              {"node": node_id, "bound_client_remains": bound_client_remains})
-    if bound_client_remains:
-        return {"status": "ok", "restart_required": True,
-                "detail": "the live actuation client remains bound to this "
-                          "node until the deck restarts"}
+    log_event(deck["events_path"], "node-removed", {"node": node_id})
     return {"status": "ok"}
 
 

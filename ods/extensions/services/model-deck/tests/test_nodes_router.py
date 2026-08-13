@@ -54,6 +54,7 @@ def test_create_then_list(client):
     hera = next(n for n in body["nodes"] if n["id"] == "hera")
     assert hera["credential_set"] is True
     assert hera["agent_kind"] == "node-agent"
+    assert hera["control"] == "none"
 
 
 def test_credential_never_echoed_anywhere(client):
@@ -169,26 +170,12 @@ def test_test_connection_rejects_both_targets(client):
     assert resp.status_code == 422
 
 
-def test_delete_of_the_bound_spark_node_says_restart_required(client):
-    """Deleting the bound node's row does NOT unbind the live SparkClient
-    (bound once, at app build) — refusing outright would deadlock removal,
-    so the delete proceeds and the residual binding is surfaced loudly.
-    Full live unbinding is the parked provider-rebinding design pass."""
-    _create(client, id="sparky", label="Sparky")
-    client.app.state.deck["spark"] = object()  # a bound client exists
-
-    body = client.delete("/api/nodes/sparky").json()
-
-    assert body["restart_required"] is True
-    assert "restart" in body["detail"]
-
-
-def test_delete_of_an_unbound_node_has_no_restart_flag(client):
-    """The away-from-default pairing for the bound case above: same route,
-    spark client present, but a DIFFERENT node — no residual binding, no
-    flag (a flag on every delete would train operators to ignore it)."""
+def test_delete_returns_plain_ok(client):
+    """N1 T12: app.node_clients rebinds every actuation client live, from
+    the registry, on every call — a deleted row simply stops resolving to a
+    client on the next client_for(), no restart involved, so delete's
+    response body carries no residual-binding flag at all anymore."""
     _create(client)  # "hera"
-    client.app.state.deck["spark"] = object()
 
     body = client.delete("/api/nodes/hera").json()
 

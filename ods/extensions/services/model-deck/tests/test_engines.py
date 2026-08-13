@@ -1402,7 +1402,8 @@ def test_build_deck_wires_hipfire_stats_url_and_activity_window(tmp_path, monkey
 # Watcher._configurable_engines does no pairing of its own anymore (see its
 # docstring) -- the vocabulary decision moved here, into app.main. These
 # prove the actual production wiring, not just the seam: a spark-configured
-# box's one route keys off spark_node_id(), never settings.node_label
+# box's one route keys off the registry node's id (LEGACY_SPARK_SEED_ID for
+# the env-seed path these tests exercise), never settings.node_label
 # (the C1 live-deploy bug's original vocabulary), and a box with no spark
 # leaves harvest fully disabled, same as every pre-C2 build.
 
@@ -1417,7 +1418,7 @@ def test_build_watcher_routes_spark_catalog_by_node_id_not_label(tmp_path, monke
     from app.engines.docker_ctl import EngineExecRouter
     from app.engines.spark import SparkCatalogExec
     from app.main import _build_watcher
-    from app.observe import spark_node_id
+    from app.node_store import LEGACY_SPARK_SEED_ID
     from app.settings import Settings
 
     monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
@@ -1430,10 +1431,10 @@ def test_build_watcher_routes_spark_catalog_by_node_id_not_label(tmp_path, monke
 
     watcher = _build_watcher(settings)
 
-    assert watcher._configurable_engines() == [(spark_node_id(), "vllm")]
+    assert watcher._configurable_engines() == [(LEGACY_SPARK_SEED_ID, "vllm")]
     assert isinstance(watcher._engine_exec, EngineExecRouter)
-    assert watcher._engine_exec.pairs == [(spark_node_id(), "vllm")]
-    assert isinstance(watcher._engine_exec._routes[(spark_node_id(), "vllm")], SparkCatalogExec)
+    assert watcher._engine_exec.pairs == [(LEGACY_SPARK_SEED_ID, "vllm")]
+    assert isinstance(watcher._engine_exec._routes[(LEGACY_SPARK_SEED_ID, "vllm")], SparkCatalogExec)
     # Never the label, and never under the label's own value either.
     assert ("autarch", "vllm") not in watcher._engine_exec.pairs
 
@@ -1464,7 +1465,7 @@ def test_build_watcher_stashes_engine_exec_on_the_shared_deck(tmp_path, monkeypa
     harvest loop would silently disagree about what's configurable."""
     from app.engines.docker_ctl import EngineExecRouter
     from app.main import _build_deck, _build_watcher
-    from app.observe import spark_node_id
+    from app.node_store import LEGACY_SPARK_SEED_ID
     from app.settings import Settings
 
     monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
@@ -1474,7 +1475,7 @@ def test_build_watcher_stashes_engine_exec_on_the_shared_deck(tmp_path, monkeypa
     watcher = _build_watcher(settings)
     deck = _build_deck(settings)  # same cached dict, by settings identity
 
-    assert deck["configurable_engines"] == [(spark_node_id(), "vllm")]
+    assert deck["configurable_engines"] == [(LEGACY_SPARK_SEED_ID, "vllm")]
     assert isinstance(deck["engine_exec"], EngineExecRouter)
     assert deck["engine_exec"] is watcher._engine_exec
 
@@ -1494,7 +1495,7 @@ def test_build_deck_wires_engine_exec_without_build_watcher(tmp_path, monkeypatc
     alone, _build_watcher never invoked at all."""
     from app.engines.docker_ctl import EngineExecRouter
     from app.main import _build_deck
-    from app.observe import spark_node_id
+    from app.node_store import LEGACY_SPARK_SEED_ID
     from app.settings import Settings
 
     monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
@@ -1503,7 +1504,7 @@ def test_build_deck_wires_engine_exec_without_build_watcher(tmp_path, monkeypatc
 
     deck = _build_deck(settings)
 
-    assert deck["configurable_engines"] == [(spark_node_id(), "vllm")]
+    assert deck["configurable_engines"] == [(LEGACY_SPARK_SEED_ID, "vllm")]
     assert isinstance(deck["engine_exec"], EngineExecRouter)
 
 
@@ -1518,7 +1519,7 @@ def test_no_watcher_app_state_deck_still_has_engine_exec_when_spark_is_configure
     request.app.state.deck, not off any watcher instance."""
     from app.engines.docker_ctl import EngineExecRouter
     from app.main import create_app
-    from app.observe import spark_node_id
+    from app.node_store import LEGACY_SPARK_SEED_ID
 
     monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
@@ -1526,5 +1527,5 @@ def test_no_watcher_app_state_deck_still_has_engine_exec_when_spark_is_configure
 
     app = create_app()
 
-    assert app.state.deck["configurable_engines"] == [(spark_node_id(), "vllm")]
+    assert app.state.deck["configurable_engines"] == [(LEGACY_SPARK_SEED_ID, "vllm")]
     assert isinstance(app.state.deck["engine_exec"], EngineExecRouter)

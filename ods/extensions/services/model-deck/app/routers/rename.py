@@ -19,9 +19,12 @@ Per-profile isolation mirrors ``app.routers.settings.adopt`` (Task 5's fixed
 form): a profile whose compose fetch or parse fails, or that has no /model
 mount, or that carries no --served-model-name at all, is simply left out of
 the gathered profiles -- there is nothing to plan a rename around for it --
-rather than failing the whole request. Only ``deck["spark"]`` being absent
-(no spark configured on this box) is a whole-request precondition, 503,
-matching ``app.routers.spark._spark``'s guard exactly.
+rather than failing the whole request. Only the resolved swap node having no
+live client (no control:"swap" node declared, or a known one that is not
+currently operable) is a whole-request precondition, 503, matching
+``app.routers.spark._single_swap_node_id``'s guard exactly (including its
+409 when more than one swap node is declared -- never guess which one the
+caller meant, [[literal-declared-inputs]]).
 """
 
 from fastapi import APIRouter, HTTPException, Request
@@ -29,6 +32,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.compose_import import import_compose
 from app.engines import EngineError
 from app.rename import plan_rename
+from app.routers.spark import _single_swap_node_id
 
 router = APIRouter(prefix="/rename", tags=["rename"])
 
@@ -78,7 +82,8 @@ def rename_plan(request: Request, body: dict | None = None) -> dict:
     caller supplies whatever pins the runbook already knows about; an empty
     or absent body just means the caller has none to report."""
     deck = request.app.state.deck
-    spark = deck.get("spark")
+    node_id = _single_swap_node_id(deck)
+    spark = deck["node_clients"].client_for(node_id)
     if spark is None:
         raise HTTPException(status_code=503,
                             detail="spark engine is not configured")

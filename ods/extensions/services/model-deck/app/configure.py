@@ -67,7 +67,7 @@ def apply_settings(
         # The one shape node-agent's settings_store accepts, verbatim (see
         # node-agent/settings_store.py's EMPTY/_KEYS) — args here is
         # WHATEVER `resolved` was handed, declared-only filtering already
-        # done by the caller (app.routers.spark.spark_reload), not this
+        # done by the caller (app.routers.serving.serving_reload), not this
         # function's concern.
         document = {
             "args": {key: entry["value"] for key, entry in resolved.items()},

@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.rename import plan_rename
-from tests.test_api import make_app
+from tests.test_api import make_app, wire_swap_node
 
 # ===========================================================================
 # plan_rename — pure function
@@ -173,7 +173,10 @@ def _rename_app(tmp_path, monkeypatch, spark="default", routes=None):
     from app.settings_store import SettingsStore
 
     app, deck = make_app(tmp_path, monkeypatch)
-    deck["spark"] = FakeSparkForRename() if spark == "default" else spark
+    if spark is not None:
+        wire_swap_node(deck, "boxa",
+                       FakeSparkForRename() if spark == "default" else spark,
+                       label="Box Alpha")
     deck["litellm"] = FakeLiteLLMRoutes(routes)
     # Same reasoning as test_api.py's _adopt_app: the default deck's stores
     # point at the container's /data, which doesn't exist under test, AND
@@ -237,7 +240,7 @@ def test_route_accepts_no_body_at_all(tmp_path, monkeypatch):
 
 
 def test_route_503_when_spark_not_configured(tmp_path, monkeypatch):
-    """Matches app.routers.spark._spark's guard exactly."""
+    """Matches app.routers.spark._single_swap_node_id's guard exactly."""
     app, _ = _rename_app(tmp_path, monkeypatch, spark=None)
 
     resp = TestClient(app).post("/api/rename/plan", json={})

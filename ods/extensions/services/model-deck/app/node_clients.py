@@ -34,7 +34,7 @@ def binding_view(store, entry: dict) -> dict:
     them now. The credential rides as a digest
     (node_store.credential_fingerprint), so a rotation is detectable without
     the value ever reaching anything wire-facing. (Moved verbatim from
-    app/node_binding.py, which N1 deletes.)"""
+    app/node_binding.py, deleted by N1 T12 once every reader migrated here.)"""
     return {
         "address": entry.get("address"),
         "serving_address": entry.get("serving_address"),

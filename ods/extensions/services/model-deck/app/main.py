@@ -176,43 +176,9 @@ def _build_deck(settings: Settings) -> dict:
     node_store.stamp_missing_control(LEGACY_SPARK_SEED_ID)
 
     from app.engines.spark import SparkClient
-
-    # Built FROM the registry, never from env directly — the seed above is
-    # the only place env is read for spark identity. Consequence to
-    # preserve: connection edits (via the /api/nodes router) apply to
-    # OBSERVATION immediately (NodeObserver re-reads the registry every
-    # tick), but to ACTUATION only on next restart — this client is bound
-    # once, here, at build.
-    spark_client = None
-    spark_bound = None
-    _spark_entry = node_store.get(LEGACY_SPARK_SEED_ID)
-    if _spark_entry and _spark_entry.get("address") and _spark_entry.get("serving_address"):
-        _spark_key = node_store.credential_for(LEGACY_SPARK_SEED_ID)
-        if _spark_key:
-            spark_client = SparkClient(
-                node_url=_spark_entry["address"],
-                node_key=_spark_key,
-                serving_url=_spark_entry["serving_address"],
-                litellm=litellm,
-            )
-            # Exactly WHAT this client was bound to, so the nodes router can
-            # tell the operator when the registry has moved on and only a
-            # restart will re-bind [max-review #13]. Recorded here, at the
-            # single build site, rather than re-derived later — a copy of the
-            # bind condition elsewhere would drift out of agreement with it.
-            # The credential rides as a digest, never a value: this stash is
-            # read by an API whose credential contract is write-only.
-            spark_bound = {
-                "address": _spark_entry["address"],
-                "serving_address": _spark_entry["serving_address"],
-                "credential_fp": node_store.credential_fingerprint(LEGACY_SPARK_SEED_ID),
-            }
-
     from app.node_clients import NodeClients, NodeObservers
 
     def _swap_client_factory(entry: dict, credential: str):
-        from app.engines.spark import SparkClient
-
         return SparkClient(node_url=entry["address"], node_key=credential,
                            serving_url=entry["serving_address"], litellm=litellm)
 
@@ -235,9 +201,6 @@ def _build_deck(settings: Settings) -> dict:
         "comfy": comfy,
         "hipfire": hipfire,
         "hostagent": hostagent,
-        "spark": spark_client,
-        # None when no client was bound at boot (see spark_bound above).
-        "spark_bound": spark_bound,
         "litellm": litellm,
         "registry": Registry(data_dir / "registry.json", _GGUF_DIR),
         "characteristics_store": CharacteristicsStore(data_dir / "characteristics.json"),
@@ -277,8 +240,10 @@ def _build_deck(settings: Settings) -> dict:
         "job_queue": job_queue,
         "node_store": node_store,
         # Per-node actuation clients + observation caches (app.node_clients):
-        # lazy, self-healing — every actuation path takes clients from here,
-        # so registry edits apply live with no restart [max-review #13 fix].
+        # built FROM the registry, never from env directly (the seed above is
+        # the only place env is read for node identity) — and lazy,
+        # self-healing: every actuation path takes clients from here, so
+        # registry edits apply live with no restart [max-review #13 fix].
         "node_clients": node_clients,
         "node_observers": node_observers,
         # The one place a real node-agent client is minted for probes; the
@@ -292,13 +257,6 @@ def _build_deck(settings: Settings) -> dict:
     from app.routers import build_world_snapshot
 
     job_queue.world_fn = lambda: build_world_snapshot(deck)
-
-    # Also late-bound, and for a second reason: it reads deck["spark"] on
-    # every call rather than capturing the client, so a test that swaps the
-    # deck entry after create_app() is still observed by the one shared cache.
-    from app.observe import SparkObserver
-
-    deck["spark_observer"] = SparkObserver(lambda: deck["spark"])
 
     # Catalog harvest (app.arbiter.Watcher._harvest_catalogs, and the manual
     # force-harvest route app.routers.settings.harvest_now): routes maps
@@ -382,8 +340,8 @@ def _build_watcher(settings: Settings):
         gguf_dir=deck["gguf_dir"],
         # Built in _build_deck (same shared dict as app.state.deck), not
         # here — see that function's routes comment: None (harvest fully
-        # disabled) on a box with no spark configured, otherwise the
-        # router built from the one real (spark_node_id(), "vllm") route.
+        # disabled) with no control:"swap" node registered, otherwise the
+        # router built from one (node_id, "vllm") route per swap node.
         engine_exec=deck["engine_exec"],
         configurable_engines=deck["configurable_engines"],
         # Provenance pass: the same shared ledger the HTTP routers read and

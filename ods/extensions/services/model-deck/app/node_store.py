@@ -293,11 +293,12 @@ class NodeStore:
         can answer "is this still the same credential?" without ever holding
         the value. ``None`` when unset — distinct from any real digest.
 
-        Used by the nodes router's ``actuation_stale`` flag, which compares
-        the SparkClient's boot-time binding against the registry's current
-        state. The credential is part of that binding (main.py passes it as
-        ``node_key``), so a rotation goes stale exactly like an address edit
-        — but this API is write-only by contract (see the router's module
+        Used by app.node_clients' binding_view, which compares a swap node's
+        live client binding against the registry's current state to decide
+        whether the client needs rebuilding. The credential is part of that
+        binding (the factory receives it as ``node_key``), so a rotation
+        triggers a rebuild exactly like an address edit — but the nodes
+        router's credential API is write-only by contract (see its module
         docstring), and a digest keeps it that way."""
         value = self.credential_for(node_id)
         if not value:

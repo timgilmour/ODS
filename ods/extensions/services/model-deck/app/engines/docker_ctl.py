@@ -284,8 +284,9 @@ class EngineExecRouter:
     ``routes`` is consumed verbatim (stored as a plain dict, keyed by the
     exact (node, engine) pair each adapter serves) — this class does no
     node-vocabulary translation of its own; that discipline lives entirely
-    in whoever BUILDS `routes` (app.main: ``(spark_node_id(), "vllm")``,
-    never ``settings.node_label``/``settings.spark_node_name`` — see
+    in whoever BUILDS `routes` (app.main: one ``(<swap node's registry id>,
+    "vllm")`` pair per control:"swap" node, never
+    ``settings.node_label``/``settings.spark_node_name`` — see
     Watcher._configurable_engines' docstring for the historical bug that
     rule guards against).
 

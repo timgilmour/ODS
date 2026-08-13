@@ -1548,6 +1548,25 @@ def test_adopt_an_unreachable_resource_is_refused(tmp_path, monkeypatch):
     assert store.get() == {}
 
 
+def test_adopt_a_swap_nodes_slot(tmp_path, monkeypatch):
+    """N1 T12: adopt's engine_for lookup now threads the live control:"swap"
+    id-set through, so a non-legacy swap node's slot key (never the frozen
+    LEGACY_SPARK_SEED_ID "sparky") resolves to the "spark" engine too — the
+    gap the old static SPARK_SLOT_KEY row in observe.py's engine table could
+    never have exercised, since it only ever matched the one hardcoded id."""
+    from tests.test_spark_api import FakeSpark
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    wire_swap_node(deck, "boxa", FakeSpark(), label="Box Alpha")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/boxa/slot0")
+
+    assert resp.status_code == 200
+    record = deck["intent_store"].get()["boxa/slot0"]
+    assert record["state"] == "loaded"
+    assert record["engine"] == "spark"
+
+
 def test_get_auto_defaults_to_enabled(tmp_path, monkeypatch):
     """Automation is on by default — its absence is what let hipfire stay
     dead for 26 hours."""
@@ -2660,16 +2679,15 @@ def test_spark_drift_translates_profile_to_identity(tmp_path):
     ('heretic'), but the settings PUT lands under the real engine ('vllm')
     and the checkpoint identity — the exact D11 live-drill flow."""
     from app.intent import IntentStore
-    from app.observe import SPARK_SLOT_KEY
     from app.routers import _settings_drift
     from app.settings_store import SettingsStore
 
     intent_store = IntentStore(tmp_path / "intent.json")
     # Fixed PAST baseline (T0) — the settings PUT below lands at real "now",
     # unambiguously after it (same idiom as C1's baseline tests above).
-    intent_store.record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+    intent_store.record("sparky/slot0", state="loaded", model="heretic",
                         engine="spark", now="2020-01-01T00:00:00+00:00")
-    intent = intent_store.get()[SPARK_SLOT_KEY]
+    intent = intent_store.get()["sparky/slot0"]
 
     identity_map = {"heretic": {"identity": "Qwen3.6-35B-A3B-heretic-NVFP4",
                                 "service": "aeon-vllm",
@@ -2679,7 +2697,7 @@ def test_spark_drift_translates_profile_to_identity(tmp_path):
     settings.put("engine_models", "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4",
                 "args", {"max-model-len": "131072"})
 
-    result = _settings_drift(settings.get(), SPARK_SLOT_KEY, intent,
+    result = _settings_drift(settings.get(), "sparky/slot0", intent,
                              identity_map=identity_map)
 
     assert result is not None
@@ -2693,14 +2711,13 @@ def test_spark_drift_without_map_entry_falls_back_to_old_scopes(tmp_path):
     to intent's verbatim scopes ('sparky/spark|heretic') — proving the
     translation is opt-in per call, not a silent behavior change."""
     from app.intent import IntentStore
-    from app.observe import SPARK_SLOT_KEY
     from app.routers import _settings_drift
     from app.settings_store import SettingsStore
 
     intent_store = IntentStore(tmp_path / "intent.json")
-    intent_store.record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+    intent_store.record("sparky/slot0", state="loaded", model="heretic",
                         engine="spark", now="2020-01-01T00:00:00+00:00")
-    intent = intent_store.get()[SPARK_SLOT_KEY]
+    intent = intent_store.get()["sparky/slot0"]
 
     settings = SettingsStore(tmp_path / "settings.json")
     settings.put("engine_models", "sparky/vllm|Qwen3.6-35B-A3B-heretic-NVFP4",
@@ -2708,13 +2725,13 @@ def test_spark_drift_without_map_entry_falls_back_to_old_scopes(tmp_path):
     settings_data = settings.get()
 
     # No map at all — the C1 3-arg call site.
-    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent) is None
+    assert _settings_drift(settings_data, "sparky/slot0", intent) is None
 
     # Map present but the profile never made it in (e.g. never adopted) —
     # same verbatim fallback as no map at all.
     other_map = {"other-profile": {"identity": "some-other-identity",
                                    "service": "x", "container_name": "x"}}
-    assert _settings_drift(settings_data, SPARK_SLOT_KEY, intent,
+    assert _settings_drift(settings_data, "sparky/slot0", intent,
                            identity_map=other_map) is None
 
 
@@ -2756,14 +2773,13 @@ def test_engines_scope_translates_too(tmp_path):
     the translation touches engine_key (used by the 'engines' scope on its
     own), not only the model half used by 'models'/'engine_models'."""
     from app.intent import IntentStore
-    from app.observe import SPARK_SLOT_KEY
     from app.routers import _settings_drift
     from app.settings_store import SettingsStore
 
     intent_store = IntentStore(tmp_path / "intent.json")
-    intent_store.record(SPARK_SLOT_KEY, state="loaded", model="heretic",
+    intent_store.record("sparky/slot0", state="loaded", model="heretic",
                         engine="spark", now="2020-01-01T00:00:00+00:00")
-    intent = intent_store.get()[SPARK_SLOT_KEY]
+    intent = intent_store.get()["sparky/slot0"]
 
     identity_map = {"heretic": {"identity": "Qwen3.6-35B-A3B-heretic-NVFP4",
                                 "service": "aeon-vllm",
@@ -2773,7 +2789,7 @@ def test_engines_scope_translates_too(tmp_path):
     settings.put("engines", "sparky/vllm", "env",
                 {"VLLM_USE_FLASHINFER_SAMPLER": "1"})
 
-    result = _settings_drift(settings.get(), SPARK_SLOT_KEY, intent,
+    result = _settings_drift(settings.get(), "sparky/slot0", intent,
                              identity_map=identity_map)
 
     assert result is not None
@@ -2923,7 +2939,7 @@ def test_adopt_on_unknown_node_or_engine_is_422(tmp_path, monkeypatch):
     """POST /api/settings/adopt/local/vllm and /boxa/spark -> 422: local is
     control:"none" (not a swap node) and spark is the wrong engine — only a
     swap node's vllm is adoptable (N1 generalized this off the single
-    (spark_node_id(), 'vllm') pair C2 had)."""
+    (the legacy sparky node's id, 'vllm') pair C2 had)."""
     app, deck = _adopt_app(tmp_path, monkeypatch)
     client = TestClient(app)
 

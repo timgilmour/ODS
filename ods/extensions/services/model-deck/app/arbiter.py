@@ -1141,9 +1141,10 @@ class Watcher:
         C2: this is now a plain pass-through -- Watcher does no pairing of
         its own. Whatever `configurable_engines` the constructor was handed
         (`self._configurable_engine_pairs`) is returned VERBATIM, pair and
-        all; production's one real pair is built once, in app.main's
-        wiring, never here. None becomes [] (harvest still opt-in, same
-        shape as characteristics_store/hostagent/intent_store).
+        all; production's real pairs (one per control:"swap" registry node,
+        N1) are built once, in app.main's wiring, never here. None becomes
+        [] (harvest still opt-in, same shape as
+        characteristics_store/hostagent/intent_store).
 
         C1 truth, live-verified 2026-08-07 -- still true, and still why no
         LOCAL engine appears in production's routes: ``docker exec
@@ -1154,10 +1155,10 @@ class Watcher:
         probe (app.harvest.PROBE_SOURCE) imports vLLM's own arg parser, so
         it is meaningful for a vLLM-backed engine only: lemonade is
         llama-server, comfyui is comfyui, hipfire is confirmed Bun. C2's
-        one real target is the spark node's remote vLLM, harvested through
-        the node-agent's cached probe (SparkCatalogExec, app.engines.spark)
-        rather than a local docker exec -- app.main wires it in, this
-        method still knows nothing about it.
+        real targets are each declared swap node's remote vLLM, harvested
+        through the node-agent's cached probe (SparkCatalogExec,
+        app.engines.spark) rather than a local docker exec -- app.main
+        wires them in, this method still knows nothing about it.
 
         Node vocabulary -- the reason this method takes pairs verbatim
         instead of building them itself: the node half of a pair MUST be a
@@ -1169,15 +1170,16 @@ class Watcher:
         settings.py:175-183). It must NEVER be ``settings.node_label`` (a
         display string, e.g. "autarch" via MODEL_DECK_NODE_LABEL, shown by
         GET /state -- app/routers/status.py:24) or ``settings.
-        spark_node_name`` (a credential-lookup name that happens to match
-        the node id today -- see ``app.observe.spark_node_id``'s own
-        docstring) -- that was this method's original bug: a harvest that
-        keyed "engine/autarch/hipfire" while every reader looks under
-        "engine/local/hipfire", silently writing a catalog no API path
-        could ever read. Unit tests never caught it because node_label
-        defaults to "local", making label == id. app.main's wiring builds
-        spark's pair as ``(the node's registry id, "vllm")`` for exactly
-        this reason -- never node_label, never spark_node_name.
+        spark_node_name`` (a credential-lookup name for the legacy env-seed
+        path, app/node_store.py's ``LEGACY_SPARK_SEED_ID`` migration, that
+        happened to match the node id on every pre-N1 box) -- that was this
+        method's original bug: a harvest that keyed "engine/autarch/hipfire"
+        while every reader looks under "engine/local/hipfire", silently
+        writing a catalog no API path could ever read. Unit tests never
+        caught it because node_label defaults to "local", making label ==
+        id. app.main's wiring builds each swap node's pair as ``(that
+        node's registry id, "vllm")`` for exactly this reason -- never
+        node_label, never spark_node_name.
 
         `_configurable_engine_pairs` (constructor param `configurable_
         engines`, test-only outside app.main) supplies pairs directly for
