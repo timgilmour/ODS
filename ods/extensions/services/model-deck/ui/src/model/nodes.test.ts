@@ -344,6 +344,14 @@ describe("buildNodes — swap nodes", () => {
     const b = nodes.find((n) => n.id === "boxb")!;
     expect(a.label).toBe("Box Alpha");
     expect(b.label).toBe("Box Beta");
+    // The happy-path status derivation (endpoint_ok -> "reachable") — lost
+    // when this test replaced the old single-spark "adds a single
+    // serving-slot resource when configured" test; a broken
+    // `else if (endpointOk) status = "reachable"` must fail this suite.
+    expect(a.status).toBe("reachable");
+    // Same for the resource shape — "slot0"/"Serving slot" was previously
+    // asserted directly rather than only implied by findPlacement's lookup.
+    expect(a.resources.map((r) => r.label)).toEqual(["Serving slot"]);
     expect(a.resources[0].placements[0].id).toBe("boxa/slot0");
     expect(b.resources[0].placements[0].id).toBe("boxb/slot0");
     expect(a.resources[0].placements[0].name).toBe("heretic");

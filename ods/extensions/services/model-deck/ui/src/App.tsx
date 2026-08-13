@@ -153,13 +153,14 @@ export default function App() {
 
   // One probe per swap node, re-run whenever the swap-node id list changes.
   // `(nodeId, "vllm")` is the only configurable engine pair the deck wires
-  // today (app/main.py:245-247 builds `configurable_engines` from exactly
-  // that one route per node), and a non-null catalog for a node is what
-  // earns it the Engine settings button. A null catalog (never harvested) or
-  // a failed probe leaves that node out of the map, so the button is absent
-  // rather than present-and-broken. Keyed on the joined id list rather than
-  // `state` itself, so an unrelated poll (world/lifecycle changing, the
-  // swap-node set staying put) does not re-fire every node's probe.
+  // today (app/main.py:290-301's routes loop builds `deck["configurable_engines"]`
+  // as exactly one `(node_id, "vllm")` pair per control:"swap" node), and a
+  // non-null catalog for a node is what earns it the Engine settings button.
+  // A null catalog (never harvested) or a failed probe leaves that node out
+  // of the map, so the button is absent rather than present-and-broken.
+  // Keyed on the joined id list rather than `state` itself, so an unrelated
+  // poll (world/lifecycle changing, the swap-node set staying put) does not
+  // re-fire every node's probe.
   const swapIds = swapNodes(state).map((e) => e.id).join(",");
   useEffect(() => {
     if (!swapIds) return;
