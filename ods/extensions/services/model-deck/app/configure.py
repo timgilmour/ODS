@@ -9,7 +9,7 @@ capability descriptor declares:
 * ``node-settings``— spark and future remote engines: ship a settings
   document to the node-agent (Plan C2 Task 7), whose host-side helper merges
   it into argv at the next swap. Ships and returns ``requires_reload`` —
-  applying it is always the human's Reload click (see app.routers.spark),
+  applying it is always the human's Reload click (see app.routers.serving),
   never this call.
 * ``none``         — a source you don't own (someone else's API): read and
   warn, permanently. This slot exists so the general rule stays honest.
@@ -26,7 +26,7 @@ say about this engine" must not mean "clear its configuration".
 but NO engine client implements ``configure()`` or ``set_env()`` — they
 were never built. ``apply_settings`` refuses them explicitly rather than
 dispatching into an AttributeError [max-review c1/c12]. Today's only live
-caller (app.routers.spark) uses ``node-settings``.
+caller (app.routers.serving) uses ``node-settings``.
 """
 
 from app.engines import EngineError

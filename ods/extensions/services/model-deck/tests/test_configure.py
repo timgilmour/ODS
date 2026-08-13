@@ -119,7 +119,8 @@ def test_node_settings_requires_a_profile():
 
 def test_node_settings_does_not_swap():
     """Shipping settings must never trigger a multi-minute swap by itself —
-    that stays the human's explicit Reload click (POST /api/spark/reload)."""
+    that stays the human's explicit Reload click
+    (POST /api/nodes/{id}/serving/reload)."""
     class FakeNode:
         swapped = False
 

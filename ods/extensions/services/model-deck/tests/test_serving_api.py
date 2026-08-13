@@ -7,8 +7,7 @@ secretly resolves "the" spark node cannot pass ([[defaults-that-hide-bugs]]).
 from fastapi.testclient import TestClient
 
 from app.engines import GuardError
-from tests.test_api import HERETIC_COMPOSE, make_app, wire_swap_node
-from tests.test_spark_api import FakeSpark
+from tests.test_api import FakeSpark, HERETIC_COMPOSE, make_app, wire_swap_node
 
 
 def _two_node_app(tmp_path, monkeypatch):
@@ -347,3 +346,16 @@ def test_reload_empty_declared_args_409(tmp_path, monkeypatch):
     assert a.settings_sent is None
     assert a.calls == []
     assert not b.calls
+
+
+def test_spark_alias_is_gone(tmp_path, monkeypatch):
+    """/api/spark/* was a one-deploy-cycle alias for these routes (N1,
+    design §6); its pre-registered removal happened after the first healthy
+    cycle on the canonical routes. 404 even with a swap node wired — a
+    resurrected forwarder would answer 200/503 here."""
+    app, deck, a, b = _two_node_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    assert client.get("/api/spark/status").status_code == 404
+    assert client.post("/api/spark/swap", json={"profile": "laguna"}).status_code == 404
+    assert client.post("/api/spark/reload", json={}).status_code == 404
+    assert a.calls == [] and b.calls == []

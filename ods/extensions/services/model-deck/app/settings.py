@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     litellm_key: str = Field(default="", validation_alias="LITELLM_KEY")
 
     # --- Spark (remote single-slot serving node; lifecycle only) ---
-    # Empty node/serving URL leaves the spark engine unbuilt (the /api/spark
-    # endpoints answer 503). The bearer key comes from the stack-wide
+    # Empty node/serving URL leaves the spark engine unbuilt (the node's
+    # serving routes answer 503). The bearer key comes from the stack-wide
     # ODS_REMOTE_NODE_KEYS JSON map (the same credential dashboard-api's
     # remote-node poller consumes), selected by spark_node_name.
     spark_node_url: str = ""

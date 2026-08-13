@@ -50,7 +50,6 @@ from app.routers import (
     rename,
     serving,
     sets,
-    spark,
     status,
     storage,
 )
@@ -498,7 +497,6 @@ def create_app() -> FastAPI:
     app.include_router(control.router, prefix="/api")
     app.include_router(sets.router, prefix="/api")
     app.include_router(policy.router, prefix="/api")
-    app.include_router(spark.router, prefix="/api")
     # Registered BEFORE nodes_router: Starlette matches routes in
     # registration order, and /api/nodes/{id}/serving/... must never risk
     # falling into a nodes route registered ahead of it.

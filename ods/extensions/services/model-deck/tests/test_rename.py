@@ -251,10 +251,10 @@ def test_route_503_when_spark_not_configured(tmp_path, monkeypatch):
 def test_route_409s_with_two_swap_nodes(tmp_path, monkeypatch):
     """N1 T12 review, finding 1: single_swap_node_id moved to
     app.routers.serving, imported here rather than duplicated — this
-    exercises the MOVED resolver through the rename route (the sibling
-    coverage, tests/test_spark_api.py::test_alias_409s_with_two_swap_nodes,
-    only proves it through the /api/spark/* alias). Never guess between
-    candidates ([[literal-declared-inputs]])."""
+    exercises the resolver through the rename route, and since the
+    /api/spark/* alias (its other caller) was removed, it is the resolver's
+    ONLY 409 coverage. Never guess between candidates
+    ([[literal-declared-inputs]])."""
     app, deck = _rename_app(tmp_path, monkeypatch, spark=None)
     wire_swap_node(deck, "boxa", FakeSparkForRename(), label="Box Alpha")
     wire_swap_node(deck, "boxb", FakeSparkForRename(), label="Box Beta")

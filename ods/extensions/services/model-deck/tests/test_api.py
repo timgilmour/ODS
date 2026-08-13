@@ -298,6 +298,57 @@ def wire_swap_node(deck, node_id, client, label=None):
     deck["node_clients"].set(node_id, client)
 
 
+class FakeSpark:
+    """The fake swap-node client wire_swap_node binds, for both the node
+    registry/adopt suite here and tests/test_serving_api.py's per-node
+    serving suite. Lived in tests/test_spark_api.py until the /api/spark/*
+    alias (and that file with it) was removed."""
+
+    def __init__(self):
+        self.calls = []  # mutating only: ("swap", profile, force)
+        self.status_calls = 0
+        self.fail = None
+        self.settings_sent = None  # (profile, document), last put_settings call
+        self.settings_fail = None
+        # Reload re-fetches the profile's compose before shipping (final
+        # branch review: a stale service name in the identity map would
+        # introduce an imageless service AFTER teardown killed everything),
+        # so every reload test needs real compose text behind get_compose.
+        self.compose = {}          # {profile: text}; default = the fixture
+        self.compose_fail = None
+        self._status = {
+            "profiles": [
+                {"name": "laguna", "engine": "vllm", "health_url": None,
+                 "container": None},
+                {"name": "mm27b", "engine": "vllm", "health_url": None,
+                 "container": None},
+            ],
+            "swap_status": None,
+            "serving": {"model": "aeon", "endpoint_ok": True,
+                        "container_status": None},
+        }
+
+    def status(self):
+        self.status_calls += 1
+        return self._status
+
+    def swap(self, profile, force=False):
+        self.calls.append(("swap", profile, force))
+        if self.fail:
+            raise self.fail
+        return {"id": "u1", "profile": profile}
+
+    def put_settings(self, profile, document):
+        if self.settings_fail:
+            raise self.settings_fail
+        self.settings_sent = (profile, document)
+
+    def get_compose(self, profile):
+        if self.compose_fail:
+            raise self.compose_fail
+        return self.compose.get(profile, HERETIC_COMPOSE)
+
+
 # ===========================================================================
 
 
@@ -1431,8 +1482,6 @@ def test_lifecycle_block_omits_spark_when_none_configured(tmp_path, monkeypatch)
 
 
 def test_lifecycle_view_carries_every_swap_nodes_slot(tmp_path, monkeypatch):
-    from tests.test_spark_api import FakeSpark
-
     app, deck = make_app(tmp_path, monkeypatch)
     wire_swap_node(deck, "boxa", FakeSpark(), label="Box Alpha")
     wire_swap_node(deck, "boxb", FakeSpark(), label="Box Beta")
@@ -1561,8 +1610,6 @@ def test_adopt_a_swap_nodes_slot(tmp_path, monkeypatch):
     LEGACY_SPARK_SEED_ID "sparky") resolves to the "spark" engine too — the
     gap the old static SPARK_SLOT_KEY row in observe.py's engine table could
     never have exercised, since it only ever matched the one hardcoded id."""
-    from tests.test_spark_api import FakeSpark
-
     app, deck = make_app(tmp_path, monkeypatch)
     wire_swap_node(deck, "boxa", FakeSpark(), label="Box Alpha")
 
@@ -2818,7 +2865,7 @@ MM27B_COMPOSE = (Path(__file__).parent / "fixtures" / "spark-profiles"
 
 class FakeSparkForAdopt:
     """Just enough of SparkClient for the adopt route: status() for the
-    profile list (mirrors FakeSpark in test_spark_api.py) and get_compose()
+    profile list (mirrors FakeSpark above) and get_compose()
     serving the two real fixture files straight off disk — real compose
     text, not a hand-shaped stand-in, is the whole point of these tests."""
 
@@ -2837,7 +2884,7 @@ class FakeSparkForAdopt:
 
 
 def _adopt_app(tmp_path, monkeypatch, spark="default"):
-    """Same shape as test_spark_api.py's _spark_app: the adopt route needs
+    """The adopt route needs
     settings_store AND characteristics_store pointed at tmp_path — the
     default deck's copies point at the container's /data, which does not
     exist under test.

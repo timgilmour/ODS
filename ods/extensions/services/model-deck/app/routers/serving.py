@@ -53,14 +53,13 @@ def _client(request: Request, node_id: str):
 
 def single_swap_node_id(deck: dict) -> str:
     """Resolve "the one swap node" for a caller that addresses the fleet
-    without a node id in its own path — the /api/spark/* alias
-    (app.routers.spark) and rename's vLLM-profile gathering
-    (app.routers.rename), both pre-N1 surfaces that never took a node
+    without a node id in its own path — today only rename's vLLM-profile
+    gathering (app.routers.rename), a pre-N1 surface that never took a node
     parameter. Every per-node route under this router takes `node_id`
     directly and never calls this.
 
-    Moved here (N1 T12 review, finding 1) from app.routers.spark, which is
-    DEPRECATED with a published removal target — a resolver two OTHER
+    Moved here (N1 T12 review, finding 1) from the since-removed
+    /api/spark/* alias router, its other caller — a resolver two OTHER
     modules import cannot live in the module scheduled to go away first.
 
     None configured -> 503 (the legacy unbuilt-engine message, so existing

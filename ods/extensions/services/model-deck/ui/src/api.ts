@@ -492,8 +492,8 @@ export function deleteSet(slug: string): Promise<{ status: string }> {
 // ---------------------------------------------------------------------------
 // Node serving (single-slot swap control) — /api/nodes/{id}/serving/*, see
 // app/routers/serving.py. The Spark* type names/shapes are unchanged (design
-// §7): this is the same wire contract /api/spark/* used before it became a
-// deprecated one-cycle alias (app/routers/spark.py), now addressed per node.
+// §7): this is the same wire contract the removed /api/spark/* routes spoke,
+// now addressed per node.
 // ---------------------------------------------------------------------------
 
 export interface SparkServing {

@@ -74,16 +74,8 @@ def test_test_connection_route_answers_without_echoing(deck):
     assert "credential" not in resp.text
 
 
-def test_spark_alias_parity(deck):
-    """While the /api/spark/* alias lives (one deploy cycle, design §6) it
-    must answer byte-identically to the canonical route it forwards to.
-
-    No skip here: like the rest of this file, the check is tolerant of
-    sparky being powered off (or unconfigured) by construction — it only
-    asserts the two routes AGREE, whatever status they agree on, and only
-    compares bodies once both sides answer 200."""
-    canonical = deck.get(f"/api/nodes/{NODE}/serving/status")
-    alias = deck.get("/api/spark/status")
-    assert alias.status_code == canonical.status_code
-    if canonical.status_code == 200:
-        assert alias.json() == canonical.json()
+def test_spark_alias_removed(deck):
+    """/api/spark/* (the one-deploy-cycle alias, design §6) is gone; a 404
+    from the live deck proves no forwarder was resurrected by a deploy of
+    an older image or a stale bundle."""
+    assert deck.get("/api/spark/status").status_code == 404

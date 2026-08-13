@@ -125,15 +125,13 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 | `POST` | `/api/nodes/{id}/serving/swap` | Hot-swap the node's single slot to a profile (`{profile, force}`). 404 unknown node, 503 not operable |
 | `POST` | `/api/nodes/{id}/serving/reload` | Ship the resolved DECLARED-only settings for whatever profile is (or will be) serving to the node, then re-swap that same profile so they actually launch (`{profile?, force?}` — no `profile` reloads whatever last swapped in). The one human action design decision 5 calls for; see [Settings](#settingsjson--what-things-are-launched-and-served-with) below. 404 unknown node, 503 not operable |
 
-### Deprecations
+### Removed routes
 
-- `/api/spark/*` is a deprecated alias for `/api/nodes/{id}/serving/*`
-  (resolves only while exactly one `control: "swap"` node exists):
-  `GET /api/spark/status`, `POST /api/spark/swap`, `POST /api/spark/reload`
-  — same bodies/semantics as the serving routes above, just node-less.
-  Removal target: the deploy cycle after N1 ships. Removing the alias also
-  deletes `tests/test_spark_api.py`'s alias-contract tests and
-  `livetests`' `test_spark_alias_parity`.
+- `/api/spark/*` (status/swap/reload) — the node-less alias for
+  `/api/nodes/{id}/serving/*`, kept for one deploy cycle after N1 shipped
+  and removed 2026-08-13 as pre-registered here. A 404 on these paths means
+  you are on the removed alias: same bodies/semantics live at the serving
+  routes above, addressed by node id.
 
 ### Lifecycle
 
@@ -245,7 +243,8 @@ engine" must not mean "clear its configuration."
 For spark, "shipping settings to the node" means writing a small JSON
 *document* — `{"args", "env", "argv", "service"}`, `argv` and `service`
 pre-rendered by the Deck (the shared `render_argv`/`_declared_only` code
-path both `GET /api/settings/effective/...` and `POST /api/spark/reload`
+path both `GET /api/settings/effective/...` and
+`POST /api/nodes/{id}/serving/reload`
 use, so the two can never disagree about what "declared-only" ships) — to
 a file the node-agent and the privileged host-side swap-helper share.
 Node-agent has no docker access at all; it only ever writes
@@ -278,7 +277,8 @@ profile is safe. A profile that isn't vLLM (`ds4`, `comfyui`, ...) is
 reported `skipped` with its real engine named, never guessed at. Adopt also
 records the profile → identity map (which compose service and container
 each profile is) as a characteristics field — that map is what lets
-`settings_drift` and `POST /api/spark/reload` translate a spark *profile*
+`settings_drift` and `POST /api/nodes/{id}/serving/reload` translate a
+spark *profile*
 (what intent records) into an `engine_models` scope key (what settings are
 keyed by) without re-parsing compose themselves.
 

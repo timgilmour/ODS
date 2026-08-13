@@ -110,13 +110,13 @@ export function scopeKeys(node: string, engine: string, model: string | null): S
  * mattered because this docstring is the authority the next implementer
  * reads, and it asserted the exact premise the fix refuted.
  *
- * The PROFILE is what /api/spark/swap takes and what intent records
- * (app/routers/spark.py deliberately records profiles). Settings, though,
- * live under the real
+ * The PROFILE is what /api/nodes/{id}/serving/swap takes and what intent
+ * records (app/routers/serving.py deliberately records profiles). Settings,
+ * though, live under the real
  * CHECKPOINT identity: `engine_models/<node>/<engine>|<identity>`. The
  * translation is the `profile_identities` characteristics fact, written by
  * the adopt sweep (app/routers/settings.py:319) and read exactly this way by
- * the backend itself — app/routers/spark.py:143 for reload, and
+ * the backend itself — app/routers/serving.py's serving_reload, and
  * app/routers/__init__.py:160-215 for settings drift, whose docstring names
  * the failure this prevents: a PUT to `engine_models/boxa/vllm|<identity>`
  * never registers against the verbatim `boxa/spark|heretic` key intent

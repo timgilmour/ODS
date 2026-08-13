@@ -27,9 +27,9 @@ rather than in a fixture of its own.
 
 D12 (adopt) is defined FIRST and therefore runs first (pytest's default
 order is file order; this suite has no randomization plugin — see
-livetests/requirements.txt): app.routers.spark.spark_reload requires an
+livetests/requirements.txt): app.routers.serving.serving_reload requires an
 adopted ``profile_identities`` entry for the profile it is reloading
-(app/routers/spark.py:142-146, 409 "has no adopted identity" otherwise),
+(409 "has no adopted identity" otherwise),
 and — more importantly — D11's reload ships an argv built ONLY from
 DECLARED settings-store layers (app/routers/settings.py's
 ``_declared_only`` / design decision 3). Without D12 having imported
@@ -146,7 +146,7 @@ def restore_spark_profile(deck):
     test_spark_ds4.restore_ds4 and conftest.restore_hipfire. Restoring
     through the deck's own swap route (rather than sparky's swap.sh
     directly) is deliberate: that is the action that records intent
-    ``loaded`` for the slot (app/routers/spark.py's ``_swap_and_record``),
+    ``loaded`` for the slot (app/routers/serving.py's ``_swap_and_record``),
     so the reconciler is left with a truthful record instead of one naming
     a profile nobody actuated through it.
     """
@@ -230,10 +230,9 @@ def test_d11_save_flags_drift_reload_applies(deck, spark_serving, settings_windo
               "spark never reported the reloaded max-model-len")
 
     entry = deck.get("/api/state").json()["lifecycle"][slot_key(NODE)]
-    # app/routers/spark.py's spark_reload docstring: "The re-swap's intent
-    # record is what clears settings_drift -- the drift flag's baseline IS
-    # the intent's updated_ts ... so re-recording it is the entire
-    # 'clearing' mechanism."
+    # The re-swap's intent record is what clears settings_drift -- the
+    # drift flag's baseline IS the intent's updated_ts (C1 T7 ruling), so
+    # re-recording it is the entire "clearing" mechanism.
     assert entry["settings_drift"] is None, "reload re-records intent; drift clears"
 
     # D11 leaves no residue, part 1 of 2 -- the DECK store: unset the

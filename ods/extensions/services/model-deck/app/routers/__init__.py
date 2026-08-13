@@ -158,7 +158,7 @@ def _settings_drift(
     Every swap node additionally speaks TWO vocabularies at once (Task 6,
     5th vocabulary-bug instance caught at plan time, generalized to every
     node by N1): intent records the deck adapter name (``engine: "spark"``)
-    and the PROFILE (``routers/spark.py`` deliberately records profiles —
+    and the PROFILE (``routers/serving.py`` deliberately records profiles —
     swap takes a profile, and mm27b serves under a different
     --served-model-name, so comparing served names would report permanent
     false drift). Settings, though, live under the real engine (``"vllm"``)
