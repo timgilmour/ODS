@@ -100,6 +100,30 @@ describe("validate — control: swap prerequisites", () => {
     const form: NodeFormState = { ...formForEntry(entry), control: "swap" };
     expect(validate(form, "edit", "node-agent", entry)).toEqual([]);
   });
+
+  // Categorical, not prerequisite-shaped: app/node_store.py:_validate
+  // refuses control:"swap" for agent_kind:"local" unconditionally, distinct
+  // from the three-prerequisite rule above. Add mode is impossible for
+  // local (add() only ever creates node-agent rows), so this is edit-mode
+  // only, on the seeded local entry, with every prerequisite otherwise
+  // satisfiable.
+  test("local entry: control swap is refused categorically, even with every prerequisite fillable", () => {
+    const form: NodeFormState = {
+      ...formForEntry(localEntry),
+      control: "swap",
+      address: "http://local:7720",
+      servingAddress: "http://local:8000",
+      credential: "k",
+    };
+    expect(validate(form, "edit", "local", localEntry)).toContain(labels.nodeControlLocalRefused);
+  });
+
+  test("a node-agent entry with the same fields is not refused categorically", () => {
+    const form: NodeFormState = { ...formForEntry(entry), control: "swap", credential: "k" };
+    expect(validate(form, "edit", "node-agent", entry)).not.toContain(
+      labels.nodeControlLocalRefused,
+    );
+  });
 });
 
 describe("toPatchPayload", () => {

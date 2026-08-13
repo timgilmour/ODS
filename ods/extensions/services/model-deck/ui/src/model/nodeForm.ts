@@ -74,13 +74,23 @@ export function validate(
     errors.push(labels.nodeCredentialRequiredForAdd);
   }
   if (form.control === "swap") {
-    // Mirror of app/node_store.py:_require_swap_prereqs — same three
-    // prerequisites, same missing-field naming; the backend 422 is
-    // authoritative, this just saves the round-trip.
-    if (!form.address.trim()) errors.push(labels.nodeSwapNeedsAddress);
-    if (!form.servingAddress.trim()) errors.push(labels.nodeSwapNeedsServingAddress);
-    const credentialPresent = Boolean(form.credential) || Boolean(entry?.credential_set);
-    if (!credentialPresent) errors.push(labels.nodeSwapNeedsCredential);
+    if (agentKind === "local") {
+      // Categorical, not prerequisite-shaped: app/node_store.py:_validate
+      // refuses control:"swap" for agent_kind:"local" unconditionally —
+      // local actuation is docker-ctl, not the swap protocol (G1 revisits).
+      // The three prerequisites below are moot for a refused kind, so they
+      // are skipped rather than piled on top of a refusal that already
+      // makes them irrelevant.
+      errors.push(labels.nodeControlLocalRefused);
+    } else {
+      // Mirror of app/node_store.py:_require_swap_prereqs — same three
+      // prerequisites, same missing-field naming; the backend 422 is
+      // authoritative, this just saves the round-trip.
+      if (!form.address.trim()) errors.push(labels.nodeSwapNeedsAddress);
+      if (!form.servingAddress.trim()) errors.push(labels.nodeSwapNeedsServingAddress);
+      const credentialPresent = Boolean(form.credential) || Boolean(entry?.credential_set);
+      if (!credentialPresent) errors.push(labels.nodeSwapNeedsCredential);
+    }
   }
   return errors;
 }

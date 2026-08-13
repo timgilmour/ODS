@@ -691,6 +691,10 @@ export const labels = {
   nodeSwapNeedsAddress: "operating a node requires an agent address",
   nodeSwapNeedsServingAddress: "operating a node requires a serving address",
   nodeSwapNeedsCredential: "operating a node requires a credential",
+  /** Categorical, not a missing prerequisite: app/node_store.py:_validate
+   * refuses control:"swap" for agent_kind:"local" unconditionally — local
+   * actuation is docker-ctl, not the swap protocol (G1 revisits). */
+  nodeControlLocalRefused: "the local node cannot operate a serving slot",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is
