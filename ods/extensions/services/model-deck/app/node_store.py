@@ -52,7 +52,7 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 _AGENT_KINDS = {"local", "node-agent"}
 _CONTROLS = {"none", "swap"}
 _PATCHABLE = {"label", "address", "serving_address", "control"}
-_ALLOWED = {"id", "label", "agent_kind", "address", "serving_address", "control"}
+_ALLOWED = {"id", "label", "agent_kind", "address", "serving_address", "control", "engines"}
 
 # The OLD env-seeded spark node id — frozen MIGRATION DATA, not coupling:
 # pre-N1 installs seeded exactly this id (it was app.observe.spark_node_id(),
@@ -109,6 +109,22 @@ def _heal_control(entry: dict) -> dict:
     return entry
 
 
+def _heal_engines(entry: dict) -> dict:
+    """Heal invalid engines to an empty list (guard-at-the-boundary posture).
+    A hand-edited entry whose engines fails validate_engines heals to
+    engines: [] rather than being dropped."""
+    if "engines" not in entry:
+        return entry
+    engines = entry.get("engines")
+    try:
+        from app.engine_kinds import validate_engines
+        validate_engines(engines)
+        return entry
+    except ValueError:
+        # Invalid engines: heal to empty list instead of dropping the entry
+        return {**entry, "engines": []}
+
+
 def _validate(spec: dict) -> None:
     missing = {"id", "label", "agent_kind"} - set(spec)
     extra = set(spec) - _ALLOWED
@@ -135,6 +151,11 @@ def _validate(spec: dict) -> None:
             raise ValueError(
                 'the local node cannot be control: "swap" — local actuation '
                 "is docker-ctl, not the swap protocol (G1 revisits)")
+    if "engines" in spec:
+        if spec["agent_kind"] != "local":
+            raise ValueError("engines is only valid on the local node entry")
+        from app.engine_kinds import validate_engines
+        validate_engines(spec["engines"])
 
 
 class NodeStore:
@@ -170,7 +191,8 @@ class NodeStore:
         # pre-N1 files have no such key, and an entry losing its whole row
         # over a field this increment introduced would be the gate punishing
         # old data for new vocabulary. One gate, here — no per-site guards.
-        return [_heal_control(entry) for entry in data if _well_formed(entry)]
+        # `engines` is similarly healed to [] if invalid, preserving the entry.
+        return [_heal_engines(_heal_control(entry)) for entry in data if _well_formed(entry)]
 
     def _save(self, data: list[dict]) -> None:
         save_json(self._path, data)

@@ -488,3 +488,41 @@ def test_stamp_ignores_non_matching_ids(store, tmp_path):
     (tmp_path / "node_credentials.json").write_text(json.dumps({"boxa": "k"}))
     store.stamp_missing_control("sparky")
     assert store.get("boxa")["control"] == "none"
+
+
+# --- E1 engines declaration tests -----
+
+def _store(tmp_path):
+    """Helper to construct a NodeStore for use in test functions."""
+    return NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+
+
+def test_local_entry_accepts_validated_engines(tmp_path):
+    store = _store(tmp_path)
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+               "engines": [{"resource": "gguf-a", "kind": "lemonade",
+                            "connection": {"url": "http://gguf-a:8080",
+                                           "metrics_url": "http://gguf-a:8001/metrics",
+                                           "container": "ods-gguf-a"},
+                            "gpu_index": 3,
+                            "policy_defaults": {"priority": 10, "pinned": False,
+                                                "idle_ttl": 60}}]})
+    assert store.get("local")["engines"][0]["resource"] == "gguf-a"
+
+
+def test_engines_refused_on_non_local_entries(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="engines"):
+        store.add({"id": "boxa", "label": "Box A", "agent_kind": "node-agent",
+                   "address": "http://boxa:7720", "engines": []})
+
+
+def test_invalid_engines_refused_at_add(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="unknown kind"):
+        store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+                   "engines": [{"resource": "x", "kind": "nope",
+                                "connection": {}, "gpu_index": 0,
+                                "policy_defaults": {"priority": 1,
+                                                    "pinned": False,
+                                                    "idle_ttl": 0}}]})
