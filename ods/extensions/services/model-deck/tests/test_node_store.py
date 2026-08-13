@@ -19,8 +19,31 @@ def store(tmp_path):
     return NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
 
 
-def _settings():
-    """Build a Settings instance with defaults for E1 engine seed tests."""
+def _settings(monkeypatch=None):
+    """Build a Settings instance with non-default overrides for E1 engine seed tests.
+
+    Ensures test uses values away from production defaults to catch accidental
+    hardcoded defaults ([[defaults-that-hide-bugs]]). If monkeypatch is provided,
+    sets env vars; otherwise creates Settings with direct kwargs."""
+    if monkeypatch is None:
+        # Called without pytest's monkeypatch fixture; use direct Settings kwargs
+        return Settings(
+            lemonade_gpu_index=5,
+            hipfire_gpu_index=7,
+            lemonade_url="http://test-lemonade:9999",
+            lemonade_metrics_url="http://test-lemonade:9998/metrics",
+            lemonade_container="test-ods-llama-server",
+            comfyui_url="http://test-comfyui:9188",
+            hipfire_container="test-ods-hipfire",
+        )
+    # Monkeypatch provided; set env vars and instantiate
+    monkeypatch.setenv("MODEL_DECK_LEMONADE_GPU_INDEX", "5")
+    monkeypatch.setenv("MODEL_DECK_HIPFIRE_GPU_INDEX", "7")
+    monkeypatch.setenv("MODEL_DECK_LEMONADE_URL", "http://test-lemonade:9999")
+    monkeypatch.setenv("MODEL_DECK_LEMONADE_METRICS_URL", "http://test-lemonade:9998/metrics")
+    monkeypatch.setenv("MODEL_DECK_LEMONADE_CONTAINER", "test-ods-llama-server")
+    monkeypatch.setenv("MODEL_DECK_COMFYUI_URL", "http://test-comfyui:9188")
+    monkeypatch.setenv("MODEL_DECK_HIPFIRE_CONTAINER", "test-ods-hipfire")
     return Settings()
 
 
@@ -575,13 +598,22 @@ def _legacy_intent(tmp_path):
 def test_seed_engines_stamps_triple_when_legacy_records_exist(store, tmp_path):
     store.add({"id": "local", "label": "Box L", "agent_kind": "local"})
     _legacy_intent(tmp_path)
-    changed = seed_engines_if_missing(store, _settings(), tmp_path)
+    settings = _settings()
+    changed = seed_engines_if_missing(store, settings, tmp_path)
     assert changed is True
     engines = {e["resource"]: e for e in store.get("local")["engines"]}
     assert set(engines) == {"lemonade", "comfyui", "hipfire"}
-    # values flow from Settings, not hardcoded copies:
-    assert engines["lemonade"]["connection"]["url"] == _settings().lemonade_url
-    assert engines["hipfire"]["gpu_index"] == _settings().hipfire_gpu_index
+    # Comprehensive assertions: values flow from Settings, not hardcoded copies
+    # (away from defaults to catch accidental hardcoding [[defaults-that-hide-bugs]]).
+    assert engines["lemonade"]["connection"]["url"] == settings.lemonade_url
+    assert engines["lemonade"]["connection"]["metrics_url"] == settings.lemonade_metrics_url
+    assert engines["lemonade"]["connection"]["container"] == settings.lemonade_container
+    assert engines["lemonade"]["gpu_index"] == settings.lemonade_gpu_index
+    assert engines["comfyui"]["connection"]["url"] == settings.comfyui_url
+    # Most easily-inverted mapping: comfyui uses lemonade_gpu_index, not hipfire_gpu_index
+    assert engines["comfyui"]["gpu_index"] == settings.lemonade_gpu_index
+    assert engines["hipfire"]["connection"]["container"] == settings.hipfire_container
+    assert engines["hipfire"]["gpu_index"] == settings.hipfire_gpu_index
 
 
 def test_seed_engines_empty_without_presence_proof(store, tmp_path):
