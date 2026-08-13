@@ -41,6 +41,11 @@ const ATTENTION_EXACT = new Set([
   // feedback that a typo'd tenant name is policying nothing —
   // app/routers/policy.py's put_policy, NOT the store's boundary gate.
   "policy-unknown-tenant",
+  // A node-agent reported its own config makes serving detection blind
+  // (app/arbiter.py's _node_observations, surfacing node-agent serving.py's
+  // PROBE_URL_WARNING). Amber, not red: nothing has failed yet, but the
+  // node's env wants fixing before the next blind swap — a decision.
+  "lifecycle-node-misconfigured",
 ]);
 
 function normalize(kind: string): string {

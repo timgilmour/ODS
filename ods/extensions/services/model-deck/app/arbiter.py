@@ -587,6 +587,14 @@ class Watcher:
         # deck; persisting it would touch the intent-store schema for no
         # incident-class gain.
         self._restore_unverified: set[str] = set()
+        # Per-node memo for lifecycle-node-misconfigured (see
+        # _node_observations): node id -> the warning text already logged.
+        # Same posture as _last_failure_key (its own memo, not the one-slot
+        # _last_event_key, which interleaved events defeat): log once per
+        # (node, warning-text) incident, re-armed when the warning
+        # disappears so fixed-then-broken-again logs a fresh event — the
+        # dedup-key-never-cleared class the T9-fix review forbade.
+        self._node_misconfig_logged: dict[str, str] = {}
         # Test-only seam: when set, called once per non-throttled derive pass
         # INSTEAD of the real checkpoint/engine scan, so the throttle timing
         # itself can be tested without a real gguf_dir or spark client.
@@ -998,6 +1006,23 @@ class Watcher:
             if error is not None:
                 self._log("lifecycle-spark-unreachable",
                           {"node": node_id, "error": error})
+            # The agent's serving payload may carry a node-config warning
+            # (node-agent serving.py PROBE_URL_WARNING — vllm profiles
+            # configured, probe URL unset, detection blind). Agent logs are
+            # where signals go to die (invisible for 4 days, 08-12), so
+            # surface it in the Events tab — once per (node, warning-text)
+            # incident via _node_misconfig_logged. Pre-N1 agents send no
+            # such field; absent means nothing to surface, and an
+            # unreachable node's cached status (serving: None) re-arms the
+            # memo like any cleared warning.
+            warning = ((status or {}).get("serving") or {}).get("warning")
+            if warning is not None:
+                if self._node_misconfig_logged.get(node_id) != warning:
+                    self._node_misconfig_logged[node_id] = warning
+                    self._log("lifecycle-node-misconfigured",
+                              {"node": node_id, "warning": warning})
+            else:
+                self._node_misconfig_logged.pop(node_id, None)
             out.append(observe_spark(status, node_id))
         return out
 

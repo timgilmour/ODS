@@ -78,6 +78,15 @@ describe("eventSeverity — attention kinds without the suffix", () => {
     expect(eventSeverity("policy-unknown-tenant")).toBe("attention");
   });
 
+  it("flags a misconfigured node", () => {
+    // app/arbiter.py's _node_observations logs this when a node-agent's
+    // serving payload carries its probe-URL warning (node-agent serving.py's
+    // PROBE_URL_WARNING: vllm profiles configured, probe URL unset —
+    // detection blind). Amber per the colour rule: it wants a decision
+    // (fix the node's env), nothing has failed yet.
+    expect(eventSeverity("lifecycle-node-misconfigured")).toBe("attention");
+  });
+
   it("classifies the per-artifact update-check error by its suffix", () => {
     // Two kinds, two DETAIL SHAPES, deliberately distinct (app/update_check.py):
     // the whole-pass "update-check-error" carries {error}, the per-artifact

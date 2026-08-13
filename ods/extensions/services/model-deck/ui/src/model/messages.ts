@@ -52,6 +52,18 @@ export const messages = {
     title: "first boot can autotune for about 15 minutes — this is normal",
   }),
 
+  // The node answered AND is serving, but its agent says its own config
+  // makes serving detection blind (lifecycle-node-misconfigured,
+  // app/arbiter.py's _node_observations — the body is node-agent
+  // serving.py's PROBE_URL_WARNING, passed through verbatim). Warning, not
+  // danger: nothing has failed yet; the node's env wants fixing before the
+  // next blind swap — amber is for things wanting a decision.
+  nodeMisconfigured: (label: string, warning: string): Message => ({
+    tone: "warning",
+    title: `${label} is misconfigured`,
+    body: warning,
+  }),
+
   // Distinct from nodeUnreachable, which reports what the BACKEND says about
   // a node. This one says THIS PAGE could not reach the deck's own endpoint
   // for that node — so everything below it may be minutes old even while the

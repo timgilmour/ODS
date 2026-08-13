@@ -2130,6 +2130,95 @@ def test_unreachable_event_names_the_node(tmp_path):
     assert "connection refused" in unreachable[0]["detail"]["error"]
 
 
+# ---------------------------------------------------------------------------
+# NODE-MISCONFIGURED surfacing (2026-08-13 incident follow-up, Part B deck
+# half). The node-agent's serving payload may carry a "warning" field (its
+# serving.py PROBE_URL_WARNING — vllm profiles configured, probe URL unset);
+# agent logs are where signals go to die, so the watcher surfaces it in the
+# Events tab as lifecycle-node-misconfigured, once per (node, warning-text)
+# incident, re-armed when the warning disappears.
+# ---------------------------------------------------------------------------
+
+
+_MISCONFIG_WARNING = ("vllm profiles configured but NODE_SERVING_PROBE_URL "
+                      "is unset — serving detection is blind")
+
+
+def _node_status(warning=None):
+    """A reachable node status in SparkObserver's STATUS shape; `warning`
+    lands inside the serving payload exactly where the agent puts it."""
+    serving = {"model": "laguna", "endpoint_ok": True, "container_status": None}
+    if warning is not None:
+        serving["warning"] = warning
+    return {"profile": "laguna", "reachable": True, "swap_in_progress": False,
+            "serving": serving}
+
+
+def test_node_warning_logs_a_misconfigured_event(tmp_path):
+    store = _intent(tmp_path)  # local/hipfire only; not exercised here
+    obs = FakeSlotObserver(_node_status(warning=_MISCONFIG_WARNING))
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_observers=FakeObservers({"sparky": obs}))
+
+    watcher.tick()
+
+    events = [e for e in tail_events(events_path)
+              if e["kind"] == "lifecycle-node-misconfigured"]
+    assert len(events) == 1
+    assert events[0]["detail"] == {"node": "sparky",
+                                   "warning": _MISCONFIG_WARNING}
+
+
+def test_node_warning_is_logged_once_per_incident(tmp_path):
+    """The warning holds tick after tick for as long as the config is wrong;
+    one event per incident, not one per tick."""
+    store = _intent(tmp_path)
+    obs = FakeSlotObserver(_node_status(warning=_MISCONFIG_WARNING))
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_observers=FakeObservers({"sparky": obs}))
+
+    watcher.tick()
+    watcher.tick()
+    watcher.tick()
+
+    events = [e for e in tail_events(events_path)
+              if e["kind"] == "lifecycle-node-misconfigured"]
+    assert len(events) == 1
+
+
+def test_node_warning_rearms_after_it_clears(tmp_path):
+    """Fixed config then broken again = a NEW incident, logged again — the
+    dedup-key-never-cleared class this codebase forbids."""
+    store = _intent(tmp_path)
+    obs = FakeSlotObserver(_node_status(warning=_MISCONFIG_WARNING))
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_observers=FakeObservers({"sparky": obs}))
+
+    watcher.tick()                                     # incident 1
+    obs._status = _node_status()                       # config fixed
+    watcher.tick()
+    obs._status = _node_status(warning=_MISCONFIG_WARNING)  # broken again
+    watcher.tick()                                     # incident 2
+
+    events = [e for e in tail_events(events_path)
+              if e["kind"] == "lifecycle-node-misconfigured"]
+    assert len(events) == 2
+
+
+def test_no_warning_key_logs_nothing(tmp_path):
+    """Pre-N1 agents don't send the field at all — additive, backward
+    compatible: no key means nothing to surface, not an error."""
+    store = _intent(tmp_path)
+    obs = FakeSlotObserver(_node_status())
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_observers=FakeObservers({"sparky": obs}))
+
+    watcher.tick()
+
+    assert not [e for e in tail_events(events_path)
+                if e["kind"] == "lifecycle-node-misconfigured"]
+
+
 # ===========================================================================
 # CHARACTERISTICS DERIVE PASS (task 6) — throttled by settings.derive_interval_s
 # ===========================================================================

@@ -48,6 +48,18 @@ describe("messages", () => {
     expect(m.body).toContain("out of date");
   });
 
+  it("surfaces a node misconfiguration as a warning carrying the agent's own sentence", () => {
+    // lifecycle-node-misconfigured (app/arbiter.py _node_observations); the
+    // body is the node-agent's own warning text, passed through verbatim.
+    const m = messages.nodeMisconfigured(
+      "sparky",
+      "vllm profiles configured but NODE_SERVING_PROBE_URL is unset — serving detection is blind",
+    );
+    expect(m.tone).toBe("warning");
+    expect(m.title).toContain("sparky");
+    expect(m.body).toContain("NODE_SERVING_PROBE_URL");
+  });
+
   it("passes a guard refusal through verbatim as the body", () => {
     const m = messages.guardRefused("busy — 2 requests in flight");
     expect(m.tone).toBe("danger");
