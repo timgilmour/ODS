@@ -196,6 +196,110 @@ def test_probe_survives_non_dict_profiles_json_entry(monkeypatch, tmp_path):
                         "container_status": "running"}
 
 
+# ---------------------------------------------------------------------------
+# vllm-without-probe-URL warning (2026-08-13 incident follow-up, Part B).
+# An empty NODE_SERVING_PROBE_URL on a node with vLLM profiles makes serving
+# detection permanently blind (the vllm/env probe path returns all-null), and
+# the misconfiguration was invisible for 4 days (08-12 incident). The probe
+# result carries a warning whenever the node CONFIG is in that state — keyed
+# on the profile list, not the active profile, because a blind future swap
+# is the hazard.
+# ---------------------------------------------------------------------------
+
+
+_VLLM_PROFILE = {"name": "laguna", "engine": "vllm",
+                 "health_url": None, "container": None}
+
+
+def test_probe_warns_when_vllm_profile_and_no_probe_url(monkeypatch):
+    monkeypatch.setattr(serving.swapctl, "current_profile_meta", lambda: None)
+    monkeypatch.setattr(serving.swapctl, "list_profiles",
+                        lambda: [_VLLM_PROFILE])
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL", "")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.json()["warning"] == (
+        "vllm profiles configured but NODE_SERVING_PROBE_URL is unset — "
+        "serving detection is blind")
+
+
+def test_probe_warning_rides_the_non_vllm_branch(monkeypatch):
+    """The field describes node CONFIG, not the current profile: with ds4
+    active, a configured vllm profile still means the next blind swap lands
+    unobservable — the warning must ride this branch too."""
+    monkeypatch.setattr(
+        serving.swapctl, "current_profile_meta",
+        lambda: {"name": "ds4", "engine": "ds4",
+                 "health_url": "http://127.0.0.1:8000/metrics",
+                 "container": "spark-ds4"})
+    monkeypatch.setattr(serving.swapctl, "list_profiles",
+                        lambda: [_VLLM_PROFILE])
+    monkeypatch.setattr(serving, "_fetch_raw", lambda url: None)
+    monkeypatch.setattr(serving, "_container_status", lambda name: "running")
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL", "")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    body = r.json()
+    assert body["model"] == "ds4"
+    assert body["warning"] == serving.PROBE_URL_WARNING
+
+
+def test_probe_no_warning_when_probe_url_set(monkeypatch):
+    monkeypatch.setattr(serving.swapctl, "current_profile_meta", lambda: None)
+    monkeypatch.setattr(serving.swapctl, "list_profiles",
+                        lambda: [_VLLM_PROFILE])
+    monkeypatch.setattr(serving, "_fetch_models_payload",
+                        lambda url: {"data": [{"id": "laguna"}]})
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert "warning" not in r.json()
+
+
+def test_probe_no_warning_without_vllm_profiles(monkeypatch):
+    monkeypatch.setattr(serving.swapctl, "current_profile_meta", lambda: None)
+    monkeypatch.setattr(
+        serving.swapctl, "list_profiles",
+        lambda: [{"name": "ds4", "engine": "ds4",
+                  "health_url": "http://127.0.0.1:8000/metrics",
+                  "container": "spark-ds4"}])
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL", "")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert "warning" not in r.json()
+
+
+def test_probe_no_warning_when_swapctl_disabled(monkeypatch):
+    """Generic node (no NODE_VLLM_DIR/NODE_SWAP_CTL_DIR): no profiles exist,
+    so there is nothing to know — and list_profiles raising SwapCtlDisabled
+    must not break the probe."""
+    def _disabled():
+        raise swapctl.SwapCtlDisabled()
+
+    monkeypatch.setattr(serving.swapctl, "current_profile_meta", _disabled)
+    monkeypatch.setattr(serving.swapctl, "list_profiles", _disabled)
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL", "")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.status_code == 200
+    assert "warning" not in r.json()
+
+
+def test_startup_log_emits_the_warning(monkeypatch, caplog):
+    monkeypatch.setattr(serving.swapctl, "list_profiles",
+                        lambda: [_VLLM_PROFILE])
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL", "")
+    with caplog.at_level("WARNING", logger="serving"):
+        serving.log_startup_warning()
+    assert serving.PROBE_URL_WARNING in caplog.text
+
+
+def test_startup_log_silent_when_configured(monkeypatch, caplog):
+    monkeypatch.setattr(serving.swapctl, "list_profiles",
+                        lambda: [_VLLM_PROFILE])
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL",
+                        "http://localhost:8000/v1/models")
+    with caplog.at_level("WARNING", logger="serving"):
+        serving.log_startup_warning()
+    assert caplog.text == ""
+
+
 def test_probe_swapctl_disabled_falls_back_to_env(monkeypatch):
     """Generic nodes without NODE_VLLM_DIR/NODE_SWAP_CTL_DIR configured raise
     SwapCtlDisabled from current_profile_meta(); probe() must swallow that and

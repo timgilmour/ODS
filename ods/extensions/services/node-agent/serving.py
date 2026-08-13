@@ -1,10 +1,23 @@
 """Probe what this node is serving (OpenAI-compatible endpoint + container)."""
+import logging
 import subprocess
 
 import httpx
 
 import nodeconfig
 import swapctl
+
+_logger = logging.getLogger(__name__)
+
+# The misconfiguration that blinded serving detection for 4 days (2026-08-12
+# incident): with vLLM profiles configured and NODE_SERVING_PROBE_URL unset,
+# the vllm/env probe path returns all-null forever, and the only signal was
+# this container's own logs — where signals go to die. The probe result now
+# carries this text so the deck can surface it (as the
+# lifecycle-node-misconfigured event, model-deck app/arbiter.py
+# _node_observations).
+PROBE_URL_WARNING = ("vllm profiles configured but NODE_SERVING_PROBE_URL is "
+                     "unset — serving detection is blind")
 
 
 class ProbeError(RuntimeError):
@@ -75,6 +88,43 @@ def _probe_env_configured() -> dict:
     return result
 
 
+def probe_url_warning() -> str | None:
+    """PROBE_URL_WARNING when the node config is blind, else None.
+
+    Keyed on the configured profile LIST, not the active profile — a node
+    currently serving ds4 with a vllm profile configured is one blind future
+    swap away from the incident, so the warning must not wait for the swap.
+    SwapCtlDisabled (generic node, no profiles) means there is nothing to
+    know, not a misconfiguration."""
+    if nodeconfig.NODE_SERVING_PROBE_URL:
+        return None
+    try:
+        profiles = swapctl.list_profiles()
+    except swapctl.SwapCtlDisabled:
+        return None
+    if any(p.get("engine") == "vllm" for p in profiles):
+        return PROBE_URL_WARNING
+    return None
+
+
+def log_startup_warning() -> None:
+    """One startup log line, same condition and text as the probe field
+    (called once at app import, node-agent app.py)."""
+    warning = probe_url_warning()
+    if warning is not None:
+        _logger.warning(warning)
+
+
+def _with_warning(result: dict) -> dict:
+    """Attach the node-config warning to a probe result. All probe paths
+    funnel through this: the field describes the node's configuration, not
+    the currently-active profile."""
+    warning = probe_url_warning()
+    if warning is not None:
+        result["warning"] = warning
+    return result
+
+
 def probe() -> dict:
     try:
         meta = swapctl.current_profile_meta()
@@ -93,6 +143,6 @@ def probe() -> dict:
         url = meta.get("health_url")
         if url:
             result["endpoint_ok"] = _probe_health_2xx(url)
-        return result
+        return _with_warning(result)
 
-    return _probe_env_configured()
+    return _with_warning(_probe_env_configured())

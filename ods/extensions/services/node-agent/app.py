@@ -22,6 +22,10 @@ from gpu_collect import collect_detailed_gpus
 app = FastAPI(title="ods-node-agent", docs_url=None, redoc_url=None,
               openapi_url=None)
 
+# Once per process: a blind serving config (vllm profiles, no probe URL)
+# announces itself in the startup log too, not only in probe() results.
+serving.log_startup_warning()
+
 
 class AuthError(Exception):
     pass
