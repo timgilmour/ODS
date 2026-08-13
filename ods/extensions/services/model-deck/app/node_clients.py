@@ -90,6 +90,18 @@ class NodeClients:
         if built is not None:
             built[1].close()
 
+    def retire_absent(self, keep_ids) -> None:
+        """Close and drop built clients whose ids are not in `keep_ids` —
+        the demotion/removal path, where nothing will ever ask client_for
+        for the id again, so retire-on-read can never fire. Called from
+        NodeObservers.snapshot()'s own retirement branch; lock order is
+        always Observers -> Clients (NodeClients never calls back into
+        NodeObservers), so the nested acquisition cannot invert."""
+        with self._lock:
+            for node_id in list(self._built):
+                if node_id not in keep_ids:
+                    self._retire(node_id)
+
 
 class NodeObservers:
     """One SparkObserver per control:"swap" node, created and retired as the
@@ -129,6 +141,11 @@ class NodeObservers:
             for node_id in list(self._observers):
                 if node_id not in swap_ids:
                     del self._observers[node_id]
+            # Retire the CLIENT too — see retire_absent's docstring: once an
+            # observer is gone nothing will call client_for(node_id) again,
+            # so retire-on-read can never fire and the old client would leak
+            # otherwise.
+            self._clients.retire_absent(swap_ids)
             return dict(self._observers)
 
     def observer_for(self, node_id: str):

@@ -266,6 +266,13 @@ class FakeNodeClients:
     def client_for(self, node_id):
         return self._clients.get(node_id)
 
+    def retire_absent(self, keep_ids) -> None:
+        """No-op: this fake is a plain dict, not the real NodeClients'
+        lazy build/retire cache, so there is nothing here to go stale or
+        need closing. NodeObservers.snapshot() calls this unconditionally
+        (see app/node_clients.py's retire_absent), so the fake must answer
+        to the same interface."""
+
 
 def wire_swap_node(deck, node_id, client, label=None):
     """Registry row (control:"swap", prereqs present) + a fake client bound

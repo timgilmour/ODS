@@ -596,8 +596,9 @@ class Watcher:
         # Provenance ledger (app.provenance). None -- every unit test and
         # every pre-provenance caller -- disables the pass entirely, the same
         # opt-in shape as characteristics_store/intent_store/hostagent above.
-        # `dockerctl` is the LOCAL oci source; the spark client (already held)
-        # is the remote one; the catalog (already held) is weights. The pass
+        # `dockerctl` is the LOCAL oci source; each swap node's client
+        # (fetched per node from self._node_clients, never held) is the
+        # remote one; the catalog (already held) is weights. The pass
         # RECORDS ONLY -- see _provenance_pass.
         self._provenance_store = provenance_store
         self._dockerctl = dockerctl

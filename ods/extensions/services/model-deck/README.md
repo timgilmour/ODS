@@ -112,24 +112,28 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/nodes` | List every registry entry + `credential_set` (never the credential itself) + `control` (declared operability: `"none"` \| `"swap"`) |
-| `POST` | `/api/nodes` | Create a node-agent entry (`{id, label, address, serving_address?, credential?}`). 409 on a duplicate id, 422 on an invalid slug/missing address |
-| `PUT` | `/api/nodes/{id}` | Partial update — `label` / `address` / `serving_address` / `credential`. `id` is immutable |
-| `DELETE` | `/api/nodes/{id}` | Remove the entry and its credential. 409 for `local` (undeletable) |
+| `POST` | `/api/nodes` | Create a node-agent entry (`{id, label, address, serving_address?, credential?, control?}`). `control` is `"none"` \| `"swap"`, default `"none"` — adding a node never grants verbs implicitly. 409 on a duplicate id, 422 on an invalid slug/missing address |
+| `PUT` | `/api/nodes/{id}` | Partial update — `label` / `address` / `serving_address` / `credential` / `control`. `id` is immutable |
+| `DELETE` | `/api/nodes/{id}` | Remove the entry and its credential. 409 for `local` (undeletable) and for a `control: "swap"` node (demote to `"none"` first) |
 | `POST` | `/api/nodes/test` | Test connection — `{node_id}` (probes with the stored credential) **or** `{address, credential}` (pre-save, e.g. before the first Save). Never both. Returns `{ok, name?, platform?, capabilities?, gpu_count?, error?}`; the credential is never echoed, including on failure |
 
-### Spark (Remote Node)
+### Serving (node-addressed swap control)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/spark/status` | Spark node status (profiles, swap status, what is serving) |
-| `POST` | `/api/spark/swap` | Hot-swap the node's single slot to a profile (`{profile, force}`) |
-| `POST` | `/api/spark/reload` | Ship the resolved DECLARED-only settings for whatever profile is (or will be) serving to the node, then re-swap that same profile so they actually launch (`{profile?, force?}` — no `profile` reloads whatever last swapped in). The one human action design decision 5 calls for; see [Settings](#settingsjson--what-things-are-launched-and-served-with) below |
+| `GET` | `/api/nodes/{id}/serving/status` | The node's status (profiles, swap status, what is serving). 404 for an unknown node id, 503 if the node is not operable (`control` != `"swap"` or a prerequisite missing) |
+| `POST` | `/api/nodes/{id}/serving/swap` | Hot-swap the node's single slot to a profile (`{profile, force}`). 404 unknown node, 503 not operable |
+| `POST` | `/api/nodes/{id}/serving/reload` | Ship the resolved DECLARED-only settings for whatever profile is (or will be) serving to the node, then re-swap that same profile so they actually launch (`{profile?, force?}` — no `profile` reloads whatever last swapped in). The one human action design decision 5 calls for; see [Settings](#settingsjson--what-things-are-launched-and-served-with) below. 404 unknown node, 503 not operable |
 
 ### Deprecations
 
 - `/api/spark/*` is a deprecated alias for `/api/nodes/{id}/serving/*`
-  (resolves only while exactly one `control: "swap"` node exists). Removal
-  target: the deploy cycle after N1 ships.
+  (resolves only while exactly one `control: "swap"` node exists):
+  `GET /api/spark/status`, `POST /api/spark/swap`, `POST /api/spark/reload`
+  — same bodies/semantics as the serving routes above, just node-less.
+  Removal target: the deploy cycle after N1 ships. Removing the alias also
+  deletes `tests/test_spark_api.py`'s alias-contract tests and
+  `livetests`' `test_spark_alias_parity`.
 
 ### Lifecycle
 
@@ -1090,7 +1094,7 @@ Model Deck API (:3015, FastAPI)
 ## Files
 
 - `app/main.py` — FastAPI application, startup, exception handlers
-- `app/routers/` — Endpoint modules (control, storage, policy, sets, spark, lifecycle, status, nodes)
+- `app/routers/` — Endpoint modules (control, storage, policy, sets, spark, serving, lifecycle, status, nodes)
 - `app/node_store.py` — NodeStore: `nodes.json` topology + `node_credentials.json` 0600 sidecar, seed-once migration
 - `app/node_observer.py` — NodeObserver: own daemon thread, registry-driven status probes (see [Node registry](#node-registry-topology-credentials-and-observation))
 - `app/engines/node_agent.py` — Thin observe-only client (`info`/`gpu`/`serving`); `SparkClient` extends the same base

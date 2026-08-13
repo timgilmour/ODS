@@ -156,6 +156,19 @@ def test_observers_retire_on_demotion(store, clients):
     assert set(observers.snapshot()) == {"boxb"}
 
 
+def test_snapshot_retires_the_client_on_demotion_without_client_for(store, clients):
+    """Demotion/removal never calls client_for(id) again — nothing else in
+    the deck would have a reason to. Before retire_absent, the built client
+    stayed open until process exit; now NodeObservers.snapshot()'s own
+    retirement branch closes it too, with no further client_for call."""
+    observers = NodeObservers(store, clients)
+    observers.snapshot()                       # builds boxa's observer
+    built = clients.client_for("boxa")          # the client under test
+    store.update("boxa", {"control": "none"})
+    observers.snapshot()                        # demotion path only
+    assert built.closed
+
+
 def test_observer_status_none_when_client_unbindable(store, clients):
     """The observer's spark_fn goes through client_for, so a node whose
     credential vanished mid-flight reads None -> observe_spark emits no key
