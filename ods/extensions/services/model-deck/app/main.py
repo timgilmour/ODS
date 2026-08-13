@@ -390,13 +390,16 @@ def _build_watcher(settings: Settings):
         hipfire=deck["hipfire"],
         litellm=deck["litellm"],
         registry=deck["registry"],
-        # Declaration + LocalClients (Task 3): what the tick's World.snapshot
-        # call reads through now, re-read live every tick (node_store, not a
-        # boot-time copy — see the NodeObservers precedent this follows).
-        # Everything else about the tick (decide/_execute/_infer_pending)
-        # still reads self._lemonade/_comfy/_hipfire above unchanged —
-        # COEXISTENCE: observation only in this task, nothing actuates
-        # through the declaration yet.
+        # Declaration + LocalClients (Task 3, actuation added Task 6): what
+        # the tick's World.snapshot call reads through, re-read live every
+        # tick (node_store, not a boot-time copy — see the NodeObservers
+        # precedent this follows). As of Task 6 this is ALSO what every
+        # actuation/pending/restore path in the tick (_execute/
+        # _infer_pending/_restore) resolves its per-resource client
+        # through — lemonade/comfy/hipfire above are handed in only to seed
+        # Watcher's _LegacyClients fallback (unused here: this real
+        # local_clients is always given, so that fallback never triggers in
+        # production).
         node_store=deck["node_store"],
         local_clients=deck["local_clients"],
         policy_store=deck["policy_store"],

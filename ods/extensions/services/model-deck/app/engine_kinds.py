@@ -305,8 +305,20 @@ class _LemonadeAdapter:
             # Logged BEFORE the rollback, not after: the diagnostic is
             # what tells an operator this happened at all, so it must
             # not be contingent on the rollback succeeding [T7 review].
+            #
+            # "resource" in the detail (review fix, T6 round 2): two
+            # DIFFERENT lemonade-kind resources failing unload with the
+            # same model name and error text would otherwise collapse
+            # into ONE logged line — `_log`'s failure-dedup memo keys on
+            # `(kind, sorted(detail.items()))`, so an identical detail
+            # from a DIFFERENT resource was silently swallowed as if it
+            # were the SAME resource's repeat failure. Folding `resource`
+            # into the detail fixes both at once: the event is now
+            # distinguishable AND the dedup key naturally differs per
+            # resource (the key is derived from this same dict).
             watcher._log("unload-failed",
-                         {"model": model, "error": _error_text(exc)})
+                         {"resource": resource, "model": model,
+                          "error": _error_text(exc)})
             # A real compare-and-swap: the predicate and the write
             # run in ONE critical section inside the store
             # (put_back_if). An operator can record a deliberate
@@ -376,7 +388,13 @@ class _LemonadeAdapter:
         except EngineError as exc:
             # Load failed (engine unreachable, bad response, etc.) — log
             # and let the loop survive; the next tick re-evaluates.
-            watcher._log("load-failed", {"error": _error_text(exc)})
+            # "resource" in the detail: same fix, same reason as
+            # execute_unload's "unload-failed" call above — two different
+            # lemonade-kind resources failing load identically must not
+            # collapse into one line, and the dedup key derives from this
+            # same dict.
+            watcher._log("load-failed",
+                         {"resource": resource, "error": _error_text(exc)})
         else:
             # Re-arm the failure-dedup memo: a recovery between two
             # IDENTICAL failures must not swallow the second one —

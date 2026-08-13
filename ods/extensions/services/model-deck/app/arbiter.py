@@ -536,15 +536,15 @@ class Watcher:
     ) -> None:
         self._settings = settings
         self._world = world
-        # Kept as instance attributes for tests/callers that read them
-        # directly (e.g. FakeLemonade.load_in_flight() assertions), but no
-        # longer consulted by any per-tick dispatch in this class (E1 Task
-        # 6): they exist solely to seed _LegacyClients below when
-        # `local_clients` isn't given. See self._local_clients' own
-        # comment a few lines down.
-        self._lemonade = lemonade
-        self._comfy = comfy
-        self._hipfire = hipfire
+        # `lemonade`/`comfy`/`hipfire` (the constructor PARAMETERS) are used
+        # below to build _LegacyClients when `local_clients` isn't given —
+        # see self._local_clients' own comment a few lines down. They are
+        # deliberately NOT stored as `self._lemonade`/`_comfy`/`_hipfire`
+        # (review fix, T6 round 2): no per-tick dispatch in this class reads
+        # those attributes anymore (E1 Task 6), and grep found no test or
+        # other caller reading them back off a Watcher instance either — a
+        # dead attribute that LOOKS load-bearing (three engine clients
+        # sitting right on `self`) is worse than none.
         self._litellm = litellm
         self._registry = registry
         self._policy_store = policy_store
@@ -553,9 +553,9 @@ class Watcher:
         # Declaration + LocalClients (E1 Task 3/6): what the tick's
         # World.snapshot call reads through, AND (as of Task 6) what every
         # actuation/pending/restore path in this class resolves its
-        # per-resource client through too — self._lemonade/_comfy/_hipfire
-        # above are kept only as constructor inputs to _LegacyClients
-        # below (production never falls back to them: app.main._build_watcher
+        # per-resource client through too — the `lemonade`/`comfy`/`hipfire`
+        # constructor params above are used only to build _LegacyClients
+        # below (production never falls back to it: app.main._build_watcher
         # always passes a real local_clients). `self._node_store is None`
         # (every unit test that doesn't go through app.main._build_watcher,
         # unless it wires node_store= itself) means "no declared engines" —
@@ -670,6 +670,13 @@ class Watcher:
         self._thread: threading.Thread | None = None
         self._last_event_key = None
         self._last_failure_key = None
+        # One-tick declaration cache (review fix, T6 round 2): set by
+        # tick() to that tick's already-read `engines` list for the
+        # duration of the actuation phase, read by _kind_for, cleared
+        # after — see tick()'s own comment at the point it's set for why.
+        # None (the default, and every state outside that window) means
+        # "no cache", so _kind_for falls back to its own fresh read.
+        self._tick_engines: list[dict] | None = None
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -755,9 +762,26 @@ class Watcher:
             if not actuation.LOCK.acquire(blocking=False):
                 return
             try:
+                # One declaration snapshot for the whole actuation phase
+                # (review fix, T6 round 2): _execute can call _kind_for
+                # once per action PLUS once more for the pending-load tail
+                # — without this cache each of those calls independently
+                # re-read self._node_store, meaning a single tick could
+                # legitimately observe two DIFFERENT declaration states if
+                # an edit landed mid-tick (a same-tick inconsistency seam,
+                # once live declaration edits ship), on top of the
+                # needless repeated disk I/O. `engines` above is already
+                # THE fresh read for this tick (world was snapshotted from
+                # it); stash it here so every _kind_for call during this
+                # tick's actuation reads that exact same list, and clear it
+                # after so a direct _execute()/_kind_for() call OUTSIDE a
+                # tick (every test that drives them without .tick()) keeps
+                # getting a fresh per-call read, unaffected.
+                self._tick_engines = engines
                 actuated_keys = self._execute(actions, pending)
                 self._reconcile_pass(world, actuated_keys)
             finally:
+                self._tick_engines = None
                 actuation.LOCK.release()
             self._derive_pass()
             self._provenance_pass()
@@ -812,23 +836,32 @@ class Watcher:
         return None
 
     def _kind_for(self, resource: str) -> str | None:
-        """The declared kind for `resource`, keyless: reads live off
-        self._node_store's "local" `engines[]` declaration (the same
-        NodeObservers-precedent live re-read tick() itself does) when one
-        is wired. `self._node_store is None` — every unit test that
-        injects lemonade/comfy/hipfire directly instead (see
-        _LegacyClients above) — falls back to treating `resource` AS its
-        own kind name, which is exactly true for that legacy triple (and
-        for nothing else — an undeclared, non-legacy resource correctly
-        resolves to None either way)."""
-        if self._node_store is not None:
+        """The declared kind for `resource`, keyless. `self._node_store is
+        None` — every unit test that injects lemonade/comfy/hipfire
+        directly instead (see _LegacyClients above) — falls back to
+        treating `resource` AS its own kind name, which is exactly true
+        for that legacy triple (and for nothing else — an undeclared,
+        non-legacy resource correctly resolves to None either way).
+
+        Otherwise reads `self._tick_engines` — the ONE declaration
+        snapshot tick() took for this whole actuation phase (review fix,
+        T6 round 2: this used to re-read self._node_store fresh on EVERY
+        call, i.e. once per action plus once more for the pending-load
+        tail — a same-tick inconsistency seam once live declaration edits
+        ship, on top of needless repeated disk I/O). `self._tick_engines
+        is None` outside that window (every direct _execute()/_kind_for()
+        call in a test, which never goes through tick()) falls back to a
+        fresh read off self._node_store, same behavior as before this fix."""
+        if self._node_store is None:
+            return resource if resource in ENGINE_KINDS else None
+        engines = self._tick_engines
+        if engines is None:
             local = self._node_store.get("local")
-            if local is not None:
-                for entry in local.get("engines", []):
-                    if entry["resource"] == resource:
-                        return entry["kind"]
-            return None
-        return resource if resource in ENGINE_KINDS else None
+            engines = local.get("engines", []) if local is not None else []
+        for entry in engines:
+            if entry["resource"] == resource:
+                return entry["kind"]
+        return None
 
     def _dispatch_verb(self, resource: str, verb: str):
         """The (adapter, client) pair for actuating `verb` against
@@ -1519,6 +1552,15 @@ class Watcher:
     # reachable trim-thrash input [T10 review]. The success arms clear this
     # memo so a fail→recover→identical-fail flap logs both failures (the
     # dedup-key-never-cleared class the T9-fix review forbade).
+    #
+    # E1 Task 6 (review fix, round 2): the dedup key below is derived
+    # straight from `detail` (`(kind, tuple(sorted(detail.items())))`), so
+    # once a second lemonade-kind resource could exist, TWO DIFFERENT
+    # resources failing with an identical model/error would collapse into
+    # one logged line unless `detail` itself told them apart. Closed at the
+    # source — app.engine_kinds' execute_unload/execute_load now fold
+    # "resource" into both failure details — rather than here, since this
+    # memo's own job is only to compare whatever detail it's handed.
     _FAILURE_DEDUP_KINDS = frozenset({"load-failed", "unload-failed"})
 
     def _log(self, kind: str, detail: dict) -> None:

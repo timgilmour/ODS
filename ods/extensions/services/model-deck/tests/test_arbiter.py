@@ -922,12 +922,18 @@ class _PendingCapableLemonade:
     """
 
     def __init__(self, litellm: "_FakeLiteLLMRoutes", registry: "FakeRegistry",
-                 loaded: str | None = None) -> None:
+                 loaded: str | None = None, raise_on_unload=None, raise_on_load=None) -> None:
         self._litellm = litellm
         self._registry = registry
         self.loaded_model = loaded
         self.unloaded = []
         self.loaded = []
+        # Mirror FakeLemonade's own raise-on-* knobs (review fix, T6 round
+        # 2: the dedup-collision regression test needs two DIFFERENT
+        # resources to fail identically, which the earlier version of this
+        # fixture had no way to drive).
+        self._raise_on_unload = raise_on_unload
+        self._raise_on_load = raise_on_load
 
     def status(self) -> dict:
         return {"loaded": self.loaded_model}
@@ -940,9 +946,13 @@ class _PendingCapableLemonade:
 
     def unload(self, model: str) -> None:
         self.unloaded.append(model)
+        if self._raise_on_unload is not None:
+            raise self._raise_on_unload
         self.loaded_model = None
 
     def load(self, model: str) -> None:
+        if self._raise_on_load is not None:
+            raise self._raise_on_load
         self.loaded.append(model)
         self.loaded_model = model
 
@@ -975,10 +985,12 @@ class _TwoGgufWatcher:
     """two_gguf_watcher's return value: the watcher plus everything needed
     to build a REAL World snapshot against its two declared resources."""
 
-    def __init__(self, watcher, clients, intent_store, gpus, litellm, registry, world) -> None:
+    def __init__(self, watcher, clients, intent_store, gpus, litellm, registry, world,
+                 events_path) -> None:
         self.watcher = watcher
         self.clients = clients
         self.intent_store = intent_store
+        self.events_path = events_path
         self._gpus = gpus
         self._litellm = litellm
         self._registry = registry
@@ -1031,12 +1043,13 @@ def two_gguf_watcher(tmp_path):
     intent_store = IntentStore(tmp_path / "intent.json")
     world = World()
 
-    watcher, _events_path = _make_watcher(
+    watcher, events_path = _make_watcher(
         tmp_path, world, registry, _policy(),
         node_store=node_store, local_clients=clients, intent_store=intent_store,
     )
 
-    return _TwoGgufWatcher(watcher, clients, intent_store, gpus, litellm, registry, world)
+    return _TwoGgufWatcher(watcher, clients, intent_store, gpus, litellm, registry, world,
+                            events_path)
 
 
 def test_pending_from_second_gguf_carries_its_own_gpu(two_gguf_watcher):
@@ -1055,6 +1068,96 @@ def test_deck_unload_records_intent_for_the_right_resource(two_gguf_watcher):
     rec = w.intent_store.get()["local/gguf-b"]
     assert rec["state"] == "unloaded" and rec["actor"] == "deck"
     assert "local/gguf-a" not in w.intent_store.get()
+
+
+def test_execute_load_and_restore_target_the_right_non_legacy_resource(two_gguf_watcher):
+    """execute_load's key generalization (`local_key(resource)`, not the
+    dead `LOCAL_LEMONADE_KEY`) proven away from resource==kind name — the
+    unload sibling above only pinned this for the unload arm. Folds in a
+    `_restore` assertion too: both resolve gguf-b's OWN client, never
+    gguf-a's (review fix, T6 round 2)."""
+    w = two_gguf_watcher
+    pending = {"resource": "gguf-b", "model": "b.gguf", "footprint": 30, "gpu_index": 3}
+
+    w.watcher._execute([], pending)
+
+    rec = w.intent_store.get()["local/gguf-b"]
+    assert rec["state"] == "loaded" and rec["actor"] == "deck"
+    assert "local/gguf-a" not in w.intent_store.get()
+    assert w.clients.fake("gguf-b").loaded == ["b.gguf"]
+    assert w.clients.fake("gguf-a").loaded == []
+
+    # _restore dispatches through the SAME per-resource resolution —
+    # resolves gguf-b's client off the intent key, not gguf-a's.
+    w.watcher._restore({"key": "local/gguf-b", "engine": "lemonade", "model": "b.gguf"})
+    assert w.clients.fake("gguf-b").loaded == ["b.gguf", "b.gguf"]
+    assert w.clients.fake("gguf-a").loaded == []
+
+
+def test_unload_failures_from_different_resources_are_not_deduped(two_gguf_watcher):
+    """Two DIFFERENT lemonade-kind resources failing unload with the SAME
+    model name and error text must produce TWO distinguishable events, not
+    collapse into one via `_log`'s failure-dedup memo (review fix, T6
+    round 2: the memo's key derives from `detail`, and the pre-fix
+    "unload-failed"/"load-failed" details carried no `resource`, so an
+    identical failure from a DIFFERENT resource was silently swallowed as
+    if it were the SAME resource's repeat)."""
+    w = two_gguf_watcher
+    err = EngineError("connection refused")
+    w.clients.fake("gguf-a")._raise_on_unload = err
+    w.clients.fake("gguf-b")._raise_on_unload = err
+
+    w.watcher._execute([{"type": "unload", "resource": "gguf-a", "model": "x.gguf"}], None)
+    w.watcher._execute([{"type": "unload", "resource": "gguf-b", "model": "x.gguf"}], None)
+
+    failed = [e for e in tail_events(w.events_path) if e["kind"] == "unload-failed"]
+    assert len(failed) == 2  # neither swallowed the other as a "repeat"
+    assert {e["detail"]["resource"] for e in failed} == {"gguf-a", "gguf-b"}
+
+
+def test_kind_for_uses_the_tick_cache_when_set(tmp_path):
+    """review fix, T6 round 2: _kind_for must resolve from
+    ``self._tick_engines`` (tick()'s own actuation-phase stash of the ONE
+    declaration read that tick already took) rather than re-reading
+    self._node_store on every call — proven directly against the seam
+    (a counting fake node_store), not through a full contention tick:
+    two_gguf_watcher's ``_policy()`` doesn't cover gguf-a/gguf-b, so a real
+    tick there would noop both regardless of how many times the
+    declaration got read."""
+
+    class _CountingNodeStore:
+        def __init__(self, engines):
+            self._engines = engines
+            self.calls = 0
+
+        def get(self, node_id):
+            self.calls += 1
+            return {"engines": self._engines}
+
+    node_store = _CountingNodeStore(
+        [{"resource": "gguf-a", "kind": "lemonade"},
+         {"resource": "gguf-b", "kind": "lemonade"}]
+    )
+    watcher = _watcher(tmp_path, node_store=node_store)
+
+    # No cache (outside a tick, self._tick_engines still None): falls back
+    # to a fresh read every call, same as before this fix.
+    assert watcher._kind_for("gguf-a") == "lemonade"
+    assert watcher._kind_for("gguf-b") == "lemonade"
+    assert node_store.calls == 2
+
+    # Cache set, as tick() does for the duration of its actuation phase:
+    # both resolve from it, zero further reads.
+    watcher._tick_engines = [{"resource": "gguf-a", "kind": "lemonade"},
+                             {"resource": "gguf-b", "kind": "lemonade"}]
+    assert watcher._kind_for("gguf-a") == "lemonade"
+    assert watcher._kind_for("gguf-b") == "lemonade"
+    assert node_store.calls == 2  # unchanged
+
+    # Cleared (as tick()'s finally does): back to a fresh read.
+    watcher._tick_engines = None
+    assert watcher._kind_for("gguf-a") == "lemonade"
+    assert node_store.calls == 3
 
 
 class _FakeClock:
