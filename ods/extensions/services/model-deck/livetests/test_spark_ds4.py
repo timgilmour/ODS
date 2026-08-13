@@ -24,8 +24,8 @@ engine side: every spark profile runs ``network_mode: host``, so :8000 has
 exactly one owner, and an answer identifying the incoming model — plus the
 disappearance of the outgoing engine's own gauge from /metrics — is proof
 the outgoing container released the socket. The node-agent's own view
-(``/api/spark/status``, a pass-through of /v1/node/profiles and
-/v1/node/serving) is asserted next to it.
+(``/api/nodes/{NODE}/serving/status``, a pass-through of /v1/node/profiles
+and /v1/node/serving) is asserted next to it.
 
 Teardown is unconditional AND asserted: the spark ends this case serving
 ds4 with the deck's intent recording it, because ds4 is the standing intent
@@ -51,9 +51,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from app.observe import SPARK_SLOT_KEY  # the deck's own key for this slot
+from app.observe import slot_key  # the deck's own key for this slot
 
 pytestmark = pytest.mark.disruptive
+
+# The live install's registry id for the swap node — data (nodes.json), not
+# coupling.
+NODE = "sparky"
 
 DS4 = "ds4"
 # The round-trip partner. A vllm profile on purpose: leg 2 then swaps away
@@ -80,15 +84,15 @@ DERIVE_TIMEOUT = 120
 
 
 def _status(deck) -> dict:
-    return deck.get("/api/spark/status").json()
+    return deck.get(f"/api/nodes/{NODE}/serving/status").json()
 
 
 def _slot(deck) -> dict:
-    return deck.get("/api/state").json()["lifecycle"][SPARK_SLOT_KEY]
+    return deck.get("/api/state").json()["lifecycle"][slot_key(NODE)]
 
 
 def _swap(deck, profile: str) -> dict:
-    r = deck.post("/api/spark/swap", json={"profile": profile})
+    r = deck.post(f"/api/nodes/{NODE}/serving/swap", json={"profile": profile})
     assert r.status_code == 200, f"swap to {profile!r} refused: {r.status_code} {r.text}"
     return r.json()
 
@@ -120,7 +124,7 @@ def ds4_window(deck, litellm_direct, spark_serving):
     assert the box came back to the same SERVED identity instead of to a
     literal that could drift.
     """
-    status = deck.get("/api/spark/status")
+    status = deck.get(f"/api/nodes/{NODE}/serving/status")
     if status.status_code == 503:
         pytest.skip("no spark configured on this deck")
     status.raise_for_status()
@@ -177,20 +181,21 @@ def restore_ds4(deck, spark_serving, ds4_window):
 
     serving = _status(deck)["serving"]
     if not (serving["endpoint_ok"] and serving["model"] == DS4):
-        r = deck.post("/api/spark/swap", json={"profile": DS4})
+        r = deck.post(f"/api/nodes/{NODE}/serving/swap", json={"profile": DS4})
         if r.status_code == 409:
             # Guard-refused: a boot this drill interrupted, or a request it
             # left in flight. force is the documented recovery path for
             # both, and teardown is the only place it belongs — the body
             # must never force, or it would stop testing the guard.
-            r = deck.post("/api/spark/swap", json={"profile": DS4, "force": True})
+            r = deck.post(f"/api/nodes/{NODE}/serving/swap",
+                          json={"profile": DS4, "force": True})
         assert r.status_code == 200, f"TEARDOWN FAILED: swap back to ds4: {r.text}"
         _wait_serving(deck, DS4)
 
     assert spark_serving.served_model() == served, \
         f"TEARDOWN FAILED: :8000 serves {spark_serving.served_model()!r}, not {served!r}"
     _wait_for(lambda: _slot(deck)["status"] == "serving", DERIVE_TIMEOUT,
-              f"TEARDOWN FAILED: the deck does not read {SPARK_SLOT_KEY} as serving")
+              f"TEARDOWN FAILED: the deck does not read {slot_key(NODE)} as serving")
     intent = _slot(deck)["intent"]
     assert intent["model"] == DS4, f"TEARDOWN FAILED: intent is {intent}"
 
@@ -220,7 +225,7 @@ def test_d6_spark_ds4_round_trip(deck, spark_serving, ds4_window, lemonade_guard
         _wait_for(lambda: (spark_serving.inflight() or 0) >= 1, 120,
                   "ds4 never reported the drill's request as in flight")
 
-        refused = deck.post("/api/spark/swap", json={"profile": PARTNER})
+        refused = deck.post(f"/api/nodes/{NODE}/serving/swap", json={"profile": PARTNER})
         assert refused.status_code == 409, \
             f"swap away from a BUSY ds4 was not refused: {refused.status_code} {refused.text}"
         assert "in-flight" in refused.json()["detail"], refused.text

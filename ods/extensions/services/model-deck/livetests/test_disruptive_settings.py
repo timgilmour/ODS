@@ -47,8 +47,13 @@ import time
 import pytest
 
 from app.argline import POSITIONAL_KEY
+from app.observe import slot_key
 
 pytestmark = pytest.mark.disruptive
+
+# The live install's registry id for the swap node — data (nodes.json), not
+# coupling.
+NODE = "sparky"
 
 VLLM_PROFILE = os.environ.get("DECK_DRILL_SETTINGS_PROFILE", "heretic")
 # app.compose_import's derived identity for VLLM_PROFILE's /model mount --
@@ -69,7 +74,7 @@ SWAP_TIMEOUT = 900
 
 
 def _status(deck) -> dict:
-    return deck.get("/api/spark/status").json()
+    return deck.get(f"/api/nodes/{NODE}/serving/status").json()
 
 
 def _wait_for(predicate, timeout_s: float, what: str) -> None:
@@ -103,7 +108,7 @@ def _swap_with_patience(deck, profile: str, attempts: int = 6, pause_s: float = 
     attempt one). The guard is correct — the drill retries briefly rather
     than forcing through it; a PERSISTENT 409 still fails the drill."""
     for remaining in range(attempts - 1, -1, -1):
-        resp = deck.post("/api/spark/swap", json={"profile": profile})
+        resp = deck.post(f"/api/nodes/{NODE}/serving/swap", json={"profile": profile})
         if resp.status_code != 409 or remaining == 0:
             resp.raise_for_status()
             return resp
@@ -150,7 +155,7 @@ def restore_spark_profile(deck):
     yield prior
     if not prior:
         return
-    r = deck.post("/api/spark/swap", json={"profile": prior, "force": True})
+    r = deck.post(f"/api/nodes/{NODE}/serving/swap", json={"profile": prior, "force": True})
     assert r.status_code == 200, f"TEARDOWN FAILED: swap back to {prior!r}: {r.text}"
     _wait_serving(deck, prior)
 
@@ -160,10 +165,11 @@ def test_d12_adopt_imports_without_touching_the_node(deck):
     identity map, and changes NOTHING on sparky -- no swap or reload call
     appears anywhere in this test."""
     lifecycle = deck.get("/api/state").json()["lifecycle"]
-    # settings scope node id and lifecycle node id share one source
-    # (app.observe.spark_node_id, derived from SPARK_SLOT_KEY): assert the
-    # sparky slot key exists before using its prefix.
-    assert any(k.startswith("sparky/") for k in lifecycle)
+    # settings scope node id and lifecycle node id share one source: both
+    # key on the node's registry id (nodes.json), and app.observe.slot_key
+    # derives the lifecycle key from that same id. Assert the sparky slot
+    # key exists before using its prefix.
+    assert any(k.startswith(f"{NODE}/") for k in lifecycle)
 
     report = deck.post("/api/settings/adopt/sparky/vllm").json()
 
@@ -201,7 +207,7 @@ def test_d11_save_flags_drift_reload_applies(deck, spark_serving, settings_windo
         json={"namespace": "args", "values": {SETTING_KEY: SETTING_VALUE}},
     ).raise_for_status()
 
-    entry = deck.get("/api/state").json()["lifecycle"]["sparky/slot0"]
+    entry = deck.get("/api/state").json()["lifecycle"][slot_key(NODE)]
     assert entry["settings_drift"] is not None, entry
     # Qualified "namespace:key" form -- app/routers/__init__.py's
     # _settings_drift docstring: 'changed entries are qualified
@@ -219,11 +225,11 @@ def test_d11_save_flags_drift_reload_applies(deck, spark_serving, settings_windo
     # always a human click." The PUT above never called apply_settings.
     assert spark_serving.reachable(), "saving must not restart anything"
 
-    deck.post("/api/spark/reload", json={}).raise_for_status()
+    deck.post(f"/api/nodes/{NODE}/serving/reload", json={}).raise_for_status()
     _wait_for(lambda: spark_serving.max_model_len() == int(SETTING_VALUE), SWAP_TIMEOUT,
               "spark never reported the reloaded max-model-len")
 
-    entry = deck.get("/api/state").json()["lifecycle"]["sparky/slot0"]
+    entry = deck.get("/api/state").json()["lifecycle"][slot_key(NODE)]
     # app/routers/spark.py's spark_reload docstring: "The re-swap's intent
     # record is what clears settings_drift -- the drift flag's baseline IS
     # the intent's updated_ts ... so re-recording it is the entire
@@ -251,7 +257,7 @@ def test_d11_save_flags_drift_reload_applies(deck, spark_serving, settings_windo
     # one flag (the override replaces compose's command outright, so the
     # engine's own default covers it, not compose's 262144) -- asserted as
     # "not the drill's value" rather than a guessed replacement.
-    deck.post("/api/spark/reload",
+    deck.post(f"/api/nodes/{NODE}/serving/reload",
               json={"profile": VLLM_PROFILE}).raise_for_status()
     _wait_serving(deck, VLLM_PROFILE)
     _wait_for(lambda: spark_serving.max_model_len() != int(SETTING_VALUE),

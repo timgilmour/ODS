@@ -12,17 +12,21 @@ import pytest
 
 pytestmark = pytest.mark.disruptive
 
+# The live install's registry id for the swap node — data (nodes.json), not
+# coupling.
+NODE = "sparky"
+
 # comfyui boot is fast; the vllm boot-back can autotune ~13-15 min
 # (FlashInfer JIT cache is not volume-mounted, see sparky-operations.md).
 SWAP_TIMEOUT = 900
 
 
 def _status(deck):
-    return deck.get("/api/spark/status").json()
+    return deck.get(f"/api/nodes/{NODE}/serving/status").json()
 
 
 def _swap(deck, profile):
-    r = deck.post("/api/spark/swap", json={"profile": profile})
+    r = deck.post(f"/api/nodes/{NODE}/serving/swap", json={"profile": profile})
     r.raise_for_status()
     return r.json()
 

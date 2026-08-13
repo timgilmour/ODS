@@ -9,6 +9,10 @@ import pytest
 
 pytestmark = pytest.mark.safe
 
+# The live install's registry id for the swap node — data (nodes.json), not
+# coupling.
+NODE = "sparky"
+
 _STATUSES = {None, "online", "offline", "error", "unconfigured"}
 
 
@@ -34,12 +38,12 @@ def test_sparky_seed_preserved_the_key_vocabulary(deck):
     # sparky/ keys, provenance's oci:sparky:* artifacts) is still readable
     # and coherent post-deploy. It does NOT prove this boot's seed used the
     # right id — intent.json and provenance.json are additive stores with
-    # months of prior sparky-keyed history, and the provenance pass keys off
-    # the hardcoded spark_node_id() constant regardless of what nodes.json
-    # says, so a wrong id written by seed_if_missing would not turn this
-    # test red. test_registry_lists_local_and_sparky (a fresh GET /api/nodes
-    # read) is the one that proves THIS seed used the right id; the two
-    # together are the real coverage.
+    # months of prior sparky-keyed history, and the deck now keys everything
+    # on registry ids (nodes.json), not a hardcoded constant, so a wrong id
+    # written by seed_if_missing would not turn this test red.
+    # test_registry_lists_local_and_sparky (a fresh GET /api/nodes read) is
+    # the one that proves THIS seed used the right id; the two together are
+    # the real coverage.
     state = deck.get("/api/state").json()
     assert any(k.startswith("sparky/") for k in state["lifecycle"]), (
         "lifecycle lost its sparky/ keys after the registry migration")
@@ -68,3 +72,18 @@ def test_test_connection_route_answers_without_echoing(deck):
     if not body["ok"]:
         assert body.get("error"), "a failed test must say why"
     assert "credential" not in resp.text
+
+
+def test_spark_alias_parity(deck):
+    """While the /api/spark/* alias lives (one deploy cycle, design §6) it
+    must answer byte-identically to the canonical route it forwards to.
+
+    No skip here: like the rest of this file, the check is tolerant of
+    sparky being powered off (or unconfigured) by construction — it only
+    asserts the two routes AGREE, whatever status they agree on, and only
+    compares bodies once both sides answer 200."""
+    canonical = deck.get(f"/api/nodes/{NODE}/serving/status")
+    alias = deck.get("/api/spark/status")
+    assert alias.status_code == canonical.status_code
+    if canonical.status_code == 200:
+        assert alias.json() == canonical.json()
