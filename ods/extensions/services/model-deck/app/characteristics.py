@@ -8,7 +8,7 @@ contradicting the checkpoint's own config.json), and the reason context
 length currently lives in three unreconciled places.
 
 Keys are ``"<kind>/<id>"`` — ``model/Qwen3.6-35B-A3B-heretic-NVFP4``,
-``engine/sparky/vllm``. Values are ``{field: {value, source, derived_ts}}``.
+``engine/boxa/vllm``. Values are ``{field: {value, source, derived_ts}}``.
 
 Provenance is mandatory, not decoration. "context: 262144" read from a
 checkpoint, read from a live engine, and asserted by a human have very

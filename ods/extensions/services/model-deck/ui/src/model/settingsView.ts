@@ -118,8 +118,8 @@ export function scopeKeys(node: string, engine: string, model: string | null): S
  * the adopt sweep (app/routers/settings.py:319) and read exactly this way by
  * the backend itself — app/routers/spark.py:143 for reload, and
  * app/routers/__init__.py:160-215 for settings drift, whose docstring names
- * the failure this prevents: a PUT to `engine_models/sparky/vllm|<identity>`
- * never registers against the verbatim `sparky/spark|heretic` key intent
+ * the failure this prevents: a PUT to `engine_models/boxa/vllm|<identity>`
+ * never registers against the verbatim `boxa/spark|heretic` key intent
  * builds, so settings for the spark slot go silently dead (the D11 defect).
  *
  * Every miss falls back to the placement's own name, which is the honest

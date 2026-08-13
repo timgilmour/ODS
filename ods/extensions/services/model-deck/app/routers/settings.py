@@ -33,7 +33,7 @@ every flag is then 'unvalidated' and still fully editable.
 Route registration order matters: the generic ``GET/PUT
 /settings/{kind}/{key:path}`` routes are declared LAST. FastAPI/Starlette
 matches routes in registration order, and ``{key:path}`` is greedy enough to
-swallow ``catalog/sparky/vllm`` or ``effective/sparky/vllm/Qwen...`` as a
+swallow ``catalog/boxa/vllm`` or ``effective/boxa/vllm/Qwen...`` as a
 literal ``key`` if it were registered first — so ``catalog``, ``effective``,
 and ``preview`` must all come before the generic pair.
 
@@ -410,7 +410,7 @@ def _catalog_default(raw):
     ``False``), so an empty one reached FastAPI's serializer and came back
     as ``[]`` — a value where ``CatalogOption.default``'s contract (api.ts)
     promises ``null`` for "nothing to prefill", which is what the UI's
-    ``startingValueFor`` reads. Two of sparky/vllm's 274 live options are
+    ``startingValueFor`` reads. Two of a live engine's 274 options are
     exactly this shape (``--cpu-offload-params``, ``--offload-params``, raw
     default ``"set()"``). So both containers are folded onto the paths their
     list counterpart already takes: empty is the ``null`` answer, non-empty

@@ -43,7 +43,7 @@ router = APIRouter(tags=["facts"])
 _OPENAI_PREFIX = "openai/"
 
 # A declared key's kind — mirrors app.characteristics' "<kind>/<id>" shape.
-# Engine keys legitimately contain a second slash (e.g. "engine/sparky/vllm"
+# Engine keys legitimately contain a second slash (e.g. "engine/boxa/vllm"
 # — node/engine), so only an EMPTY remainder or a trailing slash is rejected,
 # never an interior one.
 _KEY_PREFIXES = ("model/", "engine/")

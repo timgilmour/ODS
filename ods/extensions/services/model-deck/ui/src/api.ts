@@ -117,7 +117,7 @@ export interface Observation {
 }
 
 /** Mirrors app/routers/__init__.py's build_lifecycle_view, keyed
- * `<node>/<resource>` (e.g. "local/hipfire", "sparky/slot0"). `intent` is
+ * `<node>/<resource>` (e.g. "local/hipfire", "boxa/slot0"). `intent` is
  * null when nothing was ever recorded — which is exactly what makes the
  * status `unmanaged`/`idle` rather than `down`/`parked`. */
 export interface LifecycleEntry {

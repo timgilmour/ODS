@@ -49,7 +49,7 @@ export interface UncommittedAdd {
    * decides what happens when the operator simply moves on, as opposed to
    * explicitly cancelling.
    *
-   * True only for the empty string. Measured against the live sparky/vllm
+   * True only for the empty string. Measured against a live vLLM
    * catalog (274 options, 2026-08-08): 100 options start at `""` — 95 with no
    * catalog default at all plus 5 whose default is literally `''` — and five
    * of those are `select` widgets (collect-detailed-traces,

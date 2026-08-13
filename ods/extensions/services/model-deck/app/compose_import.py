@@ -1,7 +1,7 @@
 """Import a docker-compose service definition into settings — the "adopt"
 half of adopt-then-own (Plan C2, Task 2).
 
-The later adopt sweep feeds sparky's REAL compose files (one service each)
+The later adopt sweep feeds a remote node's REAL compose files (one service each)
 through here to seed the settings store, so what this module returns is not
 an internal convenience shape — ``identity``, ``service`` and
 ``container_name`` are the fields the reload route and drift translation are

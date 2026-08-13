@@ -44,7 +44,7 @@ import type {
 export type NodeStatus = "reachable" | "unreachable" | "warming" | "down";
 
 export interface Placement {
-  /** Lifecycle key where one exists ("local/hipfire", "sparky/slot0"), else
+  /** Lifecycle key where one exists ("local/hipfire", "boxa/slot0"), else
    * a synthetic id. Stable across polls, so it is safe as a React key. */
   id: string;
   /** Model identity, verbatim. Never prettified — truncate at render time. */

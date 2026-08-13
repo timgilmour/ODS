@@ -38,7 +38,7 @@ other value — including keys from a future version — is passed through.
 
 Provenance NEVER actuates (D4/D11). It records desired state as data and
 reports drift; app.reconcile stays the only restorer, and convergence — which
-would need `docker pull` + container create, or a compose write on sparky —
+would need `docker pull` + container create, or a compose write on a remote node —
 is a later spec gated on a socket-proxy permission decision.
 """
 

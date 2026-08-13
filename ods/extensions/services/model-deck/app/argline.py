@@ -5,7 +5,7 @@ module is the hinge between them, which makes the round trip the integrity
 guarantee of the whole settings feature: chips -> text -> chips must be the
 identity, or a human's edit gets silently altered.
 
-Value shapes, all of which appear in a live sparky profile:
+Value shapes, all of which appear in a live vLLM profile:
 
 * ``True``        — bare flag (``--enable-chunked-prefill``)
 * ``str``/``int`` — scalar (``--max-model-len 262144``)

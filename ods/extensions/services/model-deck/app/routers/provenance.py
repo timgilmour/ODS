@@ -97,9 +97,9 @@ def backfill(request: Request) -> dict:
     ProvenanceStore.observe writes history only on a real change, so a second
     run adds no records.
 
-    Deliberately does NOT reach sparky. A backfill is an operator action
-    expected to return promptly, and the sparky sweep is N+2 network
-    round-trips against a box that may be mid-swap; the watcher pass covers
+    Deliberately does NOT reach remote nodes. A backfill is an operator
+    action expected to return promptly, and a remote-node sweep is N+2
+    network round-trips against a box that may be mid-swap; the watcher pass covers
     it within provenance_interval_s anyway.
     """
     from app import provenance_collect

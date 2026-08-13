@@ -2,8 +2,9 @@
 the caller (app.arbiter.Watcher._provenance_pass) owns every client call and
 every failure.
 
-Three sources, and the interesting one is sparky. The deck cannot inspect
-that box — the node-agent deliberately holds no docker socket (see
+Three sources, and the interesting one is a remote swap node. The deck
+cannot inspect that box — the node-agent deliberately holds no docker
+socket (see
 app/engines/spark.py's module docstring) — so its engine provenance is
 assembled from two reads that ALREADY EXIST:
 
@@ -39,7 +40,7 @@ def local_oci_entries(inspect_bodies: dict, node: str) -> list[dict]:
     ``Image`` is the content id, ``Config.Image`` the human reference.
 
     THE ARTIFACT IS THE IMAGE, NOT THE CONTAINER. Identity is the image
-    REPOSITORY — the same key sparky uses — and the containers running it are
+    REPOSITORY — the same key a remote node uses — and the containers running it are
     recorded as placement facts, exactly as ``location`` is for weights
     (identity is the relpath; where it currently sits is not part of it).
     Keying per container would mean an operator declaring the same origin
@@ -124,8 +125,8 @@ def spark_oci_entries(compose_texts: dict, catalog: dict | None,
     exact ``catalog["profile"]`` match.
 
     PROFILES ARE MANY, ARTIFACTS ARE FEW. The artifact id is keyed on the
-    repository, and sparky runs several profiles off one image — five of
-    seven share ``aeon-vllm-ultimate`` today. So this returns at most one
+    repository, and a remote node runs several profiles off one image —
+    five of seven share ``aeon-vllm-ultimate`` today. So this returns at most one
     entry PER REPOSITORY, not one per profile: emitting duplicates left the
     caller's last write deciding the artifact's version, and since only the
     catalog-matching profile carries a digest, any profile sharing its image

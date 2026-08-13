@@ -338,7 +338,7 @@ def diff_snapshot(snapshot: dict | None, current: dict) -> dict:
     * ``added``/``removed``: ``{"scope", "key"}`` — present on only one side
       (``added`` = only in ``current``, ``removed`` = only in ``snapshot``).
 
-    ``scope`` is ``"<kind>/<key>"`` (e.g. ``"engines/sparky/vllm"``); ``key``
+    ``scope`` is ``"<kind>/<key>"`` (e.g. ``"engines/boxa/vllm"``); ``key``
     is the C1 qualified form ``"<namespace>:<name>"`` (e.g. ``"args:x"`` —
     see ``app.routers._settings_drift``'s ``"namespace:key"`` convention,
     routers/__init__.py:182) so same-named keys in different namespaces

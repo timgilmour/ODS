@@ -43,7 +43,7 @@ class BadArtifactId(ValueError):
 
 
 def parse_artifact_id(artifact_id: str) -> tuple[str, str, str]:
-    """``"oci:sparky:ds4-spark"`` -> ``("oci", "sparky", "ds4-spark")``."""
+    """``"oci:boxa:ds4-spark"`` -> ``("oci", "boxa", "ds4-spark")``."""
     parts = (artifact_id or "").split(":", 2)
     if len(parts) != 3:
         raise BadArtifactId(

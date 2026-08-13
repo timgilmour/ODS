@@ -1203,7 +1203,7 @@ class Watcher:
         merely deferred but currently outside the deck's permissions: the
         socket proxy allows start/stop/exec, not pull/create (see
         app/engines/docker_ctl.py's deploy note on why a wildcard there is
-        refused), and sparky's compose files are served read-only by a
+        refused), and a swap node's compose files are served read-only by a
         node-agent with no docker access at all.
 
         Best-effort per source, like _derive_pass: one unreachable container

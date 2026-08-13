@@ -132,7 +132,7 @@ export default function ModelDetailDrawer({
   // (below) and re-seeding on each of those would delete whatever the
   // operator was typing three characters in; but the KEY itself can change
   // under a stable component identity, because App keys this component on the
-  // placement ID and a spark swap changes the model NAME while `sparky/slot0`
+  // placement ID and a spark swap changes the model NAME while `boxa/slot0`
   // persists. Seeded once per key, the drawer would then hold the previous
   // model's label/notes over the new model's facts and write them onto it at
   // the next blur — cross-model corruption from a component that never
@@ -549,7 +549,7 @@ export default function ModelDetailDrawer({
                     // found it. settingsIdentityFor's fallback is the
                     // placement name, which for a spark profile is the
                     // UNTRANSLATED "heretic": Settings would then open on
-                    // `sparky/vllm|heretic`, a scope key nothing resolves,
+                    // `boxa/vllm|heretic`, a scope key nothing resolves,
                     // with nothing on screen saying so. That is the D11
                     // defect the helper exists to prevent, and a fallback is
                     // the wrong answer to "we do not know yet".

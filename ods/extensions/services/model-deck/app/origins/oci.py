@@ -58,7 +58,7 @@ def identity_from_inspect(body: dict) -> dict:
 
 def identity_from_compose(reference: str | None, digest: str | None) -> dict:
     """A compose ``image:`` line, plus a digest IF one was proven to belong
-    to this artifact. ``digest=None`` is the honest state for a sparky
+    to this artifact. ``digest=None`` is the honest state for a remote-node
     profile whose harvested catalog belongs to some other profile — see
     app.provenance_collect.spark_oci_entries."""
     return {"version": digest, "label": reference, "detail": {}}
