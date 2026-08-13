@@ -79,6 +79,15 @@ _EXTERNAL_FLOOR_BYTES = 1 * 1024**3  # 1 GiB
 
 _OPENAI_PREFIX = "openai/"
 
+# Sentinel key inside each resource's `self._mem[resource]` dict recording
+# which KIND last wrote it — lets `snapshot` detect an in-place kind change
+# (same resource, re-declared under a different kind) and reset the entry
+# instead of handing the new kind's adapter another kind's stale
+# bookkeeping (review fix, T3 round 2). Leading underscore only as a
+# naming convention (adapters never inspect the full mem dict, only their
+# own named keys via .get()/assignment, so this coexists harmlessly).
+_KIND_MEM_KEY = "_kind"
+
 
 def _strip_prefix(name: str | None, prefix: str) -> str | None:
     if name is None:
@@ -124,15 +133,29 @@ class World:
 
         tenants: dict[str, dict] = {}
         for resource, entry in declared.items():
-            adapter = ENGINE_KINDS[entry["kind"]]
+            kind = entry["kind"]
+            adapter = ENGINE_KINDS[kind]
             client = clients.client_for(resource)
             mem = self._mem.setdefault(resource, {})
+            # A resource re-declared under a DIFFERENT kind in place (same
+            # resource name, new `kind`) must not inherit the old kind's
+            # idle-clock bookkeeping — different adapters read/write
+            # overlapping mem key NAMES (e.g. both lemonade's and comfy's
+            # observe() use "last_activity_time" for unrelated clocks), so
+            # a stale value under the new kind reads as a real, wrong idle
+            # baseline instead of a fresh one (review fix, T3 round 2).
+            # `mem.get(_KIND_MEM_KEY, kind)` defaults to `kind` itself when
+            # absent — a brand-new mem entry (or one seeded by note_freed,
+            # which sets no _kind marker) is never treated as a mismatch.
+            if mem.get(_KIND_MEM_KEY, kind) != kind:
+                mem.clear()
+            mem[_KIND_MEM_KEY] = kind
             # A fresh per-resource ctx (not one shared dict mutated in
             # place): see app.engine_kinds' module docstring for why
             # `resource` rides in ctx rather than a fifth `observe` param.
             ctx = {"registry": registry, "routes": routes, "resource": resource}
             obs = adapter.observe(client, mem, now, ctx)
-            obs["engine"] = entry["kind"]
+            obs["engine"] = kind
             obs["gpu_index"] = entry["gpu_index"]
             tenants[resource] = obs
 

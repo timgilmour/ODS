@@ -9,11 +9,17 @@ Task 1 shipped the declaration half: kind names + connection schemas +
 validate_engines. Task 3 (this module's other half) adds the adapters:
 `observe`/`active`/`arbiter_verbs`/`human_verbs`/`demand`, moved VERBATIM
 from app/state.py's three `_snapshot_*` methods (see each adapter's
-`observe` for the incident-history comments that travelled with them).
-`idle_action`/`reclaimable` (arbiter generalization) and the actuator
-methods (execute_unload/execute_free/execute_load) are Task 5/6's
-additions to these same classes — this module is the one place every
-later task's per-kind logic lands, per its own docstring above.
+`observe` for the incident-history comments that travelled with them), and
+`build_client` (review fix, T3 round 2): the per-kind CONSTRUCTOR call
+`app.local_clients.LocalClients` used to hold directly (kind-name
+`if`/`elif` dispatch) — moved here because per-kind constructor knowledge
+is exactly what this module exists to hold; `LocalClients` now calls
+`ENGINE_KINDS[kind].build_client(connection, settings)` and holds no
+engine-kind-name literal anywhere. `idle_action`/`reclaimable` (arbiter
+generalization) and the actuator methods (execute_unload/execute_free/
+execute_load) are Task 5/6's additions to these same classes — this
+module is the one place every later task's per-kind logic lands, per its
+own docstring above.
 
 hipfire's ``observe`` needs the RESOURCE name (to look up its model in
 litellm's route table, which the pre-E1 code keyed by the literal
@@ -25,10 +31,24 @@ parameter, so every adapter's `observe` keeps the identical 4-arg
 signature whether or not that particular kind needs the resource name."""
 
 from app.engines import EngineError
+from app.engines.comfyui import ComfyClient
+from app.engines.docker_ctl import DockerCtl
+from app.engines.hipfire import HipfireClient
+from app.engines.lemonade import LemonadeClient
+from app.engines.litellm import LiteLLMClient
 from app.registry import HIPFIRE_FOOTPRINT
 
 _OPENAI_PREFIX = "openai/"
 _EXTRA_PREFIX = "extra."
+
+# hipfire runs as a sibling container on the compose network; its health
+# endpoint is <container>:11435/health (config/ports.json + manifest.yaml).
+# Owned here (review fix, T3 round 2 — was duplicated in local_clients.py):
+# the hipfire adapter is the one place that builds a HipfireClient from a
+# declared connection now. app.main._build_deck's own copy of this port
+# number, for the pre-E1 shared actuation instance, is untouched — a
+# separate, coexistence-era construction this task doesn't migrate.
+_HIPFIRE_PORT = 11435
 
 # kind -> {connection field -> required?}
 KNOWN_KINDS: dict[str, dict[str, bool]] = {
@@ -170,6 +190,14 @@ class _LemonadeAdapter:
     def demand(self) -> bool:
         return True
 
+    def build_client(self, connection: dict, settings):
+        # Moved from app.local_clients._build_client (review fix, T3 round
+        # 2) — same constructor call app.main._build_deck used to make
+        # once. `settings.lemonade_key` is a deck-level shared credential,
+        # not part of the per-resource declared connection.
+        return LemonadeClient(connection["url"], settings.lemonade_key,
+                              metrics_url=connection["metrics_url"])
+
 
 class _ComfyAdapter:
     """comfyui-kind: no load/unload, only a VRAM `free()`; idle-clock tracked
@@ -210,6 +238,9 @@ class _ComfyAdapter:
 
     def demand(self) -> bool:
         return False
+
+    def build_client(self, connection: dict, settings):
+        return ComfyClient(connection["url"])
 
 
 class _HipfireAdapter:
@@ -254,6 +285,27 @@ class _HipfireAdapter:
 
     def demand(self) -> bool:
         return False
+
+    def build_client(self, connection: dict, settings):
+        # DockerCtl/LiteLLMClient built fresh here rather than reusing
+        # app.main._build_deck's shared instances (which still exist,
+        # unchanged, for the pre-E1 actuation path) — both are stateless
+        # besides their own httpx.Client, so a second instance behaves
+        # identically for status()/stats() reads. See
+        # app.local_clients' module docstring for the one known
+        # transitional gap (HipfireClient's own conversation-activity
+        # tracker), out of scope for this fix.
+        container = connection["container"]
+        dockerctl = DockerCtl(settings.dockerctl_url, settings.park_allowlist)
+        litellm = LiteLLMClient(settings.litellm_url, settings.litellm_key)
+        return HipfireClient(
+            health_url=f"http://{container}:{_HIPFIRE_PORT}/health",
+            dockerctl=dockerctl,
+            container=container,
+            litellm=litellm,
+            stats_url=f"http://{container}:{_HIPFIRE_PORT}/stats",
+            activity_window_s=settings.hipfire_activity_window_s,
+        )
 
 
 # kind -> adapter instance. One instance per kind is enough — adapters carry

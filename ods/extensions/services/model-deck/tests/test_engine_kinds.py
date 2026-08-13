@@ -158,6 +158,58 @@ def test_absent_engine_is_absent_everywhere():
     assert snap["tenants"] == {}
 
 
+class _FakeComfy:
+    """Duck-types the comfy client surface observe() touches."""
+    def __init__(self, queue=0):
+        self._queue = queue
+
+    def queue_len(self):
+        return self._queue
+
+
+def test_resource_redeclared_under_a_different_kind_gets_a_fresh_idle_clock():
+    """Review fix (T3 round 2): a resource KEPT but re-declared under a
+    DIFFERENT kind must not inherit the old kind's idle-clock bookkeeping.
+    Different adapters reuse the same mem key NAME ("last_activity_time")
+    for unrelated clocks — lemonade-kind's idle baseline is meaningless to
+    a comfyui-kind observation, and reading it as one would silently
+    report a wrong (often huge) idle_s on the very first tick under the
+    new kind instead of the honest 0.0 a fresh resource always starts at
+    (see test_comfy_state_idle_when_queue_empty's shape in
+    tests/test_state.py for that baseline elsewhere).
+
+    Direction matters here, and this is deliberately lemonade-THEN-comfyui,
+    not the reverse: lemonade's own observe() has a second, independent
+    "loaded value changed" transition check (`loaded != mem.get(
+    "last_loaded")`) that happens to reset the clock anyway on ANY mem
+    that lacks a "last_loaded" key — which comfyui's observe() never
+    writes — so a comfyui-then-lemonade transition passes with or without
+    this fix and would be a [[defaults-that-hide-bugs]] test. Verified
+    empirically both ways before choosing this direction."""
+    from app.state import World
+
+    t = {"v": 1000.0}
+    world = World(clock=lambda: t["v"])
+
+    lemonade_engine = [{"resource": "img", "kind": "lemonade",
+                        "connection": {"url": "u", "metrics_url": "m", "container": "c"},
+                        "gpu_index": 2,
+                        "policy_defaults": {"priority": 1, "pinned": False, "idle_ttl": 60}}]
+    world.snapshot(_GPUS_2_3, lemonade_engine, _FakeLocalClients({"img": _FakeGguf()}),
+                  _FakeLitellm(), _FakeRegistry())
+
+    t["v"] = 1300.0  # 300s later — lemonade's own idle clock would read 300s stale here
+    comfy_engine = [{"resource": "img", "kind": "comfyui",
+                     "connection": {"url": "u"}, "gpu_index": 2,
+                     "policy_defaults": {"priority": 1, "pinned": False, "idle_ttl": 60}}]
+    snap = world.snapshot(_GPUS_2_3, comfy_engine,
+                          _FakeLocalClients({"img": _FakeComfy(queue=0)}),
+                          _FakeLitellm(), _FakeRegistry())
+
+    assert snap["tenants"]["img"]["engine"] == "comfyui"
+    assert snap["tenants"]["img"]["idle_s"] == 0.0  # fresh baseline, NOT 300.0
+
+
 # --- adapter surface: active / arbiter_verbs / human_verbs / demand -------
 
 

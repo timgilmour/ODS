@@ -12,80 +12,24 @@ dropped entirely when the resource disappears from the declaration.
 declared, exactly NodeClients' "not operable right now is a state, not an
 error" posture.
 
-Construction dispatches by kind (`app.engine_kinds.KNOWN_KINDS` names the
-valid set; this module trusts NodeStore already validated `entry["kind"]`
-via `engine_kinds.validate_engines` before it ever reaches here) to the
-EXACT constructor calls app.main._build_deck used to make once, moved
-here verbatim rather than reinvented. This is a small, disclosed residue
-of engine-kind-name literals outside app/engine_kinds.py (see that
-module's docstring and the plan's Global Constraints on residues) — the
-per-kind constructor SHAPES (which class, which args, built from which
-connection fields vs. which shared Settings fields) are irreducibly
-different, so there is no single dispatch table engine_kinds.py could hand
-back without effectively re-exporting these same client classes.
-
-hipfire-kind construction builds its own DockerCtl/LiteLLMClient from
-Settings rather than reusing app.main._build_deck's shared `dockerctl`/
-`litellm` instances (those still exist in the deck dict today, feeding
-actuation — control.py's routes and the watcher's `self._hipfire` — which
-Task 3 deliberately leaves untouched, COEXISTENCE: observation only). Both
-classes are stateless besides their own httpx.Client, so a second instance
-behaves identically for `status()`/`stats()` reads; the one known
-transitional gap is HipfireClient's own conversation-activity tracker
-(fed by every `stats()` call, read by `ensure_not_busy`'s recency check) —
-this module's instance and the deck's shared `hipfire` instance now poll
-independently, so the recency half of the busy guard is only as fresh as
-whichever instance last polled. Acceptable for this increment (actuation
-is untouched here; Task 6 migrates control.py/the watcher onto this same
-LocalClients, closing the gap) — flagged for visibility, not silently
-absorbed.
+Construction dispatches to `app.engine_kinds.ENGINE_KINDS[kind].build_client(
+connection, settings)` (review fix, T3 round 2: this module used to hold
+the per-kind constructor dispatch itself — a disclosed engine-kind-name
+residue — moved onto the adapters instead, since per-kind constructor
+knowledge is exactly what app.engine_kinds exists to hold; see that
+module's docstring for hipfire's DockerCtl/LiteLLMClient-from-Settings
+note). This module now names no engine kind anywhere.
 """
 
 from __future__ import annotations
 
 import threading
 
-from app.engines.comfyui import ComfyClient
-from app.engines.docker_ctl import DockerCtl
-from app.engines.hipfire import HipfireClient
-from app.engines.lemonade import LemonadeClient
-from app.engines.litellm import LiteLLMClient
-
-# hipfire runs as a sibling container on the compose network; its health
-# endpoint is <container>:11435/health (config/ports.json + manifest.yaml).
-# Mirrors app.main's own _HIPFIRE_PORT constant (that module's is not
-# imported here to avoid a local_clients -> main import cycle).
-_HIPFIRE_PORT = 11435
+from app.engine_kinds import ENGINE_KINDS
 
 
 def _build_key(entry: dict) -> tuple:
     return (entry["kind"], frozenset(entry["connection"].items()))
-
-
-def _build_client(entry: dict, settings):
-    conn = entry["connection"]
-    kind = entry["kind"]
-    if kind == "lemonade":
-        return LemonadeClient(conn["url"], settings.lemonade_key,
-                              metrics_url=conn["metrics_url"])
-    if kind == "comfyui":
-        return ComfyClient(conn["url"])
-    if kind == "hipfire":
-        container = conn["container"]
-        dockerctl = DockerCtl(settings.dockerctl_url, settings.park_allowlist)
-        litellm = LiteLLMClient(settings.litellm_url, settings.litellm_key)
-        return HipfireClient(
-            health_url=f"http://{container}:{_HIPFIRE_PORT}/health",
-            dockerctl=dockerctl,
-            container=container,
-            litellm=litellm,
-            stats_url=f"http://{container}:{_HIPFIRE_PORT}/stats",
-            activity_window_s=settings.hipfire_activity_window_s,
-        )
-    # Unreachable in production: NodeStore validates `kind` against
-    # engine_kinds.KNOWN_KINDS (app.engine_kinds.validate_engines) before an
-    # entry can ever land in the declaration this class reads from.
-    raise ValueError(f"unknown engine kind {kind!r}")
 
 
 class LocalClients:
@@ -119,7 +63,14 @@ class LocalClients:
             if built is not None and built[0] == key:
                 return built[1]
             self._retire(resource)
-            client = _build_client(entry, self._settings)
+            # Not guarded: NodeStore validates `entry["kind"]` against
+            # engine_kinds.KNOWN_KINDS (engine_kinds.validate_engines)
+            # before an entry can ever land in the declaration this reads
+            # from — an unknown kind here is a real bug, not a
+            # user-reachable state, so a bare KeyError is the correct
+            # "let it crash" signal (matches World.snapshot's own
+            # ENGINE_KINDS[entry["kind"]] lookup, app/state.py).
+            client = ENGINE_KINDS[entry["kind"]].build_client(entry["connection"], self._settings)
             self._built[resource] = (key, client)
             return client
 
