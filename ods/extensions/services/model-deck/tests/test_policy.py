@@ -10,11 +10,43 @@ import json
 
 import pytest
 
-from app.policy import DEFAULT_POLICIES, PolicyStore
+from app.policy import PolicyStore
+
+# Known defaults for test purposes — replaces the deleted DEFAULT_POLICIES.
+# Tests use this to declare the 3 legacy engines when testing default seeding.
+_TEST_KNOWN_DEFAULTS = {
+    "hipfire": {"priority": 100, "pinned": True, "idle_ttl": 0},
+    "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900},
+    "comfyui": {"priority": 40, "pinned": False, "idle_ttl": 300},
+}
 
 
-def test_defaults_exact_values():
-    assert DEFAULT_POLICIES == {
+def _policy_store(tmp_path, declared=None):
+    """Test helper: create a PolicyStore with optional declared defaults provider.
+
+    Args:
+        tmp_path: pytest's tmp_path fixture
+        declared: dict of {resource: {priority, pinned, idle_ttl}} or None
+
+    Returns:
+        PolicyStore configured with declared defaults
+    """
+    policy_path = tmp_path / "policy.json"
+
+    if declared is None:
+        # Legacy behavior: no declared defaults provider
+        return PolicyStore(policy_path)
+
+    # New behavior: provide declared defaults
+    def provider():
+        return declared
+
+    return PolicyStore(policy_path, declared_defaults=provider)
+
+
+def test_known_defaults_values():
+    """Verify the known defaults match expectations (E1 Task 4)."""
+    assert _TEST_KNOWN_DEFAULTS == {
         "hipfire": {"priority": 100, "pinned": True, "idle_ttl": 0},
         "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900},
         "comfyui": {"priority": 40, "pinned": False, "idle_ttl": 300},
@@ -22,21 +54,19 @@ def test_defaults_exact_values():
 
 
 def test_get_materializes_defaults_when_file_missing(tmp_path):
-    policy_path = tmp_path / "policy.json"
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
 
     result = store.get()
 
-    assert result == DEFAULT_POLICIES
+    assert result == _TEST_KNOWN_DEFAULTS
 
 
 def test_get_persists_defaults_to_disk_on_first_read(tmp_path):
-    policy_path = tmp_path / "policy.json"
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
 
     store.get()
 
-    assert json.loads(policy_path.read_text()) == DEFAULT_POLICIES
+    assert json.loads((tmp_path / "policy.json").read_text()) == _TEST_KNOWN_DEFAULTS
 
 
 def test_get_parent_dir_created_on_first_read(tmp_path):
@@ -52,61 +82,57 @@ def test_get_does_not_rewrite_file_once_it_exists(tmp_path):
     # All three known tenants present and valid (unlike a partial hand-edit)
     # so the boundary gate is a no-op and this proves the narrower claim:
     # an already-well-formed file's custom values survive untouched.
-    policy_path = tmp_path / "policy.json"
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     store.get()
     custom = {
         "hipfire": {"priority": 1, "pinned": False, "idle_ttl": 5},
-        "lemonade": dict(DEFAULT_POLICIES["lemonade"]),
-        "comfyui": dict(DEFAULT_POLICIES["comfyui"]),
+        "lemonade": dict(_TEST_KNOWN_DEFAULTS["lemonade"]),
+        "comfyui": dict(_TEST_KNOWN_DEFAULTS["comfyui"]),
     }
-    policy_path.write_text(json.dumps(custom))
+    (tmp_path / "policy.json").write_text(json.dumps(custom))
 
-    result = PolicyStore(policy_path).get()
+    result = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS).get()
 
     assert result == custom
 
 
 def test_put_then_get_roundtrips_across_instances(tmp_path):
-    policy_path = tmp_path / "policy.json"
-    first = PolicyStore(policy_path)
+    first = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     first.get()
 
     first.put({"hipfire": {"priority": 200, "pinned": False, "idle_ttl": 60}})
 
-    second = PolicyStore(policy_path)
+    second = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     result = second.get()
 
     assert result["hipfire"] == {"priority": 200, "pinned": False, "idle_ttl": 60}
 
 
 def test_put_is_partial_update_other_tenants_keep_current_values(tmp_path):
-    policy_path = tmp_path / "policy.json"
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     store.get()
 
     store.put({"lemonade": {"priority": 77, "pinned": True, "idle_ttl": 42}})
 
     result = store.get()
     assert result["lemonade"] == {"priority": 77, "pinned": True, "idle_ttl": 42}
-    assert result["hipfire"] == DEFAULT_POLICIES["hipfire"]
-    assert result["comfyui"] == DEFAULT_POLICIES["comfyui"]
+    assert result["hipfire"] == _TEST_KNOWN_DEFAULTS["hipfire"]
+    assert result["comfyui"] == _TEST_KNOWN_DEFAULTS["comfyui"]
 
 
 def test_put_write_is_atomic_no_temp_files_left_behind(tmp_path):
-    policy_path = tmp_path / "policy.json"
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     store.get()
 
     store.put({"hipfire": {"priority": 1, "pinned": False, "idle_ttl": 5}})
 
-    leftovers = list(policy_path.parent.glob("*.tmp"))
+    leftovers = list((tmp_path / "policy.json").parent.glob("*.tmp"))
     assert leftovers == []
 
 
 def test_put_parent_dir_created_when_file_never_read(tmp_path):
     policy_path = tmp_path / "nested" / "policy.json"
-    store = PolicyStore(policy_path)
+    store = PolicyStore(policy_path, declared_defaults=lambda: _TEST_KNOWN_DEFAULTS)
 
     store.put({"hipfire": {"priority": 1, "pinned": False, "idle_ttl": 5}})
 
@@ -114,24 +140,22 @@ def test_put_parent_dir_created_when_file_never_read(tmp_path):
 
 
 def test_put_rejects_the_reserved_auto_key_naming_it(tmp_path):
-    """Superseded the old unknown-tenant rejection: arbitrary tenants are now
-    accepted (see test_put_accepts_a_tenant_outside_the_defaults), but the
-    reserved config key is still not a tenant and put() must say so."""
-    store = PolicyStore(tmp_path / "policy.json")
+    """The reserved config key is not a resource and put() must say so."""
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError, match="_auto"):
         store.put({"_auto": {"priority": 1, "pinned": False, "idle_ttl": 5}})
 
 
 def test_put_rejects_missing_field(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"hipfire": {"priority": 1, "pinned": False}})
 
 
 def test_put_rejects_extra_field(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put(
@@ -140,49 +164,49 @@ def test_put_rejects_extra_field(tmp_path):
 
 
 def test_put_rejects_priority_bool_instead_of_int(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"hipfire": {"priority": True, "pinned": False, "idle_ttl": 5}})
 
 
 def test_put_rejects_priority_wrong_type(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"hipfire": {"priority": "high", "pinned": False, "idle_ttl": 5}})
 
 
 def test_put_rejects_pinned_wrong_type(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"hipfire": {"priority": 1, "pinned": "yes", "idle_ttl": 5}})
 
 
 def test_put_rejects_idle_ttl_wrong_type(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"hipfire": {"priority": 1, "pinned": False, "idle_ttl": "5"}})
 
 
 def test_put_rejects_idle_ttl_bool(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"hipfire": {"priority": 1, "pinned": False, "idle_ttl": True}})
 
 
 def test_put_rejects_negative_idle_ttl(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"hipfire": {"priority": 1, "pinned": False, "idle_ttl": -1}})
 
 
 def test_put_accepts_idle_ttl_zero(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={"hipfire": _TEST_KNOWN_DEFAULTS["hipfire"]})
 
     store.put({"hipfire": {"priority": 1, "pinned": False, "idle_ttl": 0}})
 
@@ -190,8 +214,7 @@ def test_put_accepts_idle_ttl_zero(tmp_path):
 
 
 def test_put_rejected_payload_leaves_file_unchanged(tmp_path):
-    policy_path = tmp_path / "policy.json"
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     before = store.get()
 
     with pytest.raises(ValueError):
@@ -208,97 +231,98 @@ def test_put_rejected_payload_leaves_file_unchanged(tmp_path):
 def test_corrupt_policy_json_treated_as_defaults(tmp_path):
     policy_path = tmp_path / "policy.json"
     policy_path.write_text("{not valid json")
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
 
-    assert store.get() == DEFAULT_POLICIES
+    assert store.get() == _TEST_KNOWN_DEFAULTS
 
 
 def test_corrupt_policy_json_self_heals_on_get(tmp_path):
     policy_path = tmp_path / "policy.json"
     policy_path.write_text("{not valid json")
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
 
     store.get()
 
-    assert json.loads(policy_path.read_text()) == DEFAULT_POLICIES
+    assert json.loads(policy_path.read_text()) == _TEST_KNOWN_DEFAULTS
 
 
 def test_non_dict_json_treated_as_defaults(tmp_path):
     policy_path = tmp_path / "policy.json"
     policy_path.write_text(json.dumps(["not", "a", "dict"]))
-    store = PolicyStore(policy_path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
 
-    assert store.get() == DEFAULT_POLICIES
-
-
-def test_put_accepts_a_tenant_outside_the_defaults(tmp_path):
-    """Extensibility: a new engine or node must not require a code change."""
-    store = PolicyStore(tmp_path / "policy.json")
-
-    store.put({"sparky-vllm": {"priority": 60, "pinned": False, "idle_ttl": 0}})
-
-    assert store.get()["sparky-vllm"]["priority"] == 60
+    assert store.get() == _TEST_KNOWN_DEFAULTS
 
 
-def test_put_still_validates_field_types_for_new_tenants(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+def test_put_accepts_a_resource_in_declaration(tmp_path):
+    """Declared resources are accepted in put()."""
+    store = _policy_store(tmp_path, declared={
+        "sparky-vllm": {"priority": 60, "pinned": False, "idle_ttl": 0}})
+
+    store.put({"sparky-vllm": {"priority": 70, "pinned": True, "idle_ttl": 100}})
+
+    assert store.get()["sparky-vllm"]["priority"] == 70
+
+
+def test_put_still_validates_field_types_for_declared_resources(tmp_path):
+    store = _policy_store(tmp_path, declared={
+        "sparky-vllm": {"priority": 60, "pinned": False, "idle_ttl": 0}})
 
     with pytest.raises(ValueError):
         store.put({"sparky-vllm": {"priority": "high", "pinned": False, "idle_ttl": 0}})
 
 
 def test_put_still_rejects_unknown_fields(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     with pytest.raises(ValueError):
         store.put({"sparky-vllm": {"priority": 1, "pinned": False, "idle_ttl": 0, "wat": 1}})
 
 
-def test_defaults_still_seeded_for_the_known_three(tmp_path):
-    store = PolicyStore(tmp_path / "policy.json")
+def test_declared_resources_seeded_on_first_get(tmp_path):
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
 
-    assert set(store.get()) == set(DEFAULT_POLICIES)
+    assert set(store.get()) == set(_TEST_KNOWN_DEFAULTS)
 
 
 def test_auto_enabled_defaults_to_true(tmp_path):
     """Lifecycle auto-restore is ON by default (a deliberate difference from
     storage tiering, whose automation defaults off)."""
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
 
     assert store.auto_enabled() is True
 
 
 def test_set_auto_persists(tmp_path):
-    path = tmp_path / "policy.json"
-    store = PolicyStore(path)
+    first = _policy_store(tmp_path, declared={})
 
-    store.set_auto(False)
+    first.set_auto(False)
 
-    assert PolicyStore(path).auto_enabled() is False
+    second = _policy_store(tmp_path, declared={})
+    assert second.auto_enabled() is False
 
 
-def test_auto_key_is_not_returned_as_a_tenant(tmp_path):
-    """'_auto' is config, not a tenant — it must never show up in the
+def test_auto_key_is_not_returned_as_a_resource(tmp_path):
+    """'_auto' is config, not a resource — it must never show up in the
     policy table the UI renders or the arbiter iterates."""
-    store = PolicyStore(tmp_path / "policy.json")
+    store = _policy_store(tmp_path, declared={})
     store.set_auto(False)
 
     assert "_auto" not in store.get()
 
 
-def test_set_auto_on_a_fresh_file_still_seeds_the_tenant_defaults(tmp_path):
+def test_set_auto_on_a_fresh_file_still_seeds_the_declared_resources(tmp_path):
     """set_auto must not be able to create a policy.json that permanently
-    suppresses default seeding: `_load()` only heals an existing file
-    (policy.py:195-205), so a file that has never been written still needs
-    set_auto's own fallback, or a file containing just _auto would look
-    valid and leave every tenant unpolicied forever."""
-    path = tmp_path / "policy.json"
+    suppresses declared-resource seeding: `_load()` only heals an existing file,
+    so a file that has never been written still needs set_auto's own fallback,
+    or a file containing just _auto would look valid and leave resources unpolicied."""
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
 
-    PolicyStore(path).set_auto(False)
+    store.set_auto(False)
 
-    store = PolicyStore(path)
-    assert set(store.get()) == set(DEFAULT_POLICIES)
-    assert store.auto_enabled() is False
+    second = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
+    assert set(second.get()) == set(_TEST_KNOWN_DEFAULTS)
+    assert second.auto_enabled() is False
 
 
 # ===========================================================================
@@ -306,108 +330,105 @@ def test_set_auto_on_a_fresh_file_still_seeds_the_tenant_defaults(tmp_path):
 # ===========================================================================
 
 
-def test_get_heals_a_missing_tenant(tmp_path):
-    """Hand-edit threat model, same as every sibling store: a parseable file
-    missing 'comfyui' must come back with comfyui's default materialized —
-    decide() destructures all three tenants unconditionally."""
+def test_get_heals_a_missing_declared_resource(tmp_path):
+    """Hand-edit threat model: a parseable file missing a declared resource
+    must come back with the resource's default materialized."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     del data["comfyui"]
     path.write_text(json.dumps(data))
-    got = PolicyStore(path).get()
-    assert got["comfyui"] == DEFAULT_POLICIES["comfyui"]
+    got = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS).get()
+    assert got["comfyui"] == _TEST_KNOWN_DEFAULTS["comfyui"]
     # and the heal persists (next reader of the raw file sees it too)
     assert "comfyui" in json.loads(path.read_text())
 
 
-def test_get_replaces_a_malformed_known_tenant_record(tmp_path):
+def test_get_replaces_a_malformed_declared_resource_record(tmp_path):
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     data["lemonade"] = "not-a-dict"
     path.write_text(json.dumps(data))
-    assert PolicyStore(path).get()["lemonade"] == DEFAULT_POLICIES["lemonade"]
+    got = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS).get()
+    assert got["lemonade"] == _TEST_KNOWN_DEFAULTS["lemonade"]
 
 
-def test_get_keeps_a_valid_runtime_tenant_and_drops_a_malformed_one(tmp_path):
+def test_get_keeps_declared_resources_drops_undeclared_ones(tmp_path):
+    """Undeclared stored rows stay on disk but don't appear in get()."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
-    data["sparky-thing"] = {"priority": 10, "pinned": False, "idle_ttl": 60}   # valid, kept
-    data["ghost"] = {"priority": "high"}                                       # malformed, dropped
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
+    data["sparky-thing"] = {"priority": 10, "pinned": False, "idle_ttl": 60}   # undeclared, invisible
     path.write_text(json.dumps(data))
-    got = PolicyStore(path).get()
-    assert got["sparky-thing"]["priority"] == 10
-    assert "ghost" not in got
+    got = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS).get()
+    # Only declared resources appear
+    assert set(got) == set(_TEST_KNOWN_DEFAULTS)
+    # But undeclared row stays on disk
+    assert "sparky-thing" in json.loads(path.read_text())
 
 
 def test_get_preserves_auto_key_through_the_gate(tmp_path):
-    """set_auto's warning (policy.py:195-205): the gate must not cost the
-    file its _auto record."""
+    """The gate must not cost the file its _auto record."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     data["_auto"] = {"enabled": False}
     path.write_text(json.dumps(data))
-    store = PolicyStore(path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     store.get()
     assert store.auto_enabled() is False
 
 
 def test_put_onto_a_partial_file_also_heals(tmp_path):
     """put()'s merge reads through `_load()` (the sole boundary gate), so a
-    hand-edit missing a tenant heals on the very put that touches an
-    unrelated tenant, not just on the next get()."""
+    hand-edit missing a declared resource heals on the put that touches an
+    unrelated resource, not just on the next get()."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     del data["comfyui"]
     path.write_text(json.dumps(data))
 
-    PolicyStore(path).put({"lemonade": {"priority": 5, "pinned": True, "idle_ttl": 0}})
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
+    store.put({"lemonade": {"priority": 5, "pinned": True, "idle_ttl": 0}})
 
     on_disk = json.loads(path.read_text())
-    assert on_disk["comfyui"] == DEFAULT_POLICIES["comfyui"]
+    assert on_disk["comfyui"] == _TEST_KNOWN_DEFAULTS["comfyui"]
     assert on_disk["lemonade"] == {"priority": 5, "pinned": True, "idle_ttl": 0}
 
 
 def test_set_auto_onto_a_partial_file_also_heals(tmp_path):
     """set_auto() also reads through `_load()`, so it inherits the same
-    heal as get()/put() — a hand-edit missing a tenant does not survive a
-    set_auto() call untouched."""
+    heal as get()/put() — a hand-edit missing a declared resource does not survive."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     del data["comfyui"]
     path.write_text(json.dumps(data))
 
-    PolicyStore(path).set_auto(False)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
+    store.set_auto(False)
 
     on_disk = json.loads(path.read_text())
-    assert on_disk["comfyui"] == DEFAULT_POLICIES["comfyui"]
+    assert on_disk["comfyui"] == _TEST_KNOWN_DEFAULTS["comfyui"]
     assert on_disk["_auto"] == {"enabled": False}
 
 
 def test_get_drops_a_non_dict_auto_record(tmp_path):
-    """Probed defect: "_auto": true is not a dict, so the old pass-through
-    handed auto_enabled() a bool to call .get() on -> AttributeError every
-    tick. The gate now drops a malformed _auto instead of preserving it,
-    healing to auto_enabled()'s own default-True reading."""
+    """Malformed _auto: not a dict is dropped, healing to default-True."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     data["_auto"] = True
     path.write_text(json.dumps(data))
 
-    store = PolicyStore(path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     assert store.auto_enabled() is True
     assert "_auto" not in json.loads(path.read_text())
 
 
 def test_get_drops_an_auto_record_with_a_non_bool_enabled(tmp_path):
-    """Probed defect: {"enabled": "no"} is a dict, so the old pass-through
-    preserved it verbatim, and bool("no") is True regardless of the
-    string's content -- "no" silently meant "on". The gate now drops it."""
+    """Malformed _auto: non-bool enabled is dropped, healing to default-True."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     data["_auto"] = {"enabled": "no"}
     path.write_text(json.dumps(data))
 
-    store = PolicyStore(path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     assert store.auto_enabled() is True
     assert "_auto" not in json.loads(path.read_text())
 
@@ -418,13 +439,10 @@ def test_get_drops_an_auto_record_with_a_non_bool_enabled(tmp_path):
 
 
 def test_get_does_not_rewrite_an_already_well_formed_file(tmp_path):
-    """Restores the intent behind test_get_does_not_rewrite_file_once_it_exists's
-    name, checked at the filesystem level rather than by content: mutating
-    the gate's `if gated != data: self._save(...)` suppression to `if True:`
-    leaves every content-based assertion in this file green (the resaved
-    bytes are identical), so only an mtime check catches it."""
+    """Suppression property: get() doesn't rewrite a well-formed file.
+    Checked at the filesystem level (mtime) since resaved bytes are identical."""
     path = tmp_path / "policy.json"
-    store = PolicyStore(path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     store.get()  # materializes + persists the defaults once
 
     before = path.stat().st_mtime_ns
@@ -435,13 +453,13 @@ def test_get_does_not_rewrite_an_already_well_formed_file(tmp_path):
 
 
 def test_get_rewrites_a_healed_file_exactly_once(tmp_path):
-    """The other half of the suppression property: a partial file DOES get
-    rewritten by the get() that heals it, but never again after that."""
+    """Suppression property: a partial file gets rewritten by the healing
+    get(), but never again after that."""
     path = tmp_path / "policy.json"
-    data = {t: dict(p) for t, p in DEFAULT_POLICIES.items()}
+    data = {t: dict(p) for t, p in _TEST_KNOWN_DEFAULTS.items()}
     del data["comfyui"]
     path.write_text(json.dumps(data))
-    store = PolicyStore(path)
+    store = _policy_store(tmp_path, declared=_TEST_KNOWN_DEFAULTS)
     before_heal = path.stat().st_mtime_ns
 
     store.get()
@@ -451,3 +469,33 @@ def test_get_rewrites_a_healed_file_exactly_once(tmp_path):
     store.get()
     after_second_get = path.stat().st_mtime_ns
     assert after_second_get == after_heal   # second get() is a no-op
+
+
+# ===========================================================================
+# E1 Task 4: Policy defaults from the declaration
+# ===========================================================================
+
+
+def test_policy_rows_come_from_declaration(tmp_path):
+    """Policy defaults come from the declared engines, not hardcoded."""
+    store = _policy_store(tmp_path, declared={
+        "gguf-a": {"priority": 10, "pinned": False, "idle_ttl": 60}})
+    got = store.get()
+    assert got["gguf-a"] == {"priority": 10, "pinned": False, "idle_ttl": 60}
+    store.put({"gguf-a": {"priority": 99, "pinned": True, "idle_ttl": 0}})
+    assert store.get()["gguf-a"]["priority"] == 99
+
+
+def test_undeclared_stored_row_is_invisible_but_kept(tmp_path):
+    """Orphaned row (e.g. hand-edited in): kept on disk but invisible on read.
+
+    This defends against rows left by older writes or hand-edits. When the
+    resource is re-declared, the row becomes visible again.
+    """
+    store = _policy_store(tmp_path, declared={})
+    # a row survives on disk from before a forget…
+    store_with = _policy_store(tmp_path, declared={
+        "gguf-a": {"priority": 10, "pinned": False, "idle_ttl": 60}})
+    store_with.put({"gguf-a": {"priority": 7, "pinned": False, "idle_ttl": 5}})
+    assert "gguf-a" not in store.get()           # undeclared -> invisible
+    assert store_with.get()["gguf-a"]["priority"] == 7   # redeclare -> back

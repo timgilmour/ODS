@@ -201,6 +201,18 @@ def _build_deck(settings: Settings) -> dict:
     mover = Mover()
     job_queue = JobQueue(mover, catalog, location_store, data_dir / "events.jsonl")
 
+    def _get_declared_policy_defaults():
+        """Read policy defaults from the local node's engines[] declaration."""
+        local = node_store.get("local")
+        if not local:
+            return {}
+        engines = local.get("engines", [])
+        declared = {}
+        for engine in engines:
+            if isinstance(engine, dict) and "resource" in engine and "policy_defaults" in engine:
+                declared[engine["resource"]] = engine["policy_defaults"]
+        return declared
+
     deck = {
         "settings": settings,
         # No placement param (E1 Task 3): placement now derives from each
@@ -221,7 +233,7 @@ def _build_deck(settings: Settings) -> dict:
         # asserts what things are launched WITH, the other two what they ARE.
         "settings_store": SettingsStore(data_dir / "settings.json"),
         "gguf_dir": _GGUF_DIR,
-        "policy_store": PolicyStore(data_dir / "policy.json"),
+        "policy_store": PolicyStore(data_dir / "policy.json", declared_defaults=_get_declared_policy_defaults),
         # Durable desired state. Shared, like policy_store, between the HTTP
         # routers (which write it on every deliberate action) and — once the
         # reconcile pass lands — the watcher, which reads it.

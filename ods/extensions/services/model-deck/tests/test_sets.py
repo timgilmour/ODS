@@ -21,7 +21,7 @@ from app.engines import BusyError, EngineError, GuardError
 from app.events import tail_events
 from app.intent import IntentStore
 from app.main import create_app
-from app.policy import DEFAULT_POLICIES, PolicyStore
+from app.policy import PolicyStore
 from app.sets import (
     PREVIOUS_NAME,
     RESERVED_SLUG,
@@ -34,6 +34,13 @@ from app.sets import (
     slugify,
 )
 from app.settings_store import SettingsStore
+
+# Known defaults for test purposes — replaces the deleted _TEST_KNOWN_DEFAULTS
+_TEST_KNOWN_DEFAULTS = {
+    "hipfire": {"priority": 100, "pinned": True, "idle_ttl": 0},
+    "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900},
+    "comfyui": {"priority": 40, "pinned": False, "idle_ttl": 300},
+}
 
 # ===========================================================================
 # Fakes + builders
@@ -158,7 +165,7 @@ class RecPolicyStore:
         self._current = (
             current
             if current is not None
-            else {tenant: dict(pol) for tenant, pol in DEFAULT_POLICIES.items()}
+            else {tenant: dict(pol) for tenant, pol in _TEST_KNOWN_DEFAULTS.items()}
         )
 
     def get(self):
@@ -1200,18 +1207,20 @@ def test_policy_patch_partial_merge_persists_via_real_store(tmp_path):
     """End-to-end with the real PolicyStore: a partial override lands with the
     other two fields intact and leaves untouched tenants alone."""
     world = make_world()
-    store = PolicyStore(tmp_path / "policy.json")
+    store = PolicyStore(tmp_path / "policy.json",
+                        declared_defaults=lambda: _TEST_KNOWN_DEFAULTS)
     cfg = ConfigSet(name="pol", policy_overrides={"comfyui": {"priority": 90}})
     run_apply(cfg, world, tmp_path, policy_store=store)
 
     assert store.get()["comfyui"] == {"priority": 90, "pinned": False, "idle_ttl": 300}
-    assert store.get()["lemonade"] == DEFAULT_POLICIES["lemonade"]
+    assert store.get()["lemonade"] == _TEST_KNOWN_DEFAULTS["lemonade"]
 
 
-def test_policy_patch_unknown_tenant_still_fails(tmp_path):
-    """An unknown tenant merges onto {} and is rejected by put's validation."""
+def test_policy_patch_undeclared_resource_still_fails(tmp_path):
+    """An undeclared resource is rejected by put's validation."""
     world = make_world()
-    store = PolicyStore(tmp_path / "policy.json")
+    store = PolicyStore(tmp_path / "policy.json",
+                        declared_defaults=lambda: _TEST_KNOWN_DEFAULTS)
     cfg = ConfigSet(name="pol", policy_overrides={"nosuch": {"priority": 1}})
     report, _ = run_apply(cfg, world, tmp_path, policy_store=store)
 

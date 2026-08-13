@@ -63,7 +63,11 @@ def test_policy_store_survives_a_tick_racing_an_http_read(tmp_path):
     """
     path = tmp_path / "policy.json"
     path.write_text("{ not json")
-    store = PolicyStore(path)
+    # Declare lemonade as a known resource for this test
+    declared_defaults = {
+        "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900}
+    }
+    store = PolicyStore(path, declared_defaults=lambda: declared_defaults)
 
     errors = _hammer([
         lambda i: store.get(),                       # the watcher tick's read

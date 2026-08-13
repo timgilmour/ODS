@@ -33,16 +33,11 @@ supervisor is the sole owner of policy.json.
 """
 
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from app.store_io import load_json, save_json
 
 TenantPolicy = dict[str, int | bool]
-
-DEFAULT_POLICIES: dict[str, TenantPolicy] = {
-    "hipfire": {"priority": 100, "pinned": True, "idle_ttl": 0},
-    "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900},
-    "comfyui": {"priority": 40, "pinned": False, "idle_ttl": 300},
-}
 
 _FIELDS = {"priority": int, "pinned": bool, "idle_ttl": int}
 
@@ -79,8 +74,11 @@ def _validate_policy(tenant: str, policy: dict) -> None:
 class PolicyStore:
     """Per-tenant arbitration policy, persisted to `path`."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, declared_defaults: Callable[[], dict[str, TenantPolicy]] | None = None):
         self._path = path
+        # Callable returning declared resource defaults {resource: {priority, pinned, idle_ttl}}.
+        # None = no declaration (e.g., legacy code path).
+        self._declared_defaults = declared_defaults
         # ONE lock per store around every load-modify-save. The arbiter's
         # 2 s tick (app/arbiter.py) reads policy concurrently with sync HTTP
         # routes, which FastAPI runs on a real threadpool — and _save writes
@@ -95,33 +93,31 @@ class PolicyStore:
 
     def _gated(self, data: dict) -> dict:
         """Element-level boundary gate (NodeStore._load's pattern), run
-        exclusively by `_load()` — see the module docstring. Every
-        DEFAULT_POLICIES tenant ends up present and valid, since decide()
-        and the UI's per-tenant destructure (ui/src/model/nodes.ts:186)
-        index them unconditionally. Malformed tenant records are replaced
-        by their default (defaults are seed data); a runtime tenant
-        (accepted since 1ee64611) survives only if it validates — there is
-        no default to heal it to. `_auto` survives only as a dict with a
-        real bool `enabled`; a malformed one (wrong shape, or a non-bool
-        `enabled`) is dropped, healing to `auto_enabled()`'s own
-        default-True reading rather than crashing the tick with an
-        AttributeError."""
+        exclusively by `_load()` — see the module docstring. Declared resources
+        end up present and valid with their defaults, since decide() and the UI's
+        per-resource destructure index them unconditionally. Malformed records are
+        replaced by their default; a runtime resource (not declared) survives only
+        if it validates — there is no default to heal it to. `_auto` survives only
+        as a dict with a real bool `enabled`; a malformed one is dropped, healing
+        to `auto_enabled()`'s own default-True reading rather than crashing the
+        tick with an AttributeError."""
         gated: dict = {}
-        for tenant, policy in data.items():
-            if tenant == _AUTO_KEY:
+        declared = (self._declared_defaults or (lambda: {}))()
+        for resource, policy in data.items():
+            if resource == _AUTO_KEY:
                 if isinstance(policy, dict) and isinstance(policy.get("enabled"), bool):
-                    gated[tenant] = policy
+                    gated[resource] = policy
                 continue
             if not isinstance(policy, dict):
                 continue
             try:
-                _validate_policy(tenant, policy)
+                _validate_policy(resource, policy)
             except ValueError:
                 continue
-            gated[tenant] = policy
-        for tenant, default in DEFAULT_POLICIES.items():
-            if tenant not in gated:
-                gated[tenant] = dict(default)
+            gated[resource] = policy
+        for resource, default in declared.items():
+            if resource not in gated:
+                gated[resource] = dict(default)
         return gated
 
     def _load(self) -> dict[str, TenantPolicy] | None:
@@ -142,52 +138,55 @@ class PolicyStore:
         save_json(self._path, data)
 
     def get(self) -> dict[str, TenantPolicy]:
-        """Full tenant->policy mapping, excluding reserved config keys.
+        """Full resource->policy mapping, excluding reserved config keys.
 
-        On first read (file missing or corrupt), materializes the default
-        policies and persists them before returning. Every other shape
-        concern — a partial or malformed file — is already healed by
-        `_load()` (the sole boundary gate; see the module docstring), so
-        this method does nothing but filter the reserved `_auto` key back
-        out.
+        Returns one row per DECLARED resource: declared defaults overlaid by any
+        stored override row. Stored rows for undeclared resources are kept on
+        disk (e.g., orphaned rows from hand-edits or older writes) but invisible
+        on read.
+
+        On first read (file missing or corrupt), materializes the declared
+        defaults and persists them before returning. Every other shape concern —
+        a partial or malformed file — is already healed by `_load()` (the sole
+        boundary gate; see the module docstring).
         """
+        declared = (self._declared_defaults or (lambda: {}))()
         with self._lock:
             data = self._load()
             if data is None:
-                data = {tenant: dict(policy)
-                        for tenant, policy in DEFAULT_POLICIES.items()}
+                data = {resource: dict(policy)
+                        for resource, policy in declared.items()}
                 self._save(data)
                 return dict(data)
-            return {k: v for k, v in data.items() if k != _AUTO_KEY}
+            # Return only declared resources, using stored values or defaults
+            return {k: v for k, v in data.items() if k in declared and k != _AUTO_KEY}
 
     def put(self, policies: dict[str, TenantPolicy]) -> None:
-        """Partial update by tenant: replaces the whole record for each tenant
-        named in `policies`, leaving tenants not named untouched.
+        """Partial update by resource: replaces the whole record for each resource
+        named in `policies`, leaving resources not named untouched.
 
-        Tenants outside DEFAULT_POLICIES are accepted: the defaults are seed
-        data, not an allowlist. Requiring a code edit to policy a new node or
-        engine is exactly the rigidity the lifecycle work removes. Field
-        validation is unchanged and still strict (priority: int not bool;
+        Field validation is unchanged and still strict (priority: int not bool;
         pinned: bool; idle_ttl: int >= 0, not bool), and the whole payload is
         validated before anything is written, so a rejected put leaves the
         file untouched.
         """
         if _AUTO_KEY in policies:
             raise ValueError(f"{_AUTO_KEY!r} is reserved; use set_auto()")
-        for tenant, policy in policies.items():
-            _validate_policy(tenant, policy)
+        for resource, policy in policies.items():
+            _validate_policy(resource, policy)
 
         # _load() rather than get(): get() filters the reserved _auto key, so
         # reading through it would silently drop the automation setting on
         # every policy write. _load() is the sole boundary gate (module
         # docstring), so a missing/corrupt file, or a partial hand-edited
         # one, is already healed by the time this merge runs.
+        declared = (self._declared_defaults or (lambda: {}))()
         with self._lock:
             current = self._load()
             if current is None:
-                current = {tenant: dict(policy)
-                           for tenant, policy in DEFAULT_POLICIES.items()}
-            current.update({tenant: dict(policy) for tenant, policy in policies.items()})
+                current = {resource: dict(policy)
+                           for resource, policy in declared.items()}
+            current.update({resource: dict(policy) for resource, policy in policies.items()})
             self._save(current)
 
     # --- lifecycle automation toggle ---------------------------------------
@@ -203,21 +202,22 @@ class PolicyStore:
         return bool(value)
 
     def set_auto(self, enabled: bool) -> None:
-        """Persist the automation toggle, seeding tenant defaults if the file
+        """Persist the automation toggle, seeding resource defaults if the file
         has never been written.
 
         The seeding matters: `_load()` self-heals a file that already
-        exists — even a partial or malformed one, tenant records included
+        exists — even a partial or malformed one, resource records included
         (module docstring) — but a file that has never been written
         returns None from `_load()`, the same "absent" signal every other
         consumer falls back on. Writing the toggle first must not be able
         to cost the deck its defaults.
         """
+        declared = (self._declared_defaults or (lambda: {}))()
         with self._lock:
             data = self._load()
             if data is None:
-                data = {tenant: dict(policy)
-                        for tenant, policy in DEFAULT_POLICIES.items()}
+                data = {resource: dict(policy)
+                        for resource, policy in declared.items()}
             data[_AUTO_KEY] = {"enabled": bool(enabled)}
             self._save(data)
 

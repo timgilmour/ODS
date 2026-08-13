@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from app.engines import EngineError, GuardError
 from app.intent import IntentStore
 from app.main import create_app
-from app.policy import DEFAULT_POLICIES, PolicyStore
+from app.policy import PolicyStore
 from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
 
 
@@ -246,6 +246,13 @@ _ENGINES = [
      "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
 ]
 
+# Declared policy defaults for test assertions (replaces deleted _TEST_POLICY_DEFAULTS)
+_TEST_POLICY_DEFAULTS = {
+    "hipfire": {"priority": 100, "pinned": True, "idle_ttl": 0},
+    "lemonade": {"priority": 50, "pinned": False, "idle_ttl": 900},
+    "comfyui": {"priority": 40, "pinned": False, "idle_ttl": 300},
+}
+
 
 class FakeLocalClients:
     """Stand-in for app.local_clients.LocalClients: resolves each resource
@@ -275,6 +282,15 @@ def make_app(tmp_path, monkeypatch):
 
     app = create_app()
     deck = app.state.deck
+
+    def _get_declared_policy_defaults():
+        """Provide declared policy defaults from test _ENGINES."""
+        declared = {}
+        for engine in _ENGINES:
+            if "resource" in engine and "policy_defaults" in engine:
+                declared[engine["resource"]] = engine["policy_defaults"]
+        return declared
+
     deck.update(
         {
             "lemonade": FakeLemonade(),
@@ -284,7 +300,8 @@ def make_app(tmp_path, monkeypatch):
             "litellm": FakeLiteLLM(default="extra.model.gguf"),
             "registry": FakeRegistry(),
             "read_gpus": FakeReadGpus(),
-            "policy_store": PolicyStore(tmp_path / "policy.json"),
+            "policy_store": PolicyStore(tmp_path / "policy.json",
+                                        declared_defaults=_get_declared_policy_defaults),
             "set_store": SetStore(tmp_path / "sets"),
             # Real store (like policy_store), pointed at tmp_path: every
             # deliberate action now writes intent, and the default deck's
@@ -418,7 +435,7 @@ def test_api_state_shape(tmp_path, monkeypatch):
     body = resp.json()
     assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle",
                                 "provenance", "nodes"}
-    assert body["policy"] == DEFAULT_POLICIES
+    assert body["policy"] == _TEST_POLICY_DEFAULTS
     assert body["models"] == [{"file": "m.gguf", "size": 1, "footprint": 2}]
     assert body["world"]["default_route"] == "extra.model.gguf"
     assert body["world"]["tenants"]["hipfire"]["state"] == "running"
@@ -1139,7 +1156,7 @@ def test_policy_get_default(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     resp = TestClient(app).get("/api/policy")
     assert resp.status_code == 200
-    assert resp.json() == DEFAULT_POLICIES
+    assert resp.json() == _TEST_POLICY_DEFAULTS
 
 
 def test_policy_put_roundtrip_partial_by_tenant(tmp_path, monkeypatch):
@@ -1155,26 +1172,26 @@ def test_policy_put_roundtrip_partial_by_tenant(tmp_path, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["lemonade"] == {"priority": 5, "pinned": True, "idle_ttl": 0}
-    assert body["comfyui"] == DEFAULT_POLICIES["comfyui"]  # untouched
+    assert body["comfyui"] == _TEST_POLICY_DEFAULTS["comfyui"]  # untouched
 
     again = client.get("/api/policy")
     assert again.json() == body
 
 
-def test_policy_put_accepts_runtime_tenant_but_rejects_reserved_key(tmp_path, monkeypatch):
-    """Replaces the old unknown-tenant-422 test: DEFAULT_POLICIES is seed data,
-    not an allowlist, so policying a new node or engine no longer needs a code
-    change. The reserved ``_auto`` config key is still not a tenant."""
+def test_policy_put_rejects_undeclared_resource_and_reserved_key(tmp_path, monkeypatch):
+    """E1 Task 4: PUT is refused for undeclared resources (declaration-driven).
+    The reserved ``_auto`` config key is still rejected."""
     app, _ = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
 
+    # Undeclared resource: rejected with 422
     resp = client.put(
         "/api/policy",
         json={"sparky-vllm": {"priority": 5, "pinned": True, "idle_ttl": 0}},
     )
-    assert resp.status_code == 200
-    assert resp.json()["sparky-vllm"] == {"priority": 5, "pinned": True, "idle_ttl": 0}
+    assert resp.status_code == 422
 
+    # Reserved key: still rejected
     reserved = client.put(
         "/api/policy",
         json={"_auto": {"priority": 5, "pinned": True, "idle_ttl": 0}},
@@ -1192,11 +1209,8 @@ def test_policy_put_bad_field_type_422(tmp_path, monkeypatch):
     assert resp.status_code == 422
 
 
-def test_policy_put_unknown_tenant_logs_an_event(tmp_path, monkeypatch):
-    """The feedback lost when the pre-1ee64611 unknown-tenant rejection was
-    removed: the put still succeeds (defaults are seed data, not an
-    allowlist), but a typo'd tenant name now shows up in Events instead of
-    silently policying nothing."""
+def test_policy_put_undeclared_resource_rejected(tmp_path, monkeypatch):
+    """E1 Task 4: PUT for undeclared resources is rejected with 422."""
     app, _ = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
 
@@ -1204,14 +1218,11 @@ def test_policy_put_unknown_tenant_logs_an_event(tmp_path, monkeypatch):
         "/api/policy",
         json={"sparky-vllm": {"priority": 5, "pinned": True, "idle_ttl": 0}},
     )
-    assert resp.status_code == 200
-
-    events = client.get("/api/events").json()["events"]
-    hit = next(e for e in events if e["kind"] == "policy-unknown-tenant")
-    assert hit["detail"]["tenants"] == ["sparky-vllm"]
+    assert resp.status_code == 422
+    assert "unknown resource" in resp.json()["detail"]
 
 
-def test_policy_put_known_tenants_only_logs_no_unknown_tenant_event(tmp_path, monkeypatch):
+def test_policy_put_declared_resources_accepted(tmp_path, monkeypatch):
     app, _ = make_app(tmp_path, monkeypatch)
     client = TestClient(app)
 
@@ -1220,9 +1231,7 @@ def test_policy_put_known_tenants_only_logs_no_unknown_tenant_event(tmp_path, mo
         json={"lemonade": {"priority": 5, "pinned": True, "idle_ttl": 0}},
     )
     assert resp.status_code == 200
-
-    kinds = [e["kind"] for e in client.get("/api/events").json()["events"]]
-    assert "policy-unknown-tenant" not in kinds
+    assert resp.json()["lemonade"]["priority"] == 5
 
 
 # ===========================================================================
