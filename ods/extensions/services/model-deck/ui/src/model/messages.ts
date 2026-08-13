@@ -47,19 +47,6 @@ export const messages = {
     action: { label: "Retry" },
   }),
 
-  // The deck binds its actuation client ONCE at start (app/main.py), so a
-  // connection edit splits the two paths until a restart: monitoring follows
-  // immediately, swaps and restores do not. "warning", not "danger" —
-  // nothing is broken and no data is at risk; an action the operator will
-  // reasonably expect to have taken effect simply hasn't yet.
-  nodeActuationStale: (): Message => ({
-    tone: "warning",
-    title: "Restart required for control changes",
-    body:
-      "Connection edits apply to monitoring immediately, but swaps and " +
-      "restores still use the address from the last deck start.",
-  }),
-
   warmingFirstBoot: (): Message => ({
     tone: "neutral",
     title: "first boot can autotune for about 15 minutes — this is normal",
@@ -672,6 +659,14 @@ export const labels = {
   testConnection: "Test connection",
   registerALocation: "Register a location",
 
+  // control toggle (app/node_store.py _CONTROLS) — declared operability,
+  // never inferred: "swap" gets serving verbs and a board card with
+  // controls, "none" is observe-only regardless of what data the row
+  // carries.
+  nodeControlLabel: "Operate serving slot",
+  nodeControlHint:
+    "Off: observe only. On: the deck swaps/restores this node's serving slot.",
+
   // model/nodeForm.ts's validate() and testTarget() — pure decision logic
   // that must not own its own copy (the same "everything through here"
   // rule the rest of the deck follows). See applySteps.ts's stepRow for the
@@ -688,6 +683,14 @@ export const labels = {
    * retyped credential would otherwise silently test the OLD stored
    * address while the screen shows the new one. */
   testBlockedAddressChanged: "address changed — retype the credential to test the new pair",
+
+  // Mirror of app/node_store.py:_require_swap_prereqs's three-prerequisite
+  // rule for control: "swap" — address + serving_address + a credential,
+  // all present, missing fields NAMED. The backend 422 is authoritative;
+  // this only saves the round-trip.
+  nodeSwapNeedsAddress: "operating a node requires an agent address",
+  nodeSwapNeedsServingAddress: "operating a node requires a serving address",
+  nodeSwapNeedsCredential: "operating a node requires a credential",
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

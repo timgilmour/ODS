@@ -28,10 +28,13 @@ export interface NodeFormState {
   address: string;
   servingAddress: string;
   credential: string;
+  /** Declared operability (app/node_store.py _CONTROLS) — see
+   * DeckNodeEntry.control in api.ts. */
+  control: "none" | "swap";
 }
 
 export function emptyForm(): NodeFormState {
-  return { id: "", label: "", address: "", servingAddress: "", credential: "" };
+  return { id: "", label: "", address: "", servingAddress: "", credential: "", control: "none" };
 }
 
 export function formForEntry(entry: DeckNodeEntry): NodeFormState {
@@ -41,6 +44,7 @@ export function formForEntry(entry: DeckNodeEntry): NodeFormState {
     address: entry.address ?? "",
     servingAddress: entry.serving_address ?? "",
     credential: "",
+    control: entry.control,
   };
 }
 
@@ -56,6 +60,7 @@ export function validate(
   form: NodeFormState,
   mode: "add" | "edit",
   agentKind: "local" | "node-agent",
+  entry: DeckNodeEntry | null = null,
 ): string[] {
   const errors: string[] = [];
   if (mode === "add" && !ID_RE.test(form.id)) {
@@ -68,6 +73,15 @@ export function validate(
   if (mode === "add" && !form.credential) {
     errors.push(labels.nodeCredentialRequiredForAdd);
   }
+  if (form.control === "swap") {
+    // Mirror of app/node_store.py:_require_swap_prereqs — same three
+    // prerequisites, same missing-field naming; the backend 422 is
+    // authoritative, this just saves the round-trip.
+    if (!form.address.trim()) errors.push(labels.nodeSwapNeedsAddress);
+    if (!form.servingAddress.trim()) errors.push(labels.nodeSwapNeedsServingAddress);
+    const credentialPresent = Boolean(form.credential) || Boolean(entry?.credential_set);
+    if (!credentialPresent) errors.push(labels.nodeSwapNeedsCredential);
+  }
   return errors;
 }
 
@@ -78,6 +92,7 @@ export function toCreatePayload(form: NodeFormState) {
     address: form.address,
     serving_address: form.servingAddress.trim() || null,
     credential: form.credential,
+    control: form.control,
   };
 }
 
@@ -88,6 +103,7 @@ export function toPatchPayload(form: NodeFormState, entry: DeckNodeEntry) {
   const serving = form.servingAddress.trim() || null;
   if (serving !== (entry.serving_address ?? null)) patch.serving_address = serving;
   if (form.credential) patch.credential = form.credential;
+  if (form.control !== entry.control) patch.control = form.control;
   return patch;
 }
 

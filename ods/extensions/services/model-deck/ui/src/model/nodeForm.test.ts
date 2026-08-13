@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { DeckNodeEntry } from "../api";
+import { labels } from "./messages";
 import {
   emptyForm,
   formForEntry,
@@ -7,6 +8,7 @@ import {
   toCreatePayload,
   toPatchPayload,
   validate,
+  type NodeFormState,
 } from "./nodeForm";
 
 // N1 T14 minimal fixture fix (Task 15 owns the rest of this file): swapped
@@ -35,6 +37,11 @@ test("formForEntry never carries the credential", () => {
   expect(form.label).toBe("Hera Box");
 });
 
+test("formForEntry seeds control from the entry", () => {
+  expect(formForEntry(entry).control).toBe("none");
+  expect(formForEntry({ ...entry, control: "swap" }).control).toBe("swap");
+});
+
 describe("validate", () => {
   test("add mode requires slug id, label, address", () => {
     expect(validate(emptyForm(), "add", "node-agent").length).toBeGreaterThan(0);
@@ -59,6 +66,42 @@ describe("validate", () => {
   });
 });
 
+// Mirror of app/node_store.py:_require_swap_prereqs — control: "swap"
+// requires address + serving_address + a credential, all present, with
+// missing fields NAMED. The backend 422 is authoritative; this only saves
+// the round-trip.
+describe("validate — control: swap prerequisites", () => {
+  test("swap with no serving address and no credential names both, in add mode", () => {
+    const form: NodeFormState = {
+      ...formForEntry(entry),
+      control: "swap",
+      servingAddress: "",
+      credential: "",
+    };
+    const errors = validate(form, "add", "node-agent");
+    expect(errors).toContain(labels.nodeSwapNeedsServingAddress);
+    expect(errors).toContain(labels.nodeSwapNeedsCredential);
+  });
+
+  test("swap with address, serving address, and a typed credential has no control errors", () => {
+    const form: NodeFormState = { ...formForEntry(entry), control: "swap", credential: "k" };
+    const errors = validate(form, "add", "node-agent");
+    expect(errors).not.toContain(labels.nodeSwapNeedsAddress);
+    expect(errors).not.toContain(labels.nodeSwapNeedsServingAddress);
+    expect(errors).not.toContain(labels.nodeSwapNeedsCredential);
+  });
+
+  // Mirror of _require_swap_prereqs's credential_present = bool(credential)
+  // or self.credential_set(node_id) — a stored credential satisfies the
+  // rule with nothing retyped, so an edit that touches only the label
+  // doesn't force the operator to retype a credential that's already on
+  // file.
+  test("edit mode: entry.credential_set true satisfies the credential prerequisite with nothing retyped", () => {
+    const form: NodeFormState = { ...formForEntry(entry), control: "swap" };
+    expect(validate(form, "edit", "node-agent", entry)).toEqual([]);
+  });
+});
+
 describe("toPatchPayload", () => {
   test("sends only changed fields", () => {
     const form = { ...formForEntry(entry), label: "Renamed" };
@@ -73,13 +116,19 @@ describe("toPatchPayload", () => {
     const form = { ...formForEntry(entry), servingAddress: "" };
     expect(toPatchPayload(form, entry)).toEqual({ serving_address: null });
   });
+  test("control rides only when it differs from entry.control", () => {
+    expect(toPatchPayload({ ...formForEntry(entry), control: entry.control }, entry)).toEqual({});
+    const changed: NodeFormState = { ...formForEntry(entry), control: "swap" };
+    expect(toPatchPayload(changed, entry)).toEqual({ control: "swap" });
+  });
 });
 
 test("toCreatePayload maps camelCase to the wire", () => {
   expect(toCreatePayload({ id: "hera", label: "Hera Box",
-    address: "http://hera:7720", servingAddress: "", credential: "k" })).toEqual({
+    address: "http://hera:7720", servingAddress: "", credential: "k",
+    control: "none" })).toEqual({
       id: "hera", label: "Hera Box", address: "http://hera:7720",
-      serving_address: null, credential: "k" });
+      serving_address: null, credential: "k", control: "none" });
 });
 
 // Task 9 review, Important 2: the Test button used to branch only on

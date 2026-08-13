@@ -184,8 +184,11 @@ function NodeForm({
   // Add always creates a node-agent row (node_store.py's add() refuses
   // agent_kind "local" outside its one seed); edit carries the target's own
   // kind, so the seeded local entry's address stops being required — see
-  // nodeForm.ts's validate() doc comment.
-  const errors = validate(form, mode, entry?.agent_kind ?? "node-agent");
+  // nodeForm.ts's validate() doc comment. `entry` is threaded through so a
+  // stored credential (entry.credential_set) can satisfy control: "swap"'s
+  // credential prerequisite without forcing a retype — mirrors
+  // app/node_store.py:_require_swap_prereqs's own credential_present check.
+  const errors = validate(form, mode, entry?.agent_kind ?? "node-agent", entry);
   // What Test would actually probe, recomputed every render from the
   // current buffer — see nodeForm.ts's testTarget() doc comment for why an
   // edited-but-unretyped address is "blocked" rather than silently testing
@@ -281,6 +284,24 @@ function NodeForm({
           placeholder={entry?.credential_set ? labels.nodeCredentialPlaceholder : ""}
         />
         <span className="nodes-caption">{messages.nodeCredentialCaption().title}</span>
+      </label>
+      <label>
+        {labels.nodeControlLabel}
+        <input
+          type="checkbox"
+          checked={form.control === "swap"}
+          onChange={(e) => {
+            // Deliberately no agent_kind guard here: the local node has no
+            // address, and validate()'s swap prerequisites (nodeForm.ts,
+            // mirroring app/node_store.py:_require_swap_prereqs) already
+            // refuse to save control: "swap" without one — the Save button
+            // disables itself for exactly that reason, same as every other
+            // prerequisite this form enforces.
+            setForm({ ...form, control: e.target.checked ? "swap" : "none" });
+            setTestResult(null);
+          }}
+        />
+        <span className="nodes-caption">{labels.nodeControlHint}</span>
       </label>
 
       <div className="nodes-form-actions">
