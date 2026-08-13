@@ -161,13 +161,11 @@ export interface DeckNodeEntry {
   address: string | null;
   serving_address: string | null;
   credential_set: boolean;
-  // True when the deck's ACTUATION path is still bound to configuration the
-  // registry has moved past — swaps/restores keep using the boot-time
-  // address until a restart, while observation already follows the edit.
-  // Produced by app/routers/status.py:65-71's `_nodes_block` (via
-  // app/node_binding.py's `entry_actuation_stale`); always present, and
-  // always false for non-spark nodes.
-  actuation_stale: boolean;
+  /** Declared operability (app/node_store.py _CONTROLS): "swap" nodes get
+   * serving verbs and a board card with controls; "none" nodes are
+   * observe-only regardless of what data they carry — declared, never
+   * inferred. */
+  control: "none" | "swap";
   status: NodeAgentStatus;
   last_seen: string | null;
   gpus: NodeGpu[] | null;
@@ -492,7 +490,10 @@ export function deleteSet(slug: string): Promise<{ status: string }> {
 }
 
 // ---------------------------------------------------------------------------
-// Spark (remote single-slot node — /api/spark/*, see app/routers/spark.py)
+// Node serving (single-slot swap control) — /api/nodes/{id}/serving/*, see
+// app/routers/serving.py. The Spark* type names/shapes are unchanged (design
+// §7): this is the same wire contract /api/spark/* used before it became a
+// deprecated one-cycle alias (app/routers/spark.py), now addressed per node.
 // ---------------------------------------------------------------------------
 
 export interface SparkServing {
@@ -522,29 +523,37 @@ export interface SparkStatus {
   serving: SparkServing;
 }
 
-/** GET /api/spark/status — null when the spark engine isn't configured
- * (503), which is how the card feature-detects whether to render at all.
- * Every other failure propagates: a configured-but-unreachable spark is a
- * real error the operator should see, not an absent card. */
-export async function getSparkStatus(): Promise<SparkStatus | null> {
+/** GET /api/nodes/{id}/serving/status — null when the node is not operable
+ * (503, app/routers/serving.py:_client). Every other failure propagates: a
+ * declared-operable node we cannot reach is an error to surface, not an
+ * absence. */
+export async function getNodeServingStatus(nodeId: string): Promise<SparkStatus | null> {
   try {
-    return await request<SparkStatus>("/api/spark/status");
+    return await request<SparkStatus>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/serving/status`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 503) return null;
     throw err;
   }
 }
 
-/** POST /api/spark/swap. Throws ApiError(409) for the busy-serving guard,
- * for a previous swap still booting, and for the litellm default-route
- * guard. Force overrides the first two backend-side and is ignored by the
- * third; which of them the UI actually offers a Force button for is a
- * separate, deliberate decision — see SparkSwap.tsx's docstring. */
-export function sparkSwap(profile: string, force = false): Promise<unknown> {
-  return request<unknown>("/api/spark/swap", {
+/** POST /api/nodes/{id}/serving/swap. 409s: busy guard (force helps),
+ * mid-boot guard (force helps, button withheld — SparkSwap.tsx docstring),
+ * litellm default-route guard (force-proof). */
+export function postNodeSwap(nodeId: string, profile: string, force = false): Promise<unknown> {
+  return request<unknown>(`/api/nodes/${encodeURIComponent(nodeId)}/serving/swap`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ profile, force }),
+  });
+}
+
+/** POST /api/nodes/{id}/serving/reload — JSON body required (matches swap). */
+export function postNodeReload(nodeId: string): Promise<unknown> {
+  return request<unknown>(`/api/nodes/${encodeURIComponent(nodeId)}/serving/reload`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
   });
 }
 
@@ -657,15 +666,6 @@ export function putDeclared(key: string, fields: Record<string, unknown>): Promi
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(fields),
-  });
-}
-
-/** POST /api/spark/reload — route requires a JSON body (no default); matches sparkSwap pattern. */
-export function sparkReload(): Promise<unknown> {
-  return request<unknown>("/api/spark/reload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
   });
 }
 
@@ -828,8 +828,10 @@ export interface NodeRegistryEntry {
   added_ts: string;
   credential_set: boolean;
   // Same field, same producer as DeckNodeEntry's — app/routers/nodes.py's
-  // `_public` calls the same app/node_binding.py rule the state block does.
-  actuation_stale: boolean;
+  // `_public` spreads the stored NodeStore entry as-is, which always
+  // carries `control` (app/node_store.py _CONTROLS, healed by
+  // `_heal_control` if ever missing/invalid).
+  control: "none" | "swap";
 }
 
 export function createNode(body: {
