@@ -13,13 +13,15 @@
  * silent. App.tsx drills the LOCAL box's snapshot — `world`, `models`,
  * `coldGgufs` — down to every node card, remote ones included. That is safe
  * only while exactly one node is "local-like", i.e. while no other node
- * carries tenant controls. Sparky's only control is SPARK_CONTROL, which is
- * dispatched separately and never touches `world`, so nothing reads the
- * wrong host today. The moment a second box exposes lemonade/comfyui/hipfire
- * verbs, those props start describing the wrong machine and the board will
- * render plausible, wrong numbers with no error anywhere. The fix then is a
- * richer `controls` type carrying its own node's data, decided HERE — not a
- * per-component guard.
+ * carries tenant controls. Every swap node's only control is SPARK_CONTROL,
+ * which is dispatched separately and never touches `world`, so nothing reads
+ * the wrong host today — a registry with N swap nodes keeps the landmine
+ * dormant the same way one hardcoded sparky used to (design §7: swap nodes
+ * still carry no local-world props). The moment a second box exposes
+ * lemonade/comfyui/hipfire verbs, those props start describing the wrong
+ * machine and the board will render plausible, wrong numbers with no error
+ * anywhere. The fix then is a richer `controls` type carrying its own node's
+ * data, decided HERE — not a per-component guard.
  */
 
 import type {
@@ -139,19 +141,14 @@ export interface DeckNode {
   servingLine?: string;
 }
 
-// Spark is a single-slot node and its lifecycle key is a fixed constant
-// backend-side (app/observe.py SPARK_SLOT_KEY). Mirrored, not derived.
-const SPARK_SLOT_KEY = "sparky/slot0";
-const SPARK_NODE_ID = "sparky";
-
-/** The control surface the spark serving slot exposes — the value that ends
- * up in `DeckResource.controls`, which the board dispatches on to decide
- * whether to render the profile picker rather than a tenant's verbs.
+/** The control surface every swap node's serving slot exposes — the value
+ * that ends up in `DeckResource.controls`, which the board dispatches on to
+ * decide whether to render the profile picker rather than a tenant's verbs.
  *
- * Deliberately NOT the same value as SPARK_NODE_ID ("sparky"). A node id and
- * a control name are different namespaces that happen to describe the same
- * box today; nothing currently ties them, and the node-registry work needs
- * one grep target for each rather than a single string doing both jobs. */
+ * Deliberately NOT a node id. A node id is declared per registry entry
+ * (e.g. "boxa") and a control name is a different namespace that happens to
+ * name the same kind of surface; nothing ties them, which is what lets N
+ * swap nodes share one control name without colliding. */
 const SPARK_CONTROL = "spark";
 
 /** What the spark normally serves. Any other engine gets a badge on the
@@ -312,23 +309,38 @@ function observedNode(entry: DeckNodeEntry): DeckNode {
   };
 }
 
+/** The registry entries the board gives serving controls to. Control is
+ * DECLARED (app/node_store.py) — presence of serving data never promotes a
+ * node (the watcher-shaped fixture in nodes.test.ts is the proof). */
+export function swapNodes(state: StateResponse | null): DeckNodeEntry[] {
+  return (state?.nodes ?? []).filter((e) => e.control === "swap");
+}
+
+/** Slot-key convention mirrored from app/observe.py:slot_key — the one
+ * backend function that builds these ids. */
+export function isSwapSlotId(id: string): boolean {
+  return id.endsWith("/slot0");
+}
+
+/** Reverse of `${entry.id}/slot0`: the node id a swap placement's id
+ * belongs to (app/observe.py:slot_key builds the id the other way). */
+export function nodeIdOfPlacement(id: string): string {
+  return id.split("/")[0];
+}
+
 export function buildNodes(
   state: StateResponse | null,
-  spark: SparkStatus | null,
+  servingByNode: Record<string, SparkStatus | null>,
 ): DeckNode[] {
   if (state === null) return [];
-  const entries = state.nodes ?? [];
   const nodes = [localNode(state)];
-  const sparkNode = buildSparkNode(state.lifecycle, spark);
-  if (sparkNode) {
-    // The registry owns the label now; the id stays the key everywhere.
-    const reg = entries.find((e) => e.id === SPARK_NODE_ID);
-    if (reg) sparkNode.label = reg.label;
-    nodes.push(sparkNode);
-  }
-  for (const entry of entries) {
+  for (const entry of state.nodes ?? []) {
     if (entry.agent_kind !== "node-agent") continue;
-    if (entry.id === SPARK_NODE_ID && sparkNode) continue;
+    if (entry.control === "swap") {
+      const swapNode = buildSwapNode(entry, state.lifecycle, servingByNode[entry.id] ?? null);
+      nodes.push(swapNode ?? observedNode(entry));
+      continue;
+    }
     nodes.push(observedNode(entry));
   }
   return nodes;
@@ -368,18 +380,24 @@ export function findPlacement(nodes: DeckNode[], id: string): PlacementSpot | nu
   return null;
 }
 
-/** The spark half of the board.
+/** One swap node's serving-slot resource — buildNodes' registry loop calls
+ * this once per `control: "swap"` entry.
  *
- * `spark === null` means the engine is not configured on this deployment
- * (the backend answers 503) — an ABSENT node, so no card at all. That is a
- * different thing from a configured node we cannot reach, which keeps its
- * card and its last-known placements.
+ * `serving === null` means no landed status yet (the fetch has not resolved,
+ * or 503'd), or the backend says the node is not operable — either way there
+ * is nothing to synthesize a control surface from, so the caller falls back
+ * to the observe-only card rather than rendering a phantom one.
  */
-function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): DeckNode | null {
-  if (spark === null) return null;
+function buildSwapNode(
+  entry: DeckNodeEntry,
+  lifecycle: LifecycleMap,
+  serving: SparkStatus | null,
+): DeckNode | null {
+  if (serving === null) return null;
 
-  const entry = lifecycle[SPARK_SLOT_KEY];
-  const reachable = entry?.observed.reachable ?? true;
+  const slotKey = `${entry.id}/slot0`;
+  const lc = lifecycle[slotKey];
+  const reachable = lc?.observed.reachable ?? true;
   // The backend's own boot verdict, and the ONLY reliable one. The node's
   // swap helper reports swap_status.state === "done" the moment swap.sh
   // *launches* — not when the model serves (live finding 2026-07-30,
@@ -391,12 +409,12 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
   // app/observe.py sets observed.transitioning from spark.boot_in_flight(),
   // which weighs state AND endpoint AND recency together — the judgement
   // this line must not try to re-derive.
-  const transitioning = entry?.observed.transitioning ?? false;
-  // Kept as a fallback for the poll where /api/spark/status is fresher than
+  const transitioning = lc?.observed.transitioning ?? false;
+  // Kept as a fallback for the poll where the serving fetch is fresher than
   // the lifecycle view (the observer caches for SPARK_OBSERVE_TTL_S), so a
   // swap the operator just fired reads as warming immediately.
-  const swapping = spark.swap_status?.state === "swapping";
-  const endpointOk = spark.serving.endpoint_ok;
+  const swapping = serving.swap_status?.state === "swapping";
+  const endpointOk = serving.serving.endpoint_ok;
 
   let status: NodeStatus;
   if (!reachable) status = "unreachable";
@@ -405,14 +423,14 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
   else status = "down";
 
   const stale = status === "unreachable";
-  const model = spark.serving.model;
+  const model = serving.serving.model;
   // The PROFILE is the identity vocabulary (see Placement.profile). It also
   // fixes the engine join: profiles[] is keyed by profile name, so matching
   // on the SERVED name found nothing whenever the two differ and silently
   // fell back to SPARK_DEFAULT_ENGINE — an "aeon" placement reporting vllm
   // while ds4 was actually serving it.
-  const profile = spark.swap_status?.profile ?? null;
-  const engine = spark.profiles.find((p) => p.name === (profile ?? model))?.engine
+  const profile = serving.swap_status?.profile ?? null;
+  const engine = serving.profiles.find((p) => p.name === (profile ?? model))?.engine
     ?? SPARK_DEFAULT_ENGINE;
 
   // Both candidates are sentences the BACKEND wrote, so the banner reports
@@ -423,15 +441,15 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
   // app/lifecycle.py's `reason` for the derived status, which is already
   // phrased for a human. An "error" swap with an empty message falls
   // through to the reason rather than showing a blank explanation.
-  const swapError = spark.swap_status?.state === "error" ? spark.swap_status.message : null;
-  const detail = swapError || entry?.reason || undefined;
+  const swapError = serving.swap_status?.state === "error" ? serving.swap_status.message : null;
+  const detail = swapError || lc?.reason || undefined;
 
   return {
-    id: SPARK_NODE_ID,
-    label: SPARK_NODE_ID,
+    id: entry.id,
+    label: entry.label,
     status,
     detail,
-    lastSeen: entry?.last_healthy_ts ?? null,
+    lastSeen: lc?.last_healthy_ts ?? null,
     resources: [
       {
         id: "slot0",
@@ -444,20 +462,20 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
         placements: model
           ? [
               {
-                id: SPARK_SLOT_KEY,
+                id: slotKey,
                 name: model,
                 profile: profile ?? undefined,
                 bytes: null,
-                status: entry?.status ?? (endpointOk ? "serving" : "down"),
+                status: lc?.status ?? (endpointOk ? "serving" : "down"),
                 engine,
-                // Which engine sparky is actually serving, but only when it
-                // is not the one it usually serves — a "vllm" badge on every
-                // chip is noise, a "ds4" badge is the answer to a question
-                // the operator would otherwise have to go and look up.
+                // Which engine the node is actually serving, but only when
+                // it is not the one it usually serves — a "vllm" badge on
+                // every chip is noise, a "ds4" badge is the answer to a
+                // question the operator would otherwise have to look up.
                 engineBadge: engine === SPARK_DEFAULT_ENGINE ? undefined : engine,
                 kind: "model",
                 stale,
-                settingsDrift: driftOf(lifecycle, SPARK_SLOT_KEY),
+                settingsDrift: driftOf(lifecycle, slotKey),
               },
             ]
           : [],
@@ -466,4 +484,4 @@ function buildSparkNode(lifecycle: LifecycleMap, spark: SparkStatus | null): Dec
   };
 }
 
-export { SPARK_CONTROL, SPARK_DEFAULT_ENGINE, SPARK_NODE_ID, SPARK_SLOT_KEY };
+export { SPARK_CONTROL, SPARK_DEFAULT_ENGINE };

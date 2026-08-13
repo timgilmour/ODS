@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   getCatalog,
-  getSparkStatus,
+  getNodeServingStatus,
   getState,
   getStorageState,
   type SparkStatus,
@@ -18,7 +18,7 @@ import SettingsModal, { type SettingsTarget } from "./components/SettingsModal";
 import SetStrip from "./components/SetStrip";
 import StorageView from "./components/StorageView";
 import { labels, messages } from "./model/messages";
-import { buildNodes, findPlacement, SPARK_NODE_ID, type Placement } from "./model/nodes";
+import { buildNodes, findPlacement, swapNodes, type Placement } from "./model/nodes";
 import Banner from "./ui/Banner";
 
 const POLL_MS = 3000;
@@ -30,11 +30,10 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [storageState, setStorageState] = useState<StorageState | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
-  const [spark, setSpark] = useState<SparkStatus | null>(null);
-  // Separate from `spark` on purpose: the last-known status must survive a
-  // failed poll (see the rejection handler below), but the failure itself
-  // still has to reach the screen.
-  const [sparkError, setSparkError] = useState<string | null>(null);
+  const [serving, setServing] = useState<Record<string, SparkStatus | null>>({});
+  // Last-known statuses survive failed polls per node (same contract the
+  // single spark fetch had); failures land per node id for the banner.
+  const [servingErrors, setServingErrors] = useState<Record<string, string | null>>({});
   const [view, setView] = useState<View>("deck");
   const [modalOpen, setModalOpen] = useState(false);
   const [policyModalOpen, setPolicyModalOpen] = useState(false);
@@ -60,9 +59,46 @@ export default function App() {
   const refreshState = useCallback(async () => {
     await Promise.all([
       getState().then(
-        (s) => {
+        async (s) => {
           setState(s);
           setLoadError(null);
+          const ids = swapNodes(s).map((e) => e.id);
+          // Prune nodes that left the registry/demoted, keep last-known for
+          // the rest (the per-node analogue of the old don't-clear rule
+          // below).
+          setServing((prev) => Object.fromEntries(
+            Object.entries(prev).filter(([id]) => ids.includes(id))));
+          setServingErrors((prev) => Object.fromEntries(
+            Object.entries(prev).filter(([id]) => ids.includes(id))));
+          await Promise.all(ids.map((id) =>
+            getNodeServingStatus(id).then(
+              (st) => {
+                setServing((prev) => ({ ...prev, [id]: st }));
+                setServingErrors((prev) => ({ ...prev, [id]: null }));
+              },
+              // Deliberately does NOT clear this node's `serving` entry.
+              // getNodeServingStatus resolves to null only for a 503 — "not
+              // operable on this deployment", which correctly falls back to
+              // the observe-only card. Every other failure means a
+              // DECLARED-operable node we currently cannot reach, and the
+              // adapter's whole contract is that such a node keeps its card
+              // and its last-known placements, marked stale. Overwriting
+              // with null here would blank the node on the first failed
+              // poll and silently defeat that rule.
+              //
+              // Keeping the data is not the same as hiding the failure,
+              // though. buildSwapNode derives reachability from the
+              // BACKEND's lifecycle view, so if THIS page's fetch is what
+              // broke, the node would keep rendering a confident status
+              // pill over data that stopped updating minutes ago. The error
+              // is recorded here and banner-ed on the node it belongs to,
+              // which is the one thing this handler must not skip.
+              (err) =>
+                setServingErrors((prev) => ({
+                  ...prev,
+                  [id]: err instanceof Error ? err.message : String(err),
+                })),
+            )));
         },
         (err) => setLoadError(err instanceof Error ? err.message : String(err)),
       ),
@@ -75,27 +111,6 @@ export default function App() {
           setStorageState(null);
           setStorageError(err instanceof Error ? err.message : String(err));
         },
-      ),
-      getSparkStatus().then(
-        (s) => {
-          setSpark(s);
-          setSparkError(null);
-        },
-        // Deliberately does NOT clear `spark`. getSparkStatus resolves to
-        // null only for a 503 — "no spark configured on this deployment",
-        // which correctly removes the card. Every other failure means a
-        // CONFIGURED node we currently cannot reach, and the adapter's whole
-        // contract is that such a node keeps its card and its last-known
-        // placements, marked stale. Overwriting with null here would blank
-        // the node on the first failed poll and silently defeat that rule.
-        //
-        // Keeping the data is not the same as hiding the failure, though.
-        // buildSparkNode derives reachability from the BACKEND's lifecycle
-        // view, so if THIS page's fetch is what broke, the node would keep
-        // rendering a confident status pill over data that stopped updating
-        // minutes ago. The error is recorded here and banner-ed on the node
-        // it belongs to, which is the one thing this handler must not skip.
-        (err) => setSparkError(err instanceof Error ? err.message : String(err)),
       ),
     ]);
   }, []);
@@ -136,24 +151,32 @@ export default function App() {
     return () => clearInterval(id);
   }, [modalOpen, policyModalOpen, settingsTarget, refreshAll]);
 
-  // One probe, once, on mount. `(spark_node_id(), "vllm")` is the only
-  // configurable engine pair the deck wires today (app/main.py:245-247 builds
-  // `configurable_engines` from exactly that one route), and a non-null
-  // catalog for it is what earns the node its Engine settings button. A null
-  // catalog (never harvested) or a failed probe leaves the map empty, so the
-  // button is absent rather than present-and-broken.
+  // One probe per swap node, re-run whenever the swap-node id list changes.
+  // `(nodeId, "vllm")` is the only configurable engine pair the deck wires
+  // today (app/main.py:245-247 builds `configurable_engines` from exactly
+  // that one route per node), and a non-null catalog for a node is what
+  // earns it the Engine settings button. A null catalog (never harvested) or
+  // a failed probe leaves that node out of the map, so the button is absent
+  // rather than present-and-broken. Keyed on the joined id list rather than
+  // `state` itself, so an unrelated poll (world/lifecycle changing, the
+  // swap-node set staying put) does not re-fire every node's probe.
+  const swapIds = swapNodes(state).map((e) => e.id).join(",");
   useEffect(() => {
+    if (!swapIds) return;
     let alive = true;
-    getCatalog(SPARK_NODE_ID, "vllm").then(
-      (catalog) => {
-        if (alive && catalog) setEngineSettingsNodes({ [SPARK_NODE_ID]: "vllm" });
-      },
-      () => {},
-    );
+    for (const id of swapIds.split(",")) {
+      getCatalog(id, "vllm").then(
+        (catalog) => {
+          if (alive && catalog)
+            setEngineSettingsNodes((prev) => ({ ...prev, [id]: "vllm" }));
+        },
+        () => {},
+      );
+    }
     return () => {
       alive = false;
     };
-  }, []);
+  }, [swapIds]);
 
   // Resident GGUFs sitting on a location that isn't lemonade's hot mount —
   // i.e. cold from lemonade's point of view. Defaults to [] so the lemonade
@@ -166,7 +189,7 @@ export default function App() {
         storageState.locations.find((l) => l.name === u.location)?.engine !== "lemonade",
     ) ?? [];
 
-  const nodes = buildNodes(state, spark);
+  const nodes = buildNodes(state, serving);
   // Re-derived on EVERY render, i.e. after every poll: the drawer must read
   // its subject out of the freshest board rather than out of the object the
   // chip click captured, or it would keep showing "serving" over a model that
@@ -230,11 +253,11 @@ export default function App() {
               world={state.world}
               models={state.models}
               coldGgufs={coldGgufs}
-              spark={spark}
+              serving={serving}
               // App owns the fetches, so App is what knows which node an
               // error belongs to. Board stays node-agnostic: it just looks
               // each node up by id.
-              nodeErrors={{ [SPARK_NODE_ID]: sparkError }}
+              nodeErrors={servingErrors}
               engineSettingsNodes={engineSettingsNodes}
               onChipClick={setDetailPlacement}
               onOpenSettings={setSettingsTarget}

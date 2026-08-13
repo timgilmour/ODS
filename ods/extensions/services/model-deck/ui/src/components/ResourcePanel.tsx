@@ -132,7 +132,9 @@ export default function ResourcePanel({
       {!stale &&
         resource.controls.map((control) =>
           control === SPARK_CONTROL ? (
-            spark && <SparkSwap key={control} spark={spark} onChanged={onRefresh} />
+            spark && (
+              <SparkSwap key={control} nodeId={nodeId} spark={spark} onChanged={onRefresh} />
+            )
           ) : isTenantName(control) ? (
             <PlacementActions
               key={control}

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ApiError, sparkSwap, type SparkStatus } from "../api";
+import { ApiError, postNodeSwap, type SparkStatus } from "../api";
 import { isArmedFor } from "../model/armed";
 import { messages, labels } from "../model/messages";
 import { SPARK_CONTROL, SPARK_DEFAULT_ENGINE } from "../model/nodes";
@@ -23,9 +23,11 @@ import ArmedButton from "../ui/ArmedButton";
  * - **the litellm default-route guard.** This is the one force genuinely
  *   cannot help with: it runs before the force check and says so itself. */
 export default function SparkSwap({
+  nodeId,
   spark,
   onChanged,
 }: {
+  nodeId: string;
   spark: SparkStatus;
   onChanged: () => void;
 }) {
@@ -46,7 +48,7 @@ export default function SparkSwap({
     if (!selected) return;
     setBusy(true);
     try {
-      await sparkSwap(selected, force);
+      await postNodeSwap(nodeId, selected, force);
       setError(null);
       setOfferForce(false);
     } catch (err) {

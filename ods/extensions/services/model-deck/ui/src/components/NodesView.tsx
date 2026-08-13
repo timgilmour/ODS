@@ -104,12 +104,6 @@ export default function NodesView({
             />
           ) : entry ? (
             <>
-              {/* Not dismissible: the condition is live, and it clears only
-                  when the deck restarts or the edit is reverted. A dismiss
-                  would hide a still-true fact until the next fetch. */}
-              {entry.actuation_stale && (
-                <Banner message={messages.nodeActuationStale()} />
-              )}
               {/* Keyed on the entry's own id: switching rail rows must START
                   a new form, not carry the previous row's buffers (label
                   edits, a typed credential, an armed delete) into this one.

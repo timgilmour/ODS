@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { getFacts, sparkReload, type SettingsDrift } from "../api";
+import { getFacts, postNodeReload, type SettingsDrift } from "../api";
 import { partitionDrift } from "../model/driftView";
 import { humanizeAge, labels, messages } from "../model/messages";
-import { SPARK_SLOT_KEY, type Placement } from "../model/nodes";
+import { isSwapSlotId, nodeIdOfPlacement, type Placement } from "../model/nodes";
 import { settingsIdentityFor, settingsKeyOf } from "../model/settingsView";
 import Banner from "../ui/Banner";
 import type { SettingsTarget } from "./SettingsModal";
@@ -56,16 +56,16 @@ export default function DriftCard({
   // show.
   const { rows, legacy } = partitionDrift(drift.changed, drift.entries);
   const age = humanizeAge(drift.since);
-  // Spark is a single-slot node whose lifecycle key is fixed backend-side
-  // (app/observe.py SPARK_SLOT_KEY, mirrored in nodes.ts) and the one
-  // placement with a reload verb (app/routers/spark.py:97) — every other
-  // engine has no such action wired today.
-  const isSparkSlot = placement.id === SPARK_SLOT_KEY;
+  // A swap node's slot key is a fixed convention backend-side
+  // (app/observe.py:slot_key, mirrored in nodes.ts's isSwapSlotId) and the
+  // one placement with a reload verb (app/routers/serving.py:109's
+  // serving_reload) — every other engine has no such action wired today.
+  const isSparkSlot = isSwapSlotId(placement.id);
 
   async function handleReload() {
     setReloadBusy(true);
     try {
-      await sparkReload();
+      await postNodeReload(nodeIdOfPlacement(placement.id));
       setReloadError(null);
     } catch (err) {
       setReloadError(err instanceof Error ? err.message : String(err));

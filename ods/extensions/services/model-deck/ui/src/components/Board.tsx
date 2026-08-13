@@ -14,7 +14,7 @@ export default function Board({
   world,
   models,
   coldGgufs,
-  spark,
+  serving,
   nodeErrors,
   engineSettingsNodes,
   onChipClick,
@@ -25,7 +25,12 @@ export default function Board({
   world: World;
   models: ModelFile[];
   coldGgufs: StorageUnit[];
-  spark: SparkStatus | null;
+  /** Per-node serving status, keyed by node id — App's per-node fetch
+   * results. Indexed here (one lookup per card) rather than threaded whole
+   * to NodeCard, which stays scalar the same way `nodeErrors` and
+   * `engineSettingsNodes` already are: a real node registry needs no change
+   * to NodeCard's own prop shape. */
+  serving: Record<string, SparkStatus | null>;
   /** Per-node fetch failures, keyed by node id: "this page could not reach
    * that node's endpoint", which is a different claim from the backend's own
    * reachability verdict in `node.status`. A plain map rather than a
@@ -79,7 +84,7 @@ export default function Board({
             world={world}
             models={models}
             coldGgufs={coldGgufs}
-            spark={spark}
+            spark={serving[node.id] ?? null}
             fetchError={nodeErrors[node.id] ?? null}
             settingsEngine={engineSettingsNodes[node.id] ?? null}
             onChipClick={onChipClick}

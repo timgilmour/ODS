@@ -3,8 +3,8 @@ import {
   bytesToGB,
   getFacts,
   getFactsDrift,
+  postNodeReload,
   putDeclared,
-  sparkReload,
   type FactEntry,
   type FactsDriftItem,
   type FactsMap,
@@ -23,7 +23,7 @@ import {
   tagsWith,
 } from "../model/factsView";
 import { labels, messages } from "../model/messages";
-import { isTenantName, SPARK_SLOT_KEY, type DeckResource, type Placement } from "../model/nodes";
+import { isSwapSlotId, isTenantName, nodeIdOfPlacement, type DeckResource, type Placement } from "../model/nodes";
 import { settingsIdentityFor, settingsKeyOf } from "../model/settingsView";
 import Banner from "../ui/Banner";
 import ProvenanceDot from "../ui/ProvenanceDot";
@@ -289,7 +289,7 @@ export default function ModelDetailDrawer({
   async function handleReload() {
     setReloading(true);
     try {
-      await sparkReload();
+      await postNodeReload(nodeIdOfPlacement(placement.id));
       setReloadError(null);
     } catch (err) {
       setReloadError(err instanceof Error ? err.message : String(err));
@@ -307,9 +307,9 @@ export default function ModelDetailDrawer({
   const tenantControl = placedOn
     ? (placedOn.resource.controls.filter(isTenantName).find((c) => c === placement.engine) ?? null)
     : null;
-  // Spark is a single-slot node whose lifecycle key is fixed backend-side
-  // (app/observe.py SPARK_SLOT_KEY, mirrored in nodes.ts).
-  const isSparkSlot = placement.id === SPARK_SLOT_KEY;
+  // A swap node's slot key is a fixed convention backend-side
+  // (app/observe.py:slot_key, mirrored in nodes.ts's isSwapSlotId).
+  const isSparkSlot = isSwapSlotId(placement.id);
   const settingsEngine = placedOn ? (engineSettingsNodes[placedOn.nodeId] ?? null) : null;
   // Verbs need a reachable node AND a placement still on the board: a stale
   // reading is a memory, and nothing can act on a memory.

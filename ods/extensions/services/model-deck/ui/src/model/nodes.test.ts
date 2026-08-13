@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { DeckNodeEntry, LifecycleEntry, SettingsDrift, SparkStatus, StateResponse } from "../api";
-import { buildNodes, findPlacement, isTenantName, TENANT_ORDER } from "./nodes";
+import {
+  buildNodes,
+  findPlacement,
+  isSwapSlotId,
+  isTenantName,
+  nodeIdOfPlacement,
+  swapNodes,
+  TENANT_ORDER,
+} from "./nodes";
 
 function state(overrides: Partial<StateResponse> = {}): StateResponse {
   return {
@@ -32,25 +40,25 @@ function state(overrides: Partial<StateResponse> = {}): StateResponse {
 
 describe("buildNodes", () => {
   it("returns nothing before the first successful poll", () => {
-    expect(buildNodes(null, null)).toEqual([]);
+    expect(buildNodes(null, {})).toEqual([]);
   });
 
   it("names the local node from the backend, not a hardcoded string", () => {
-    const [local] = buildNodes(state(), null);
+    const [local] = buildNodes(state(), {});
     expect(local.id).toBe("local");
     expect(local.label).toBe("autarch");
     expect(local.status).toBe("reachable");
   });
 
   it("makes one resource per GPU, in index order", () => {
-    const [local] = buildNodes(state(), null);
+    const [local] = buildNodes(state(), {});
     expect(local.resources.map((r) => r.id)).toEqual(["gpu0", "gpu1"]);
     expect(local.resources[0].label).toBe("GPU 0");
     expect(local.resources[0].capacity).toEqual({ used: 22_100_000_000, total: 34_000_000_000 });
   });
 
   it("places a tenant on the GPU the backend assigned it", () => {
-    const [local] = buildNodes(state(), null);
+    const [local] = buildNodes(state(), {});
     const gpu0 = local.resources[0];
     expect(gpu0.placements.map((p) => p.name)).toEqual(["Qwen3.6-35B-A3B-heretic-NVFP4"]);
     expect(gpu0.placements[0].engine).toBe("hipfire");
@@ -58,12 +66,12 @@ describe("buildNodes", () => {
   });
 
   it("keeps a model identity verbatim", () => {
-    const [local] = buildNodes(state(), null);
+    const [local] = buildNodes(state(), {});
     expect(local.resources[0].placements[0].name).toBe("Qwen3.6-35B-A3B-heretic-NVFP4");
   });
 
   it("omits an unloaded tenant rather than showing an empty chip", () => {
-    const [local] = buildNodes(state(), null);
+    const [local] = buildNodes(state(), {});
     const gpu1 = local.resources[1];
     expect(gpu1.placements.some((p) => p.engine === "lemonade")).toBe(false);
   });
@@ -74,14 +82,14 @@ describe("buildNodes", () => {
     // flight shows up today; a dedicated chip treatment is deferred.
     const s = state();
     s.world.tenants.lemonade = { state: "loading", model: null, footprint: null, idle_s: null };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     expect(local.resources[1].placements.some((p) => p.engine === "lemonade")).toBe(false);
   });
 
   it("keeps an unloaded tenant's controls on its resource", () => {
     // The empty-slot case: no chip, but lemonade's Load dropdown still has
     // to render somewhere, so the resource carries the control list.
-    const [local] = buildNodes(state(), null);
+    const [local] = buildNodes(state(), {});
     expect(local.resources[1].controls).toEqual(["lemonade", "comfyui"]);
     expect(local.resources[0].controls).toEqual(["hipfire"]);
   });
@@ -94,7 +102,7 @@ describe("buildNodes", () => {
       footprint: 9_500_000_000,
       idle_s: 4,
     };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     expect(local.resources[1].placements.map((p) => p.name)).toContain(
       "qwen2.5-14b-instruct-4k-q4_k_m.gguf",
     );
@@ -103,14 +111,14 @@ describe("buildNodes", () => {
   it("omits a parked hipfire", () => {
     const s = state();
     s.world.tenants.hipfire = { state: "parked", model: null, footprint: 0, queue_depth: null };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     expect(local.resources[0].placements).toEqual([]);
   });
 
   it("surfaces an external process as its own placement", () => {
     const s = state();
     s.world.externals = [{ pid: 4242, gpu: 0, bytes: 1_200_000_000 }];
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     const external = local.resources[0].placements.find((p) => p.kind === "external");
     expect(external?.bytes).toBe(1_200_000_000);
     expect(external?.status).toBe("unmanaged");
@@ -124,7 +132,7 @@ describe("buildNodes", () => {
     s.world.tenants.lemonade = {
       state: "loaded", model: "qwen.gguf", footprint: 9_000_000_000, idle_s: 4,
     };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     const hipfire = local.resources[0].placements[0];
     const lemonade = local.resources[1].placements.find((p) => p.engine === "lemonade");
 
@@ -137,24 +145,24 @@ describe("buildNodes", () => {
   it("marks hipfire busy when a turn is in flight, and not otherwise", () => {
     // Predicts the park refusal BEFORE the click: hipfire's single admission
     // slot is what makes park/apply 409 without force.
-    const idle = buildNodes(state(), null)[0].resources[0].placements[0];
+    const idle = buildNodes(state(), {})[0].resources[0].placements[0];
     expect(idle.busy).toBe(false);
 
     const s = state();
     s.world.tenants.hipfire = { ...s.world.tenants.hipfire, queue_depth: 2 };
-    expect(buildNodes(s, null)[0].resources[0].placements[0].busy).toBe(true);
+    expect(buildNodes(s, {})[0].resources[0].placements[0].busy).toBe(true);
   });
 
   it("treats a missing hipfire queue reading as not busy", () => {
     const s = state();
     s.world.tenants.hipfire = { ...s.world.tenants.hipfire, queue_depth: null };
-    expect(buildNodes(s, null)[0].resources[0].placements[0].busy).toBe(false);
+    expect(buildNodes(s, {})[0].resources[0].placements[0].busy).toBe(false);
   });
 
   it("carries ComfyUI's queue and idle time, and gives hipfire neither", () => {
     const s = state();
     s.world.tenants.comfyui = { state: "busy", queue: 3, idle_s: 0 };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     const comfy = local.resources[1].placements.find((p) => p.engine === "comfyui");
     const hipfire = local.resources[0].placements[0];
 
@@ -167,13 +175,13 @@ describe("buildNodes", () => {
   });
 
   it("keeps a drained ComfyUI queue distinct from an unreadable one", () => {
-    const zero = buildNodes(state(), null)[0].resources[1].placements
+    const zero = buildNodes(state(), {})[0].resources[1].placements
       .find((p) => p.engine === "comfyui");
     expect(zero?.queue).toBe(0);
 
     const s = state();
     s.world.tenants.comfyui = { state: "unknown", queue: null, idle_s: null };
-    const unknown = buildNodes(s, null)[0].resources[1].placements
+    const unknown = buildNodes(s, {})[0].resources[1].placements
       .find((p) => p.engine === "comfyui");
     expect(unknown?.queue).toBeNull();
   });
@@ -182,7 +190,7 @@ describe("buildNodes", () => {
     // The badge answers "what is this node running that it usually isn't".
     // On the local box each tenant IS its engine, so there is no such
     // question and no badge.
-    const [local] = buildNodes(state(), null);
+    const [local] = buildNodes(state(), {});
     for (const r of local.resources) {
       for (const p of r.placements) expect(p.engineBadge).toBeUndefined();
     }
@@ -200,7 +208,7 @@ describe("buildNodes", () => {
         settings_drift: null,
       },
     };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     expect(local.resources[0].placements[0].status).toBe("drifted");
   });
 
@@ -226,7 +234,7 @@ describe("buildNodes", () => {
         settings_drift: drift,
       },
     };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     expect(local.resources[0].placements[0].settingsDrift).toEqual(drift);
   });
 
@@ -242,7 +250,7 @@ describe("buildNodes", () => {
         settings_drift: null,
       },
     };
-    const [local] = buildNodes(s, null);
+    const [local] = buildNodes(s, {});
     expect(local.resources[0].placements[0].settingsDrift).toBeUndefined();
   });
 });
@@ -268,40 +276,129 @@ function lifecycleEntry(overrides: Partial<LifecycleEntry> = {}): LifecycleEntry
   };
 }
 
-describe("buildNodes — spark", () => {
-  it("omits the node entirely when spark is not configured", () => {
-    expect(buildNodes(state(), null).map((n) => n.id)).toEqual(["local"]);
-  });
+// The registry's own entry for the local box — always present in
+// state.nodes (app/routers/status.py's _nodes_block), always agent_kind
+// "local", always skipped by buildNodes' registry loop (which only turns
+// "node-agent" entries into cards). Included in these fixtures because the
+// real payload always carries it alongside the remote entries. `control` is
+// carried on the wire regardless of agent_kind (app/node_store.py's
+// `_heal_control`), even though the local loop never reads it.
+const localEntry: DeckNodeEntry = {
+  id: "local", label: "autarch", agent_kind: "local",
+  address: null, serving_address: null, credential_set: false, control: "none",
+  status: "online", last_seen: null, gpus: null, serving: null, error: null,
+};
 
-  it("adds a single serving-slot resource when configured", () => {
-    const nodes = buildNodes(state(), sparkStatus());
-    const spark = nodes[1];
-    expect(spark.id).toBe("sparky");
-    expect(spark.status).toBe("reachable");
-    expect(spark.resources.map((r) => r.label)).toEqual(["Serving slot"]);
-    expect(spark.resources[0].placements[0].name).toBe("heretic");
+// Labels deliberately ≠ ids: a fixture whose label equals its id cannot
+// catch a label used as a key (the node_label class of defect). control
+// "none" — the observe-only case, whether or not it happens to carry
+// serving data (see the "watcher-shaped" test below).
+const heraEntry: DeckNodeEntry = {
+  id: "hera", label: "Hera Box", agent_kind: "node-agent",
+  address: "http://hera:7720", serving_address: null, credential_set: true,
+  control: "none",
+  status: "online", last_seen: "2026-08-10T00:00:00+00:00",
+  gpus: [{ index: 0, name: "RTX", memory_used_mb: 1024, memory_total_mb: 24576,
+           utilization_percent: 5 }],
+  serving: { model: "big-model", endpoint_ok: true }, error: null,
+};
+
+// Two swap-control entries — deliberately different ids/labels so a test can
+// tell them apart on screen, the same reasoning as heraEntry's label choice.
+// `gpus` carries a reading (unlike heraEntry's) because a swap node is a
+// node-agent too — the node-observer probes it the same way — so its
+// observe-only fallback (buildSwapNode returning null) has a real resource
+// to render rather than an empty shell.
+const boxaEntry: DeckNodeEntry = {
+  id: "boxa", label: "Box Alpha", agent_kind: "node-agent",
+  address: "http://boxa:7720", serving_address: "http://boxa:8000",
+  credential_set: true, control: "swap",
+  status: "online", last_seen: "2026-08-10T00:00:00+00:00",
+  gpus: [{ index: 0, name: "RTX 6000", memory_used_mb: 4096, memory_total_mb: 49152,
+           utilization_percent: 10 }],
+  serving: null, error: null,
+};
+
+const boxbEntry: DeckNodeEntry = {
+  id: "boxb", label: "Box Beta", agent_kind: "node-agent",
+  address: "http://boxb:7720", serving_address: "http://boxb:8000",
+  credential_set: true, control: "swap",
+  status: "online", last_seen: "2026-08-10T00:00:00+00:00",
+  gpus: [{ index: 0, name: "RTX 6000", memory_used_mb: 2048, memory_total_mb: 49152,
+           utilization_percent: 5 }],
+  serving: null, error: null,
+};
+
+describe("buildNodes — swap nodes", () => {
+  it("makes one card per swap node, each with its own placement id and label from the registry", () => {
+    const s = state({ nodes: [localEntry, boxaEntry, boxbEntry] });
+    const nodes = buildNodes(s, {
+      boxa: sparkStatus(),
+      boxb: sparkStatus({
+        profiles: [{ name: "ds4", engine: "ds4", health_url: null, container: "spark-ds4" }],
+        serving: { model: "ds4", endpoint_ok: true, container_status: "running" },
+      }),
+    });
+
+    const a = nodes.find((n) => n.id === "boxa")!;
+    const b = nodes.find((n) => n.id === "boxb")!;
+    expect(a.label).toBe("Box Alpha");
+    expect(b.label).toBe("Box Beta");
+    expect(a.resources[0].placements[0].id).toBe("boxa/slot0");
+    expect(b.resources[0].placements[0].id).toBe("boxb/slot0");
+    expect(a.resources[0].placements[0].name).toBe("heretic");
+    expect(b.resources[0].placements[0].name).toBe("ds4");
+    // Neither node's serving status leaks into the other's card.
+    expect(a.resources[0].placements).toHaveLength(1);
+    expect(b.resources[0].placements).toHaveLength(1);
   });
 
   it("reports unknown capacity rather than zero", () => {
-    const spark = buildNodes(state(), sparkStatus())[1];
-    expect(spark.resources[0].capacity).toBeNull();
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(boxa.resources[0].capacity).toBeNull();
+  });
+
+  it("control decides, data never does: a control:'none' entry never gets swap controls, even carrying serving data and a servingByNode entry", () => {
+    // The watcher-shaped fixture nodes.ts's swapNodes docstring points at:
+    // heraEntry already reports `serving` on the wire and is handed a real
+    // SparkStatus here too, and still must render observe-only — presence of
+    // serving data must never promote a node, only the DECLARED control does.
+    const s = state({ nodes: [localEntry, heraEntry] });
+    const hera = buildNodes(s, { hera: sparkStatus() }).find((n) => n.id === "hera")!;
+    expect(hera.resources[0].controls).toEqual([]);
+    expect(hera.resources[0].placements).toEqual([]);
+  });
+
+  it("falls back to the observe-only card when no status has landed yet, never a phantom control surface", () => {
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, { boxa: null }).find((n) => n.id === "boxa")!;
+    expect(boxa.label).toBe("Box Alpha"); // the registry label, same as the swap card would show
+    expect(boxa.resources[0].controls).toEqual([]);
+    expect(boxa.resources[0].placements).toEqual([]);
+  });
+
+  it("also falls back to observe-only when the id is simply absent from servingByNode (fetch not landed)", () => {
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {}).find((n) => n.id === "boxa")!;
+    expect(boxa.resources[0].controls).toEqual([]);
   });
 
   it("retains last-known placements when unreachable, and marks them stale", () => {
-    const s = state();
+    const s = state({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
-      "sparky/slot0": lifecycleEntry({
+      "boxa/slot0": lifecycleEntry({
         status: "unreachable",
         observed: { reachable: false, loaded: false, model: null, transitioning: false },
       }),
     };
-    const spark = buildNodes(s, sparkStatus())[1];
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
 
-    expect(spark.status).toBe("unreachable");
-    expect(spark.lastSeen).toBe("2026-08-04T14:23:11Z");
+    expect(boxa.status).toBe("unreachable");
+    expect(boxa.lastSeen).toBe("2026-08-04T14:23:11Z");
     // The whole point: an offline node must never blank out.
-    expect(spark.resources[0].placements[0].name).toBe("heretic");
-    expect(spark.resources[0].placements[0].stale).toBe(true);
+    expect(boxa.resources[0].placements[0].name).toBe("heretic");
+    expect(boxa.resources[0].placements[0].stale).toBe(true);
   });
 
   it("carries the PROFILE for settings identity and the served name for display", () => {
@@ -316,9 +413,9 @@ describe("buildNodes — spark", () => {
     // app/observe.py:180-184 says so outright — "Identity is the PROFILE the
     // node last swapped to, not the served model name ... comparing served
     // names would report permanent drift for a correct placement".
-    const spark = buildNodes(
-      state(),
-      sparkStatus({
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({
         // engine "ds4" on a profile named mm27b is a deliberately
         // NON-default engine, chosen so the join is observable — the real
         // mm27b is a vllm profile, so read this as "a profile whose engine
@@ -330,8 +427,8 @@ describe("buildNodes — spark", () => {
           message: "", ts: "2026-08-05T00:00:00Z",
         },
       }),
-    )[1];
-    const placement = spark.resources[0].placements[0];
+    }).find((n) => n.id === "boxa")!;
+    const placement = boxa.resources[0].placements[0];
 
     expect(placement.name).toBe("aeon");       // the chip shows what is served
     expect(placement.profile).toBe("mm27b");   // settings/facts key vocabulary
@@ -344,81 +441,96 @@ describe("buildNodes — spark", () => {
     // swap_status null is a real state (a node up since before the deck
     // watched it). Callers fall back to placement.name, so this must be
     // absent rather than an empty string.
-    const spark = buildNodes(state(), sparkStatus())[1];
-    expect(spark.resources[0].placements[0].profile).toBeUndefined();
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(boxa.resources[0].placements[0].profile).toBeUndefined();
   });
 
   it("reads as warming while a swap is in flight and the endpoint is down", () => {
-    const spark = buildNodes(
-      state(),
-      sparkStatus({
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({
         serving: { model: "heretic", endpoint_ok: false, container_status: "running" },
         swap_status: {
           state: "swapping", profile: "heretic", id: "1",
           message: "", ts: "2026-08-05T00:00:00Z",
         },
       }),
-    )[1];
-    expect(spark.status).toBe("warming");
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.status).toBe("warming");
   });
 
   it("reads as warming through the long tail of a boot the helper already calls done", () => {
-    // The case a real spark boot spends nearly all its time in, and the one
-    // the swap_status-only rule got wrong. The helper reports "done" as soon
-    // as swap.sh launches (app/engines/spark.py, _BOOTING_STATES), so the
-    // 5-15 minutes of weight load and autotune look like this: state "done",
+    // The case a real boot spends nearly all its time in, and the one the
+    // swap_status-only rule got wrong. The helper reports "done" as soon as
+    // swap.sh launches (app/engines/spark.py, _BOOTING_STATES), so the 5-15
+    // minutes of weight load and autotune look like this: state "done",
     // endpoint still down. app/observe.py's boot_in_flight() is what knows
     // better, and it arrives here as observed.transitioning.
-    const s = state();
+    const s = state({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
-      "sparky/slot0": lifecycleEntry({
+      "boxa/slot0": lifecycleEntry({
         status: "warming",
         reason: "a load or boot is in flight",
         observed: { reachable: true, loaded: false, model: null, transitioning: true },
       }),
     };
-    const spark = buildNodes(
-      s,
-      sparkStatus({
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({
         serving: { model: "heretic", endpoint_ok: false, container_status: "running" },
         swap_status: {
           state: "done", profile: "heretic", id: "1",
           message: "", ts: "2026-08-05T00:00:00Z",
         },
       }),
-    )[1];
-    expect(spark.status).toBe("warming");
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.status).toBe("warming");
   });
 
   it("is down, not warming, when the endpoint is dead with no swap running", () => {
-    const spark = buildNodes(
-      state(),
-      sparkStatus({ serving: { model: "heretic", endpoint_ok: false, container_status: "exited" } }),
-    )[1];
-    expect(spark.status).toBe("down");
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({ serving: { model: "heretic", endpoint_ok: false, container_status: "exited" } }),
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.status).toBe("down");
+  });
+
+  it("is unreachable when the lifecycle view says so, even with a healthy-looking serving payload", () => {
+    // Status derivation order: `!reachable` wins over everything else.
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    s.lifecycle = {
+      "boxa/slot0": lifecycleEntry({
+        status: "unreachable",
+        observed: { reachable: false, loaded: false, model: null, transitioning: false },
+      }),
+    };
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({ serving: { model: "heretic", endpoint_ok: true, container_status: "running" } }),
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.status).toBe("unreachable");
   });
 
   it("badges a non-default engine and stays silent about the default one", () => {
-    const vllm = buildNodes(state(), sparkStatus())[1];
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const vllm = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
     expect(vllm.resources[0].placements[0].engine).toBe("vllm");
     expect(vllm.resources[0].placements[0].engineBadge).toBeUndefined();
 
-    const ds4 = buildNodes(
-      state(),
-      sparkStatus({
+    const ds4 = buildNodes(s, {
+      boxa: sparkStatus({
         profiles: [{ name: "ds4", engine: "ds4", health_url: null, container: "spark-ds4" }],
         serving: { model: "ds4", endpoint_ok: true, container_status: "running" },
       }),
-    )[1];
+    }).find((n) => n.id === "boxa")!;
     expect(ds4.resources[0].placements[0].engineBadge).toBe("ds4");
   });
 
   it("carries the swap helper's error text as the node's detail", () => {
     // The failed-swap case: without this the board shows a red pill and
     // nothing anywhere says the helper died.
-    const spark = buildNodes(
-      state(),
-      sparkStatus({
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({
         serving: { model: null, endpoint_ok: false, container_status: "exited" },
         swap_status: {
           state: "error", profile: "ornith", id: "7",
@@ -426,82 +538,80 @@ describe("buildNodes — spark", () => {
           ts: "2026-08-05T00:00:00Z",
         },
       }),
-    )[1];
-    expect(spark.status).toBe("down");
-    expect(spark.detail).toBe("swap-helper: container spark-ornith exited (1)");
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.status).toBe("down");
+    expect(boxa.detail).toBe("swap-helper: container spark-ornith exited (1)");
   });
 
   it("falls back to lifecycle's own reason when no swap failed", () => {
-    const s = state();
+    const s = state({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
-      "sparky/slot0": lifecycleEntry({
+      "boxa/slot0": lifecycleEntry({
         status: "down",
         reason: "intended 'heretic' is not loaded",
         observed: { reachable: true, loaded: false, model: null, transitioning: false },
       }),
     };
-    const spark = buildNodes(
-      s,
-      sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
-    )[1];
-    expect(spark.status).toBe("down");
-    expect(spark.detail).toBe("intended 'heretic' is not loaded");
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.status).toBe("down");
+    expect(boxa.detail).toBe("intended 'heretic' is not loaded");
   });
 
   it("prefers a real reason over an error swap with an empty message", () => {
     // A blank explanation is worse than the generic one: it renders as a
     // banner trailing an em-dash into nothing.
-    const s = state();
+    const s = state({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
-      "sparky/slot0": lifecycleEntry({
+      "boxa/slot0": lifecycleEntry({
         status: "down",
         reason: "intended 'heretic' is not loaded",
         observed: { reachable: true, loaded: false, model: null, transitioning: false },
       }),
     };
-    const spark = buildNodes(
-      s,
-      sparkStatus({
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({
         serving: { model: null, endpoint_ok: false, container_status: "exited" },
         swap_status: {
           state: "error", profile: "ornith", id: "7", message: "",
           ts: "2026-08-05T00:00:00Z",
         },
       }),
-    )[1];
-    expect(spark.detail).toBe("intended 'heretic' is not loaded");
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.detail).toBe("intended 'heretic' is not loaded");
   });
 
   it("leaves detail absent when the backend offered no reason at all", () => {
-    const spark = buildNodes(
-      state(),
-      sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
-    )[1];
-    expect(spark.detail).toBeUndefined();
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.detail).toBeUndefined();
   });
 
-  it("carries settings drift onto the spark slot too", () => {
-    // The reload verb is gated on placement.id === SPARK_SLOT_KEY, so drift
-    // has to reach exactly this placement, not just local tenants.
+  it("carries settings drift onto the swap slot too", () => {
+    // The reload verb is gated on isSwapSlotId(placement.id), so drift has
+    // to reach exactly this placement, not just local tenants.
     const drift: SettingsDrift = {
       changed: ["args:served-model-name"],
       entries: [],
       since: "2026-08-07T00:00:00Z",
     };
-    const s = state();
+    const s = state({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
-      "sparky/slot0": lifecycleEntry({ settings_drift: drift }),
+      "boxa/slot0": lifecycleEntry({ settings_drift: drift }),
     };
-    const spark = buildNodes(s, sparkStatus())[1];
-    expect(spark.resources[0].placements[0].settingsDrift).toEqual(drift);
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(boxa.resources[0].placements[0].settingsDrift).toEqual(drift);
   });
 
   it("has an empty slot when nothing is serving", () => {
-    const spark = buildNodes(
-      state(),
-      sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: null } }),
-    )[1];
-    expect(spark.resources[0].placements).toEqual([]);
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: null } }),
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.resources[0].placements).toEqual([]);
   });
 });
 
@@ -523,8 +633,48 @@ describe("isTenantName", () => {
   });
 });
 
+describe("isSwapSlotId", () => {
+  it("recognizes a swap node's synthesized slot key, regardless of node id", () => {
+    expect(isSwapSlotId("boxa/slot0")).toBe(true);
+    expect(isSwapSlotId("boxb/slot0")).toBe(true);
+  });
+
+  it("rejects a local tenant placement id", () => {
+    expect(isSwapSlotId("local/hipfire")).toBe(false);
+  });
+
+  it("rejects an external placement id", () => {
+    expect(isSwapSlotId("external/4242")).toBe(false);
+  });
+});
+
+describe("nodeIdOfPlacement", () => {
+  it("takes the node id off a swap slot key", () => {
+    expect(nodeIdOfPlacement("boxa/slot0")).toBe("boxa");
+  });
+
+  it("takes the node id off a local tenant placement id the same way", () => {
+    expect(nodeIdOfPlacement("local/hipfire")).toBe("local");
+  });
+});
+
+describe("swapNodes", () => {
+  it("returns only the control:swap entries, declared not inferred", () => {
+    const s = state({ nodes: [localEntry, heraEntry, boxaEntry, boxbEntry] });
+    expect(swapNodes(s).map((e) => e.id)).toEqual(["boxa", "boxb"]);
+  });
+
+  it("returns nothing before state has loaded", () => {
+    expect(swapNodes(null)).toEqual([]);
+  });
+
+  it("returns nothing when the registry carries no swap nodes", () => {
+    expect(swapNodes(state({ nodes: [localEntry, heraEntry] }))).toEqual([]);
+  });
+});
+
 describe("findPlacement", () => {
-  const nodes = buildNodes(state(), sparkStatus());
+  const nodes = buildNodes(state({ nodes: [localEntry, boxaEntry] }), { boxa: sparkStatus() });
 
   it("finds a local tenant placement and hands back the resource that carries it", () => {
     // The drawer needs the RESOURCE too: its `controls` are what decide
@@ -536,9 +686,9 @@ describe("findPlacement", () => {
     expect(spot?.resource.controls).toContain("hipfire");
   });
 
-  it("finds the spark slot on the remote node", () => {
-    const spot = findPlacement(nodes, "sparky/slot0");
-    expect(spot?.node.id).toBe("sparky");
+  it("finds a swap node's slot on the remote node", () => {
+    const spot = findPlacement(nodes, "boxa/slot0");
+    expect(spot?.node.id).toBe("boxa");
     expect(spot?.resource.id).toBe("slot0");
     expect(spot?.placement.name).toBe("heretic");
   });
@@ -550,7 +700,7 @@ describe("findPlacement", () => {
     parked.world.tenants.hipfire = {
       state: "parked", model: null, footprint: 0, queue_depth: null,
     };
-    expect(findPlacement(buildNodes(parked, null), "local/hipfire")).toBeNull();
+    expect(findPlacement(buildNodes(parked, {}), "local/hipfire")).toBeNull();
   });
 
   it("returns null for an id no node ever carried", () => {
@@ -559,34 +709,10 @@ describe("findPlacement", () => {
   });
 });
 
-// The registry's own entry for the local box — always present in
-// state.nodes (app/routers/status.py's _nodes_block), always agent_kind
-// "local", always skipped by buildNodes' registry loop (which only turns
-// "node-agent" entries into observe-only cards). Included in these fixtures
-// because the real payload always carries it alongside the remote entries.
-const localEntry: DeckNodeEntry = {
-  id: "local", label: "autarch", agent_kind: "local",
-  address: null, serving_address: null, credential_set: false,
-  status: "online", last_seen: null, gpus: null, serving: null, error: null,
-  actuation_stale: false,
-};
-
-// Labels deliberately ≠ ids: a fixture whose label equals its id cannot
-// catch a label used as a key (the node_label class of defect).
-const heraEntry: DeckNodeEntry = {
-  id: "hera", label: "Hera Box", agent_kind: "node-agent",
-  address: "http://hera:7720", serving_address: null, credential_set: true,
-  status: "online", last_seen: "2026-08-10T00:00:00+00:00",
-  gpus: [{ index: 0, name: "RTX", memory_used_mb: 1024, memory_total_mb: 24576,
-           utilization_percent: 5 }],
-  serving: { model: "big-model", endpoint_ok: true }, error: null,
-  actuation_stale: false,
-};
-
 describe("buildNodes — registry nodes", () => {
-  it("a registry node-agent entry becomes an observe-only card", () => {
+  it("a registry node-agent entry with control:'none' becomes an observe-only card", () => {
     const s = state({ nodes: [localEntry, heraEntry] });
-    const nodes = buildNodes(s, null);
+    const nodes = buildNodes(s, {});
     const hera = nodes.find((n) => n.id === "hera")!;
     expect(hera.label).toBe("Hera Box");
     expect(hera.status).toBe("reachable");
@@ -606,25 +732,16 @@ describe("buildNodes — registry nodes", () => {
   ] as const)("observer status %s renders as %s", (status, expected) => {
     const s = state({ nodes: [localEntry, { ...heraEntry, status,
       error: "backend sentence" }] });
-    const hera = buildNodes(s, null).find((n) => n.id === "hera")!;
+    const hera = buildNodes(s, {}).find((n) => n.id === "hera")!;
     expect(hera.status).toBe(expected);
     expect(hera.detail).toBe("backend sentence");
   });
 
-  it("sparky's card label comes from the registry", () => {
-    const s = state({ nodes: [localEntry,
-      { ...heraEntry, id: "sparky", label: "Spark Box" }] });
-    const nodes = buildNodes(s, sparkStatus());
-    const sparky = nodes.find((n) => n.id === "sparky")!;
-    expect(sparky.label).toBe("Spark Box");
-    // and NOT a second observe-only sparky card:
-    expect(nodes.filter((n) => n.id === "sparky")).toHaveLength(1);
-  });
-
-  it("sparky with no spark client still gets an observe-only card", () => {
-    const s = state({ nodes: [localEntry,
-      { ...heraEntry, id: "sparky", label: "Spark Box" }] });
-    const nodes = buildNodes(s, null); // /api/spark 503s: engine unbuilt
-    expect(nodes.find((n) => n.id === "sparky")).toBeDefined();
+  it("a swap node's label always comes from the registry, never a hardcoded id", () => {
+    const s = state({ nodes: [localEntry, boxaEntry] });
+    const nodes = buildNodes(s, { boxa: sparkStatus() });
+    // Exactly one card for the entry — never a second, separately-built one.
+    expect(nodes.filter((n) => n.id === "boxa")).toHaveLength(1);
+    expect(nodes.find((n) => n.id === "boxa")?.label).toBe("Box Alpha");
   });
 });
