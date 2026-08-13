@@ -56,6 +56,12 @@ def make_world(
 ):
     lem_state, lem_model = lemonade
     comfy_state, comfy_queue = comfy
+    # "engine" backfilled per tenant (E1, Task 5 obligation): this world dict
+    # feeds app.observe.observe_local (test_declared_model_x_over_resident_y_
+    # derives_drifted_not_restore), whose dispatch reads `tenant["engine"]`
+    # unconditionally now — the transitional `tenant.get("engine", resource)`
+    # fallback is gone. Resource == kind name for this fixed triple, so the
+    # literal is exact, not a guess.
     return {
         "gpus": [],
         "tenants": {
@@ -64,9 +70,11 @@ def make_world(
                 "model": lem_model,
                 "footprint": None,
                 "idle_s": None,
+                "engine": "lemonade",
             },
-            "comfyui": {"state": comfy_state, "queue": comfy_queue, "idle_s": None},
-            "hipfire": {"state": hipfire, "model": None, "footprint": 0},
+            "comfyui": {"state": comfy_state, "queue": comfy_queue, "idle_s": None,
+                       "engine": "comfyui"},
+            "hipfire": {"state": hipfire, "model": None, "footprint": 0, "engine": "hipfire"},
         },
         "externals": [],
         "default_route": default_route,

@@ -64,17 +64,18 @@ def observe_local(world: dict) -> dict[str, dict]:
     revisit this dispatch alongside its LOCAL_LEMONADE_KEY/LOCAL_HIPFIRE_KEY
     relocation.
 
-    `tenant.get("engine", resource)`: app/arbiter.py's and
-    tests/test_arbiter.py's hand-built world dicts (the `decide()` pure-
-    function fixtures, `_world()`/`_lem()`/`_comfy()`/`_hip()` — Task 5's
-    territory per the plan's own T3/T5 conflict-scan ruling, not
-    backfilled here) predate the `engine` field and key tenants by kind
-    name already (coexistence: resource == kind for the seeded triple), so
-    falling back to the resource name itself is exact, not a guess, for
-    every one of them."""
+    `tenant["engine"]` is read unconditionally — the transitional
+    `tenant.get("engine", resource)` fallback this function used to lean on
+    (for hand-built world dicts across app/arbiter.py's and
+    tests/test_arbiter.py's `decide()` pure-function fixtures, which predated
+    the `engine` field) is gone: Task 5 backfilled `engine` into every one of
+    those fixtures (plus the couple of other hand-built worlds elsewhere in
+    tests/ that also route through this function), so a resource-name guess
+    is no longer needed — every tenant this function ever sees now carries
+    its own kind explicitly, same as production."""
     out: dict[str, dict] = {}
     for resource, tenant in world["tenants"].items():
-        kind = tenant.get("engine", resource)
+        kind = tenant["engine"]
         state = tenant["state"]
         if kind == "lemonade":
             record = _record(

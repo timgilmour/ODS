@@ -41,6 +41,13 @@ from app.registry import HIPFIRE_FOOTPRINT
 _OPENAI_PREFIX = "openai/"
 _EXTRA_PREFIX = "extra."
 
+# VRAM overhead slack subtracted when estimating a "free"-verb kind's (today:
+# comfyui) reclaimable bytes from raw GPU usage (fragmentation, driver/
+# runtime overhead, small tenants) — moved here VERBATIM from app/arbiter.py
+# (Task 5) alongside the usage-gap estimate that consumes it, since both are
+# now per-kind (`_ComfyAdapter.reclaimable`), not arbiter-module globals.
+_SLACK_BYTES = 1024**3  # 1 GiB
+
 # hipfire runs as a sibling container on the compose network; its health
 # endpoint is <container>:11435/health (config/ports.json + manifest.yaml).
 # Owned here (review fix, T3 round 2 — was duplicated in local_clients.py):
@@ -190,6 +197,37 @@ class _LemonadeAdapter:
     def demand(self) -> bool:
         return True
 
+    def idle_action(self, obs: dict, policy: dict, gpu: dict | None, co_footprints: int) -> dict | None:
+        # Moved VERBATIM from app.arbiter._decide_idle_release's pre-E1
+        # rule 1 (arbiter.py:251-262) — comments included, they carry
+        # incident history. `gpu`/`co_footprints` are unused for this kind
+        # (kept for adapter-interface uniformity with comfy's idle_action,
+        # same rationale as `observe`'s per-kind-unused `ctx` fields — see
+        # this module's docstring).
+        if (
+            obs["state"] == "loaded"
+            and not policy["pinned"]
+            and policy["idle_ttl"] > 0
+            and obs["idle_s"] is not None
+            and obs["idle_s"] >= policy["idle_ttl"]
+        ):
+            # NOTE: the default-route model is intentionally NOT guarded
+            # here — idle release on it is the idle-GPU-burn fix (reload
+            # ~4 s). This exception applies ONLY to idle release, never to
+            # contention (see app.arbiter._eviction_candidates).
+            return {"type": "unload", "model": obs["model"]}
+        return None
+
+    def reclaimable(self, obs: dict, gpu: dict | None, co_footprints: int) -> int | None:
+        """Known footprint while loaded, else None (unquantifiable, so not a
+        usable eviction/idle candidate) — moved VERBATIM from the
+        eligibility half of app.arbiter._eviction_candidates's pre-E1
+        lemonade branch (arbiter.py:369-374). `gpu`/`co_footprints` are
+        unused for this kind (see idle_action's docstring above)."""
+        if obs["state"] == "loaded" and obs.get("footprint"):
+            return obs["footprint"]
+        return None
+
     def build_client(self, connection: dict, settings):
         # Moved from app.local_clients._build_client (review fix, T3 round
         # 2) — same constructor call app.main._build_deck used to make
@@ -239,6 +277,49 @@ class _ComfyAdapter:
     def demand(self) -> bool:
         return False
 
+    def idle_action(self, obs: dict, policy: dict, gpu: dict | None, co_footprints: int) -> dict | None:
+        # Moved VERBATIM from app.arbiter._decide_idle_release's pre-E1
+        # rule 2 (arbiter.py:264-279) — comments included, they carry
+        # incident history.
+        if (
+            obs["state"] == "idle"
+            and obs["queue"] == 0
+            and not policy["pinned"]
+            and policy["idle_ttl"] > 0
+            and obs["idle_s"] is not None
+            and obs["idle_s"] >= policy["idle_ttl"]
+            # A free that can't reclaim anything is a no-op that re-arms the
+            # TTL and re-fires every idle_ttl seconds forever, flooding the
+            # event ring. None (this resource's GPU unresolvable) must not
+            # suppress the free: unknown usage is not proof there's nothing
+            # to reclaim.
+            and self.reclaimable(obs, gpu, co_footprints) != 0
+        ):
+            return {"type": "free"}
+        return None
+
+    def reclaimable(self, obs: dict, gpu: dict | None, co_footprints: int) -> int | None:
+        """Estimated bytes a free would reclaim, or None when this resource
+        isn't eligible at all (its GPU isn't in the snapshot, or it's
+        busy/unknown — never free a busy or unknown-state comfy queue).
+        This kind's VRAM presence isn't directly observable, so attribute to
+        it whatever its GPU's usage doesn't explain — minus the known
+        footprints of OTHER co-resident loaded/running tenants
+        (`co_footprints`, the generalization of "minus a co-resident loaded
+        lemonade's footprint" app.arbiter._eviction_candidates used to
+        compute inline) and the fixed slack allowance. Moved from
+        app.arbiter._comfy_reclaimable / the pre-E1 comfyui branch of
+        _eviction_candidates (arbiter.py:284-305, 356-365); serves BOTH
+        callers now — this adapter's own idle_action (the no-op-flood
+        guard above) and app.arbiter._eviction_candidates (contention
+        eligibility) — so the busy/unknown exclusion has to live HERE, not
+        only in the idle_action call site that used to pre-gate it."""
+        if gpu is None:
+            return None
+        if obs["state"] != "idle" or obs.get("queue") != 0:
+            return None
+        return max(0, gpu["used"] - co_footprints - _SLACK_BYTES)
+
     def build_client(self, connection: dict, settings):
         return ComfyClient(connection["url"])
 
@@ -285,6 +366,20 @@ class _HipfireAdapter:
 
     def demand(self) -> bool:
         return False
+
+    def idle_action(self, obs: dict, policy: dict, gpu: dict | None, co_footprints: int) -> dict | None:
+        # No arbiter verb (see arbiter_verbs above) -> no idle rule either:
+        # park stays human-only. Structural omission made explicit, the
+        # same posture as arbiter_verbs()'s empty frozenset — a hipfire
+        # tenant is simply never a candidate for ANY automatic action.
+        return None
+
+    def reclaimable(self, obs: dict, gpu: dict | None, co_footprints: int) -> int | None:
+        # Never called in practice: app.arbiter._eviction_candidates skips
+        # any kind whose arbiter_verbs() is empty before it would reach a
+        # reclaimable() call. Defined anyway for adapter-interface
+        # completeness (every kind implements the same protocol).
+        return None
 
     def build_client(self, connection: dict, settings):
         # DockerCtl/LiteLLMClient built fresh here rather than reusing

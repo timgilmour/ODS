@@ -15,29 +15,33 @@ Two pieces:
   via the engine clients -> logs each executed action. It owns exactly one
   ``World`` instance for its whole lifetime (idle clocks live there).
 
-Action dicts (the only three shapes ``decide`` ever returns):
-    {"type": "unload_lemonade", "model": <str>}
-    {"type": "free_comfyui"}
+Action dicts (the only three shapes ``decide`` ever returns; E1 generalizes
+every action to carry the RESOURCE it targets, not a kind-baked verb —
+``unload_lemonade``/``free_comfyui`` are gone):
+    {"type": "unload", "resource": <str>, "model": <str>}
+    {"type": "free", "resource": <str>}
     {"type": "noop", "reason": <str>}   # reason in {"fits", "wont-fit"}
 
 Design notes that are load-bearing (and tested):
 
-* IDLE RELEASE (rule 1) is allowed on the default-route lemonade model. That
-  is the deliberate idle-GPU-burn fix — a resident-but-idle llama.cpp model
-  pins a card at 100%/86 W doing nothing; unloading drops it to ~17 W and the
-  next request reloads it in ~4 s. This exception applies ONLY to idle
-  release, never to contention.
+* IDLE RELEASE (rule 1) is allowed on a demand-routing kind's (lemonade)
+  default-route model. That is the deliberate idle-GPU-burn fix — a
+  resident-but-idle llama.cpp model pins a card at 100%/86 W doing nothing;
+  unloading drops it to ~17 W and the next request reloads it in ~4 s. This
+  exception applies ONLY to idle release, never to contention. E1: this rule
+  now runs independently for EVERY declared resource (not a single hardcoded
+  "lemonade" tenant) via each kind's own ``idle_action`` (app.engine_kinds).
 
-* CONTENTION HEALING (rule 2) NEVER evicts the default-route lemonade model,
-  no matter how much VRAM that would free. It also never touches hipfire
-  (which lives on a different GPU and is pinned) and never frees a busy or
-  unknown-state comfy queue. Candidates on the pending GPU are sorted
-  ascending by ``policy[tenant]["priority"]`` (lowest priority evicted
-  first) — with the default policies (comfyui 40, lemonade 50) this
-  reproduces the historical comfyui-then-lemonade order. Because on this box
-  lemonade and comfyui share the one GPU that pending loads target,
-  ``decide`` doesn't need per-GPU attribution — the pending GPU's candidates
-  are always {comfyui, lemonade}, and hipfire is structurally excluded.
+* CONTENTION HEALING (rule 2) NEVER evicts a demand-routing kind's
+  default-route model, no matter how much VRAM that would free. It also
+  never touches a kind with no arbiter verb (hipfire has none — park stays
+  human-only) and never frees a busy or unknown-state comfy queue.
+  Candidates are scoped to the PENDING LOAD'S OWN GPU (``tenant["gpu_index"]
+  == gpu["index"]``) — E1 generalizes past the old single-GPU assumption, so
+  two contended GPUs at once no longer cross-contaminate each other's
+  candidate sets — then sorted ascending by ``policy[resource]["priority"]``
+  (lowest priority evicted first) — with the default policies (comfyui 40,
+  lemonade 50) this reproduces the historical comfyui-then-lemonade order.
 
 * Feasibility-first eviction: if the FULL set of eligible evictions still
   can't free enough VRAM, ``decide`` emits ``noop "wont-fit"`` and evicts
@@ -119,6 +123,7 @@ from pathlib import Path
 from app import actuation, provenance_collect
 from app.derive_checkpoint import derive_checkpoint
 from app.derive_live import derive_live_models
+from app.engine_kinds import ENGINE_KINDS
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
@@ -132,10 +137,6 @@ from app.observe import (
     observe_spark,
 )
 from app.reconcile import plan_reconcile
-
-# VRAM overhead slack subtracted when estimating comfyui's reclaimable bytes
-# from raw GPU usage (fragmentation, driver/runtime overhead, small tenants).
-_SLACK_BYTES = 1024**3  # 1 GiB
 
 _EXTRA_PREFIX = "extra."
 
@@ -245,64 +246,54 @@ def decide(world: dict, policy: dict, pending_load: dict | None) -> list[dict]:
 
 
 def _decide_idle_release(world: dict, policy: dict) -> list[dict]:
+    """Rule 1, E1-generalized: every DECLARED resource gets its own idle
+    check, not a hardcoded lemonade+comfyui pair. Iterates
+    ``world["tenants"]`` sorted by resource (deterministic order) and asks
+    that resource's kind adapter (app.engine_kinds) whether it wants to
+    idle-release — the two rules' actual guard conditions moved there
+    VERBATIM, comments included (they carry incident history)."""
     actions: list[dict] = []
     tenants = world["tenants"]
+    gpus = world["gpus"]
 
-    lem = tenants["lemonade"]
-    lem_pol = policy["lemonade"]
-    if (
-        lem["state"] == "loaded"
-        and not lem_pol["pinned"]
-        and lem_pol["idle_ttl"] > 0
-        and lem["idle_s"] is not None
-        and lem["idle_s"] >= lem_pol["idle_ttl"]
-    ):
-        # NOTE: the default-route model is intentionally NOT guarded here —
-        # idle release on it is the idle-GPU-burn fix (reload ~4 s).
-        actions.append({"type": "unload_lemonade", "model": lem["model"]})
-
-    comfy = tenants["comfyui"]
-    comfy_pol = policy["comfyui"]
-    if (
-        comfy["state"] == "idle"
-        and comfy["queue"] == 0
-        and not comfy_pol["pinned"]
-        and comfy_pol["idle_ttl"] > 0
-        and comfy["idle_s"] is not None
-        and comfy["idle_s"] >= comfy_pol["idle_ttl"]
-        # A free that can't reclaim anything is a no-op that re-arms the TTL
-        # and re-fires every idle_ttl seconds forever, flooding the event
-        # ring. None (comfy's GPU unresolvable) must not suppress the free:
-        # unknown usage is not proof there's nothing to reclaim.
-        and _comfy_reclaimable(world) != 0
-    ):
-        actions.append({"type": "free_comfyui"})
+    for resource in sorted(tenants):
+        tenant = tenants[resource]
+        # Tolerate a policy map missing this resource (partial/legacy
+        # declaration, or a stale test fixture): no policy row means there
+        # is nothing safe to decide for it, never a KeyError.
+        pol = policy.get(resource)
+        if pol is None:
+            continue
+        adapter = ENGINE_KINDS[tenant["engine"]]
+        gpu_index = tenant.get("gpu_index")
+        gpu = _find_gpu(gpus, gpu_index) if gpu_index is not None else None
+        co_footprints = _co_resident_footprints(tenants, resource, gpu_index)
+        action = adapter.idle_action(tenant, pol, gpu, co_footprints)
+        if action is not None:
+            actions.append({**action, "resource": resource})
 
     return actions
 
 
-def _comfy_reclaimable(world: dict) -> int | None:
-    """Estimated bytes a comfy free would reclaim, or None when comfy's GPU
-    isn't in the snapshot. Same estimate as ``_eviction_candidates``: comfy's
-    VRAM presence isn't directly observable, so attribute to it whatever its
-    GPU's usage doesn't explain — minus a co-resident loaded lemonade's
-    footprint and the fixed slack allowance."""
-    placement = world.get("placement") or {}
-    gpu = _find_gpu(world["gpus"], placement.get("comfyui"))
-    if gpu is None:
-        return None
-
-    lem = world["tenants"]["lemonade"]
-    lem_footprint = (
-        lem["footprint"]
-        if (
-            lem["state"] == "loaded"
-            and lem["footprint"]
-            and placement.get("lemonade") == placement.get("comfyui")
-        )
-        else 0
-    )
-    return max(0, gpu["used"] - lem_footprint - _SLACK_BYTES)
+def _co_resident_footprints(tenants: dict, exclude_resource: str, gpu_index) -> int:
+    """Sum of known footprints of every OTHER tenant sharing `gpu_index`
+    with a loaded/running state — the generalization of the old "minus a
+    co-resident loaded lemonade's footprint": a kind's own VRAM use may not
+    be directly observable (comfyui), so its reclaimable estimate must
+    subtract whatever ANY OTHER co-resident tenant is already accounted
+    for, not a hardcoded single-kind check."""
+    total = 0
+    for resource, tenant in tenants.items():
+        if resource == exclude_resource:
+            continue
+        if tenant.get("gpu_index") != gpu_index:
+            continue
+        if tenant.get("state") not in ("loaded", "running"):
+            continue
+        footprint = tenant.get("footprint")
+        if isinstance(footprint, int) and footprint:
+            total += footprint
+    return total
 
 
 def _decide_contention(world: dict, policy: dict, pending_load: dict) -> list[dict]:
@@ -335,49 +326,60 @@ def _decide_contention(world: dict, policy: dict, pending_load: dict) -> list[di
 
 
 def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dict, int]]:
-    """Evictable tenants on the pending GPU as ``(action, reclaimable_bytes)``,
-    sorted ascending by ``policy[tenant]["priority"]`` (lowest priority
-    evicted first). Eligibility guards are unchanged from before; only the
-    resulting order is policy-driven.
+    """Evictable tenants on the pending GPU (``tenant["gpu_index"] ==
+    gpu["index"]`` — E1: candidates are scoped to the GPU the pending load
+    actually targets, not every declared resource) as ``(action,
+    reclaimable_bytes)``, sorted ascending by ``policy[resource]["priority"]``
+    (lowest priority evicted first). Eligibility guards are unchanged from
+    before; only the resulting order is policy-driven.
 
-    hipfire is never a candidate (it lives on the other GPU and is pinned) —
-    the guard against touching it is by structural omission here.
+    A kind with no arbiter verb (hipfire) is never a candidate — the guard
+    against touching it is by structural omission here.
     """
     tenants = world["tenants"]
-    lem = tenants["lemonade"]
-    comfy = tenants["comfyui"]
+    default_route = world.get("default_route")
 
-    lem_loaded_footprint = (
-        lem["footprint"] if lem["state"] == "loaded" and lem["footprint"] else 0
-    )
+    scored: list[tuple[int, dict, int]] = []
+    for resource in sorted(tenants):
+        tenant = tenants[resource]
+        if tenant.get("gpu_index") != gpu["index"]:
+            continue
+        adapter = ENGINE_KINDS[tenant["engine"]]
+        if not adapter.arbiter_verbs():
+            continue  # e.g. hipfire: structurally excluded
+        pol = policy.get(resource)
+        if pol is None or pol["pinned"]:
+            continue
+        # ABSOLUTE guard, rule 2 ONLY (never rule 1 — see idle_action's own
+        # NOTE): a demand-routing kind's currently-loaded default-route
+        # model must never be evicted for contention, no matter how much
+        # VRAM that would free.
+        if (
+            adapter.demand()
+            and tenant.get("model") is not None
+            and tenant.get("model") == default_route
+        ):
+            continue
+        co_footprints = _co_resident_footprints(tenants, resource, gpu["index"])
+        reclaimable = adapter.reclaimable(tenant, gpu, co_footprints)
+        if reclaimable is None:
+            continue  # unquantifiable (or, for a "free"-verb kind, busy/unknown)
 
-    candidates: list[tuple[str, dict, int]] = []
+        # Build the action from the kind's single arbiter verb — "model" is
+        # present in `tenant` iff the verb needs it (lemonade's "unload";
+        # comfyui's obs never carries a "model" key at all), so this reads
+        # the payload shape off the tenant itself rather than branching on
+        # a kind name (spec §8: no engine name outside app.engine_kinds).
+        (verb,) = adapter.arbiter_verbs()
+        action = {"type": verb, "resource": resource}
+        if "model" in tenant:
+            action["model"] = tenant["model"]
 
-    # comfyui — never free a busy/unknown queue, never if pinned. Its VRAM
-    # presence isn't in world.tenants, so estimate reclaimable from the GPU
-    # usage gap (per plan): used - lemonade-footprint-if-loaded - slack.
-    if (
-        not policy["comfyui"]["pinned"]
-        and comfy["state"] == "idle"
-        and comfy["queue"] == 0
-    ):
-        reclaimable = max(0, gpu["used"] - lem_loaded_footprint - _SLACK_BYTES)
-        candidates.append(("comfyui", {"type": "free_comfyui"}, reclaimable))
+        scored.append((pol["priority"], action, reclaimable))
 
-    # lemonade — never evict the default-route model (ABSOLUTE for rule 2),
-    # never if pinned, and only if its footprint is known (else unquantifiable).
-    if (
-        lem["state"] == "loaded"
-        and not policy["lemonade"]["pinned"]
-        and lem["model"] != world["default_route"]
-        and lem["footprint"]
-    ):
-        candidates.append(
-            ("lemonade", {"type": "unload_lemonade", "model": lem["model"]}, lem["footprint"])
-        )
-
-    candidates.sort(key=lambda c: policy[c[0]]["priority"])
-    return [(action, reclaimable) for _, action, reclaimable in candidates]
+    # Stable sort: ties keep the sorted-by-resource insertion order above.
+    scored.sort(key=lambda c: c[0])
+    return [(action, reclaimable) for _, action, reclaimable in scored]
 
 
 def _find_gpu(gpus: list[dict], gpu_index: int) -> dict | None:
@@ -773,8 +775,19 @@ class Watcher:
         actuated: set[str] = set()
 
         for action in actions:
-            kind = action["type"]
-            if kind == "unload_lemonade":
+            # E1 Task 5 generalized decide()'s own action vocabulary to
+            # {"type": "unload"/"free"/"noop", "resource": r, ...} — this
+            # mechanical translation back to the pre-E1 dispatch keys
+            # ("unload_lemonade"/"free_comfyui") is the MINIMUM needed to
+            # keep this method (and its event-log vocabulary) working
+            # against the new action shapes without changing what it
+            # actually does. Task 6 owns generalizing `_execute` itself
+            # (and `_infer_pending`/`_restore`) past the single hardcoded
+            # lemonade/comfyui pair — see this method's own docstring scope.
+            kind_raw = action["type"]
+            resource = action.get("resource")
+            if kind_raw == "unload" and resource == "lemonade":
+                kind = "unload_lemonade"
                 # Whoever actuates, records — and records FIRST, so a tick
                 # that lands mid-unload derives 'parked', never 'down'
                 # (2026-08-06). actor="deck": this is the arbiter's OWN
@@ -859,7 +872,8 @@ class Watcher:
                     # revert it.
                     self._heal_suppressor.note_deck_unload()
                     self._log(kind, {"model": action["model"]})
-            elif kind == "free_comfyui":
+            elif kind_raw == "free" and resource == "comfyui":
+                kind = "free_comfyui"
                 try:
                     self._comfy.free()
                 except GuardError:
@@ -885,7 +899,7 @@ class Watcher:
                     # surrounding block already commits to elsewhere.
                     self._world.note_freed("comfyui")
                     self._log(kind, {})
-            elif kind == "noop":
+            elif kind_raw == "noop":
                 if action["reason"] == "wont-fit":
                     wont_fit = True
                 self._log("noop", {"reason": action["reason"]})

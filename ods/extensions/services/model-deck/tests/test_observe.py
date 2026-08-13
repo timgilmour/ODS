@@ -10,12 +10,19 @@ from app.observe import merge_observations, observe_local, observe_spark
 
 
 def _world(lemonade_state="loaded", hipfire_state="running", comfy_state="idle"):
+    # "engine" backfilled per tenant (E1, Task 5 obligation): observe_local's
+    # dispatch reads `tenant["engine"]` unconditionally now (the transitional
+    # `tenant.get("engine", resource)` fallback these hand-built dicts used
+    # to lean on is gone) — resource == kind name for this fixed triple, so
+    # the literal is exact, not a guess.
     return {
         "gpus": [],
         "tenants": {
-            "lemonade": {"state": lemonade_state, "model": "qwen", "footprint": 1, "idle_s": 0},
-            "hipfire": {"state": hipfire_state, "model": "gpt-oss", "footprint": 1, "queue_depth": 0},
-            "comfyui": {"state": comfy_state, "queue": 0, "idle_s": 0},
+            "lemonade": {"state": lemonade_state, "model": "qwen", "footprint": 1,
+                        "idle_s": 0, "engine": "lemonade"},
+            "hipfire": {"state": hipfire_state, "model": "gpt-oss", "footprint": 1,
+                       "queue_depth": 0, "engine": "hipfire"},
+            "comfyui": {"state": comfy_state, "queue": 0, "idle_s": 0, "engine": "comfyui"},
         },
         "externals": [],
         "default_route": None,

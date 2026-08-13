@@ -5,9 +5,9 @@ I/O, deterministic, and every guard below is tested for the ABSENCE of the
 dangerous action, not merely the presence of the safe one — this module
 decides real GPU unloads on a live box.
 
-Action dicts:
-    {"type": "unload_lemonade", "model": <str>}
-    {"type": "free_comfyui"}
+Action dicts (E1: every action carries the RESOURCE it targets):
+    {"type": "unload", "resource": <str>, "model": <str>}
+    {"type": "free", "resource": <str>}
     {"type": "noop", "reason": <str>}
 
 The Watcher tests drive one ``tick()`` at a time against stub deps (no real
@@ -74,18 +74,36 @@ def _gpu(index=1, total=34 * GIB, used=0, free=None):
 
 
 def _world(gpus=None, lemonade=None, comfyui=None, hipfire=None, default_route=None, placement=None):
+    placement = (
+        placement if placement is not None else {"hipfire": 0, "lemonade": 1, "comfyui": 1}
+    )
+    tenants = {
+        "lemonade": lemonade if lemonade is not None else _lem(),
+        "comfyui": comfyui if comfyui is not None else _comfy(),
+        "hipfire": hipfire if hipfire is not None else _hip(),
+    }
+    # E1 backfill (obligation 1, T5 review): Task 3's real World.snapshot
+    # stamps `engine`/`gpu_index` onto every tenant obs (app/state.py:
+    # `obs["engine"] = kind; obs["gpu_index"] = entry["gpu_index"]`) —
+    # decide() now reads BOTH unconditionally (app.engine_kinds dispatch,
+    # per-GPU eviction scoping). Every hand-built world dict in this file
+    # routes through this one function, so backfilling here — using the
+    # tenant KEY as the kind name and this same `placement` mapping as the
+    # gpu_index source — covers every one of them at a single point.
+    # Resource == kind name for this fixed triple (the coexistence-era
+    # shape every test here still builds), so the backfill is exact, not a
+    # guess. `setdefault` leaves any fixture that already sets these
+    # explicitly untouched.
+    for resource, tenant in tenants.items():
+        tenant.setdefault("engine", resource)
+        tenant.setdefault("gpu_index", placement.get(resource))
     return {
         "gpus": gpus if gpus is not None else [_gpu()],
-        "tenants": {
-            "lemonade": lemonade if lemonade is not None else _lem(),
-            "comfyui": comfyui if comfyui is not None else _comfy(),
-            "hipfire": hipfire if hipfire is not None else _hip(),
-        },
+        "tenants": tenants,
         "externals": [],
         "default_route": default_route,
-        "placement": placement
-        if placement is not None
-        else {"hipfire": 0, "lemonade": 1, "comfyui": 1},
+        "routes_known": True,
+        "placement": placement,
     }
 
 
@@ -97,7 +115,7 @@ def _policy(lem_pinned=False, lem_idle=900, comfy_pinned=False, comfy_idle=300):
     }
 
 
-_VALID_ACTION_TYPES = {"unload_lemonade", "free_comfyui", "noop"}
+_VALID_ACTION_TYPES = {"unload", "free", "noop"}
 
 
 def _assert_only_valid_actions(actions):
@@ -129,7 +147,7 @@ def test_idle_release_unloads_default_route_lemonade_when_idle_past_ttl():
 
     result = decide(world, _policy(lem_idle=900), None)
 
-    assert result == [{"type": "unload_lemonade", "model": model}]
+    assert result == [{"type": "unload", "resource": "lemonade", "model": model}]
     _assert_only_valid_actions(result)
 
 
@@ -140,7 +158,7 @@ def test_idle_release_no_unload_when_lemonade_pinned():
 
     result = decide(world, _policy(lem_pinned=True), None)
 
-    assert "unload_lemonade" not in _types(result)
+    assert "unload" not in _types(result)
 
 
 def test_idle_release_no_unload_when_idle_ttl_zero():
@@ -150,7 +168,7 @@ def test_idle_release_no_unload_when_idle_ttl_zero():
 
     result = decide(world, _policy(lem_idle=0), None)
 
-    assert "unload_lemonade" not in _types(result)
+    assert "unload" not in _types(result)
 
 
 def test_idle_release_no_unload_when_idle_s_none():
@@ -162,7 +180,7 @@ def test_idle_release_no_unload_when_idle_s_none():
 
     result = decide(world, _policy(lem_idle=900), None)
 
-    assert "unload_lemonade" not in _types(result)
+    assert "unload" not in _types(result)
 
 
 def test_idle_release_no_unload_when_below_ttl():
@@ -185,7 +203,7 @@ def test_idle_release_frees_comfyui_when_idle_past_ttl():
 
     result = decide(world, _policy(comfy_idle=300), None)
 
-    assert result == [{"type": "free_comfyui"}]
+    assert result == [{"type": "free", "resource": "comfyui"}]
     _assert_only_valid_actions(result)
 
 
@@ -200,7 +218,7 @@ def test_idle_release_no_free_when_comfy_holds_no_vram():
 
     result = decide(world, _policy(comfy_idle=300), None)
 
-    assert "free_comfyui" not in _types(result)
+    assert "free" not in _types(result)
 
 
 def test_idle_release_no_free_when_gpu_usage_is_lemonades():
@@ -214,7 +232,7 @@ def test_idle_release_no_free_when_gpu_usage_is_lemonades():
 
     result = decide(world, _policy(comfy_idle=300), None)
 
-    assert "free_comfyui" not in _types(result)
+    assert "free" not in _types(result)
 
 
 def test_idle_release_frees_comfyui_when_gpu_unresolvable():
@@ -228,7 +246,7 @@ def test_idle_release_frees_comfyui_when_gpu_unresolvable():
 
     result = decide(world, _policy(comfy_idle=300), None)
 
-    assert result == [{"type": "free_comfyui"}]
+    assert result == [{"type": "free", "resource": "comfyui"}]
 
 
 def test_idle_release_no_free_when_comfy_pinned():
@@ -236,7 +254,7 @@ def test_idle_release_no_free_when_comfy_pinned():
 
     result = decide(world, _policy(comfy_pinned=True), None)
 
-    assert "free_comfyui" not in _types(result)
+    assert "free" not in _types(result)
 
 
 def test_idle_release_no_free_when_comfy_busy():
@@ -245,7 +263,7 @@ def test_idle_release_no_free_when_comfy_busy():
 
     result = decide(world, _policy(comfy_idle=300), None)
 
-    assert "free_comfyui" not in _types(result)
+    assert "free" not in _types(result)
 
 
 def test_idle_release_no_free_when_comfy_idle_ttl_zero():
@@ -253,7 +271,7 @@ def test_idle_release_no_free_when_comfy_idle_ttl_zero():
 
     result = decide(world, _policy(comfy_idle=0), None)
 
-    assert "free_comfyui" not in _types(result)
+    assert "free" not in _types(result)
 
 
 def test_idle_release_no_free_when_comfy_unknown():
@@ -296,7 +314,7 @@ def test_contention_todays_incident_frees_comfyui():
 
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
-    assert result == [{"type": "free_comfyui"}]
+    assert result == [{"type": "free", "resource": "comfyui"}]
     _assert_only_valid_actions(result)
 
 
@@ -318,8 +336,8 @@ def test_contention_wont_fit_when_nothing_evictable():
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
     assert result == [{"type": "noop", "reason": "wont-fit"}]
-    assert "free_comfyui" not in _types(result)
-    assert "unload_lemonade" not in _types(result)
+    assert "free" not in _types(result)
+    assert "unload" not in _types(result)
 
 
 def test_contention_never_evicts_default_route_lemonade():
@@ -338,7 +356,7 @@ def test_contention_never_evicts_default_route_lemonade():
 
     # Would have fit (5 + 25 >= 19) if the guard weren't absolute.
     assert result == [{"type": "noop", "reason": "wont-fit"}]
-    assert "unload_lemonade" not in _types(result)
+    assert "unload" not in _types(result)
 
 
 def test_contention_evicts_lemonade_when_not_default_route():
@@ -353,7 +371,7 @@ def test_contention_evicts_lemonade_when_not_default_route():
 
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
-    assert result == [{"type": "unload_lemonade", "model": "extra.other.gguf"}]
+    assert result == [{"type": "unload", "resource": "lemonade", "model": "extra.other.gguf"}]
 
 
 def test_contention_no_evict_when_lemonade_footprint_unknown():
@@ -369,7 +387,7 @@ def test_contention_no_evict_when_lemonade_footprint_unknown():
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
     assert result == [{"type": "noop", "reason": "wont-fit"}]
-    assert "unload_lemonade" not in _types(result)
+    assert "unload" not in _types(result)
 
 
 def test_contention_evicts_comfy_before_lemonade_ascending_priority():
@@ -385,8 +403,8 @@ def test_contention_evicts_comfy_before_lemonade_ascending_priority():
 
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
-    assert result == [{"type": "free_comfyui"}]
-    assert "unload_lemonade" not in _types(result)
+    assert result == [{"type": "free", "resource": "comfyui"}]
+    assert "unload" not in _types(result)
 
 
 def test_contention_evicts_both_when_comfy_insufficient():
@@ -402,7 +420,10 @@ def test_contention_evicts_both_when_comfy_insufficient():
 
     result = decide(world, _policy(), _pending(footprint=30 * GIB, gpu_index=1))
 
-    assert result == [{"type": "free_comfyui"}, {"type": "unload_lemonade", "model": "extra.other.gguf"}]
+    assert result == [
+        {"type": "free", "resource": "comfyui"},
+        {"type": "unload", "resource": "lemonade", "model": "extra.other.gguf"},
+    ]
 
 
 def test_contention_wont_fit_emits_no_partial_eviction():
@@ -420,7 +441,7 @@ def test_contention_wont_fit_emits_no_partial_eviction():
     result = decide(world, _policy(), _pending(footprint=30 * GIB, gpu_index=1))
 
     assert result == [{"type": "noop", "reason": "wont-fit"}]
-    assert "free_comfyui" not in _types(result)  # comfy NOT killed pointlessly
+    assert "free" not in _types(result)  # comfy NOT killed pointlessly
 
 
 def test_contention_pinned_comfy_not_evicted():
@@ -433,7 +454,7 @@ def test_contention_pinned_comfy_not_evicted():
     result = decide(world, _policy(comfy_pinned=True), _pending(footprint=19 * GIB, gpu_index=1))
 
     assert result == [{"type": "noop", "reason": "wont-fit"}]
-    assert "free_comfyui" not in _types(result)
+    assert "free" not in _types(result)
 
 
 def test_contention_busy_comfy_never_freed():
@@ -445,7 +466,7 @@ def test_contention_busy_comfy_never_freed():
 
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
-    assert "free_comfyui" not in _types(result)
+    assert "free" not in _types(result)
 
 
 def test_contention_never_touches_hipfire():
@@ -462,6 +483,11 @@ def test_contention_never_touches_hipfire():
 
     assert result == [{"type": "noop", "reason": "wont-fit"}]
     _assert_only_valid_actions(result)
+    # Stronger than the type-only proof above: under the new resource-
+    # tagged action shape, prove by omission that hipfire specifically was
+    # never even considered a candidate (not merely that no exotic action
+    # type slipped through).
+    assert all(a.get("resource") != "hipfire" for a in result)
 
 
 def test_contention_gpu_index_not_found_is_wont_fit():
@@ -495,7 +521,116 @@ def test_contention_honors_policy_priority_low_evicted_first():
 
     result = decide(world, policy, _pending(footprint=14 * GIB, gpu_index=1))
 
-    assert result == [{"type": "unload_lemonade", "model": "extra.other.gguf"}]
+    assert result == [{"type": "unload", "resource": "lemonade", "model": "extra.other.gguf"}]
+
+
+# ===========================================================================
+# E1 GENERALIZATION — decide() over a genuinely declaration-shaped world:
+# more than one resource per kind, GPUs that don't match live topology, an
+# empty declaration. Fixture rule (same convention as test_engine_kinds.py's
+# adapter section): resources gguf-a/gguf-b/img/agent, GPUs 2 and 3 — none of
+# this may coincidentally match lemonade/comfyui/hipfire on GPUs 0/1, so a
+# bug that silently falls back to a kind-name-as-resource-name assumption
+# cannot hide behind a fixture that happens to agree with it.
+# ===========================================================================
+
+
+def _dworld(tenants: dict, gpus: list[dict]) -> dict:
+    return {
+        "gpus": gpus,
+        "tenants": tenants,
+        "externals": [],
+        "default_route": "default.gguf",
+        "routes_known": True,
+        "placement": {r: t["gpu_index"] for r, t in tenants.items()},
+    }
+
+
+def _dgpu(index, total, used):
+    return {"index": index, "total": total, "used": used, "free": total - used}
+
+
+def test_idle_release_iterates_every_declared_gguf():
+    """E1: rule 1 runs independently for EVERY declared lemonade-kind
+    resource, not a single hardcoded 'lemonade' tenant."""
+    world = _dworld({
+        "gguf-a": {"engine": "lemonade", "gpu_index": 2, "state": "loaded",
+                   "model": "a.gguf", "footprint": 10, "idle_s": 100.0},
+        "gguf-b": {"engine": "lemonade", "gpu_index": 3, "state": "loaded",
+                   "model": "b.gguf", "footprint": 10, "idle_s": 5.0},
+    }, [_dgpu(2, 100, 50), _dgpu(3, 100, 50)])
+    policy = {"gguf-a": {"priority": 1, "pinned": False, "idle_ttl": 60},
+              "gguf-b": {"priority": 1, "pinned": False, "idle_ttl": 60}}
+
+    actions = decide(world, policy, None)
+
+    assert actions == [{"type": "unload", "resource": "gguf-a", "model": "a.gguf"}]
+
+
+def test_contention_is_scoped_to_the_pending_gpu():
+    """Two contended GPUs at once (impossible pre-E1): only residents of
+    the pending load's GPU are candidates."""
+    world = _dworld({
+        "gguf-a": {"engine": "lemonade", "gpu_index": 2, "state": "loaded",
+                   "model": "a.gguf", "footprint": 40, "idle_s": 0.0},
+        "img":    {"engine": "comfyui", "gpu_index": 3, "state": "idle",
+                   "queue": 0, "idle_s": 500.0},
+    }, [_dgpu(2, 100, 95), _dgpu(3, 100, 95)])
+    policy = {"gguf-a": {"priority": 1, "pinned": False, "idle_ttl": 0},
+              "img": {"priority": 2, "pinned": False, "idle_ttl": 300}}
+    pending = {"resource": "gguf-b", "model": "b.gguf", "footprint": 30,
+               "gpu_index": 2}
+
+    actions = decide(world, policy, pending)
+
+    assert actions == [{"type": "unload", "resource": "gguf-a",
+                        "model": "a.gguf"}]      # img is on GPU 3: untouchable
+
+
+def test_agent_kind_is_never_a_candidate():
+    """hipfire-kind has no arbiter verbs — even unpinned, even alone."""
+    world = _dworld({
+        "agent": {"engine": "hipfire", "gpu_index": 2, "state": "running",
+                  "model": "x", "footprint": 90, "queue_depth": 0},
+    }, [_dgpu(2, 100, 95)])
+    policy = {"agent": {"priority": 1, "pinned": False, "idle_ttl": 0}}
+    pending = {"resource": "gguf-b", "model": "b.gguf", "footprint": 30,
+               "gpu_index": 2}
+
+    assert decide(world, policy, pending) == [{"type": "noop", "reason": "wont-fit"}]
+
+
+def test_default_route_model_still_never_evicted():
+    world = _dworld({
+        "gguf-a": {"engine": "lemonade", "gpu_index": 2, "state": "loaded",
+                   "model": "default.gguf", "footprint": 40, "idle_s": 0.0},
+    }, [_dgpu(2, 100, 95)])
+    policy = {"gguf-a": {"priority": 1, "pinned": False, "idle_ttl": 0}}
+    pending = {"resource": "gguf-b", "model": "b.gguf", "footprint": 30,
+               "gpu_index": 2}
+
+    assert decide(world, policy, pending) == [{"type": "noop", "reason": "wont-fit"}]
+
+
+def test_decide_empty_declaration_idle_path_is_a_true_noop():
+    """Obligation 2 (T5 review): decide() must tolerate a tenants/policy map
+    missing any legacy name entirely — an empty declaration is not a crash,
+    it's nothing to do."""
+    world = _dworld({}, [])
+
+    assert decide(world, {}, None) == []
+
+
+def test_decide_empty_declaration_pending_load_noops_nothing_evictable():
+    """Same tolerance for the contention path: a pending load against a GPU
+    with zero declared tenants can't be healed by eviction (nothing to
+    evict), so it must resolve to a plain 'wont-fit' noop, never a KeyError
+    from indexing a tenants/policy map that has no entries at all."""
+    world = _dworld({}, [_dgpu(2, 100, 90)])  # free = 10
+    pending = {"resource": "gguf-a", "model": "a.gguf", "footprint": 30,
+               "gpu_index": 2}
+
+    assert decide(world, {}, pending) == [{"type": "noop", "reason": "wont-fit"}]
 
 
 # ===========================================================================
@@ -2602,7 +2737,7 @@ def test_same_tick_evict_and_reload_pins_single_load_and_final_intent(tmp_path):
     # Sanity: both arms are about to fire for the SAME key — the eviction
     # alone (25 GiB freed) covers the 19 GiB pending footprint given 5 GiB
     # already free, so comfy (busy anyway) is never a candidate.
-    assert actions == [{"type": "unload_lemonade", "model": "extra.other.gguf"}]
+    assert actions == [{"type": "unload", "resource": "lemonade", "model": "extra.other.gguf"}]
 
     actuated_keys = watcher._execute(actions, pending)
     assert actuated_keys == {"local/lemonade"}  # idempotent: one key, added by both arms
