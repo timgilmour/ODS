@@ -4,6 +4,27 @@ resume), each a thin wrapper over exactly one engine client call. No auth:
 the deck runs ops-first on a single-operator box (admin gate deliberately
 removed 2026-07-22; the LAN path still sits behind Authelia via ods-lan).
 
+E1 Task 7: ONE generic ``POST /{resource}/{verb}`` route replaces the five
+fixed ``/lemonade/load``, ``/lemonade/unload``, ``/comfyui/free``,
+``/hipfire/park``, ``/hipfire/resume`` routes. Today's URLs keep working
+unchanged (the seeded resource names still ARE lemonade/comfyui/hipfire);
+what changes is that a resource is now looked up in the LIVE declaration
+(``deck["node_store"].get("local")["engines"]``) on every request, and its
+client resolved through ``deck["local_clients"].client_for(resource)`` on
+every request too — never a boot-time per-engine deck alias, which would
+silently keep acting on the OLD connection after a live declaration edit
+(T10 ships those edits). An unknown resource is a 404; a verb the
+resource's declared KIND doesn't support (its ``app.engine_kinds`` adapter's
+``human_verbs()``) is a 405 naming the kind — both strings are
+UI-catalogued verbatim (Task 11).
+
+human_verbs() is disjoint across kinds (load/unload only ever come from a
+lemonade-kind resource, free only from comfyui, park/resume only from
+hipfire — enforced by the 405 check above before any handler runs), so the
+verb alone is enough to pick the right handler below; no kind-name literal
+is needed in the dispatcher itself (spec §8: engine-kind names live in
+app.engine_kinds, not here).
+
 Engine exceptions (GuardError, BusyError, EngineError) are deliberately left
 to propagate uncaught — ``app.main`` registers app-wide exception handlers
 that map them to their HTTP status (409/409/502). A malformed engine
@@ -46,10 +67,11 @@ either — see ``_pull_through``.
 
 import time
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel
 
-from app.observe import LOCAL_HIPFIRE_KEY, local_key
+from app.engine_kinds import ENGINE_KINDS
+from app.observe import local_key
 
 router = APIRouter(prefix="/tenants", tags=["control"])
 
@@ -67,11 +89,11 @@ _READY_TIMEOUT_S = 60.0
 _READY_POLL_S = 2.0
 
 
-class LemonadeLoadBody(BaseModel):
+class LoadBody(BaseModel):
     model: str
 
 
-class LemonadeUnloadBody(BaseModel):
+class UnloadBody(BaseModel):
     # Omitted (or explicit null) -> unload whatever is currently loaded.
     model: str | None = None
 
@@ -97,11 +119,49 @@ def _ensure_host_agent_idle(deck, force: bool) -> None:
         )
 
 
-@router.post("/lemonade/load")
-def lemonade_load(body: LemonadeLoadBody, request: Request,
-                  force: bool = False, pull: bool = False) -> dict:
+def _declared_kind(deck, resource: str) -> str | None:
+    """The kind declared for `resource` right now, read LIVE off node_store
+    (never a boot-time copy — same posture as app.routers.build_world_snapshot)
+    — or None when the resource isn't declared at all."""
+    local = deck["node_store"].get("local")
+    engines = local.get("engines", []) if local is not None else []
+    for entry in engines:
+        if entry["resource"] == resource:
+            return entry["kind"]
+    return None
+
+
+@router.post("/{resource}/{verb}")
+def dispatch(resource: str, verb: str, request: Request,
+             body: dict | None = Body(default=None),
+             force: bool = False, pull: bool = False) -> dict:
+    """Generic control dispatch (E1 Task 7). See module docstring for the
+    404/405 contract and why the verb alone (not a kind-name literal) is
+    enough to pick a handler below."""
     deck = request.app.state.deck
+    kind = _declared_kind(deck, resource)
+    if kind is None:
+        raise HTTPException(status_code=404, detail=f"unknown resource {resource!r}")
+    if verb not in ENGINE_KINDS[kind].human_verbs():
+        raise HTTPException(
+            status_code=405,
+            detail=f"{resource} ({kind}) does not support {verb}",
+        )
+
+    if verb == "load":
+        return _lemonade_load(deck, resource, LoadBody(**(body or {})), force, pull)
+    if verb == "unload":
+        return _lemonade_unload(deck, resource, UnloadBody(**(body or {})), force)
+    if verb == "free":
+        return _comfy_free(deck, resource)
+    if verb == "park":
+        return _hipfire_park(deck, resource, force)
+    return _hipfire_resume(deck, resource, force)  # verb == "resume"
+
+
+def _lemonade_load(deck, resource: str, body: LoadBody, force: bool, pull: bool) -> dict:
     _ensure_host_agent_idle(deck, force)
+    client = deck["local_clients"].client_for(resource)
     model = body.model
     if not model.startswith(_EXTRA_PREFIX):
         model = f"{_EXTRA_PREFIX}{model}"
@@ -111,7 +171,7 @@ def lemonade_load(body: LemonadeLoadBody, request: Request,
     if bare not in hot_files:
         cold_unit = _find_cold_gguf(deck, bare)
         if cold_unit is not None:
-            return _pull_through(deck, bare, cold_unit, pull)
+            return _pull_through(deck, resource, bare, cold_unit, pull)
 
     # Hot path — unchanged semantics (see original comments for suppressor
     # rationale), plus last-used bookkeeping for the storage catalog.
@@ -126,9 +186,9 @@ def lemonade_load(body: LemonadeLoadBody, request: Request,
     # budget, not un-recorded. Record the PREFIXED name — that is what
     # lemonade was told and what the observation will report back.
     deck["intent_store"].record(
-        local_key("lemonade"), state="loaded", model=model, engine="lemonade"
+        local_key(resource), state="loaded", model=model, engine="lemonade"
     )
-    deck["lemonade"].load(model)
+    client.load(model)
     # Deliberate load succeeded: clear the window (and any prior unload's).
     deck["heal_suppressor"].clear()
     deck["catalog"].note_used_gguf(bare)
@@ -144,7 +204,7 @@ def _find_cold_gguf(deck, bare: str):
     return None
 
 
-def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
+def _pull_through(deck, resource: str, bare: str, unit: dict, pull: bool) -> dict:
     from datetime import UTC, datetime
 
     from app.engines import EngineError, GuardError
@@ -187,7 +247,7 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
             # follow-up]. A record with no "actor" at all (pre-upgrade
             # intent.json) reads as "operator" — conservative, preserving
             # this check's original skip behavior for those.
-            entry = deck["intent_store"].get().get(local_key("lemonade"))
+            entry = deck["intent_store"].get().get(local_key(resource))
             if (
                 entry is not None
                 and entry.get("actor", "operator") == "operator"
@@ -210,12 +270,16 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
                           {"job": job["id"], "warning": warning, "model": bare})
                 return
             # Restart happened: poll for readiness before handing lemonade a
-            # load (see _READY_TIMEOUT_S/_READY_POLL_S above).
+            # load (see _READY_TIMEOUT_S/_READY_POLL_S above). Resolved
+            # fresh HERE, not captured at submit time — this hook fires
+            # minutes later on the mover's worker thread, and the resource's
+            # declared connection may have changed in the meantime (T10).
+            client = deck["local_clients"].client_for(resource)
             deadline = time.monotonic() + _READY_TIMEOUT_S
             ready = False
             while time.monotonic() < deadline:
                 try:
-                    deck["lemonade"].status()
+                    client.status()
                     ready = True
                     break
                 except EngineError:
@@ -230,10 +294,10 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
             # third writer class the supersession check above depends on
             # being told apart from the arbiter's automatic "deck" records.
             deck["intent_store"].record(
-                local_key("lemonade"), state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
+                local_key(resource), state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
                 engine="lemonade", actor="operator",
             )
-            deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
+            client.load(f"{_EXTRA_PREFIX}{bare}")
             deck["heal_suppressor"].clear()
             deck["catalog"].note_used_gguf(bare)
 
@@ -253,13 +317,12 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
     return {"status": "pulling", "job": job["id"]}
 
 
-@router.post("/lemonade/unload")
-def lemonade_unload(body: LemonadeUnloadBody, request: Request, force: bool = False) -> dict:
-    deck = request.app.state.deck
+def _lemonade_unload(deck, resource: str, body: UnloadBody, force: bool) -> dict:
     _ensure_host_agent_idle(deck, force)
+    client = deck["local_clients"].client_for(resource)
     model = body.model
     if model is None:
-        model = deck["lemonade"].status()["loaded"]
+        model = client.status()["loaded"]
         if not model:
             raise HTTPException(status_code=409, detail="no model is currently loaded")
     # Recorded BEFORE the call: unload takes ~2.2s, and a 2s watcher tick
@@ -270,41 +333,36 @@ def lemonade_unload(body: LemonadeUnloadBody, request: Request, force: bool = Fa
     # ...and record it as intent, which is the durable half of the same
     # statement: the suppression window expires, this does not.
     deck["intent_store"].record(
-        local_key("lemonade"), state="unloaded", model=None, engine="lemonade"
+        local_key(resource), state="unloaded", model=None, engine="lemonade"
     )
-    deck["lemonade"].unload(model)
+    client.unload(model)
     return {"status": "ok"}
 
 
-@router.post("/comfyui/free")
-def comfyui_free(request: Request) -> dict:
-    request.app.state.deck["comfy"].free()
+def _comfy_free(deck, resource: str) -> dict:
+    deck["local_clients"].client_for(resource).free()
     return {"status": "ok"}
 
 
-@router.post("/hipfire/park")
-def hipfire_park(request: Request, force: bool = False) -> dict:
+def _hipfire_park(deck, resource: str, force: bool) -> dict:
     # ?force=true skips the conversation-guard, never the route guard; the
     # host-agent busy guard below shares the same flag.
-    deck = request.app.state.deck
     _ensure_host_agent_idle(deck, force)
-    deck["hipfire"].park(force=force)
+    deck["local_clients"].client_for(resource).park(force=force)
     deck["intent_store"].record(
-        LOCAL_HIPFIRE_KEY, state="unloaded", model=None, engine="hipfire"
+        local_key(resource), state="unloaded", model=None, engine="hipfire"
     )
     return {"status": "ok"}
 
 
-@router.post("/hipfire/resume")
-def hipfire_resume(request: Request, force: bool = False) -> dict:
-    deck = request.app.state.deck
+def _hipfire_resume(deck, resource: str, force: bool) -> dict:
     _ensure_host_agent_idle(deck, force)
-    deck["hipfire"].resume()
+    deck["local_clients"].client_for(resource).resume()
     # model=None, not a name: hipfire is single-model and the Deck does not
     # choose that model (it comes from the litellm route table, app/state.py).
     # None reads as "loaded, no opinion which model"; recording a name the
     # Deck cannot observe would manufacture permanent drift.
     deck["intent_store"].record(
-        LOCAL_HIPFIRE_KEY, state="loaded", model=None, engine="hipfire"
+        local_key(resource), state="loaded", model=None, engine="hipfire"
     )
     return {"status": "ok"}

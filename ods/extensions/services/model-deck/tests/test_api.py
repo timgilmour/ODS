@@ -364,6 +364,39 @@ def wire_swap_node(deck, node_id, client, label=None):
     deck["node_clients"].set(node_id, client)
 
 
+# E1 Task 7: a second lemonade-kind resource's fixture entry, module-level so
+# later tasks (10+) can use it verbatim without redefining the shape. Mirrors
+# tests/test_engine_kinds.py's `_entry()` — resource deliberately NOT an
+# engine name, GPU not 0/1 ([[defaults-that-hide-bugs]]) — but pinned to GPU
+# 2 specifically (not that file's 3) so a fixture pairing it with a sibling
+# "gguf-b" entry lands the two on DIFFERENT GPUs, same as
+# test_engine_kinds.py's own two-resource fixture.
+_GGUF_A_ENTRY = {
+    "resource": "gguf-a", "kind": "lemonade",
+    "connection": {"url": "http://gguf-a:8080",
+                   "metrics_url": "http://gguf-a:8001/metrics",
+                   "container": "ods-gguf-a"},
+    "gpu_index": 2,
+    "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60},
+}
+
+
+def _declare_local(deck, engines):
+    """Replace the local node's engines[] declaration (E1 Task 7+): write
+    `engines` onto node_store and rely on every consumer that reads it fresh
+    per call to pick it up. `deck["local_clients"]` (FakeLocalClients above)
+    reads live off `deck` on every `client_for` call — nothing there to
+    rebuild — but this still goes through node_store, not a deck dict write,
+    because that is what the real dispatch path
+    (app.routers.control._declared_kind / LocalClients.client_for) reads
+    from. A test that needs a client for a resource this declares (anything
+    other than the seeded lemonade/comfyui/hipfire trio) must still wire one
+    itself, e.g. ``deck["gguf-a"] = FakeLemonade()`` — see FakeLocalClients'
+    docstring for why that deck-key convention resolves any resource name,
+    not just the legacy three."""
+    deck["node_store"].update("local", {"engines": engines})
+
+
 class FakeSpark:
     """The fake swap-node client wire_swap_node binds, for both the node
     registry/adopt suite here and tests/test_serving_api.py's per-node
@@ -694,6 +727,61 @@ def test_comfyui_free_unguarded_while_host_agent_busy(tmp_path, monkeypatch):
     resp = TestClient(app).post("/api/tenants/comfyui/free")
     assert resp.status_code == 200
     assert deck["comfy"].calls == ["free"]
+
+
+# ===========================================================================
+# Generic /{resource}/{verb} dispatch (E1 Task 7)
+# ===========================================================================
+
+
+def test_unknown_resource_404s(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    r = TestClient(app).post("/api/tenants/nope/load", json={"model": "m"})
+    assert r.status_code == 404
+    assert "nope" in r.json()["detail"]
+
+
+def test_unsupported_verb_405s_with_kind_named(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [{"resource": "img", "kind": "comfyui",
+                           "connection": {"url": "http://img:8188"},
+                           "gpu_index": 2,
+                           "policy_defaults": {"priority": 1, "pinned": False,
+                                               "idle_ttl": 0}}])
+    r = TestClient(app).post("/api/tenants/img/load", json={"model": "m"})
+    assert r.status_code == 405
+    assert "comfyui" in r.json()["detail"]
+
+
+def test_load_on_a_second_declared_lemonade_resource_dispatches_to_its_own_client(
+    tmp_path, monkeypatch
+):
+    """The generalization's point: TWO lemonade-kind resources declared at
+    once each dispatch to THEIR OWN client, resolved per-request through
+    deck["local_clients"] off the resource in the URL — never a single
+    shared boot-time alias. gguf-b's load must reach gguf-b's fake and
+    record local/gguf-b; gguf-a's fake (and its own key) must stay
+    untouched."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    gguf_b = {**_GGUF_A_ENTRY, "resource": "gguf-b", "gpu_index": 3,
+             "connection": {"url": "http://gguf-b:8080",
+                            "metrics_url": "http://gguf-b:8001/metrics",
+                            "container": "ods-gguf-b"}}
+    _declare_local(deck, [_GGUF_A_ENTRY, gguf_b])
+    deck["gguf-a"] = FakeLemonade()
+    deck["gguf-b"] = FakeLemonade()
+
+    resp = TestClient(app).post(
+        "/api/tenants/gguf-b/load", json={"model": "extra.new.gguf"}
+    )
+
+    assert resp.status_code == 200
+    assert deck["gguf-b"].calls == [("load", "extra.new.gguf")]
+    assert deck["gguf-a"].calls == []
+    record = deck["intent_store"].get()["local/gguf-b"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "extra.new.gguf"
+    assert "local/gguf-a" not in deck["intent_store"].get()
 
 
 # ===========================================================================
