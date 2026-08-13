@@ -1,28 +1,29 @@
-"""Model Deck tenant policy store.
+"""Model Deck resource policy store — declaration-driven defaults.
 
-Tracks the arbitration policy for each known tenant engine (hipfire,
-lemonade, comfyui): its eviction priority, whether it's pinned (exempt from
-eviction), and its idle-TTL before Model Deck parks it.
+E1 Task 4: Policy defaults now come from the node's declared engines[] (each
+engine carries policy_defaults). Tracks arbitration policy for each declared
+resource: eviction priority, pinned status (exempt from eviction), and idle-TTL
+before Model Deck parks it.
 
-``policy.json`` is a flat mapping of ``{tenant: {priority, pinned,
+``policy.json`` is a flat mapping of ``{resource: {priority, pinned,
 idle_ttl}}``, persisted next to no other state — this module owns the whole
 file. Writes are atomic (temp file + ``os.replace``) since the supervisor
 may crash mid-write; a missing or corrupt file is treated as absent rather
-than raised, and self-heals by materializing and persisting the defaults on
-the next ``get()``.
+than raised, and self-heals by materializing and persisting declared defaults
+on the next ``get()``.
 
 Malformed-record gating lives HERE, at ``_load()``, and nowhere else
 (NodeStore's pattern, app/node_store.py:18-30): a parseable file that is
-missing or malformed for one tenant self-heals the same way as the
+missing or malformed for a declared resource self-heals the same way as the
 whole-file case, one level down. ``_load()`` runs every record through
 ``_gated()`` and persists the heal immediately if anything changed, so
 ``get()``/``put()``/``set_auto()`` all consume an already-guaranteed shape
-and gate nothing themselves. A missing or malformed known tenant is
-replaced by its default; a runtime tenant (accepted since 1ee64611)
-survives only if it validates — there is no default to heal it to. A
-malformed ``_auto`` record (wrong shape, or a non-bool ``enabled``) is
-dropped rather than kept, healing to ``auto_enabled()``'s default-True
-reading instead of crashing the tick.
+and gate nothing themselves. A missing or malformed declared resource is
+replaced by its declared default. Stored rows for undeclared resources (orphaned
+rows from hand-edits or older writes) are kept on disk but invisible on read
+— they survive re-declaration. A malformed ``_auto`` record (wrong shape, or
+a non-bool ``enabled``) is dropped rather than kept, healing to
+``auto_enabled()``'s default-True reading instead of crashing the tick.
 
 This is single-process, in-process state only — no CROSS-process locking.
 Within the process both stores below DO hold a threading.Lock across every

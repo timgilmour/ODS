@@ -12,8 +12,6 @@ rejection idiom.
 
 from fastapi import APIRouter, Request
 
-from app.events import log_event
-
 router = APIRouter(prefix="/policy", tags=["policy"])
 
 

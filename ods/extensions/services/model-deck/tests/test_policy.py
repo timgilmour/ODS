@@ -1,9 +1,12 @@
-"""Tests for app.policy — the tenant policy store.
+"""Tests for app.policy — the resource policy store (E1 Task 4).
 
-policy.json is a flat mapping of {tenant: {priority, pinned, idle_ttl}} for
-the three known tenants (hipfire, lemonade, comfyui). Defaults materialize
-and persist on first get() (missing or corrupt file self-heals to defaults).
-Writes are atomic (temp file + os.replace), matching app.registry's idiom.
+E1 Task 4: policy.json is a flat mapping of {resource: {priority, pinned,
+idle_ttl}} with defaults from declared engines[]. get() returns one row per
+DECLARED resource (declared defaults overlaid by stored overrides); stored rows
+for undeclared resources are invisible on read but kept on disk (orphan defense:
+hand-edits, older writes). Defaults materialize and persist on first get()
+(missing or corrupt file self-heals to declared defaults). Writes are atomic
+(temp file + os.replace), matching app.registry's idiom.
 """
 
 import json
@@ -493,7 +496,7 @@ def test_undeclared_stored_row_is_invisible_but_kept(tmp_path):
     resource is re-declared, the row becomes visible again.
     """
     store = _policy_store(tmp_path, declared={})
-    # a row survives on disk from before a forget…
+    # a row survives on disk from hand-edits or older writes
     store_with = _policy_store(tmp_path, declared={
         "gguf-a": {"priority": 10, "pinned": False, "idle_ttl": 60}})
     store_with.put({"gguf-a": {"priority": 7, "pinned": False, "idle_ttl": 5}})
