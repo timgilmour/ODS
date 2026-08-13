@@ -186,6 +186,46 @@ def _build_deck(settings: Settings) -> dict:
     # declaration instead of swap nodes' registry rows.
     local_clients = LocalClients(node_store, settings)
 
+    # E1 Task 6 (branch-blocking obligation carried from Task 3's review,
+    # "dual-HipfireClient cold busy-guard"): ALIAS the pre-E1 shared
+    # lemonade/comfy/hipfire instances above onto whatever `local_clients`
+    # builds for that SAME resource name, whenever it's actually declared.
+    # Closes the dual-instance gap: HipfireClient's own conversation-
+    # activity tracker is fed by every `stats()` call and read by
+    # `ensure_not_busy`'s recency check (app/engines/hipfire.py) — before
+    # this, World.snapshot's per-tick polls (Task 3, through
+    # `local_clients`) fed ONE HipfireClient instance while
+    # app.routers.control's park route and app.sets' apply() guarded
+    # busy-ness through a SEPARATE one built here, so the tracker
+    # ensure_not_busy actually consulted was always cold on a fresh deck
+    # start ("hipfire served a request 0s ago", falsely refused, until the
+    # window elapsed from the failed attempt). Extended past hipfire to
+    # lemonade/comfy too, for the analogous reason: LemonadeClient's own
+    # `_loads_in_flight` tracker (read by `load_in_flight()`, which
+    # World.snapshot's observe() AND Watcher._reconcile_pass's in-flight
+    # skip both consult) would have the identical split otherwise.
+    #
+    # Falls back to the settings-built instance above when the resource
+    # ISN'T declared (a brand-new, empty-declaration install, spec §1) —
+    # every consumer of deck["lemonade"]/deck["comfy"]/deck["hipfire"]
+    # (this file's own _build_watcher below, app.routers.control's routes,
+    # app.routers.sets' apply() call, app.notify) must keep getting a
+    # real, always-present client regardless of declaration state; see
+    # tests/test_engines.py's
+    # test_build_deck_wires_hipfire_stats_url_and_activity_window, which
+    # pins exactly that for an undeclared box, and
+    # test_local_clients_alias_falls_back_when_nothing_is_declared
+    # alongside it, which pins the fallback explicitly.
+    _declared_lemonade = local_clients.client_for("lemonade")
+    if _declared_lemonade is not None:
+        lemonade = _declared_lemonade
+    _declared_comfy = local_clients.client_for("comfyui")
+    if _declared_comfy is not None:
+        comfy = _declared_comfy
+    _declared_hipfire = local_clients.client_for("hipfire")
+    if _declared_hipfire is not None:
+        hipfire = _declared_hipfire
+
     from app.engines.spark import SparkClient
     from app.node_clients import NodeClients, NodeObservers
 

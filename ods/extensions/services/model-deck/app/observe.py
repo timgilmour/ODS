@@ -27,14 +27,25 @@ from app.engines.spark import boot_in_flight
 
 _LOCAL_NODE = "local"
 
-# Public so writers (app.arbiter, app.routers.control, app.sets) and readers
-# (app.arbiter's reconcile pass) name it from one place instead of
-# re-typing the literal — actuation and observation can never disagree on
-# the key.
-LOCAL_LEMONADE_KEY = f"{_LOCAL_NODE}/lemonade"
+def local_key(resource: str) -> str:
+    """The intent/observation key for a DECLARED local resource
+    (``local/<resource>``) — the per-resource generalization of the old
+    ``LOCAL_LEMONADE_KEY`` constant (E1 Task 6: that name is gone; every
+    former use now calls this instead). Writers (app.engine_kinds'
+    actuator methods, app.sets, app.routers.control) and readers
+    (app.arbiter's reconcile pass, ``observe_local`` below) derive the key
+    from HERE so actuation and observation can never disagree on it — same
+    rationale ``LOCAL_HIPFIRE_KEY`` below already followed for hipfire
+    specifically, generalized past a single hardcoded name."""
+    return f"{_LOCAL_NODE}/{resource}"
 
-# Same rationale as LOCAL_LEMONADE_KEY above, for hipfire's intent key.
-LOCAL_HIPFIRE_KEY = f"{_LOCAL_NODE}/hipfire"
+
+# Same rationale as local_key above, kept as a named constant for hipfire
+# specifically: app.sets and app.routers.control still address hipfire by
+# its one legacy resource name directly (E1 Task 6 scope: only
+# app/arbiter.py's LOCAL_LEMONADE_KEY uses generalize this task — control.py's
+# route generalization is Task 7's).
+LOCAL_HIPFIRE_KEY = local_key("hipfire")
 
 
 def slot_key(node_id: str) -> str:
@@ -60,9 +71,11 @@ def observe_local(world: dict) -> dict[str, dict]:
     function's old hardcoded `tenants["lemonade"]`/`tenants["hipfire"]`/
     `tenants["comfyui"]` reads in place would KeyError on every
     `GET /api/state` call once World stopped guaranteeing those three keys
-    — a real, unavoidable break, not a style choice. Task 6 is expected to
-    revisit this dispatch alongside its LOCAL_LEMONADE_KEY/LOCAL_HIPFIRE_KEY
-    relocation.
+    — a real, unavoidable break, not a style choice. E1 Task 6 relocated
+    the LOCAL_LEMONADE_KEY constant this function used to define (now
+    ``local_key(resource)``, above) but deliberately left this per-kind
+    if/elif dispatch itself alone — out of that task's scope (arbiter.py's
+    watcher execution/pending/restore paths), still a disclosed residue.
 
     `tenant["engine"]` is read unconditionally — the transitional
     `tenant.get("engine", resource)` fallback this function used to lean on
@@ -112,7 +125,7 @@ def observe_local(world: dict) -> dict[str, dict]:
             # fourth kind or a fixture using some other resource name
             # without an explicit "engine" key would reach this.
             raise ValueError(f"unhandled engine kind {kind!r}")
-        out[f"{_LOCAL_NODE}/{resource}"] = record
+        out[local_key(resource)] = record
     return out
 
 
@@ -157,9 +170,9 @@ def observe_spark(spark_status: dict | None, node_id: str) -> dict[str, dict]:
 # caller. No swap-node row lives here — a `<node>/slot0` key's owner depends
 # on the registry (a PREPARED id-set, see engine_for), not a static literal.
 _LOCAL_ENGINE_BY_KEY = {
-    LOCAL_LEMONADE_KEY: "lemonade",
+    local_key("lemonade"): "lemonade",
     LOCAL_HIPFIRE_KEY: "hipfire",
-    "local/comfyui": "comfyui",
+    local_key("comfyui"): "comfyui",
 }
 
 

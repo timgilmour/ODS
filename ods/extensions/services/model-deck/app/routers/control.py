@@ -49,7 +49,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.observe import LOCAL_HIPFIRE_KEY, LOCAL_LEMONADE_KEY
+from app.observe import LOCAL_HIPFIRE_KEY, local_key
 
 router = APIRouter(prefix="/tenants", tags=["control"])
 
@@ -126,7 +126,7 @@ def lemonade_load(body: LemonadeLoadBody, request: Request,
     # budget, not un-recorded. Record the PREFIXED name — that is what
     # lemonade was told and what the observation will report back.
     deck["intent_store"].record(
-        LOCAL_LEMONADE_KEY, state="loaded", model=model, engine="lemonade"
+        local_key("lemonade"), state="loaded", model=model, engine="lemonade"
     )
     deck["lemonade"].load(model)
     # Deliberate load succeeded: clear the window (and any prior unload's).
@@ -187,7 +187,7 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
             # follow-up]. A record with no "actor" at all (pre-upgrade
             # intent.json) reads as "operator" — conservative, preserving
             # this check's original skip behavior for those.
-            entry = deck["intent_store"].get().get(LOCAL_LEMONADE_KEY)
+            entry = deck["intent_store"].get().get(local_key("lemonade"))
             if (
                 entry is not None
                 and entry.get("actor", "operator") == "operator"
@@ -230,7 +230,7 @@ def _pull_through(deck, bare: str, unit: dict, pull: bool) -> dict:
             # third writer class the supersession check above depends on
             # being told apart from the arbiter's automatic "deck" records.
             deck["intent_store"].record(
-                LOCAL_LEMONADE_KEY, state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
+                local_key("lemonade"), state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
                 engine="lemonade", actor="operator",
             )
             deck["lemonade"].load(f"{_EXTRA_PREFIX}{bare}")
@@ -270,7 +270,7 @@ def lemonade_unload(body: LemonadeUnloadBody, request: Request, force: bool = Fa
     # ...and record it as intent, which is the durable half of the same
     # statement: the suppression window expires, this does not.
     deck["intent_store"].record(
-        LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade"
+        local_key("lemonade"), state="unloaded", model=None, engine="lemonade"
     )
     deck["lemonade"].unload(model)
     return {"status": "ok"}

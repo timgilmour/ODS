@@ -1397,6 +1397,68 @@ def test_build_deck_wires_hipfire_stats_url_and_activity_window(tmp_path, monkey
     assert deck["hipfire"]._stats_url == "http://ods-hipfire:11435/stats"
 
 
+# --- dual-HipfireClient cold busy-guard closure (E1 Task 6) -----------------
+#
+# Branch-blocking obligation carried from Task 3's review: since Task 3,
+# World.snapshot polls the hipfire client built by LocalClients every tick
+# (feeding HipfireClient's own conversation-activity tracker), but
+# deck["hipfire"] — the SEPARATE instance app.routers.control's park route
+# and app.sets' apply() guard busy-ness through via ensure_not_busy — was
+# built independently in _build_deck and never polled, so its tracker sat
+# permanently cold and the FIRST park after any deck start was falsely
+# refused ("hipfire served a request 0s ago") until the window elapsed from
+# the failed attempt. _build_deck now ALIASES deck["lemonade"]/deck["comfy"]/
+# deck["hipfire"] onto whatever LocalClients builds for that resource
+# whenever it's declared (see that assignment's own comment for the chosen
+# mechanism and why lemonade/comfy are included too).
+
+
+def test_local_clients_alias_closes_the_dual_hipfire_busy_guard_gap(tmp_path, monkeypatch):
+    """The instance World.snapshot polls every tick (through
+    local_clients) and the instance ensure_not_busy's recency check guards
+    actuation through (deck["hipfire"]/deck["lemonade"]/deck["comfy"]) must
+    be the SAME object — same identity is the simplest honest proof the
+    tracker they read is the one that actually gets fed. A pre-existing
+    intent.json naming "hipfire" satisfies seed_engines_if_missing's
+    presence-proof gate, so the coexistence triple is declared BEFORE
+    _build_deck first runs — the real, live-deployed condition this
+    closes for (every currently-running box, not a brand-new install; see
+    the fallback test below and
+    test_build_deck_wires_hipfire_stats_url_and_activity_window above for
+    that other case)."""
+    from app.main import _build_deck
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    (tmp_path / "intent.json").write_text('{"local/hipfire": {"state": "loaded"}}')
+    settings = Settings()
+
+    deck = _build_deck(settings)
+
+    assert deck["hipfire"] is deck["local_clients"].client_for("hipfire")
+    assert deck["lemonade"] is deck["local_clients"].client_for("lemonade")
+    assert deck["comfy"] is deck["local_clients"].client_for("comfyui")
+
+
+def test_local_clients_alias_falls_back_when_nothing_is_declared(tmp_path, monkeypatch):
+    """The other half of the same mechanism: a brand-new/empty declaration
+    (no presence proof — fresh tmp_path, no intent.json/policy.json) must
+    NOT leave deck["hipfire"] as None — every consumer (control.py's
+    routes, app.sets' apply(), app.notify) expects a real, always-present
+    client regardless of declaration state."""
+    from app.main import _build_deck
+    from app.settings import Settings
+
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    settings = Settings()
+
+    deck = _build_deck(settings)
+
+    assert deck["local_clients"].client_for("hipfire") is None  # nothing declared
+    assert deck["hipfire"] is not None
+    assert deck["hipfire"]._activity_window_s == settings.hipfire_activity_window_s
+
+
 # --- _build_watcher wiring: remote catalog harvest routes (task 8, C2) -----
 #
 # Watcher._configurable_engines does no pairing of its own anymore (see its

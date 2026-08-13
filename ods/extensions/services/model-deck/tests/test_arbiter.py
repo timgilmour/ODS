@@ -313,8 +313,14 @@ def test_idle_release_empty_when_nothing_idle():
 # ===========================================================================
 
 
-def _pending(model="extra.model.gguf", footprint=19 * GIB, gpu_index=1):
-    return {"model": model, "footprint": footprint, "gpu_index": gpu_index}
+def _pending(model="extra.model.gguf", footprint=19 * GIB, gpu_index=1, resource="lemonade"):
+    # "resource" mirrors Watcher._infer_pending's real output shape (E1
+    # Task 6 added it there); decide() itself never reads it (pending_load
+    # only ever needs footprint/gpu_index), so every decide()-only caller
+    # of this helper is unaffected — only test_same_tick_evict_and_reload_
+    # pins_single_load_and_final_intent, which feeds this straight into
+    # watcher._execute(), actually needs it.
+    return {"model": model, "footprint": footprint, "gpu_index": gpu_index, "resource": resource}
 
 
 def test_contention_todays_incident_frees_comfyui():
@@ -793,7 +799,8 @@ def _make_watcher(
     intent_store=None, node_clients=None, node_observers=None, auto=True,
     characteristics_store=None,
     gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
-    configurable_engines=None, provenance_store=None, dockerctl=None, **sett,
+    configurable_engines=None, provenance_store=None, dockerctl=None,
+    node_store=None, local_clients=None, **sett,
 ):
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
@@ -821,6 +828,13 @@ def _make_watcher(
         configurable_engines=configurable_engines,
         provenance_store=provenance_store,
         dockerctl=dockerctl,
+        # E1 Task 6: declaration-shaped watcher tests (two_gguf_watcher
+        # below) wire a real node_store + a LocalClients-shaped fake here;
+        # every other caller in this file leaves both None, which routes
+        # actuation through Watcher's own _LegacyClients fallback (built
+        # from the lemonade/comfy/hipfire clients above) instead.
+        node_store=node_store,
+        local_clients=local_clients,
     )
     return watcher, events_path
 
@@ -838,6 +852,209 @@ def _watcher(tmp_path, world=None, registry=None, policy=None, **kwargs):
         **kwargs,
     )
     return watcher
+
+
+# ===========================================================================
+# two_gguf_watcher — E1 Task 6: a watcher over TWO independent lemonade-kind
+# resources (declaration shape), extending _make_watcher/_watcher above with
+# the node_store=/local_clients= wiring those gained for a resource whose
+# name isn't one of the legacy lemonade/comfyui/hipfire triple. T13 extends
+# this SAME fixture further (load_natively/forget helpers — see the plan's
+# pre-flight conflict scan); don't fork it there either.
+# ===========================================================================
+
+
+class _FakeLocalClients:
+    """LocalClients-shaped fake (``client_for`` only — the same shape as
+    tests/test_state.py's own ``_FakeLocalClients``), plus ``.fake(resource)``:
+    a test-only accessor this file's declaration-shaped tests use to reach a
+    specific resource's fake client directly (mirrors
+    ``deck["local_clients"].fake`` in tests/test_api.py, per the plan's
+    pre-flight conflict scan)."""
+
+    def __init__(self, clients: dict) -> None:
+        self._clients = clients
+
+    def client_for(self, resource: str):
+        return self._clients.get(resource)
+
+    def retire_absent(self, keep_resources) -> None:
+        pass  # nothing built lazily here to retire
+
+    def fake(self, resource: str):
+        return self._clients[resource]
+
+
+class _FakeLiteLLMRoutes:
+    """Minimal ``route_table()`` fake for two_gguf_watcher's REAL
+    ``World.snapshot`` calls: ``default`` starts unset (``route_table()``
+    then carries no "default" key at all, matching a box with no default
+    route configured — same shape ``world["default_route"]`` reads as
+    falsy for), and is driven by ``_PendingCapableLemonade.set_pending``
+    below."""
+
+    def __init__(self) -> None:
+        self.default = None
+
+    def route_table(self) -> dict:
+        return {} if self.default is None else {"default": self.default}
+
+
+class _PendingCapableLemonade:
+    """A lemonade-kind client wired for BOTH observation (status/activity/
+    load_in_flight — the contract app.engine_kinds._LemonadeAdapter.observe
+    calls, same shape as tests/test_state.py's StubLemonade) and actuation
+    (load/unload — the same call-log contract as FakeLemonade above): the
+    two_gguf_watcher fixture's tests exercise a REAL World.snapshot (unlike
+    every other watcher test in this file, which hands the watcher a canned
+    FakeWorld dict), so its resources need both halves at once.
+
+    ``set_pending`` is test-only sugar for
+    test_pending_from_second_gguf_carries_its_own_gpu:
+    Watcher._infer_pending's actual MECHANISM is UNCHANGED by E1 Task 6 —
+    still ``world["default_route"]`` + ``self._registry.footprint()``, both
+    box-wide, not per-resource (see that method's own docstring); only the
+    per-resource iteration generalizes. This feeds those SAME
+    fixture-level fake litellm/registry — a resource-scoped handle is test
+    ergonomics, and it also guarantees the call is scoped to a resource
+    that observes 'unloaded' (this class's own ``loaded_model``), the
+    OTHER precondition _infer_pending checks.
+    """
+
+    def __init__(self, litellm: "_FakeLiteLLMRoutes", registry: "FakeRegistry",
+                 loaded: str | None = None) -> None:
+        self._litellm = litellm
+        self._registry = registry
+        self.loaded_model = loaded
+        self.unloaded = []
+        self.loaded = []
+
+    def status(self) -> dict:
+        return {"loaded": self.loaded_model}
+
+    def activity(self):
+        return None
+
+    def load_in_flight(self) -> bool:
+        return False
+
+    def unload(self, model: str) -> None:
+        self.unloaded.append(model)
+        self.loaded_model = None
+
+    def load(self, model: str) -> None:
+        self.loaded.append(model)
+        self.loaded_model = model
+
+    def set_pending(self, model: str, *, footprint: int) -> None:
+        self._litellm.default = model
+        self._registry._footprints[model.removeprefix("extra.")] = footprint
+
+
+# Declaration for two_gguf_watcher: resource names deliberately NOT
+# "lemonade" ([[defaults-that-hide-bugs]] — a resource==kind-name
+# coincidence would prove nothing about the per-resource generalization),
+# GPUs 2/3 (away from the legacy triple's 0/1 placement).
+_TWO_GGUF_ENGINES = [
+    {"resource": "gguf-a", "kind": "lemonade",
+     "connection": {"url": "http://gguf-a:8080",
+                    "metrics_url": "http://gguf-a:8081/metrics",
+                    "container": "gguf-a"},
+     "gpu_index": 2,
+     "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+    {"resource": "gguf-b", "kind": "lemonade",
+     "connection": {"url": "http://gguf-b:8080",
+                    "metrics_url": "http://gguf-b:8081/metrics",
+                    "container": "gguf-b"},
+     "gpu_index": 3,
+     "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+]
+
+
+class _TwoGgufWatcher:
+    """two_gguf_watcher's return value: the watcher plus everything needed
+    to build a REAL World snapshot against its two declared resources."""
+
+    def __init__(self, watcher, clients, intent_store, gpus, litellm, registry, world) -> None:
+        self.watcher = watcher
+        self.clients = clients
+        self.intent_store = intent_store
+        self._gpus = gpus
+        self._litellm = litellm
+        self._registry = registry
+        self._world = world
+
+    def world_snapshot(self) -> dict:
+        return self._world.snapshot(
+            self._gpus, _TWO_GGUF_ENGINES, self.clients, self._litellm, self._registry)
+
+
+@pytest.fixture
+def two_gguf_watcher(tmp_path):
+    """A watcher over two INDEPENDENT lemonade-kind resources (declaration
+    shape) — gguf-a on GPU 2 (loaded with "a.gguf"), gguf-b on GPU 3
+    (unloaded) — built through _make_watcher's node_store=/local_clients=
+    params (this task's own new additions) rather than a second, forked
+    watcher builder."""
+    from app.intent import IntentStore
+    from app.node_store import NodeStore
+    from app.state import World
+
+    node_store = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+    node_store.add({"id": "local", "label": "local", "agent_kind": "local"})
+    node_store.update("local", {"engines": _TWO_GGUF_ENGINES})
+
+    litellm = _FakeLiteLLMRoutes()
+    # gguf-a's own footprint is needed even though this fixture's tests
+    # never make gguf-a pending: World.snapshot's lemonade-kind observe()
+    # always resolves a LOADED resource's footprint from the registry.
+    registry = FakeRegistry(footprints={"a.gguf": 5 * GIB})
+    # World.snapshot's OWN gpu shape (app.gpu.read_gpus' raw output:
+    # vram_total/vram_used/pids) — NOT this file's own `_gpu()` helper,
+    # which builds the ALREADY-PROCESSED total/used/free shape decide()
+    # consumes; two_gguf_watcher drives a REAL World.snapshot, so its
+    # inputs must match what that function actually expects (see
+    # tests/test_state.py's own `_gpu()` for the same raw shape). Small
+    # raw byte counts, not GiB-scaled — sized to be comparable against
+    # test_pending_from_second_gguf_carries_its_own_gpu's own small
+    # footprint=30: GPU 2 has plenty of free space (gguf-a is loaded
+    # anyway, never a candidate), GPU 3's free (10) is BELOW that
+    # footprint, which is what makes gguf-b pending.
+    gpus = [
+        {"index": 2, "vram_total": 100, "vram_used": 10, "pids": {}},
+        {"index": 3, "vram_total": 100, "vram_used": 90, "pids": {}},
+    ]
+    clients = _FakeLocalClients({
+        "gguf-a": _PendingCapableLemonade(litellm, registry, loaded="a.gguf"),
+        "gguf-b": _PendingCapableLemonade(litellm, registry, loaded=None),
+    })
+    intent_store = IntentStore(tmp_path / "intent.json")
+    world = World()
+
+    watcher, _events_path = _make_watcher(
+        tmp_path, world, registry, _policy(),
+        node_store=node_store, local_clients=clients, intent_store=intent_store,
+    )
+
+    return _TwoGgufWatcher(watcher, clients, intent_store, gpus, litellm, registry, world)
+
+
+def test_pending_from_second_gguf_carries_its_own_gpu(two_gguf_watcher):
+    """A second lemonade-kind resource is an independent demand source
+    with its own declared GPU (kills settings.lemonade_gpu_index)."""
+    w = two_gguf_watcher            # fixture: gguf-a on GPU 2, gguf-b on 3
+    w.clients.fake("gguf-b").set_pending("b.gguf", footprint=30)
+    pending = w.watcher._infer_pending(w.world_snapshot())
+    assert pending["resource"] == "gguf-b" and pending["gpu_index"] == 3
+
+
+def test_deck_unload_records_intent_for_the_right_resource(two_gguf_watcher):
+    w = two_gguf_watcher
+    w.watcher._execute([{"type": "unload", "resource": "gguf-b",
+                         "model": "b.gguf"}], None)
+    rec = w.intent_store.get()["local/gguf-b"]
+    assert rec["state"] == "unloaded" and rec["actor"] == "deck"
+    assert "local/gguf-a" not in w.intent_store.get()
 
 
 class _FakeClock:

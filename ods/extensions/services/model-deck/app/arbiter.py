@@ -131,7 +131,6 @@ from app.intent import FAILURE_BUDGET
 from app.lifecycle import derive_status
 from app.observe import (
     _LOCAL_NODE,
-    LOCAL_LEMONADE_KEY,
     merge_observations,
     observe_local,
     observe_spark,
@@ -168,22 +167,6 @@ _DERIVE_RESTORE_FLOOR_S = 30.0
 # cooldown is also what paces those charges. A skipped restore is a
 # non-action: no event, no failure charged.
 _RESTORE_COOLDOWN_S = 30.0
-
-# Engine failures carry raw HTTP bodies (`EngineError(resp.text)`), and a
-# multi-KB body re-logged per 2 s tick is exactly the trim-thrash input
-# app/events.py's byte-denominated trim bounds [T10]. Bound the DETAIL too:
-# 500 chars keeps a failed-load line well under events' 2500 B/line
-# hysteresis ratio even when the body is unstable tick to tick (timestamps
-# in an error page defeat dedup, so truncation is the backstop dedup needs).
-_ERROR_TEXT_MAX = 500
-
-
-def _error_text(exc: BaseException) -> str:
-    text = str(exc)
-    if len(text) <= _ERROR_TEXT_MAX:
-        return text
-    return text[:_ERROR_TEXT_MAX] + " …[truncated]"
-
 
 # ===========================================================================
 # Heal suppression — shared flag guarding deliberate unloads
@@ -492,6 +475,28 @@ def harvest_catalog_pair(engine_exec, characteristics_store, log, node, engine,
 # ===========================================================================
 
 
+class _LegacyClients:
+    """Fallback resource -> client map for callers that inject the
+    pre-LocalClients lemonade/comfy/hipfire clients directly (every unit
+    test in tests/test_arbiter.py written before this task, plus any other
+    caller that predates app.local_clients.LocalClients) instead of a real
+    one (E1 Task 6). Built ONCE in Watcher.__init__ when `local_clients`
+    isn't given — every per-tick actuation/pending/restore path in this
+    class stays KEYLESS (always routes through self._local_clients, never
+    self._lemonade/_comfy/_hipfire directly), and this is the ONE place the
+    legacy lemonade/comfyui/hipfire resource names get resolved, at
+    construction time, never inside the tick loop itself."""
+
+    def __init__(self, lemonade, comfy, hipfire) -> None:
+        self._map = {"lemonade": lemonade, "comfyui": comfy, "hipfire": hipfire}
+
+    def client_for(self, resource: str):
+        return self._map.get(resource)
+
+    def retire_absent(self, keep_resources) -> None:
+        pass  # nothing built lazily here to retire
+
+
 class Watcher:
     """Periodic arbiter loop. Owns one ``World`` and drives ``decide`` on a
     timer, executing actions against the engine clients and logging each.
@@ -531,6 +536,12 @@ class Watcher:
     ) -> None:
         self._settings = settings
         self._world = world
+        # Kept as instance attributes for tests/callers that read them
+        # directly (e.g. FakeLemonade.load_in_flight() assertions), but no
+        # longer consulted by any per-tick dispatch in this class (E1 Task
+        # 6): they exist solely to seed _LegacyClients below when
+        # `local_clients` isn't given. See self._local_clients' own
+        # comment a few lines down.
         self._lemonade = lemonade
         self._comfy = comfy
         self._hipfire = hipfire
@@ -539,16 +550,28 @@ class Watcher:
         self._policy_store = policy_store
         self._events_path = events_path
         self._read_gpus = read_gpus
-        # Declaration + LocalClients (E1 Task 3): what the tick's
-        # World.snapshot call reads through now. Both None (every unit test
-        # except the ones built through app.main._build_watcher) means "no
-        # declared engines" — the tick's own snapshot degrades to an empty
-        # `engines` list, same as a genuinely fresh install with nothing
-        # declared yet (spec §1, seed_engines_if_missing's docstring).
-        # COEXISTENCE: observation only — self._lemonade/_comfy/_hipfire
-        # above still drive every ACTUATION path in this class unchanged.
+        # Declaration + LocalClients (E1 Task 3/6): what the tick's
+        # World.snapshot call reads through, AND (as of Task 6) what every
+        # actuation/pending/restore path in this class resolves its
+        # per-resource client through too — self._lemonade/_comfy/_hipfire
+        # above are kept only as constructor inputs to _LegacyClients
+        # below (production never falls back to them: app.main._build_watcher
+        # always passes a real local_clients). `self._node_store is None`
+        # (every unit test that doesn't go through app.main._build_watcher,
+        # unless it wires node_store= itself) means "no declared engines" —
+        # the tick's own snapshot degrades to an empty `engines` list, same
+        # as a genuinely fresh install with nothing declared yet (spec §1,
+        # seed_engines_if_missing's docstring).
         self._node_store = node_store
-        self._local_clients = local_clients
+        # `local_clients=None` (most unit tests) falls back to a shim
+        # resolving the legacy lemonade/comfyui/hipfire resource names onto
+        # the clients this constructor was handed directly — see
+        # _LegacyClients' own docstring. This keeps _execute/_infer_pending/
+        # _restore themselves free of any resource-name literal.
+        self._local_clients = (
+            local_clients if local_clients is not None
+            else _LegacyClients(lemonade, comfy, hipfire)
+        )
         # Shared across the HTTP routers (set-apply, manual load/unload) via
         # the deck namespace; a standalone default keeps unit tests simple.
         self._heal_suppressor = (
@@ -689,8 +712,10 @@ class Watcher:
             if self._node_store is not None:
                 local = self._node_store.get("local")
                 engines = local.get("engines", []) if local is not None else []
-                if self._local_clients is not None:
-                    self._local_clients.retire_absent({e["resource"] for e in engines})
+                # self._local_clients is never None (see __init__) — a
+                # legacy caller's _LegacyClients fallback simply has
+                # nothing lazily built to retire.
+                self._local_clients.retire_absent({e["resource"] for e in engines})
             world = self._world.snapshot(
                 gpus, engines, self._local_clients, self._litellm, self._registry
             )
@@ -740,16 +765,29 @@ class Watcher:
             self._log("tick-error", {"error": str(exc)})
 
     def _infer_pending(self, world: dict) -> dict | None:
-        """Infer a pending default-route load waiting on VRAM.
+        """Infer a pending default-route load waiting on VRAM, generalized
+        (E1 Task 6) past a single hardcoded "lemonade" tenant: iterates
+        every DECLARED resource whose kind `demand()` (only lemonade-kind
+        today), asking each in turn whether IT is the one waiting — first
+        match wins (sorted by resource, deterministic; spec §3: one
+        pending per tick; two lemonade-kind resources are independent
+        demand sources).
 
-        Only when: a default route is configured, lemonade currently has
-        nothing loaded, the model is a GGUF we know how to size, and the
-        lemonade GPU's free VRAM is below that footprint.
+        The actual MECHANISM is UNCHANGED from before this task: a default
+        route is configured (`world["default_route"]`, still litellm-wide
+        — there is one "wants to be resident" model per box, not one per
+        resource) and the model is a GGUF we know how to size (computed
+        ONCE, since both inputs are box-wide, not per-resource). What
+        generalizes per resource is only: is THIS resource the one
+        currently unloaded, and is THIS resource's OWN declared GPU's free
+        VRAM below that footprint. `gpu_index` now comes from the tenant's
+        OWN declared placement (`tenant["gpu_index"]`, stamped onto every
+        tenant by World.snapshot from the declaration) — this is what
+        kills the single global `settings.lemonade_gpu_index` the pre-E1
+        version read.
         """
         default_route = world["default_route"]
         if not default_route:
-            return None
-        if world["tenants"]["lemonade"]["state"] != "unloaded":
             return None
 
         key = default_route.removeprefix(_EXTRA_PREFIX)
@@ -758,205 +796,135 @@ class Watcher:
         except FileNotFoundError:
             return None  # not a loadable GGUF -> nothing to heal
 
-        gpu_index = self._settings.lemonade_gpu_index
-        gpu = _find_gpu(world["gpus"], gpu_index)
-        if gpu is None or gpu["free"] >= footprint:
-            return None
+        for resource in sorted(world["tenants"]):
+            tenant = world["tenants"][resource]
+            if not ENGINE_KINDS[tenant["engine"]].demand():
+                continue
+            if tenant["state"] != "unloaded":
+                continue
+            gpu_index = tenant.get("gpu_index")
+            gpu = _find_gpu(world["gpus"], gpu_index) if gpu_index is not None else None
+            if gpu is None or gpu["free"] >= footprint:
+                continue
+            return {"resource": resource, "model": default_route,
+                    "footprint": footprint, "gpu_index": gpu_index}
 
-        return {"model": default_route, "footprint": footprint, "gpu_index": gpu_index}
+        return None
+
+    def _kind_for(self, resource: str) -> str | None:
+        """The declared kind for `resource`, keyless: reads live off
+        self._node_store's "local" `engines[]` declaration (the same
+        NodeObservers-precedent live re-read tick() itself does) when one
+        is wired. `self._node_store is None` — every unit test that
+        injects lemonade/comfy/hipfire directly instead (see
+        _LegacyClients above) — falls back to treating `resource` AS its
+        own kind name, which is exactly true for that legacy triple (and
+        for nothing else — an undeclared, non-legacy resource correctly
+        resolves to None either way)."""
+        if self._node_store is not None:
+            local = self._node_store.get("local")
+            if local is not None:
+                for entry in local.get("engines", []):
+                    if entry["resource"] == resource:
+                        return entry["kind"]
+            return None
+        return resource if resource in ENGINE_KINDS else None
+
+    def _dispatch_verb(self, resource: str, verb: str):
+        """The (adapter, client) pair for actuating `verb` against
+        `resource`, or raises: the resource isn't declared/resolvable
+        (self._local_clients has no client for it — covers a genuinely
+        undeclared resource AND a name outside the legacy fallback's
+        lemonade/comfyui/hipfire set), or its declared kind doesn't expose
+        `verb` as an arbiter verb at all. decide() only ever asks for a
+        verb the resource's OWN kind actually has (app.engine_kinds), so
+        reaching here with either false is a real bug — never vanish
+        silently (no actuation, no log): raise so tick()'s own broad
+        supervisor catch logs it as a tick-error instead, "let it crash"
+        the tick, not the process, the same posture as observe.py's
+        `unhandled engine kind` raise for an analogous gap [T5 review,
+        totality floor; Task 6 replaces that hardcoded raise with this
+        real per-kind dispatch]."""
+        client = self._local_clients.client_for(resource)
+        kind = self._kind_for(resource)
+        adapter = ENGINE_KINDS.get(kind) if kind is not None else None
+        if client is None or adapter is None or verb not in adapter.arbiter_verbs():
+            raise ValueError(f"_execute: no {verb!r} dispatch for resource {resource!r}")
+        return adapter, client
 
     def _execute(self, actions: list[dict], pending: dict | None) -> set[str]:
         """Perform this tick's arbitration actions. Returns the intent-store
         keys actuated (unloaded or load-retriggered) THIS tick — the caller
         (tick()) feeds it to _reconcile_pass so a stale, pre-action snapshot
-        can never restore-fight a change this same tick just made."""
+        can never restore-fight a change this same tick just made.
+
+        E1 Task 6: dispatch is now BY KIND, through each resource's own
+        adapter (app.engine_kinds) — `ENGINE_KINDS[kind].execute_unload`/
+        `execute_free` — rather than a hardcoded lemonade/comfyui pair.
+        Every invariant those two blocks held (whoever-actuates-records
+        ordering, actor="deck", the `_still_ours` compare-and-swap, the
+        actuated-key set, HealSuppressor arming) moved onto the adapter
+        methods intact, comments included — see their own docstrings.
+        """
         wont_fit = False
         eviction_raced = False
         actuated: set[str] = set()
 
         for action in actions:
-            # E1 Task 5 generalized decide()'s own action vocabulary to
-            # {"type": "unload"/"free"/"noop", "resource": r, ...} — this
-            # mechanical translation back to the pre-E1 dispatch keys
-            # ("unload_lemonade"/"free_comfyui") is the MINIMUM needed to
-            # keep this method (and its event-log vocabulary) working
-            # against the new action shapes without changing what it
-            # actually does. Task 6 owns generalizing `_execute` itself
-            # (and `_infer_pending`/`_restore`) past the single hardcoded
-            # lemonade/comfyui pair — see this method's own docstring scope.
             kind_raw = action["type"]
-            resource = action.get("resource")
-            if kind_raw == "unload" and resource == "lemonade":
-                kind = "unload_lemonade"
-                # Whoever actuates, records — and records FIRST, so a tick
-                # that lands mid-unload derives 'parked', never 'down'
-                # (2026-08-06). actor="deck": this is the arbiter's OWN
-                # automatic action (idle-release or contention-eviction),
-                # never an operator's — app.routers.control's pull-through
-                # supersession check relies on that distinction to tell
-                # "the deck unloaded something idle" apart from "the
-                # operator asked for this" [max-review Important-1].
-                # Snapshot the prior record first, so a FAILED unload can roll
-                # it back: the actuation didn't happen, and leaving 'unloaded'
-                # standing against a still-loaded model derives the inert
-                # 'unexpected' status until an eventual retry [max-review #9].
-                prior = None
-                if self._intent_store is not None:
-                    prior = self._intent_store.get().get(LOCAL_LEMONADE_KEY)
-                    self._intent_store.record(
-                        LOCAL_LEMONADE_KEY, state="unloaded", model=None, engine="lemonade",
-                        actor="deck")
-                # Added BEFORE the engine call (mirrors the retrigger tail
-                # below) so the invariant is structural: an unload wrapped in
-                # try/except in the future still can't return without this
-                # key marked actuated.
-                actuated.add(LOCAL_LEMONADE_KEY)
-                try:
-                    self._lemonade.unload(action["model"])
-                except EngineError as exc:
-                    # Per-action isolation — _execute_restore's documented
-                    # invariant (see its docstring), applied to the arm that
-                    # lacked it: a raise here must not abort the remaining
-                    # actions or the reconcile/derive/provenance passes via
-                    # tick()'s broad catch [max-review #9].
-                    #
-                    # Logged BEFORE the rollback, not after: the diagnostic is
-                    # what tells an operator this happened at all, so it must
-                    # not be contingent on the rollback succeeding [T7 review].
-                    self._log("unload-failed",
-                              {"model": action["model"],
-                               "error": _error_text(exc)})
-                    # A real compare-and-swap: the predicate and the write
-                    # run in ONE critical section inside the store
-                    # (put_back_if). An operator can record a deliberate
-                    # load/unload during the seconds this engine call hung,
-                    # and blindly putting `prior` back would silently revert
-                    # THEIR action — the same class of bug as the pull-through
-                    # supersession hole task 6 closed. An earlier version read
-                    # the record and then wrote in two separate critical
-                    # sections, which is check-then-act, not CAS [T7/T8
-                    # fix-round review].
-                    #
-                    # Still the speculative record this arm wrote? It is
-                    # deck-authored AND unloaded; an operator's write flips
-                    # actor to "operator" (their routes never pass
-                    # actor="deck"), so that pair is a sufficient witness.
-                    def _still_ours(current):
-                        return (current is not None
-                                and current.get("actor") == "deck"
-                                and current.get("state") == "unloaded")
 
-                    if self._intent_store is not None and prior is not None:
-                        if not self._intent_store.put_back_if(
-                                LOCAL_LEMONADE_KEY, _still_ours, prior):
-                            # Someone else's intent is newer. Leave it alone
-                            # and say so — a silent skip here would be the
-                            # same invisibility the rollback exists to end.
-                            # Covers the forget()-shaped case too (current
-                            # gone entirely), which the previous shape logged
-                            # nothing for.
-                            self._log("unload-rollback-skipped",
-                                      {"model": action["model"],
-                                       "reason": "intent changed during the unload"})
-                    # prior is None (no record for this key yet) + failure
-                    # leaves the fresh 'unloaded' record standing: there is no
-                    # forget() to undo it with. Rare, and no worse than the
-                    # behavior this fix replaces.
-                else:
-                    # Same re-arm as the load arm's success path: a
-                    # successful unload between two identical unload
-                    # failures must not swallow the second one.
-                    self._last_failure_key = None
-                    # Deck-initiated unload (idle release OR contention
-                    # eviction): arm suppression so healing can't immediately
-                    # revert it.
-                    self._heal_suppressor.note_deck_unload()
-                    self._log(kind, {"model": action["model"]})
-            elif kind_raw == "free" and resource == "comfyui":
-                kind = "free_comfyui"
-                try:
-                    self._comfy.free()
-                except GuardError:
-                    # Race: comfy's queue filled between decide and execute.
-                    # The VRAM was NOT reclaimed — log and skip the reload.
-                    eviction_raced = True
-                    self._log("free-raced", {})
-                except EngineError as exc:
-                    # Comfy unreachable / refused. Same conservative reading
-                    # as the race above — the VRAM is NOT confirmed reclaimed,
-                    # so the pending load must not be re-triggered into a GPU
-                    # that may still be full — and the same per-action
-                    # isolation as the unload arm [max-review #9].
-                    eviction_raced = True
-                    self._log("free-failed", {"error": str(exc)})
-                else:
-                    # Re-arm the idle TTL so the idle-release rule fires once
-                    # per TTL while comfy stays idle, not on every tick.
-                    # note_comfy_freed() -> note_freed(resource) (E1 Task 3);
-                    # this action type is still comfy-specific pending Task
-                    # 6's per-resource action vocabulary, so the resource
-                    # name is the same "comfyui" literal `_execute`'s
-                    # surrounding block already commits to elsewhere.
-                    self._world.note_freed("comfyui")
-                    self._log(kind, {})
-            elif kind_raw == "noop":
+            if kind_raw == "noop":
                 if action["reason"] == "wont-fit":
                     wont_fit = True
                 self._log("noop", {"reason": action["reason"]})
+                continue
+
+            resource = action["resource"]
+            if kind_raw == "unload":
+                adapter, client = self._dispatch_verb(resource, "unload")
+                adapter.execute_unload(self, resource, client, action["model"], actuated)
+            elif kind_raw == "free":
+                adapter, client = self._dispatch_verb(resource, "free")
+                if adapter.execute_free(self, resource, client):
+                    eviction_raced = True
             else:
-                # T5 review fix: decide() can now emit "unload"/"free" for
-                # ANY declared resource (E1 generalization), but this method
-                # still only actuates the lemonade/comfyui pair — the rest
-                # is Task 6's generalization (see this method's docstring
-                # scope, and the mechanical-translation comment above). An
-                # action that matches neither branch must not vanish
-                # silently (no actuation, no log) — that would be a real
-                # unload/free the deck decided on and then simply never
-                # performed. Raise so tick()'s own broad supervisor catch
-                # logs it as a tick-error instead: "let it crash" the tick,
-                # not the process, the same posture as observe.py's
-                # `unhandled engine kind` raise for an analogous gap.
+                # decide() only ever emits "unload"/"free"/"noop" — an
+                # action of any other shape must not vanish silently (no
+                # actuation, no log), the same totality floor as
+                # _dispatch_verb's own raise above.
                 raise ValueError(f"_execute: no dispatch for action {action!r}")
 
         # After healing a pending load's contention (or finding it already
-        # fit), re-trigger the default-route load with its FULL name. Skip if
-        # the contention can't be healed (wont-fit) or an eviction raced.
+        # fit), re-trigger the pending resource's load with its FULL name.
+        # Skip if the contention can't be healed (wont-fit) or an eviction
+        # raced.
         if pending is not None and not wont_fit and not eviction_raced:
-            # Deck-authored load: record BEFORE actuating (same rule as the
-            # unload arm above). A failed load then derives 'down' and the
-            # reconciler retries under the existing FAILURE_BUDGET —
-            # deliberate, not a gap. actor="deck" for the same reason as the
-            # unload arm above — this is automatic contention-healing, not
-            # an operator's request.
-            if self._intent_store is not None:
-                self._intent_store.record(
-                    LOCAL_LEMONADE_KEY, state="loaded", model=pending["model"], engine="lemonade",
-                    actor="deck")
-            actuated.add(LOCAL_LEMONADE_KEY)
-            try:
-                self._lemonade.load(pending["model"])
-            except EngineError as exc:
-                # Load failed (engine unreachable, bad response, etc.) — log
-                # and let the loop survive; the next tick re-evaluates.
-                self._log("load-failed", {"error": _error_text(exc)})
-            else:
-                # Re-arm the failure-dedup memo: a recovery between two
-                # IDENTICAL failures must not swallow the second one —
-                # fail→recover→fail is the flap the T9-fix review named as
-                # this codebase's forbidden dedup class.
-                self._last_failure_key = None
-                # Deck-initiated load: the model is wanted resident again, so
-                # clear any suppression left by a prior deliberate unload.
-                self._heal_suppressor.clear()
-                # ...and it's a genuine use of the model: record it so the
-                # storage watcher's LRU order doesn't treat an auto-reloaded
-                # default-route model as "never used".
-                if self._catalog is not None:
-                    self._catalog.note_used_gguf(
-                        pending["model"].removeprefix(_EXTRA_PREFIX))
-                self._log("load-retriggered", {"model": pending["model"]})
+            resource = pending["resource"]
+            client = self._local_clients.client_for(resource)
+            kind = self._kind_for(resource)
+            adapter = ENGINE_KINDS.get(kind) if kind is not None else None
+            if client is None or adapter is None or not adapter.demand():
+                # _infer_pending only ever returns a pending dict for a
+                # demand()-kind resource it just found declared and
+                # client-resolvable in THIS SAME world snapshot — reaching
+                # here with either false is a real bug, same totality
+                # posture as _dispatch_verb above.
+                raise ValueError(f"_execute: no load dispatch for resource {resource!r}")
+            adapter.execute_load(self, resource, client, pending, actuated)
 
         return actuated
+
+    def _clear_failure_dedup(self) -> None:
+        """Re-arm the load/unload failure-dedup memo (`_FAILURE_DEDUP_KINDS`,
+        see `_log`) after a successful load or unload: a recovery between
+        two IDENTICAL failures must not swallow the second one —
+        fail→recover→fail is the flap class the T9-fix review forbade.
+        Called by the lemonade-kind actuator (app.engine_kinds.
+        _LemonadeAdapter.execute_unload/execute_load) on their success
+        paths, now that those blocks live there rather than inline in
+        `_execute` (E1 Task 6) — a small accessor rather than a bare
+        `self._last_failure_key = None` write from outside the class."""
+        self._last_failure_key = None
 
     # --- lifecycle reconciliation ------------------------------------------
 
@@ -1021,8 +989,28 @@ class Watcher:
             # next tick once the snapshot catches up with the load. A skipped
             # restore is a non-action, so — like the cooldown skip below — it
             # must not be stamped.
-            if action["engine"] == "lemonade" and self._lemonade.load_in_flight():
-                continue
+            #
+            # E1 Task 6: resolved per-resource through self._local_clients
+            # (keyless — `load_in_flight` is a lemonade-kind-only capability
+            # with no adapter-level equivalent, so this checks for the
+            # method's PRESENCE on the resource's own client, rather than
+            # hardcoding the kind name "lemonade" here to pick which single
+            # client to ask) instead of the old single `self._lemonade`,
+            # which only ever meant ONE specific resource and would silently
+            # answer for the wrong one once a second lemonade-kind resource
+            # exists. `key` is only ever a local ("local/<resource>") key
+            # for this guard to fire at all — a swap node's "<node>/slot0"
+            # key has no local client and load_in_flight has no swap
+            # equivalent (spark's own boot-in-flight suppression is separate,
+            # see observe_spark's `transitioning`).
+            resource = key.removeprefix(f"{_LOCAL_NODE}/")
+            if resource != key:
+                client = self._local_clients.client_for(resource)
+                load_in_flight = (
+                    getattr(client, "load_in_flight", None) if client is not None else None
+                )
+                if load_in_flight is not None and load_in_flight():
+                    continue
 
             last = self._restore_last_attempt_at.get(key)
             now_mono = self._clock()
@@ -1136,26 +1124,26 @@ class Watcher:
     def _restore(self, action: dict) -> None:
         """Dispatch a restore to the engine that owns the resource.
 
-        Engine dispatch is a mapping of behaviours, not an if-chain over
-        resource names, so a new engine is a new entry. The method names are
-        the REAL client APIs: hipfire resumes its container
-        (app/engines/hipfire.py:162), lemonade loads by name
-        (app/engines/lemonade.py:64), spark swaps a profile
+        E1 Task 6: dispatch is now BY KIND, through each kind's own
+        `restore` method (app.engine_kinds) — lemonade-kind loads by name
+        (app/engines/lemonade.py:64), hipfire-kind resumes its container
+        (app/engines/hipfire.py:162) — rather than an if-chain over
+        engine-name literals in THIS module. spark stays its own special
+        case: it isn't an ENGINE_KINDS entry at all (a remote swap node's
+        protocol, not a local declared engine kind), so it's resolved
+        through self._node_clients by the NODE half of the key, never
+        through self._local_clients — a node swaps a profile
         (app/engines/spark.py).
 
         ComfyUI is deliberately absent, and cannot reach here: app.observe
         maps its 'unknown' state to unreachable, so a down ComfyUI derives
         'unreachable', never 'down'. A handler for it would be dead code
-        implying a capability ComfyClient does not have (queue_len/free only).
+        implying a capability ComfyClient does not have (queue_len/free only)
+        — `_ComfyAdapter` defines no `restore` method, so the `hasattr`
+        check below raises for it exactly like an unroutable engine name.
         """
         engine = action["engine"]
 
-        if engine == "hipfire":
-            self._hipfire.resume()
-            return
-        if engine == "lemonade":
-            self._lemonade.load(action["model"])
-            return
         if engine == "spark":
             node_id = action["key"].split("/", 1)[0]
             client = (self._node_clients.client_for(node_id)
@@ -1169,7 +1157,12 @@ class Watcher:
             client.swap(action["model"])
             return
 
-        raise EngineError(f"no restore handler for engine {engine!r}")
+        resource = action["key"].removeprefix(f"{_LOCAL_NODE}/")
+        client = self._local_clients.client_for(resource)
+        adapter = ENGINE_KINDS.get(engine)
+        if adapter is None or client is None or not hasattr(adapter, "restore"):
+            raise EngineError(f"no restore handler for engine {engine!r}")
+        adapter.restore(client, action["model"])
 
     # --- characteristics derivation ----------------------------------------
 

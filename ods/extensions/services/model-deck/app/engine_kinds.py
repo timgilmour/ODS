@@ -30,16 +30,35 @@ rather than a separate `observe(client, mem, now, resource, ctx)`
 parameter, so every adapter's `observe` keeps the identical 4-arg
 signature whether or not that particular kind needs the resource name."""
 
-from app.engines import EngineError
+from app.engines import EngineError, GuardError
 from app.engines.comfyui import ComfyClient
 from app.engines.docker_ctl import DockerCtl
 from app.engines.hipfire import HipfireClient
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
+from app.observe import local_key
 from app.registry import HIPFIRE_FOOTPRINT
 
 _OPENAI_PREFIX = "openai/"
 _EXTRA_PREFIX = "extra."
+
+# Engine failures carry raw HTTP bodies (`EngineError(resp.text)`), and a
+# multi-KB body re-logged per 2 s tick is exactly the trim-thrash input
+# app/events.py's byte-denominated trim bounds [T10]. Bound the DETAIL too:
+# 500 chars keeps a failed-load line well under events' 2500 B/line
+# hysteresis ratio even when the body is unstable tick to tick (timestamps
+# in an error page defeat dedup, so truncation is the backstop dedup needs).
+# Moved here VERBATIM from app/arbiter.py (E1 Task 6) alongside the two
+# actuator methods that are now its only callers.
+_ERROR_TEXT_MAX = 500
+
+
+def _error_text(exc: BaseException) -> str:
+    text = str(exc)
+    if len(text) <= _ERROR_TEXT_MAX:
+        return text
+    return text[:_ERROR_TEXT_MAX] + " …[truncated]"
+
 
 # VRAM overhead slack subtracted when estimating a "free"-verb kind's (today:
 # comfyui) reclaimable bytes from raw GPU usage (fragmentation, driver/
@@ -236,6 +255,151 @@ class _LemonadeAdapter:
         return LemonadeClient(connection["url"], settings.lemonade_key,
                               metrics_url=connection["metrics_url"])
 
+    def execute_unload(self, watcher, resource: str, client, model: str,
+                        actuated: set[str]) -> None:
+        """Moved VERBATIM from Watcher._execute's unload branch (E1 Task 6,
+        pre-move: app/arbiter.py's old `_execute`, ~lines 789-874) — every
+        comment travels, they carry incident history. `watcher` is the
+        calling Watcher instance: this block always needed cross-action
+        bookkeeping that lives THERE (`_log`'s dedup memos, the shared
+        `HealSuppressor`, the shared `IntentStore`) — previously reached as
+        bare `self.*` from inside Watcher itself, now reached the same way
+        through the instance handed in. `LOCAL_LEMONADE_KEY` (a single
+        hardcoded key) is now `local_key(resource)` — the same
+        per-resource generalization every other site in this branch makes.
+        `actuated` is `_execute`'s own per-tick set, passed in so the
+        "added before the engine call" invariant below stays structural
+        (see its own comment) rather than becoming a caller's
+        after-the-fact add that a future refactor could accidentally skip.
+        """
+        key = local_key(resource)
+        # Whoever actuates, records — and records FIRST, so a tick that
+        # lands mid-unload derives 'parked', never 'down' (2026-08-06).
+        # actor="deck": this is the arbiter's OWN automatic action
+        # (idle-release or contention-eviction), never an operator's —
+        # app.routers.control's pull-through supersession check relies on
+        # that distinction to tell "the deck unloaded something idle" apart
+        # from "the operator asked for this" [max-review Important-1].
+        # Snapshot the prior record first, so a FAILED unload can roll it
+        # back: the actuation didn't happen, and leaving 'unloaded' standing
+        # against a still-loaded model derives the inert 'unexpected' status
+        # until an eventual retry [max-review #9].
+        prior = None
+        if watcher._intent_store is not None:
+            prior = watcher._intent_store.get().get(key)
+            watcher._intent_store.record(
+                key, state="unloaded", model=None, engine="lemonade", actor="deck")
+        # Added BEFORE the engine call (mirrors the retrigger tail below) so
+        # the invariant is structural: an unload wrapped in try/except in
+        # the future still can't return without this key marked actuated.
+        actuated.add(key)
+        try:
+            client.unload(model)
+        except EngineError as exc:
+            # Per-action isolation — _execute_restore's documented
+            # invariant (see its docstring), applied to the arm that
+            # lacked it: a raise here must not abort the remaining
+            # actions or the reconcile/derive/provenance passes via
+            # tick()'s broad catch [max-review #9].
+            #
+            # Logged BEFORE the rollback, not after: the diagnostic is
+            # what tells an operator this happened at all, so it must
+            # not be contingent on the rollback succeeding [T7 review].
+            watcher._log("unload-failed",
+                         {"model": model, "error": _error_text(exc)})
+            # A real compare-and-swap: the predicate and the write
+            # run in ONE critical section inside the store
+            # (put_back_if). An operator can record a deliberate
+            # load/unload during the seconds this engine call hung,
+            # and blindly putting `prior` back would silently revert
+            # THEIR action — the same class of bug as the pull-through
+            # supersession hole task 6 closed. An earlier version read
+            # the record and then wrote in two separate critical
+            # sections, which is check-then-act, not CAS [T7/T8
+            # fix-round review].
+            #
+            # Still the speculative record this arm wrote? It is
+            # deck-authored AND unloaded; an operator's write flips
+            # actor to "operator" (their routes never pass
+            # actor="deck"), so that pair is a sufficient witness.
+            def _still_ours(current):
+                return (current is not None
+                        and current.get("actor") == "deck"
+                        and current.get("state") == "unloaded")
+
+            if watcher._intent_store is not None and prior is not None:
+                if not watcher._intent_store.put_back_if(key, _still_ours, prior):
+                    # Someone else's intent is newer. Leave it alone
+                    # and say so — a silent skip here would be the
+                    # same invisibility the rollback exists to end.
+                    # Covers the forget()-shaped case too (current
+                    # gone entirely), which the previous shape logged
+                    # nothing for.
+                    watcher._log("unload-rollback-skipped",
+                                 {"model": model,
+                                  "reason": "intent changed during the unload"})
+            # prior is None (no record for this key yet) + failure
+            # leaves the fresh 'unloaded' record standing: there is no
+            # forget() to undo it with. Rare, and no worse than the
+            # behavior this fix replaces.
+        else:
+            # Same re-arm as the load arm's success path: a
+            # successful unload between two identical unload
+            # failures must not swallow the second one.
+            watcher._clear_failure_dedup()
+            # Deck-initiated unload (idle release OR contention
+            # eviction): arm suppression so healing can't immediately
+            # revert it.
+            watcher._heal_suppressor.note_deck_unload()
+            watcher._log(f"unload_{resource}", {"model": model})
+
+    def execute_load(self, watcher, resource: str, client, pending: dict,
+                      actuated: set[str]) -> None:
+        """Moved VERBATIM from Watcher._execute's pending-load retrigger
+        tail (E1 Task 6, pre-move: ~lines 924-957) — comments included.
+        See execute_unload's docstring above for what `watcher`/`actuated`
+        are and why."""
+        key = local_key(resource)
+        # Deck-authored load: record BEFORE actuating (same rule as the
+        # unload arm above). A failed load then derives 'down' and the
+        # reconciler retries under the existing FAILURE_BUDGET —
+        # deliberate, not a gap. actor="deck" for the same reason as the
+        # unload arm above — this is automatic contention-healing, not
+        # an operator's request.
+        if watcher._intent_store is not None:
+            watcher._intent_store.record(
+                key, state="loaded", model=pending["model"], engine="lemonade",
+                actor="deck")
+        actuated.add(key)
+        try:
+            client.load(pending["model"])
+        except EngineError as exc:
+            # Load failed (engine unreachable, bad response, etc.) — log
+            # and let the loop survive; the next tick re-evaluates.
+            watcher._log("load-failed", {"error": _error_text(exc)})
+        else:
+            # Re-arm the failure-dedup memo: a recovery between two
+            # IDENTICAL failures must not swallow the second one —
+            # fail→recover→fail is the flap the T9-fix review named as
+            # this codebase's forbidden dedup class.
+            watcher._clear_failure_dedup()
+            # Deck-initiated load: the model is wanted resident again, so
+            # clear any suppression left by a prior deliberate unload.
+            watcher._heal_suppressor.clear()
+            # ...and it's a genuine use of the model: record it so the
+            # storage watcher's LRU order doesn't treat an auto-reloaded
+            # default-route model as "never used".
+            if watcher._catalog is not None:
+                watcher._catalog.note_used_gguf(
+                    pending["model"].removeprefix(_EXTRA_PREFIX))
+            watcher._log("load-retriggered", {"model": pending["model"]})
+
+    def restore(self, client, model: str | None) -> None:
+        """The REAL restore call for a lemonade-kind resource: load by
+        name (app/engines/lemonade.py:64). Moved from Watcher._restore's
+        lemonade branch (E1 Task 6)."""
+        client.load(model)
+
 
 class _ComfyAdapter:
     """comfyui-kind: no load/unload, only a VRAM `free()`; idle-clock tracked
@@ -323,6 +487,37 @@ class _ComfyAdapter:
     def build_client(self, connection: dict, settings):
         return ComfyClient(connection["url"])
 
+    def execute_free(self, watcher, resource: str, client) -> bool:
+        """Moved VERBATIM from Watcher._execute's comfy free branch (E1
+        Task 6, pre-move: ~lines 875-901) — comments included. `watcher` is
+        the calling Watcher instance (see _LemonadeAdapter.execute_unload's
+        docstring for why). Returns True when the free RACED or FAILED
+        (VRAM not confirmed reclaimed) — the caller (Watcher._execute) uses
+        this in place of the old local `eviction_raced` flag to decide
+        whether the pending-load retrigger tail may run."""
+        try:
+            client.free()
+        except GuardError:
+            # Race: comfy's queue filled between decide and execute.
+            # The VRAM was NOT reclaimed — log and skip the reload.
+            watcher._log("free-raced", {})
+            return True
+        except EngineError as exc:
+            # Comfy unreachable / refused. Same conservative reading
+            # as the race above — the VRAM is NOT confirmed reclaimed,
+            # so the pending load must not be re-triggered into a GPU
+            # that may still be full — and the same per-action
+            # isolation as the unload arm [max-review #9].
+            watcher._log("free-failed", {"error": str(exc)})
+            return True
+        else:
+            # Re-arm the idle TTL so the idle-release rule fires once
+            # per TTL while comfy stays idle, not on every tick.
+            # note_comfy_freed() -> note_freed(resource) (E1 Task 3).
+            watcher._world.note_freed(resource)
+            watcher._log(f"free_{resource}", {})
+            return False
+
 
 class _HipfireAdapter:
     """hipfire-kind: container lifecycle (park/resume), no arbiter verb —
@@ -401,6 +596,14 @@ class _HipfireAdapter:
             stats_url=f"http://{container}:{_HIPFIRE_PORT}/stats",
             activity_window_s=settings.hipfire_activity_window_s,
         )
+
+    def restore(self, client, model: str | None) -> None:
+        """The REAL restore call for a hipfire-kind resource: resume its
+        container (app/engines/hipfire.py:162). `model` is unused
+        (hipfire's intent always carries model=None) — kept for signature
+        parity with lemonade-kind's restore above. Moved from
+        Watcher._restore's hipfire branch (E1 Task 6)."""
+        client.resume()
 
 
 # kind -> adapter instance. One instance per kind is enough — adapters carry

@@ -57,7 +57,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from app import actuation
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
-from app.observe import LOCAL_HIPFIRE_KEY, LOCAL_LEMONADE_KEY
+from app.observe import LOCAL_HIPFIRE_KEY, local_key
 from app.settings_store import KINDS, NAMESPACES, empty_store
 from app.store_io import write_atomic
 
@@ -636,7 +636,7 @@ def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
         return
     if eph.lemonade is not None:
         if eph.lemonade.state == "unloaded":
-            intent_store.record(LOCAL_LEMONADE_KEY, state="unloaded",
+            intent_store.record(local_key("lemonade"), state="unloaded",
                                 model=None, engine="lemonade")
         elif eph.lemonade.state == "loaded":
             model = eph.lemonade.model
@@ -646,7 +646,7 @@ def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
             if model is None and world["tenants"]["lemonade"]["state"] == "loaded":
                 model = world["tenants"]["lemonade"].get("model")
             if model is not None:
-                intent_store.record(LOCAL_LEMONADE_KEY, state="loaded",
+                intent_store.record(local_key("lemonade"), state="loaded",
                                     model=model, engine="lemonade")
     if eph.hipfire is not None:
         if eph.hipfire.state == "parked":
