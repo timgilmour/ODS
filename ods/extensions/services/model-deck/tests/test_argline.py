@@ -501,7 +501,8 @@ def test_render_skips_an_unset_inside_a_list_and_positionals():
     """[T9-fix review] The unset ruling was applied ONLY to the bare-value
     branch, so a persisted None inside a list or in _positional still hit the
     refusal — and that wedged the SHIP path: GET effective, the preview and
-    POST /api/spark/reload all 422'd, i.e. the endpoints that would show the
+    the reload route (now /api/nodes/{id}/serving/reload) all 422'd, i.e.
+    the endpoints that would show the
     operator what to fix were the ones failing. The ladder pops only
     TOP-LEVEL Nones, so a list containing one survives resolution and reaches
     the renderer.

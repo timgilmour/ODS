@@ -309,13 +309,11 @@ class FakeSpark:
         self.status_calls = 0
         self.fail = None
         self.settings_sent = None  # (profile, document), last put_settings call
-        self.settings_fail = None
         # Reload re-fetches the profile's compose before shipping (final
         # branch review: a stale service name in the identity map would
         # introduce an imageless service AFTER teardown killed everything),
         # so every reload test needs real compose text behind get_compose.
         self.compose = {}          # {profile: text}; default = the fixture
-        self.compose_fail = None
         self._status = {
             "profiles": [
                 {"name": "laguna", "engine": "vllm", "health_url": None,
@@ -339,13 +337,9 @@ class FakeSpark:
         return {"id": "u1", "profile": profile}
 
     def put_settings(self, profile, document):
-        if self.settings_fail:
-            raise self.settings_fail
         self.settings_sent = (profile, document)
 
     def get_compose(self, profile):
-        if self.compose_fail:
-            raise self.compose_fail
         return self.compose.get(profile, HERETIC_COMPOSE)
 
 

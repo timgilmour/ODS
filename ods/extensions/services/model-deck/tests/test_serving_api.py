@@ -351,11 +351,24 @@ def test_reload_empty_declared_args_409(tmp_path, monkeypatch):
 def test_spark_alias_is_gone(tmp_path, monkeypatch):
     """/api/spark/* was a one-deploy-cycle alias for these routes (N1,
     design §6); its pre-registered removal happened after the first healthy
-    cycle on the canonical routes. 404 even with a swap node wired — a
-    resurrected forwarder would answer 200/503 here."""
-    app, deck, a, b = _two_node_app(tmp_path, monkeypatch)
+    cycle on the canonical routes.
+
+    ONE node wired, unlike the rest of this file: this is the resurrection
+    scenario that would actually answer — with a single swap node a revived
+    forwarder returns 200 on status and records a swap call (with two it
+    409s before touching any client, which would make the call assertions
+    vacuous). The POSTs accept 405 as well as 404: on a checkout with
+    ui/dist built, main.py's StaticFiles catch-all at "/" claims every
+    unrouted path and refuses non-GET methods with 405. The route-table
+    assertion carries the exactness either way."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    fake = FakeSpark()
+    wire_swap_node(deck, "boxa", fake, label="Box Alpha")
+    assert not any(getattr(r, "path", "").startswith("/api/spark")
+                   for r in app.routes)
     client = TestClient(app)
     assert client.get("/api/spark/status").status_code == 404
-    assert client.post("/api/spark/swap", json={"profile": "laguna"}).status_code == 404
-    assert client.post("/api/spark/reload", json={}).status_code == 404
-    assert a.calls == [] and b.calls == []
+    assert client.post(
+        "/api/spark/swap", json={"profile": "laguna"}).status_code in (404, 405)
+    assert client.post("/api/spark/reload", json={}).status_code in (404, 405)
+    assert fake.calls == []

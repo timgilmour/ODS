@@ -149,8 +149,9 @@ def _require_renderable(key: str, value) -> None:
     That skip is at THREE sites, not one. An earlier version put it only on
     the bare-value branch, which left list elements and positional tokens
     refusing None and reproduced the same wedge one level down — this time
-    also 422ing POST /api/spark/reload, since the ladder pops only TOP-LEVEL
-    Nones and a list containing one survives resolution.
+    also 422ing POST /api/spark/reload (now /api/nodes/{id}/serving/reload),
+    since the ladder pops only TOP-LEVEL Nones and a list containing one
+    survives resolution.
     """
     if not isinstance(value, (str, int, float)):
         raise ValueError(
@@ -194,7 +195,8 @@ def _argv_tokens(settings: dict) -> list[str]:
             # Drop None ELEMENTS the same way the bare-value branch drops a
             # bare None: nothing is the honest rendering of "no value", and
             # refusing here wedged real ship paths — a persisted [None] made
-            # GET effective, the preview AND POST /api/spark/reload all 422,
+            # GET effective, the preview AND the reload route (now
+            # /api/nodes/{id}/serving/reload) all 422,
             # i.e. the endpoints that would show the operator what to fix
             # were the ones failing. The wire refuses NEW list-Nones
             # (_normalize_args_value); this keeps already-persisted ones

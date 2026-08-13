@@ -62,9 +62,11 @@ def single_swap_node_id(deck: dict) -> str:
     /api/spark/* alias router, its other caller — a resolver two OTHER
     modules import cannot live in the module scheduled to go away first.
 
-    None configured -> 503 (the legacy unbuilt-engine message, so existing
-    feature-detecting callers keep working); more than one -> 409 naming the
-    candidates, never guess ([[literal-declared-inputs]])."""
+    None configured -> 503. The detail keeps the legacy unbuilt-engine
+    wording (rename_plan's client_for branch shares it, and
+    test_route_503_when_spark_not_configured pins the text) — the alias
+    clients it was originally preserved for are gone. More than one -> 409
+    naming the candidates, never guess ([[literal-declared-inputs]])."""
     ids = sorted(n["id"] for n in deck["node_store"].list()
                  if n.get("control") == "swap")
     if not ids:
@@ -73,7 +75,7 @@ def single_swap_node_id(deck: dict) -> str:
     if len(ids) > 1:
         raise HTTPException(status_code=409, detail=(
             "multiple swap nodes configured (" + ", ".join(ids) + "); "
-            "use /api/nodes/{id}/serving/... instead"))
+            "this operation supports exactly one"))
     return ids[0]
 
 

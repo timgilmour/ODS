@@ -129,9 +129,11 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 
 - `/api/spark/*` (status/swap/reload) — the node-less alias for
   `/api/nodes/{id}/serving/*`, kept for one deploy cycle after N1 shipped
-  and removed 2026-08-13 as pre-registered here. A 404 on these paths means
-  you are on the removed alias: same bodies/semantics live at the serving
-  routes above, addressed by node id.
+  and removed 2026-08-13 as pre-registered here. A 404 on
+  `GET /api/spark/status` — or a 405 on the two POSTs, from the UI
+  bundle's static catch-all, which owns every unrouted path but serves
+  only GETs — means you are on the removed alias: same bodies/semantics
+  live at the serving routes above, addressed by node id.
 
 ### Lifecycle
 
