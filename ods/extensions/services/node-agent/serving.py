@@ -102,6 +102,13 @@ def probe_url_warning() -> str | None:
         profiles = swapctl.list_profiles()
     except swapctl.SwapCtlDisabled:
         return None
+    except OSError:
+        # A profiles dir that raises on inspection (root-owned, not
+        # traversable, ...) means the warning is UNDETERMINABLE — and a
+        # warning-only feature must never take down what it decorates:
+        # this runs on every serving poll and at agent boot, and the same
+        # config booted and probed fine before the warning existed.
+        return None
     if any(p.get("engine") == "vllm" for p in profiles):
         return PROBE_URL_WARNING
     return None

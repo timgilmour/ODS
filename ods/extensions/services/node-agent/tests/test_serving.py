@@ -281,6 +281,26 @@ def test_probe_no_warning_when_swapctl_disabled(monkeypatch):
     assert "warning" not in r.json()
 
 
+def test_probe_survives_an_unreadable_profiles_dir(monkeypatch, caplog):
+    """A warning-only feature must never take down what it decorates: a
+    profiles dir that raises on inspection (e.g. root-owned, not
+    traversable — swapctl's path.is_file() runs outside its try block)
+    means the warning is UNDETERMINABLE, not that the probe or agent boot
+    should crash. Pre-warning, this config booted and served probes."""
+    def _perm(*_a, **_k):
+        raise PermissionError("profiles dir not traversable")
+
+    monkeypatch.setattr(serving.swapctl, "current_profile_meta", lambda: None)
+    monkeypatch.setattr(serving.swapctl, "list_profiles", _perm)
+    monkeypatch.setattr(serving.nodeconfig, "NODE_SERVING_PROBE_URL", "")
+    r = client.get("/v1/node/serving", headers=AUTH)
+    assert r.status_code == 200
+    assert "warning" not in r.json()
+
+    with caplog.at_level("WARNING", logger="serving"):
+        serving.log_startup_warning()   # must not raise either
+
+
 def test_startup_log_emits_the_warning(monkeypatch, caplog):
     monkeypatch.setattr(serving.swapctl, "list_profiles",
                         lambda: [_VLLM_PROFILE])

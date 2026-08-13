@@ -74,9 +74,7 @@ def _profiles_meta_map() -> dict:
         return {}
 
 
-def profile_meta(name: str) -> dict:
-    """Return metadata dict for profile, with defaults for missing fields."""
-    entry = _profiles_meta_map().get(name) or {}
+def _meta_from_entry(name: str, entry) -> dict:
     if not isinstance(entry, dict):
         # profiles.json is valid JSON but this entry isn't an object (e.g.
         # {"comfyui": 5}) -- treat it the same as a missing entry rather than
@@ -88,6 +86,11 @@ def profile_meta(name: str) -> dict:
     for key, default in _META_DEFAULTS.items():
         meta[key] = entry.get(key, default)
     return meta
+
+
+def profile_meta(name: str) -> dict:
+    """Return metadata dict for profile, with defaults for missing fields."""
+    return _meta_from_entry(name, _profiles_meta_map().get(name) or {})
 
 
 def current_profile_meta() -> dict | None:
@@ -103,7 +106,11 @@ def list_profiles() -> list[dict]:
     vllm, _ = _dirs()
     names = sorted(p.name[len("compose-"):-len(".yaml")]
                    for p in vllm.glob("compose-*.yaml"))
-    return [profile_meta(n) for n in names]
+    # One profiles.json read for the whole listing: this runs on every
+    # serving poll (serving.probe_url_warning), and per-name profile_meta()
+    # would re-read the sidecar N times per poll.
+    meta_map = _profiles_meta_map()
+    return [_meta_from_entry(n, meta_map.get(n) or {}) for n in names]
 
 
 def read_status() -> dict | None:

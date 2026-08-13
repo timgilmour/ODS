@@ -2205,6 +2205,30 @@ def test_node_warning_rearms_after_it_clears(tmp_path):
     assert len(events) == 2
 
 
+def test_unreachable_gap_does_not_relog_the_warning(tmp_path):
+    """An unreachable blip is 'we failed to look', not 'we looked and the
+    warning was gone' (the SparkObserver distinction): the cached
+    unreachable status carries serving: None, which must NOT re-arm the
+    memo — else a regularly powered-off node with a standing
+    misconfiguration logs a fresh amber event every reachability cycle."""
+    store = _intent(tmp_path)
+    obs = FakeSlotObserver(_node_status(warning=_MISCONFIG_WARNING))
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, node_observers=FakeObservers({"sparky": obs}))
+
+    watcher.tick()                                     # incident logged
+    obs._status = {"profile": None, "serving": None,   # observer's cached
+                   "reachable": False,                 # _UNREACHABLE_SPARK
+                   "swap_in_progress": False}
+    watcher.tick()                                     # blip: failed to look
+    obs._status = _node_status(warning=_MISCONFIG_WARNING)
+    watcher.tick()                                     # same incident holds
+
+    events = [e for e in tail_events(events_path)
+              if e["kind"] == "lifecycle-node-misconfigured"]
+    assert len(events) == 1
+
+
 def test_no_warning_key_logs_nothing(tmp_path):
     """Pre-N1 agents don't send the field at all — additive, backward
     compatible: no key means nothing to surface, not an error."""
@@ -2663,11 +2687,8 @@ def _unverified_setup(tmp_path):
     """A lemonade key whose restores dispatch fine (no raise) while the world
     permanently shows it unloaded -> 'down' derives every tick, `serving`
     never arrives. The exact incident shape Part A exists to bound."""
-    from app.intent import IntentStore
-
-    intent = IntentStore(tmp_path / "intent.json")
-    intent.record("local/lemonade", state="loaded", model="extra.m.gguf",
-                  engine="lemonade")
+    intent = _intent(tmp_path, key="local/lemonade", model="extra.m.gguf",
+                     engine="lemonade")
     clock = _FakeClock()
     lemonade = FakeLemonade()
     world = FakeWorld(_world(lemonade=_lem(state="unloaded")))
@@ -2785,11 +2806,8 @@ def test_fresh_watcher_does_not_charge_for_a_pre_restart_restore(tmp_path):
     pending charge. A fresh watcher over a stale loaded-intent dispatches
     its first restore without charging — `failures` seeded away from the
     0 default so 'unchanged' is provable, not coincidental."""
-    from app.intent import IntentStore
-
-    intent = IntentStore(tmp_path / "intent.json")
-    intent.record("local/lemonade", state="loaded", model="extra.m.gguf",
-                  engine="lemonade")
+    intent = _intent(tmp_path, key="local/lemonade", model="extra.m.gguf",
+                     engine="lemonade")
     intent.note_failure("local/lemonade")  # pre-restart history: failures=1
     lemonade = FakeLemonade()
     watcher, events_path = _make_watcher(

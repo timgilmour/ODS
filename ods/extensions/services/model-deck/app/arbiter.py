@@ -102,10 +102,11 @@ Design notes that are load-bearing (and tested):
   that just came back up gets its live facts captured by that same tick's
   derive pass instead of waiting up to ``derive_interval_s``. That clear is
   itself floor-limited (``_DERIVE_RESTORE_FLOOR_S``, 30 s): a crash-looping
-  resource can have ``_restore()`` succeed at the API level every ~2 s tick
-  without ever raising, so the failure-budget/quarantine machinery (which
-  only trips on a raise) never bounds it — without the floor every one of
-  those ticks would re-clear the throttle and re-run the scan.
+  resource can have ``_restore()`` succeed at the API level without ever
+  raising; the failure budget charges that case on the next dispatch for a
+  still-unverified key (``_restore_unverified``), but quarantine only lands
+  after FAILURE_BUDGET cooldown-paced charges — without the floor every
+  restore in that window would re-clear the throttle and re-run the scan.
   ``characteristics_store=None`` (the default) disables the whole pass —
   same opt-in shape as ``hostagent``/``intent_store``.
 """
@@ -121,6 +122,7 @@ from app.derive_live import derive_live_models
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
+from app.intent import FAILURE_BUDGET
 from app.lifecycle import derive_status
 from app.observe import (
     _LOCAL_NODE,
@@ -978,13 +980,8 @@ class Watcher:
             # severity mapping applies; no new event vocabulary.
             if key in self._restore_unverified:
                 self._restore_unverified.discard(key)
-                count = self._intent_store.note_failure(key)
-                self._log("lifecycle-restore-failed",
-                          {"key": key,
-                           "error": "previous restore never became healthy",
-                           "failures": count})
-                if self._intent_store.get().get(key, {}).get("quarantined"):
-                    self._log("lifecycle-quarantined", {"key": key})
+                if self._charge_restore_failure(
+                        key, "previous restore never became healthy"):
                     continue  # derive_status reports quarantined next tick
             self._execute_restore(action)
 
@@ -1012,19 +1009,40 @@ class Watcher:
             # where signals go to die (invisible for 4 days, 08-12), so
             # surface it in the Events tab — once per (node, warning-text)
             # incident via _node_misconfig_logged. Pre-N1 agents send no
-            # such field; absent means nothing to surface, and an
-            # unreachable node's cached status (serving: None) re-arms the
-            # memo like any cleared warning.
-            warning = ((status or {}).get("serving") or {}).get("warning")
+            # such field; absent means nothing to surface. The memo re-arms
+            # only on a serving payload OBSERVED without the warning — an
+            # unreachable node's cached status carries serving: None, which
+            # is "we failed to look", not "we looked and it was gone" (the
+            # SparkObserver distinction), so a reachability blip on a node
+            # with a standing misconfiguration does not re-log it.
+            serving = (status or {}).get("serving")
+            warning = (serving or {}).get("warning")
             if warning is not None:
                 if self._node_misconfig_logged.get(node_id) != warning:
                     self._node_misconfig_logged[node_id] = warning
                     self._log("lifecycle-node-misconfigured",
                               {"node": node_id, "warning": warning})
-            else:
+            elif serving is not None:
                 self._node_misconfig_logged.pop(node_id, None)
             out.append(observe_spark(status, node_id))
         return out
+
+    def _charge_restore_failure(self, key: str, error: str) -> bool:
+        """One failure against `key`'s budget: charge, log, and report
+        whether this charge quarantined it. Shared by the two sites that
+        must agree on the sequence — the unverified-redispatch charge in
+        _reconcile_pass and _execute_restore's raise path. `count >=
+        FAILURE_BUDGET` is equivalent to the stored `quarantined` flag
+        (note_failure sets it exactly there, every reset path clears both
+        together, and a missing record returns count 0), so no store
+        re-read is needed."""
+        count = self._intent_store.note_failure(key)
+        self._log("lifecycle-restore-failed",
+                  {"key": key, "error": error, "failures": count})
+        quarantined = count >= FAILURE_BUDGET
+        if quarantined:
+            self._log("lifecycle-quarantined", {"key": key})
+        return quarantined
 
     def _execute_restore(self, action: dict) -> None:
         """Perform one restore, recording success or failure against the
@@ -1035,11 +1053,7 @@ class Watcher:
         try:
             self._restore(action)
         except Exception as exc:  # noqa: BLE001 — per-action isolation, see docstring
-            count = self._intent_store.note_failure(key)
-            self._log("lifecycle-restore-failed",
-                      {"key": key, "error": str(exc), "failures": count})
-            if self._intent_store.get().get(key, {}).get("quarantined"):
-                self._log("lifecycle-quarantined", {"key": key})
+            self._charge_restore_failure(key, str(exc))
             return
         # A resource that just came back up has fresh live facts worth
         # capturing, not up to derive_interval_s later — clear the throttle
@@ -1047,10 +1061,11 @@ class Watcher:
         # after _reconcile_pass in tick()) runs instead of being skipped. No
         # new I/O here: this only resets an in-memory gate. Floor-limited
         # (_DERIVE_RESTORE_FLOOR_S, see its comment) so a crash-looping
-        # resource — _restore() succeeding every ~2 s tick without ever
-        # raising, so the failure-budget/quarantine above never trips —
-        # doesn't turn into a derive on every tick for the whole incident;
-        # only the first restore of a burst clears it.
+        # resource — _restore() succeeding at the API level without ever
+        # raising, charged only cooldown-paced via _restore_unverified
+        # until quarantine lands — doesn't turn into a derive on every
+        # restore for the whole incident; only the first restore of a
+        # burst clears it.
         now_mono = self._clock()
         if (self._last_restore_derive_at is None
                 or now_mono - self._last_restore_derive_at >= _DERIVE_RESTORE_FLOOR_S):
