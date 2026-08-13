@@ -492,13 +492,7 @@ def test_stamp_ignores_non_matching_ids(store, tmp_path):
 
 # --- E1 engines declaration tests -----
 
-def _store(tmp_path):
-    """Helper to construct a NodeStore for use in test functions."""
-    return NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
-
-
-def test_local_entry_accepts_validated_engines(tmp_path):
-    store = _store(tmp_path)
+def test_local_entry_accepts_validated_engines(store):
     store.add({"id": "local", "label": "Box L", "agent_kind": "local",
                "engines": [{"resource": "gguf-a", "kind": "lemonade",
                             "connection": {"url": "http://gguf-a:8080",
@@ -510,15 +504,13 @@ def test_local_entry_accepts_validated_engines(tmp_path):
     assert store.get("local")["engines"][0]["resource"] == "gguf-a"
 
 
-def test_engines_refused_on_non_local_entries(tmp_path):
-    store = _store(tmp_path)
+def test_engines_refused_on_non_local_entries(store):
     with pytest.raises(ValueError, match="engines"):
         store.add({"id": "boxa", "label": "Box A", "agent_kind": "node-agent",
                    "address": "http://boxa:7720", "engines": []})
 
 
-def test_invalid_engines_refused_at_add(tmp_path):
-    store = _store(tmp_path)
+def test_invalid_engines_refused_at_add(store):
     with pytest.raises(ValueError, match="unknown kind"):
         store.add({"id": "local", "label": "Box L", "agent_kind": "local",
                    "engines": [{"resource": "x", "kind": "nope",
@@ -526,3 +518,38 @@ def test_invalid_engines_refused_at_add(tmp_path):
                                 "policy_defaults": {"priority": 1,
                                                     "pinned": False,
                                                     "idle_ttl": 0}}]})
+
+
+def test_load_heals_local_entry_with_invalid_engines(store, tmp_path):
+    """Local entry with schema-invalid engines heals to [], entry preserved."""
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                      "address": "http://hera:7720"})
+    _write_nodes(tmp_path, [good,
+        {"id": "local", "label": "Local Box", "agent_kind": "local",
+         "engines": [{"resource": "bad", "kind": "invalid"}]}])
+    loaded = store.get("local")
+    assert loaded is not None
+    assert loaded["id"] == "local"
+    assert loaded["engines"] == []
+
+
+def test_load_strips_engines_from_non_local_entries(store, tmp_path):
+    """Non-local entry with engines list loads with key stripped, entry preserved.
+    A subsequent update() patch on that node must succeed (not bricked)."""
+    _write_nodes(tmp_path, [
+        {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
+         "address": "http://boxa:7720",
+         "engines": [{"resource": "gguf-a", "kind": "lemonade",
+                      "connection": {"url": "http://gguf-a:8080",
+                                     "metrics_url": "http://gguf-a:8001/metrics",
+                                     "container": "ods-gguf-a"},
+                      "gpu_index": 0,
+                      "policy_defaults": {"priority": 10, "pinned": False,
+                                          "idle_ttl": 60}}]}])
+    loaded = store.get("boxa")
+    assert loaded is not None
+    assert loaded["id"] == "boxa"
+    assert "engines" not in loaded
+    # Subsequent update() must succeed (not bricked by engines validation)
+    result = store.update("boxa", {"label": "Renamed"})
+    assert result["label"] == "Renamed"

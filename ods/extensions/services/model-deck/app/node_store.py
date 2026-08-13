@@ -110,11 +110,20 @@ def _heal_control(entry: dict) -> dict:
 
 
 def _heal_engines(entry: dict) -> dict:
-    """Heal invalid engines to an empty list (guard-at-the-boundary posture).
-    A hand-edited entry whose engines fails validate_engines heals to
-    engines: [] rather than being dropped."""
+    """Heal invalid engines (guard-at-the-boundary posture).
+
+    Non-local entries must not carry an engines key at all; if present,
+    strip it (guard-at-boundary: reject at load, don't brick future patches).
+    Local entries with schema-invalid engines heal to [] rather than being
+    dropped, preserving the entry."""
     if "engines" not in entry:
         return entry
+
+    # Non-local entries must never have engines key
+    if entry.get("agent_kind") != "local":
+        return {k: v for k, v in entry.items() if k != "engines"}
+
+    # Local entry: validate schema, heal to [] if invalid
     engines = entry.get("engines")
     try:
         from app.engine_kinds import validate_engines
