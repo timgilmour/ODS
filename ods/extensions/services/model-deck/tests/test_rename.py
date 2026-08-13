@@ -240,12 +240,29 @@ def test_route_accepts_no_body_at_all(tmp_path, monkeypatch):
 
 
 def test_route_503_when_spark_not_configured(tmp_path, monkeypatch):
-    """Matches app.routers.spark._single_swap_node_id's guard exactly."""
+    """Matches app.routers.serving.single_swap_node_id's guard exactly."""
     app, _ = _rename_app(tmp_path, monkeypatch, spark=None)
 
     resp = TestClient(app).post("/api/rename/plan", json={})
 
     assert resp.status_code == 503
+
+
+def test_route_409s_with_two_swap_nodes(tmp_path, monkeypatch):
+    """N1 T12 review, finding 1: single_swap_node_id moved to
+    app.routers.serving, imported here rather than duplicated — this
+    exercises the MOVED resolver through the rename route (the sibling
+    coverage, tests/test_spark_api.py::test_alias_409s_with_two_swap_nodes,
+    only proves it through the /api/spark/* alias). Never guess between
+    candidates ([[literal-declared-inputs]])."""
+    app, deck = _rename_app(tmp_path, monkeypatch, spark=None)
+    wire_swap_node(deck, "boxa", FakeSparkForRename(), label="Box Alpha")
+    wire_swap_node(deck, "boxb", FakeSparkForRename(), label="Box Beta")
+
+    resp = TestClient(app).post("/api/rename/plan", json={})
+
+    assert resp.status_code == 409
+    assert "boxa" in resp.json()["detail"] and "boxb" in resp.json()["detail"]
 
 
 def test_route_is_read_only_second_call_matches_and_nothing_is_written(

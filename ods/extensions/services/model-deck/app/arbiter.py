@@ -1163,7 +1163,7 @@ class Watcher:
         Node vocabulary -- the reason this method takes pairs verbatim
         instead of building them itself: the node half of a pair MUST be a
         node id (``app.observe._LOCAL_NODE``, "local", app/observe.py:28,
-        or a swap node's REGISTRY id, e.g. "sparky") -- the same id
+        or a swap node's REGISTRY id, e.g. "boxa") -- the same id
         ``GET /api/settings/catalog/{node}/{engine}`` reads into the
         ``engine/{node}/{engine}`` characteristics key (app/routers/
         settings.py:78-82) and ``_resolve`` looks up by (app/routers/
@@ -1187,7 +1187,7 @@ class Watcher:
         _harvest_catalogs's machinery; returned verbatim here (no internal
         pairing step) means the seam itself has no vocabulary decision left
         to get wrong -- a test can hand it `(_LOCAL_NODE, "hipfire")`,
-        `("sparky", "vllm")`, or any other pair, and this method cannot
+        `("boxa", "vllm")`, or any other pair, and this method cannot
         silently substitute a label for either half.
         """
         return list(self._configurable_engine_pairs or [])

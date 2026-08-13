@@ -115,8 +115,10 @@ def observe_spark(spark_status: dict | None, node_id: str) -> dict[str, dict]:
     }
 
 
-# Which LOCAL engine owns each resource key. Used by restore dispatch and
-# adopt; a new local engine adds a line here rather than editing either
+# Which LOCAL engine owns each resource key. Used by `engine_for`, whose
+# one caller is the lifecycle router's adopt route (restore dispatch reads
+# the engine straight off the recorded intent, `action["engine"]`, and never
+# calls this); a new local engine adds a line here rather than editing the
 # caller. No swap-node row lives here — a `<node>/slot0` key's owner depends
 # on the registry (a PREPARED id-set, see engine_for), not a static literal.
 _LOCAL_ENGINE_BY_KEY = {

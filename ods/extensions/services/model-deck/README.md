@@ -111,7 +111,7 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/nodes` | List every registry entry + `credential_set` (never the credential itself) + `actuation_stale` |
+| `GET` | `/api/nodes` | List every registry entry + `credential_set` (never the credential itself) + `control` (declared operability: `"none"` \| `"swap"`) |
 | `POST` | `/api/nodes` | Create a node-agent entry (`{id, label, address, serving_address?, credential?}`). 409 on a duplicate id, 422 on an invalid slug/missing address |
 | `PUT` | `/api/nodes/{id}` | Partial update — `label` / `address` / `serving_address` / `credential`. `id` is immutable |
 | `DELETE` | `/api/nodes/{id}` | Remove the entry and its credential. 409 for `local` (undeletable) |
@@ -151,10 +151,10 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 | `GET` | `/api/settings/catalog/{node}/{engine}` | The engine's harvested option catalog (`null` if it has never been up) |
 | `GET` | `/api/settings/effective/{node}/{engine}/{model}?layers=` | Resolved ladder for one placement — `resolved` (all five layers, full provenance) and `argline` (declared-only, what would actually ship); `?layers=` filters `resolved` only |
 | `POST` | `/api/settings/preview` | Parse a typed argline into a settings map without saving — the text field's live feedback |
-| `POST` | `/api/settings/adopt/{node}/{engine}` | Sweep the node's real compose profiles into the settings store (see **Adopt**, below). Only `sparky/vllm` is adoptable today |
+| `POST` | `/api/settings/adopt/{node}/{engine}` | Sweep the node's real compose profiles into the settings store (see **Adopt**, below). Only `(<node>, "vllm")` is adoptable, and only for a `control: "swap"` node |
 | `GET` | `/api/settings/{kind}/{key}` | One scope (`kind` is `engines`, `models`, or `engine_models`) |
 | `PUT` | `/api/settings/{kind}/{key}` | Merge values into one namespace of one scope: `{"namespace": "args"\|"env"\|"container", "values": {...}}` |
-| `POST` | `/api/rename/plan` | Read-only: plan the alias → identity rename migration for sparky's vLLM profiles (`{"client_pins": {route: [pin, ...]}}`, optional). Plans, never executes — see `~/notes/model-deck-rename-runbook.md` |
+| `POST` | `/api/rename/plan` | Read-only: plan the alias → identity rename migration for the single control:"swap" node's vLLM profiles (`{"client_pins": {route: [pin, ...]}}`, optional). Plans, never executes — see `~/notes/model-deck-rename-runbook.md` |
 
 ### `characteristics.json` / `declared.json` — model and engine facts
 
@@ -621,13 +621,18 @@ exists, **env is never consulted again** — no per-boot merge that could
 resurrect a deleted entry. Compose keeps passing the env vars for exactly
 one reason: a fresh install seeds itself on first boot.
 
-The sparky entry's id **must be exactly `spark_node_id()`**
-(`app/observe.py`, derived from `SPARK_SLOT_KEY`, today `"sparky"`) — every
-existing keyed datum (intent, settings scopes, `oci:sparky:*` provenance)
-attaches through that literal string. Get it wrong and those records
-silently orphan rather than erroring; `livetests/test_safe_nodes.py::
-test_sparky_seed_preserved_the_key_vocabulary` is the live proof that they
-didn't.
+The env-seeded sparky entry's id **must be exactly `LEGACY_SPARK_SEED_ID`**
+(`app/node_store.py`, frozen migration data, literally `"sparky"`) — every
+pre-N1 install's keyed data (intent, settings scopes, `oci:sparky:*`
+provenance) already attaches through that exact string, so `seed_if_missing`
+must keep reusing it verbatim rather than deriving it from anything. Get it
+wrong and those records silently orphan rather than erroring;
+`livetests/test_safe_nodes.py::test_sparky_seed_preserved_the_key_vocabulary`
+is the live proof that they didn't. A **new** swap node — one added through
+`POST /api/nodes` with `control: "swap"`, N1's multi-node generalization —
+carries no such constraint: every keyed vocabulary (intent, settings scopes,
+provenance, harvest routes) now derives from whatever registry id the
+operator gives it, never a hardcoded literal.
 
 **To re-seed:** delete `nodes.json` and restart. This re-reads the env vars
 as if from a fresh install — **any operator edits made through the UI
@@ -646,14 +651,15 @@ field *name* (`"credential"`) when one was supplied, never its value — other
 fields (e.g. `label`) may still appear by value elsewhere (`node-added` logs
 `label`), so this guarantee is specifically about the credential.
 
-`actuation_stale` respects this too. The deck binds its SparkClient once at
-start, so editing sparky's connection moves *monitoring* immediately while
-*swaps and restores* keep using the boot-time configuration until a restart —
-the flag surfaces that split, and the credential is part of what was bound,
-so a rotated key must go stale like a changed address. It is compared as a
-**sha256 fingerprint** (`NodeStore.credential_fingerprint`), never a value,
-so this route can answer "has the credential changed since boot?" without
-the value ever reaching it. An unset credential fingerprints to `None`,
+Credential rotation respects this too. `app.node_clients.NodeClients`
+compares each swap node's live binding (address, serving_address, and the
+credential's **sha256 fingerprint** via `NodeStore.credential_fingerprint`,
+never a value) against what it last built a client from, on *every*
+`client_for()` call — a changed fingerprint rebuilds the client (closing the
+old one, never leaking it) exactly like a changed address or
+serving_address. A rotated credential therefore reaches actuation on the
+very next call, no restart involved, and the value itself never has to leave
+the store to prove it changed. An unset credential fingerprints to `None`,
 distinct from any real digest.
 
 This closes a path that would otherwise leak it: pydantic v2's "missing
@@ -710,27 +716,35 @@ new observation path. This is a named seam, not an oversight — a future
 increment that tries to unify them needs to keep both questions answerable
 separately.
 
-### The restart-for-actuation caveat
+### Live actuation rebinding (was: the restart-for-actuation caveat)
 
-Editing sparky's address or credential through `PUT /api/nodes/sparky`
-applies to **observation immediately** (`NodeObserver` re-reads the
-registry every pass) but to **actuation only on the deck's next restart** —
-`SparkClient` is built once, at app startup, from whatever the registry
-held at that moment (`app/main.py`'s deck-build step). A save that changes
-sparky's connection details does not retroactively rebind the client the
-watcher and the spark router already hold. v1 documents this rather than
-adding live client rebinding next to the reconciler; an event naming the
-restart requirement is a candidate follow-up, not built.
+v1 shipped a caveat here: editing a node's address or credential applied to
+**observation immediately** (`NodeObserver` re-reads the registry every
+pass) but to **actuation only on the deck's next restart**, because
+`SparkClient` was built once, at app startup, from whatever the registry
+held at that moment. **N1 closed this** (`app/node_clients.py`): every
+actuation path now takes its client from `NodeClients.client_for(node_id)`,
+which compares the node's live registry binding against what it last built
+a client from on *every* call and rebinds (closing the old client, never
+leaking it) the moment address, serving_address, or the credential change —
+no restart, and no per-node event needed to name the requirement, because
+the requirement no longer exists.
 
 ### Deferred (design §11)
 
 In intended order, from
 `~/notes/designs/2026-08-09-model-deck-nodes-registry-design.md`:
 
-1. **Full N-node operability** — generalizing the ~10 single-spark
-   hardcoded sites (`SPARK_SLOT_KEY`, the one `SparkClient`, the one
-   harvest route, the adopt allowlist, the spark router). Build when a real
-   second box exists.
+1. ✅ **DONE (N1).** ~~Full N-node operability~~ — every single-spark
+   hardcoded site is generalized off the registry's declared `control:
+   "swap"` set: `SPARK_SLOT_KEY` is deleted (`slot_key(node_id)` derives the
+   resource key per node), actuation goes through `app.node_clients`' one
+   client per swap node instead of the one `SparkClient`, the harvest route
+   builds one `(node_id, "vllm")` pair per swap node, the adopt allowlist
+   (`POST /api/settings/adopt/{node}/{engine}`) accepts any control:"swap"
+   node, and the spark router resolves whichever swap nodes are declared
+   (`app.routers.serving.single_swap_node_id`, 409 naming candidates when
+   more than one exists).
 2. **Capability descriptors** — the ontology's per-node engine-capability
    schema. The node-agent's `/v1/node/info` `capabilities[]` is the
    designed hook; C2 shipped inference-from-harvested-catalog instead.
@@ -739,8 +753,8 @@ In intended order, from
    `controls` reworked first (see that file's header comment on the
    `App.tsx` local-snapshot prop-drilling landmine, dormant while only
    `node-agent` kinds can be added).
-4. **Live client rebinding** — actuation picking up connection edits
-   without a restart (see above).
+4. ✅ **DONE (N1).** ~~Live client rebinding~~ — actuation now picks up
+   connection edits live, no restart (see above).
 5. **Dashboard-api convergence** — shared node topology; today both
    dashboard-api and the deck read `ODS_REMOTE_NODE_KEYS` independently,
    and that stays.
