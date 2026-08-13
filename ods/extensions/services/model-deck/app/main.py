@@ -154,7 +154,7 @@ def _build_deck(settings: Settings) -> dict:
     )
     hostagent = HostAgent(hostagent_url, settings.hostagent_key)
 
-    from app.node_store import LEGACY_SPARK_SEED_ID, NodeStore, seed_if_missing
+    from app.node_store import LEGACY_SPARK_SEED_ID, NodeStore, seed_if_missing, seed_engines_if_missing
 
     node_store = NodeStore(data_dir / "nodes.json", data_dir / "node_credentials.json")
     # One-time migration: env -> registry. Once nodes.json exists env is
@@ -173,6 +173,10 @@ def _build_deck(settings: Settings) -> dict:
     # Keys on the raw file's missing `control` key, so an operator demotion
     # is never re-promoted on a later boot.
     node_store.stamp_missing_control(LEGACY_SPARK_SEED_ID)
+    # One-time engines[] seed (E1 spec §1): stamp the triple on first boot IFF
+    # presence proof is found (intent.json or policy.json naming legacy engines).
+    # Env defaults are not proof an engine exists (coexistence, spec §6).
+    seed_engines_if_missing(node_store, settings, data_dir)
 
     from app.engines.spark import SparkClient
     from app.node_clients import NodeClients, NodeObservers

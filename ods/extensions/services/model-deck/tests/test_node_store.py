@@ -11,11 +11,17 @@ import pytest
 
 from app.engines import GuardError
 from app.node_store import NodeStore
+from app.settings import Settings
 
 
 @pytest.fixture
 def store(tmp_path):
     return NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+
+
+def _settings():
+    """Build a Settings instance with defaults for E1 engine seed tests."""
+    return Settings()
 
 
 def test_add_and_list_roundtrip(store):
@@ -553,3 +559,44 @@ def test_load_strips_engines_from_non_local_entries(store, tmp_path):
     # Subsequent update() must succeed (not bricked by engines validation)
     result = store.update("boxa", {"label": "Renamed"})
     assert result["label"] == "Renamed"
+
+
+# ---- E1 T2: seed_engines_if_missing ----
+
+from app.node_store import seed_engines_if_missing
+
+
+def _legacy_intent(tmp_path):
+    (tmp_path / "intent.json").write_text(
+        '{"local/lemonade": {"state": "loaded", "model": "m.gguf",'
+        ' "engine": "lemonade"}}')
+
+
+def test_seed_engines_stamps_triple_when_legacy_records_exist(store, tmp_path):
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local"})
+    _legacy_intent(tmp_path)
+    changed = seed_engines_if_missing(store, _settings(), tmp_path)
+    assert changed is True
+    engines = {e["resource"]: e for e in store.get("local")["engines"]}
+    assert set(engines) == {"lemonade", "comfyui", "hipfire"}
+    # values flow from Settings, not hardcoded copies:
+    assert engines["lemonade"]["connection"]["url"] == _settings().lemonade_url
+    assert engines["hipfire"]["gpu_index"] == _settings().hipfire_gpu_index
+
+
+def test_seed_engines_empty_without_presence_proof(store, tmp_path):
+    """Coexistence (spec §6): env DEFAULTS naming llama-server are not
+    proof llama-server exists. Fresh data dir -> empty declaration."""
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local"})
+    changed = seed_engines_if_missing(store, _settings(), tmp_path)
+    assert changed is True
+    assert store.get("local")["engines"] == []
+
+
+def test_seed_engines_runs_once(store, tmp_path):
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local"})
+    _legacy_intent(tmp_path)
+    seed_engines_if_missing(store, _settings(), tmp_path)
+    store.update("local", {"engines": []})     # operator emptied it
+    assert seed_engines_if_missing(store, _settings(), tmp_path) is False
+    assert store.get("local")["engines"] == []  # seed did NOT resurrect

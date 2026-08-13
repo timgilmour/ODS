@@ -51,7 +51,7 @@ from app.store_io import load_json, save_json
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 _AGENT_KINDS = {"local", "node-agent"}
 _CONTROLS = {"none", "swap"}
-_PATCHABLE = {"label", "address", "serving_address", "control"}
+_PATCHABLE = {"label", "address", "serving_address", "control", "engines"}
 _ALLOWED = {"id", "label", "agent_kind", "address", "serving_address", "control", "engines"}
 
 # The OLD env-seeded spark node id — frozen MIGRATION DATA, not coupling:
@@ -414,4 +414,48 @@ def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
                    # and recoverable via the UI toggle (design §8).
                    "control": "swap" if credential else "none"},
                   credential=credential)
+    return True
+
+
+def seed_engines_if_missing(store: "NodeStore", settings, data_dir: Path) -> bool:
+    """One-time engines[] seed (E1 spec §1). Keyed on raw-file absence of
+    the `engines` key on the local entry — after the first stamp the file
+    owns the truth and the env settings are dead (N1 stamp pattern).
+
+    Presence proof: only stamp today's triple when intent.json or
+    policy.json shows a pre-E1 install that was actually MANAGING the
+    legacy names. Env defaults naming llama-server are not proof
+    llama-server exists (coexistence, spec §6). No proof -> stamp []."""
+    local = store.get("local")
+    if local is None or "engines" in local:
+        return False
+    legacy = ("lemonade", "comfyui", "hipfire")
+    proof = False
+    for name in ("intent.json", "policy.json"):
+        p = Path(data_dir) / name
+        if p.exists():
+            try:
+                text = p.read_text()
+            except OSError:
+                continue
+            if any(k in text for k in legacy):
+                proof = True
+                break
+    engines = [] if not proof else [
+        {"resource": "hipfire", "kind": "hipfire",
+         "connection": {"container": settings.hipfire_container},
+         "gpu_index": settings.hipfire_gpu_index,
+         "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
+        {"resource": "lemonade", "kind": "lemonade",
+         "connection": {"url": settings.lemonade_url,
+                        "metrics_url": settings.lemonade_metrics_url,
+                        "container": settings.lemonade_container},
+         "gpu_index": settings.lemonade_gpu_index,
+         "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+        {"resource": "comfyui", "kind": "comfyui",
+         "connection": {"url": settings.comfyui_url},
+         "gpu_index": settings.lemonade_gpu_index,
+         "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+    ]
+    store.update("local", {"engines": engines})
     return True
