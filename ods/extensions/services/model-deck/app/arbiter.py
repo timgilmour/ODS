@@ -139,29 +139,31 @@ _EXTRA_PREFIX = "extra."
 
 # Minimum spacing between restore-triggered characteristics-derive-throttle
 # clears (see Watcher._execute_restore). A crash-looping resource can have
-# _restore() succeed at the API level every ~2 s tick (e.g. resume() returns
-# fine) while the process dies again before the next tick — the failure-
-# budget/quarantine machinery only trips when _restore() RAISES, so it does
-# not bound this case. Without a floor, every one of those ticks would clear
-# the derive throttle and re-run the checkpoint scan + spark probe, exactly
-# the pointless per-tick I/O the throttle exists to prevent, concentrated
-# during an active incident. 30 s bounds that to at most one extra derive per
-# half-minute of crash-looping — well above the ~2 s tick so one flap cycle
-# can't retrigger it, and well below settings.derive_interval_s's default
-# 300 s so a genuinely new incident more than 30 s later still gets its own
-# immediate derive.
+# _restore() succeed at the API level (e.g. resume() returns fine) while the
+# process dies again before the next tick — never raising. The failure
+# budget now bounds that case too (a cooldown-paced redispatch of a
+# still-unverified key charges it, see _restore_unverified), but quarantine
+# only lands after FAILURE_BUDGET charges (~60-90 s of flapping); without a
+# floor, every restore in that window would clear the derive throttle and
+# re-run the checkpoint scan + spark probe, exactly the pointless I/O the
+# throttle exists to prevent, concentrated during an active incident. 30 s
+# bounds that to at most one extra derive per half-minute of crash-looping —
+# well above the ~2 s tick so one flap cycle can't retrigger it, and well
+# below settings.derive_interval_s's default 300 s so a genuinely new
+# incident more than 30 s later still gets its own immediate derive.
 _DERIVE_RESTORE_FLOOR_S = 30.0
 
 # Minimum spacing between restore attempts FOR THE SAME KEY (storm limiter,
 # defense-in-depth for observation windows the earlier tasks don't cover —
-# deck-invisible lazy loads, hipfire/spark record-last windows). The failure
-# budget (app.intent.FAILURE_BUDGET) quarantines repeat FAILURES, but a
-# restore that "succeeds" at the API level and dies out-of-band before the
-# next tick never raises, so it never charges the budget — without this
-# floor, reconcile re-dispatches a real restore every ~2 s tick for as long
-# as the resource keeps flapping (observed live: three restores in 10 s,
-# 2026-08-06). A skipped restore is a non-action: no event, no failure
-# charged.
+# deck-invisible lazy loads, hipfire/spark record-last windows). A restore
+# that "succeeds" at the API level and dies out-of-band before the next tick
+# never raises; without this floor, reconcile re-dispatches a real restore
+# every ~2 s tick for as long as the resource keeps flapping (observed live:
+# three restores in 10 s, 2026-08-06). The failure budget
+# (app.intent.FAILURE_BUDGET) charges that no-raise case on the NEXT
+# dispatch for a still-unverified key (see _restore_unverified), so this
+# cooldown is also what paces those charges. A skipped restore is a
+# non-action: no event, no failure charged.
 _RESTORE_COOLDOWN_S = 30.0
 
 # Engine failures carry raw HTTP bodies (`EngineError(resp.text)`), and a
@@ -573,6 +575,18 @@ class Watcher:
         # last monotonic time a restore was ATTEMPTED for this key, success
         # or failure. Only intent-store callers ever populate it.
         self._restore_last_attempt_at: dict[str, float] = {}
+        # Keys whose last restore dispatched fine (no raise) but has not yet
+        # produced a `serving` tick. The reconciler being about to dispatch
+        # the NEXT restore for a still-marked key IS the evidence the
+        # previous restore failed, so that dispatch charges note_failure
+        # first (see _reconcile_pass) — closing the no-raise hole in the
+        # failure budget (live-proven 08-12: unbounded 20-min restore loop,
+        # no quarantine). Deliberately in-memory, same lifetime as
+        # _restore_last_attempt_at: a deck restart forgets at most ONE
+        # pending charge, and the incident class involves a long-running
+        # deck; persisting it would touch the intent-store schema for no
+        # incident-class gain.
+        self._restore_unverified: set[str] = set()
         # Test-only seam: when set, called once per non-throttled derive pass
         # INSTEAD of the real checkpoint/engine scan, so the throttle timing
         # itself can be tested without a real gguf_dir or spark client.
@@ -916,6 +930,7 @@ class Watcher:
         for key, status in statuses.items():
             if status["status"] == "serving":
                 self._intent_store.note_healthy(key)
+                self._restore_unverified.discard(key)
 
         actions = plan_reconcile(
             statuses,
@@ -948,6 +963,21 @@ class Watcher:
             if last is not None and now_mono - last < _RESTORE_COOLDOWN_S:
                 continue  # a skip is a non-action: no event, no failure charged
             self._restore_last_attempt_at[key] = now_mono
+            # Being about to dispatch a restore for a still-unverified key
+            # means the previous restore never became healthy: charge it now
+            # (after the skip-guards above — skips stay non-actions and never
+            # charge). Reuses the lifecycle-restore-failed kind so existing
+            # severity mapping applies; no new event vocabulary.
+            if key in self._restore_unverified:
+                self._restore_unverified.discard(key)
+                count = self._intent_store.note_failure(key)
+                self._log("lifecycle-restore-failed",
+                          {"key": key,
+                           "error": "previous restore never became healthy",
+                           "failures": count})
+                if self._intent_store.get().get(key, {}).get("quarantined"):
+                    self._log("lifecycle-quarantined", {"key": key})
+                    continue  # derive_status reports quarantined next tick
             self._execute_restore(action)
 
     def _node_observations(self) -> list[dict]:
@@ -1001,6 +1031,10 @@ class Watcher:
                 or now_mono - self._last_restore_derive_at >= _DERIVE_RESTORE_FLOOR_S):
             self._last_derive_at = None
             self._last_restore_derive_at = now_mono
+        # Dispatched fine, but not yet verified: only a `serving` tick clears
+        # this (see _reconcile_pass). If the reconciler comes back to restore
+        # this key again first, that redispatch charges the failure budget.
+        self._restore_unverified.add(key)
         self._log("lifecycle-restore", {"key": key, "model": action["model"]})
 
     def _restore(self, action: dict) -> None:

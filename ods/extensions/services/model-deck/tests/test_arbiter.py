@@ -2559,6 +2559,163 @@ def test_reconciler_skips_a_lemonade_restore_while_a_deck_load_is_in_flight(tmp_
     assert lemonade.loaded == ["extra.m.gguf"]
 
 
+# ---------------------------------------------------------------------------
+# RESTORE-WITHOUT-HEALTH charges the failure budget (2026-08-13 incident
+# follow-up, Part A). A restore that dispatches fine but never produces a
+# `serving` tick used to charge nothing — the budget only tripped when
+# _restore() RAISED — so an unhealthy placement restored forever (live-proven
+# 08-12: 7 restores at 20-min boot-window intervals, no quarantine). The
+# evidence that restore N failed is the reconciler being about to dispatch
+# restore N+1 for the same key with no `serving` tick in between.
+# ---------------------------------------------------------------------------
+
+
+def _unverified_setup(tmp_path):
+    """A lemonade key whose restores dispatch fine (no raise) while the world
+    permanently shows it unloaded -> 'down' derives every tick, `serving`
+    never arrives. The exact incident shape Part A exists to bound."""
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.m.gguf",
+                  engine="lemonade")
+    clock = _FakeClock()
+    lemonade = FakeLemonade()
+    world = FakeWorld(_world(lemonade=_lem(state="unloaded")))
+    watcher, events_path = _make_watcher(
+        tmp_path, world, FakeRegistry(), _policy(),
+        lemonade=lemonade, intent_store=intent, clock=clock,
+    )
+    return watcher, events_path, intent, lemonade, clock, world
+
+
+def test_unverified_restore_charges_the_budget_on_redispatch(tmp_path):
+    """First unverified redispatch: exactly ONE failure charged (count
+    asserted, not just a flag), the event reuses the existing
+    lifecycle-restore-failed kind, and the second restore still dispatches
+    (budget not yet exhausted)."""
+    watcher, events_path, intent, lemonade, clock, _ = _unverified_setup(tmp_path)
+
+    watcher.tick()                        # restore #1 dispatches, no raise
+    assert lemonade.loaded == ["extra.m.gguf"]
+    assert intent.get()["local/lemonade"]["failures"] == 0
+
+    clock.advance(31)                     # past _RESTORE_COOLDOWN_S
+    watcher.tick()                        # still down -> charge, restore #2
+
+    assert intent.get()["local/lemonade"]["failures"] == 1
+    assert lemonade.loaded == ["extra.m.gguf", "extra.m.gguf"]
+    failed = [e for e in tail_events(events_path)
+              if e["kind"] == "lifecycle-restore-failed"]
+    assert failed
+    assert failed[-1]["detail"] == {
+        "key": "local/lemonade",
+        "error": "previous restore never became healthy",
+        "failures": 1,
+    }
+
+
+def test_second_unverified_restore_quarantines_and_skips_dispatch(tmp_path):
+    """Budget exhausted: the third would-be dispatch charges failure #2,
+    quarantines, logs, and does NOT dispatch (the engine fake records no
+    third call). Incident replay: quarantine after 2 restores, not 7+."""
+    watcher, events_path, intent, lemonade, clock, _ = _unverified_setup(tmp_path)
+
+    watcher.tick()                        # restore #1, marker set
+    clock.advance(31)
+    watcher.tick()                        # charge 1, restore #2, marker re-set
+    clock.advance(31)
+    watcher.tick()                        # charge 2 -> quarantined, NO dispatch
+
+    record = intent.get()["local/lemonade"]
+    assert record["failures"] == 2
+    assert record["quarantined"] is True
+    assert lemonade.loaded == ["extra.m.gguf", "extra.m.gguf"]
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert "lifecycle-quarantined" in kinds
+
+
+def test_serving_tick_clears_the_unverified_marker(tmp_path):
+    """A restore that reaches `serving` is verified: the marker clears next
+    to note_healthy, so a LATER genuine outage starts clean — its first
+    restore charges nothing and logs no failure."""
+    watcher, events_path, intent, lemonade, clock, world = _unverified_setup(tmp_path)
+
+    watcher.tick()                        # restore #1, marker set
+    world._snapshot = _world(lemonade=_lem(state="loaded", model="extra.m.gguf"))
+    clock.advance(31)
+    watcher.tick()                        # serving: marker cleared
+    assert intent.get()["local/lemonade"]["last_healthy_ts"] is not None
+
+    world._snapshot = _world(lemonade=_lem(state="unloaded"))
+    clock.advance(31)
+    watcher.tick()                        # new incident's FIRST restore
+
+    assert lemonade.loaded == ["extra.m.gguf", "extra.m.gguf"]
+    assert intent.get()["local/lemonade"]["failures"] == 0
+    assert not [e for e in tail_events(events_path)
+                if e["kind"] == "lifecycle-restore-failed"]
+
+
+def test_cooldown_skip_does_not_charge_the_budget(tmp_path):
+    """The 30 s cooldown skip stays a non-action: no event, no failure
+    charged, marker untouched."""
+    watcher, events_path, intent, lemonade, clock, _ = _unverified_setup(tmp_path)
+
+    watcher.tick()                        # restore #1 at t=0
+    clock.advance(10)                     # inside _RESTORE_COOLDOWN_S
+    watcher.tick()                        # cooldown skip
+
+    assert intent.get()["local/lemonade"]["failures"] == 0
+    assert lemonade.loaded == ["extra.m.gguf"]
+    assert not [e for e in tail_events(events_path)
+                if e["kind"] == "lifecycle-restore-failed"]
+
+
+def test_load_in_flight_skip_does_not_charge_the_budget(tmp_path):
+    """The lemonade load_in_flight skip stays a non-action too — but it only
+    DEFERS the reckoning: once the in-flight load clears and the key is
+    still down, the charge fires on the real dispatch."""
+    watcher, events_path, intent, lemonade, clock, _ = _unverified_setup(tmp_path)
+
+    watcher.tick()                        # restore #1, marker set
+    lemonade._in_flight = True
+    clock.advance(31)
+    watcher.tick()                        # in-flight skip: no charge
+
+    assert intent.get()["local/lemonade"]["failures"] == 0
+
+    lemonade._in_flight = False
+    watcher.tick()                        # real dispatch -> charge fires
+
+    assert intent.get()["local/lemonade"]["failures"] == 1
+
+
+def test_fresh_watcher_does_not_charge_for_a_pre_restart_restore(tmp_path):
+    """Documents the in-memory choice: a deck restart forgets at most one
+    pending charge. A fresh watcher over a stale loaded-intent dispatches
+    its first restore without charging — `failures` seeded away from the
+    0 default so 'unchanged' is provable, not coincidental."""
+    from app.intent import IntentStore
+
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("local/lemonade", state="loaded", model="extra.m.gguf",
+                  engine="lemonade")
+    intent.note_failure("local/lemonade")  # pre-restart history: failures=1
+    lemonade = FakeLemonade()
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world(lemonade=_lem(state="unloaded"))),
+        FakeRegistry(), _policy(), lemonade=lemonade, intent_store=intent,
+    )
+
+    watcher.tick()                        # first restore after "restart"
+
+    assert lemonade.loaded == ["extra.m.gguf"]
+    assert intent.get()["local/lemonade"]["failures"] == 1  # unchanged
+    assert not [e for e in tail_events(events_path)
+                if e["kind"] == "lifecycle-restore-failed"]
+
+
 # ===========================================================================
 # CATALOG HARVEST (task 8) — _derive_pass harvests each configurable
 # engine's option catalog, once per observed engine version.
