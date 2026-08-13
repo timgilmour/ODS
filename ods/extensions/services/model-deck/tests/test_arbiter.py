@@ -19,6 +19,8 @@ import json
 import threading
 import time
 
+import pytest
+
 from app.arbiter import HealSuppressor, Watcher, decide
 from app.characteristics import CharacteristicsStore
 from app.engines import EngineError, GuardError
@@ -118,11 +120,23 @@ def _policy(lem_pinned=False, lem_idle=900, comfy_pinned=False, comfy_idle=300):
 _VALID_ACTION_TYPES = {"unload", "free", "noop"}
 
 
-def _assert_only_valid_actions(actions):
+def _assert_only_valid_actions(actions, world):
     """No action type may ever target hipfire or an external — the only way
-    to prove that guard is to assert by omission across every result."""
+    to prove that guard is to assert by omission across every result.
+
+    T5 review fix: once every kind shares the same generic action vocabulary
+    ("unload"/"free"/"noop"), a type-only check no longer proves the TARGET
+    wasn't hipfire — only that no exotic type slipped through. Derive the
+    answer honestly from `world`'s own tenants (their `engine` field) rather
+    than a fixture-naming assumption (a resource need not be named
+    "hipfire" to BE hipfire-kind), so this helper keeps meaning what its
+    docstring promises regardless of which fixture style calls it."""
+    tenants = world["tenants"]
     for a in actions:
         assert a["type"] in _VALID_ACTION_TYPES, a
+        resource = a.get("resource")
+        if resource is not None:
+            assert tenants[resource]["engine"] != "hipfire", a
 
 
 def _types(actions):
@@ -148,7 +162,7 @@ def test_idle_release_unloads_default_route_lemonade_when_idle_past_ttl():
     result = decide(world, _policy(lem_idle=900), None)
 
     assert result == [{"type": "unload", "resource": "lemonade", "model": model}]
-    _assert_only_valid_actions(result)
+    _assert_only_valid_actions(result, world)
 
 
 def test_idle_release_no_unload_when_lemonade_pinned():
@@ -204,7 +218,7 @@ def test_idle_release_frees_comfyui_when_idle_past_ttl():
     result = decide(world, _policy(comfy_idle=300), None)
 
     assert result == [{"type": "free", "resource": "comfyui"}]
-    _assert_only_valid_actions(result)
+    _assert_only_valid_actions(result, world)
 
 
 def test_idle_release_no_free_when_comfy_holds_no_vram():
@@ -315,7 +329,7 @@ def test_contention_todays_incident_frees_comfyui():
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
     assert result == [{"type": "free", "resource": "comfyui"}]
-    _assert_only_valid_actions(result)
+    _assert_only_valid_actions(result, world)
 
 
 def test_contention_noop_fits_when_free_already_sufficient():
@@ -482,12 +496,13 @@ def test_contention_never_touches_hipfire():
     result = decide(world, _policy(), _pending(footprint=19 * GIB, gpu_index=1))
 
     assert result == [{"type": "noop", "reason": "wont-fit"}]
-    _assert_only_valid_actions(result)
-    # Stronger than the type-only proof above: under the new resource-
-    # tagged action shape, prove by omission that hipfire specifically was
-    # never even considered a candidate (not merely that no exotic action
-    # type slipped through).
-    assert all(a.get("resource") != "hipfire" for a in result)
+    # _assert_only_valid_actions now checks BOTH the type vocabulary and (T5
+    # review) that no action's resource is a hipfire-kind tenant in `world`
+    # — the per-site version of that second check used to live here
+    # explicitly; deleting it and relying on the shared helper is what
+    # proves the helper actually covers this invariant (guard-at-the-
+    # boundary).
+    _assert_only_valid_actions(result, world)
 
 
 def test_contention_gpu_index_not_found_is_wont_fit():
@@ -631,6 +646,29 @@ def test_decide_empty_declaration_pending_load_noops_nothing_evictable():
                "gpu_index": 2}
 
     assert decide(world, {}, pending) == [{"type": "noop", "reason": "wont-fit"}]
+
+
+def test_idle_release_comfy_suppressed_by_coresident_hipfire_footprint():
+    """T5 review: `_co_resident_footprints` must generalize past "minus
+    lemonade's footprint" to ANY co-resident loaded/running tenant — proven
+    here with a co-resident HIPFIRE, a kind that never appeared in this role
+    pre-E1. A running hipfire-kind resource on the same GPU as an idle
+    comfy-kind resource explains almost all of that GPU's usage
+    (used 26 GiB, hipfire footprint 25 GiB, 1 GiB slack -> reclaimable ==
+    exactly 0), so the free must be SUPPRESSED — not fire as a guaranteed
+    no-op that would just re-arm the TTL forever."""
+    world = _dworld({
+        "img": {"engine": "comfyui", "gpu_index": 2, "state": "idle",
+                "queue": 0, "idle_s": 500.0},
+        "agent": {"engine": "hipfire", "gpu_index": 2, "state": "running",
+                  "model": "x", "footprint": 25 * GIB, "queue_depth": 0},
+    }, [_dgpu(2, 34 * GIB, 26 * GIB)])
+    policy = {"img": {"priority": 1, "pinned": False, "idle_ttl": 300},
+              "agent": {"priority": 1, "pinned": False, "idle_ttl": 0}}
+
+    actions = decide(world, policy, None)
+
+    assert actions == []
 
 
 # ===========================================================================
@@ -2748,6 +2786,29 @@ def test_same_tick_evict_and_reload_pins_single_load_and_final_intent(tmp_path):
     record = intent.get()["local/lemonade"]
     assert record["state"] == "loaded"  # last write wins, not the eviction arm's 'unloaded'
     assert record["model"] == "extra.model.gguf"
+
+
+def test_execute_raises_on_action_for_a_non_legacy_resource(tmp_path):
+    """T5 review fix: decide() can now emit "unload"/"free" for ANY declared
+    resource (E1 generalization), but _execute still only actuates the
+    lemonade/comfyui pair (Task 6 generalizes the rest). An action _execute
+    doesn't recognize must raise — never vanish silently with no actuation
+    and no log line, which is what a bare unmatched-if-chain would do."""
+    watcher, _events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
+    )
+
+    with pytest.raises(ValueError, match="gguf-a"):
+        watcher._execute(
+            [{"type": "unload", "resource": "gguf-a", "model": "x.gguf"}], None
+        )
+
+    # Same gap for the "free" verb, and for a "resource" the action vocabulary
+    # doesn't even carry (a bare "unload" for hipfire, structurally
+    # impossible from decide() itself but still a shape _execute must not
+    # silently accept from some OTHER future caller).
+    with pytest.raises(ValueError, match="img"):
+        watcher._execute([{"type": "free", "resource": "img"}], None)
 
 
 def test_reconciler_restores_a_key_at_most_once_per_cooldown(tmp_path):

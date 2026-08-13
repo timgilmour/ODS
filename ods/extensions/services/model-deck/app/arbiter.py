@@ -903,6 +903,20 @@ class Watcher:
                 if action["reason"] == "wont-fit":
                     wont_fit = True
                 self._log("noop", {"reason": action["reason"]})
+            else:
+                # T5 review fix: decide() can now emit "unload"/"free" for
+                # ANY declared resource (E1 generalization), but this method
+                # still only actuates the lemonade/comfyui pair — the rest
+                # is Task 6's generalization (see this method's docstring
+                # scope, and the mechanical-translation comment above). An
+                # action that matches neither branch must not vanish
+                # silently (no actuation, no log) — that would be a real
+                # unload/free the deck decided on and then simply never
+                # performed. Raise so tick()'s own broad supervisor catch
+                # logs it as a tick-error instead: "let it crash" the tick,
+                # not the process, the same posture as observe.py's
+                # `unhandled engine kind` raise for an analogous gap.
+                raise ValueError(f"_execute: no dispatch for action {action!r}")
 
         # After healing a pending load's contention (or finding it already
         # fit), re-trigger the default-route load with its FULL name. Skip if
