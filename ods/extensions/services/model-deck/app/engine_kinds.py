@@ -28,7 +28,17 @@ litellm's route table, which the pre-E1 code keyed by the literal
 per iteration (a fresh per-resource ctx dict, not a mutated shared one) —
 rather than a separate `observe(client, mem, now, resource, ctx)`
 parameter, so every adapter's `observe` keeps the identical 4-arg
-signature whether or not that particular kind needs the resource name."""
+signature whether or not that particular kind needs the resource name.
+
+`uses_gguf(obs)` and `restart_container(entry)` (Task 9) are this same
+per-kind-knowledge pattern applied to the storage feature: `app.storage`'s
+in-use scan (a GGUF unit currently loaded by ANY declared lemonade-kind
+resource, never a fixed `world["tenants"]["lemonade"]` index) and
+`app.notify`'s moved-in-GGUF restart hook (which container to bounce, and
+whether THAT resource's own client currently has something loaded worth
+protecting) both iterate the live declaration and ask the matching
+adapter, rather than assuming a single resource literally named
+"lemonade" is the only GGUF server that could exist."""
 
 from app.engines import EngineError, GuardError
 from app.engines.comfyui import ComfyClient
@@ -207,6 +217,17 @@ class _LemonadeAdapter:
     def active(self, obs: dict) -> bool:
         return obs["state"] == "loaded"
 
+    def uses_gguf(self, obs: dict) -> str | None:
+        """The loaded model name when this resource is currently serving a
+        GGUF, else None — the same ``obs["state"] == "loaded"`` read
+        ``active()`` makes just above. E1 Task 9: the one place that knows
+        "a lemonade-kind resource being loaded means a specific GGUF file
+        is in use" — app.storage's in-use scan and app.notify's
+        moved-in-GGUF restart hook both read this instead of assuming a
+        single resource named "lemonade" is the only place a GGUF could be
+        loaded."""
+        return obs["model"] if obs["state"] == "loaded" else None
+
     def arbiter_verbs(self) -> frozenset:
         return frozenset({"unload"})
 
@@ -254,6 +275,15 @@ class _LemonadeAdapter:
         # not part of the per-resource declared connection.
         return LemonadeClient(connection["url"], settings.lemonade_key,
                               metrics_url=connection["metrics_url"])
+
+    def restart_container(self, entry: dict) -> str | None:
+        """The container to bounce so a newly-arrived GGUF registers
+        (lemonade only rescans its store at startup — app.notify's module
+        docstring) — the declared resource's OWN ``connection.container``,
+        never a single settings-level alias (E1 Task 9: two lemonade-kind
+        resources restart their own containers independently, each on its
+        own declared connection)."""
+        return entry["connection"]["container"]
 
     def execute_unload(self, watcher, resource: str, client, model: str,
                         actuated: set[str]) -> None:
@@ -450,6 +480,14 @@ class _ComfyAdapter:
     def active(self, obs: dict) -> bool:
         return obs["state"] == "busy"
 
+    def uses_gguf(self, obs: dict) -> str | None:
+        # comfyui-kind never serves a GGUF: a storage "gguf" unit can never
+        # be in use by a comfy tenant, and app.notify never restarts one
+        # over a gguf move (see restart_container below) — defined anyway
+        # for adapter-interface completeness (every kind implements the
+        # same protocol, per this module's docstring).
+        return None
+
     def arbiter_verbs(self) -> frozenset:
         return frozenset({"free"})
 
@@ -504,6 +542,12 @@ class _ComfyAdapter:
 
     def build_client(self, connection: dict, settings):
         return ComfyClient(connection["url"])
+
+    def restart_container(self, entry: dict) -> str | None:
+        # No restart needed: ComfyUI's /api/models/{type} lists files per
+        # request (app.notify's module docstring) — a moved-in file is
+        # already visible with no action.
+        return None
 
     def execute_free(self, watcher, resource: str, client) -> bool:
         """Moved VERBATIM from Watcher._execute's comfy free branch (E1
@@ -571,6 +615,12 @@ class _HipfireAdapter:
     def active(self, obs: dict) -> bool:
         return obs["state"] == "running"
 
+    def uses_gguf(self, obs: dict) -> str | None:
+        # hipfire's own obs["model"] is a litellm-routed name, not a GGUF
+        # file the storage catalog tracks — never in use by a gguf storage
+        # unit. Defined anyway for adapter-interface completeness.
+        return None
+
     def arbiter_verbs(self) -> frozenset:
         return frozenset()
 
@@ -614,6 +664,10 @@ class _HipfireAdapter:
             stats_url=f"http://{container}:{_HIPFIRE_PORT}/stats",
             activity_window_s=settings.hipfire_activity_window_s,
         )
+
+    def restart_container(self, entry: dict) -> str | None:
+        # hipfire has no gguf store to register files into.
+        return None
 
     def restore(self, client, model: str | None) -> None:
         """The REAL restore call for a hipfire-kind resource: resume its

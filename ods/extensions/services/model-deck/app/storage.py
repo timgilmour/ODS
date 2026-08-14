@@ -16,6 +16,7 @@ refused with GuardError → HTTP 409.
 import threading
 from pathlib import Path
 
+from app.engine_kinds import ENGINE_KINDS
 from app.engines import GuardError
 from app.events import log_event
 from app.sets import apply_in_progress
@@ -30,19 +31,32 @@ def _strip(name: str | None) -> str | None:
 def unit_in_use(unit: dict, world: dict) -> str | None:
     """Reason string if unit is in active use by an engine, else None.
 
-    Covers three cases: gguf currently loaded in lemonade, gguf being litellm's
-    default route (never overridable — plan-level invariant), and comfy units
-    while ComfyUI is busy or queue unknown. Callers (plan_move, storage_decide)
-    treat non-None reason as GuardError refusal."""
+    Iterates every DECLARED resource in ``world["tenants"]`` — never a fixed
+    ``["lemonade"]``/``["comfyui"]`` index (E1 Task 9, T3 review obligation):
+    an empty declaration then blocks nothing (clean, not a KeyError -> 500 on
+    the storage move routes), and two lemonade-kind resources are each
+    checked independently. Covers three cases: a gguf currently loaded by
+    ANY declared lemonade-kind resource (``app.engine_kinds``' ``uses_gguf``
+    hook — no engine name here), a gguf being litellm's default route (never
+    overridable — plan-level invariant), and comfy units while ANY declared
+    comfyui-kind resource — found the same kind-agnostic way app.sets'
+    ``_park_capable_resources`` finds hipfire-kind ones, via
+    ``human_verbs()`` carrying its verb rather than a kind-name literal — is
+    busy or unknown. Callers (plan_move, storage_decide) treat a non-None
+    reason as GuardError refusal."""
     if unit["type"] == "gguf":
-        if _strip(world["tenants"]["lemonade"]["model"]) == unit["name"]:
-            return f"model {unit['name']!r} is currently loaded in lemonade"
+        for resource, tenant in world["tenants"].items():
+            loaded = ENGINE_KINDS[tenant["engine"]].uses_gguf(tenant)
+            if loaded is not None and _strip(loaded) == unit["name"]:
+                return f"model {unit['name']!r} is currently loaded in {resource!r}"
         if _strip(world["default_route"]) == unit["name"]:
             return f"model {unit['name']!r} is the litellm default route — never movable"
     if unit["type"] == "comfy":
-        comfy = world["tenants"]["comfyui"]
-        if comfy["state"] != "idle" or (comfy["queue"] or 0) > 0:
-            return f"ComfyUI is {comfy['state']} (queue {comfy['queue']}) — comfy files locked"
+        for tenant in world["tenants"].values():
+            if "free" not in ENGINE_KINDS[tenant["engine"]].human_verbs():
+                continue
+            if tenant["state"] != "idle" or (tenant.get("queue") or 0) > 0:
+                return f"ComfyUI is {tenant['state']} (queue {tenant.get('queue')}) — comfy files locked"
     return None
 
 

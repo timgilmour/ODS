@@ -27,12 +27,55 @@ class _DockerCtl:
             raise self._start_exc
 
 
-class _Settings:
-    lemonade_container = "ods-llama-server"
+class _NodeStore:
+    """Stand-in for app.node_store.NodeStore: just enough for notify_engine
+    to read the local declaration live (deck["node_store"].get("local")
+    ["engines"]) — mirrors tests/test_api.py's _declare_local convention
+    without pulling in the real file-backed store."""
+
+    def __init__(self, engines):
+        self._engines = engines
+
+    def get(self, node_id):
+        if node_id != "local":
+            return None
+        return {"engines": self._engines}
 
 
-def _deck(loaded=None, dockerctl=None):
-    return {"lemonade": _Lemonade(loaded), "dockerctl": dockerctl or _DockerCtl(), "settings": _Settings()}
+class _LocalClients:
+    """Stand-in for app.local_clients.LocalClients: resource -> client dict
+    lookup, mirroring tests/test_api.py's FakeLocalClients (live off the
+    dict, not captured at construction)."""
+
+    def __init__(self, clients):
+        self._clients = clients
+
+    def client_for(self, resource):
+        return self._clients.get(resource)
+
+
+# E1 Task 9: mirrors tests/test_api.py's _GGUF_A_ENTRY shape, resource name
+# kept as "lemonade" here (unlike that file's "gguf-a") so this module's
+# pre-E1 single-resource tests below stay byte-identical in intent — only
+# the plumbing they go through changed, not what they assert.
+_LEMONADE_ENTRY = {
+    "resource": "lemonade", "kind": "lemonade",
+    "connection": {"url": "http://llama-server:8080",
+                   "metrics_url": "http://llama-server:8001/metrics",
+                   "container": "ods-llama-server"},
+    "gpu_index": 1,
+    "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900},
+}
+
+
+def _deck(loaded=None, dockerctl=None, engines=None, clients=None):
+    engines = [_LEMONADE_ENTRY] if engines is None else engines
+    clients = {"lemonade": _Lemonade(loaded)} if clients is None else clients
+    return {
+        "node_store": _NodeStore(engines),
+        "local_clients": _LocalClients(clients),
+        "dockerctl": dockerctl or _DockerCtl(),
+    }
 
 
 def _loc(engine):
@@ -84,3 +127,59 @@ def test_lemonade_stop_timeout_then_start_also_fails_raises_start_error(monkeypa
         notify_engine(_loc("lemonade"), deck)
 
     assert dockerctl.calls == [("stop", "ods-llama-server"), ("start", "ods-llama-server")]
+
+
+# ===========================================================================
+# E1 Task 9 (T6 review class): the restart hook iterates every DECLARED
+# engine whose kind matches the destination's, resolving each one's OWN
+# container from ITS declared connection — never a single settings-level
+# alias. Two lemonade-kind resources restart their own containers
+# independently.
+# ===========================================================================
+
+
+def _gguf_b_entry(**over):
+    entry = {**_LEMONADE_ENTRY, "resource": "gguf-b",
+            "connection": {**_LEMONADE_ENTRY["connection"], "container": "ods-gguf-b"}}
+    entry.update(over)
+    return entry
+
+
+def test_two_declared_lemonade_resources_both_restart():
+    """With TWO lemonade-kind resources declared, a moved-in GGUF restarts
+    BOTH containers — each declares its own (T6 review class obligation)."""
+    deck = _deck(
+        engines=[_LEMONADE_ENTRY, _gguf_b_entry()],
+        clients={"lemonade": _Lemonade(None), "gguf-b": _Lemonade(None)},
+    )
+
+    assert notify_engine(_loc("lemonade"), deck) is None
+
+    assert deck["dockerctl"].calls == [
+        ("stop", "ods-llama-server"), ("start", "ods-llama-server"),
+        ("stop", "ods-gguf-b"), ("start", "ods-gguf-b"),
+    ]
+
+
+def test_one_loaded_sibling_still_restarts_independently():
+    """A resource with a model loaded defers (never yanks); a SIBLING
+    resource with nothing loaded still restarts on its own — the defer on
+    one must not block the other."""
+    deck = _deck(
+        engines=[_LEMONADE_ENTRY, _gguf_b_entry()],
+        clients={"lemonade": _Lemonade("extra.a.gguf"), "gguf-b": _Lemonade(None)},
+    )
+
+    warning = notify_engine(_loc("lemonade"), deck)
+
+    assert warning and "restart deferred" in warning and "lemonade" in warning
+    assert deck["dockerctl"].calls == [("stop", "ods-gguf-b"), ("start", "ods-gguf-b")]
+
+
+def test_undeclared_box_is_a_noop():
+    """No declared engines at all: notify_engine must not KeyError, just do
+    nothing (same "empty declaration blocks nothing" posture as
+    app.storage.unit_in_use)."""
+    deck = _deck(engines=[], clients={})
+    assert notify_engine(_loc("lemonade"), deck) is None
+    assert deck["dockerctl"].calls == []

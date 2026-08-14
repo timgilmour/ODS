@@ -22,12 +22,19 @@ def _dest(**over):
 
 
 def _world(lemonade_model=None, default_route=None, comfy_state="idle", comfy_queue=0):
+    # "engine" backfilled on every tenant (E1 Task 9, same fix test_sets.py's
+    # make_world already carries for the identical reason): unit_in_use now
+    # iterates world["tenants"] generically and looks up
+    # ENGINE_KINDS[tenant["engine"]] for EVERY tenant, not just lemonade's.
     return {"gpus": [], "externals": [], "placement": {},
             "default_route": default_route,
             "tenants": {"lemonade": {"state": "loaded" if lemonade_model else "unloaded",
-                                     "model": lemonade_model, "footprint": None, "idle_s": None},
-                        "comfyui": {"state": comfy_state, "queue": comfy_queue, "idle_s": None},
-                        "hipfire": {"state": "parked", "model": None, "footprint": 0, "queue_depth": None}}}
+                                     "model": lemonade_model, "footprint": None, "idle_s": None,
+                                     "engine": "lemonade"},
+                        "comfyui": {"state": comfy_state, "queue": comfy_queue, "idle_s": None,
+                                   "engine": "comfyui"},
+                        "hipfire": {"state": "parked", "model": None, "footprint": 0,
+                                   "queue_depth": None, "engine": "hipfire"}}}
 
 
 def _plan(unit=None, dest=None, world=None, active=frozenset(), free=None, slack=0,
@@ -85,6 +92,56 @@ def test_unit_in_use_helper():
     assert unit_in_use(_unit(), _world(lemonade_model="extra.a.gguf")) is not None
     assert unit_in_use(_unit(), _world()) is None
     assert unit_in_use(_unit(name="other.gguf"), _world(default_route="extra.other.gguf")) is not None
+
+
+# ===========================================================================
+# E1 Task 9: unit_in_use over a genuinely declaration-shaped world — more
+# than one lemonade-kind resource, and an empty declaration. Fixture rule
+# (same convention as test_arbiter.py's/test_sets.py's own E1 sections,
+# their _dworld/_dgpu and _world/_G respectively — named _dworld/_dgpu here
+# since this file's plain _world/_G names are already the fixed-triple
+# builder above): resources gguf-a/gguf-b, GPUs 2 and 3 — neither coincides
+# with lemonade/comfyui/hipfire on GPU 0/1, so a bug that silently assumes
+# kind-name-as-resource-name can't hide behind an agreeing fixture.
+# ===========================================================================
+
+
+def _dgpu(index, total, used):
+    return {"index": index, "total": total, "used": used, "free": total - used}
+
+
+def _dworld(tenants: dict, gpus: list[dict]) -> dict:
+    return {"gpus": gpus, "tenants": tenants, "externals": [],
+            "default_route": None, "routes_known": True,
+            "placement": {r: t["gpu_index"] for r, t in tenants.items()}}
+
+
+def test_in_use_covers_every_declared_gguf_server():
+    """A gguf loaded on EITHER of two declared lemonade-kind resources is
+    in use — not just a single hardcoded 'lemonade' tenant (T3 review
+    obligation, E1 Task 9)."""
+    world = _dworld({"gguf-a": {"engine": "lemonade", "gpu_index": 2,
+                                "state": "loaded", "model": "extra.m.gguf",
+                                "footprint": 10, "idle_s": 0.0},
+                     "gguf-b": {"engine": "lemonade", "gpu_index": 3,
+                                "state": "loaded", "model": "extra.n.gguf",
+                                "footprint": 10, "idle_s": 0.0}},
+                    [_dgpu(2, 100, 50), _dgpu(3, 100, 50)])
+    assert unit_in_use(_unit(name="m.gguf"), world) is not None
+    assert unit_in_use(_unit(name="n.gguf"), world) is not None
+    assert unit_in_use(_unit(name="other.gguf"), world) is None
+
+
+def test_in_use_empty_declaration_blocks_nothing():
+    """T3 review obligation: an EMPTY declaration must clean-behave (block
+    nothing), never KeyError — the pre-fix code indexed
+    world["tenants"]["lemonade"]/["comfyui"] unconditionally, which
+    KeyErrors the in-use guard into a 500 on storage move routes as soon as
+    nothing at all is declared."""
+    world = _dworld({}, [])
+    assert unit_in_use(_unit(), world) is None
+    comfy_unit = _unit(id="cm:x.st", type="comfy", name="x.st", location="cm", relpath="x.st")
+    assert unit_in_use(comfy_unit, world) is None
 
 
 # ===========================================================================
