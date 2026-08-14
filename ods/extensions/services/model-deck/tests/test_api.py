@@ -1086,7 +1086,7 @@ def test_preview_warn_step_costs_zero(tmp_path, monkeypatch):
 
     body = resp.json()
     assert body["steps"] == [
-        {"step": "warn", "reason": "comfyui-busy-skipped", "resource": "comfyui"}
+        {"step": "warn", "reason": "busy-skipped", "resource": "comfyui"}
     ]
     assert body["estimate_s"] == 0
 

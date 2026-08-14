@@ -45,10 +45,21 @@ ALREADY-validated stored set and needs no context. ``apply_set`` passes
 ``local_clients=deck["local_clients"]`` (not boot-time ``lemonade``/``comfy``/
 ``hipfire`` aliases) so every step resolves its own resource's client live,
 the same conversion Task 7 made for ``app.routers.control``.
+
+Hand-rolling that ``model_validate`` call (T8 review, I2) means a
+``ValidationError`` it raises does NOT go through FastAPI's normal
+automatic-body-validation path — so ``create_set`` catches it and re-raises
+as ``RequestValidationError(exc.errors())``, the same shape FastAPI's own
+internal body binding constructs, so it lands on ``app.main``'s
+``RequestValidationError`` handler (which strips the echoed ``input`` from
+every error entry) instead of the bare ``ValueError`` handler, which would
+echo the offending payload value — including anything sensitive a
+``settings_snapshot`` might carry — straight back into the 422 body.
 """
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.routers import build_world_snapshot
 from app.sets import (
@@ -115,10 +126,14 @@ def create_set(payload: dict, request: Request, overwrite: bool = False) -> dict
     # Built here, not via automatic FastAPI body binding (see module
     # docstring): the kind cross-check needs the live declaration as
     # validation context, which only this route can supply. A
-    # ValidationError from a bad kind/desired pairing propagates straight
-    # through — pydantic.ValidationError subclasses ValueError, so the
-    # app-wide handler already maps it to 422.
-    cfgset = ConfigSet.model_validate(payload, context={"kinds": _declared_kinds(deck)})
+    # ValidationError from a bad kind/desired pairing is converted to
+    # RequestValidationError (T8 review I2) so it goes through app.main's
+    # REDACTING handler, not the bare ValueError one, which would echo the
+    # offending payload value straight back into the 422 body.
+    try:
+        cfgset = ConfigSet.model_validate(payload, context={"kinds": _declared_kinds(deck)})
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
     slug = slugify(cfgset.name)
     if not overwrite and store.get(slug) is not None:
         raise HTTPException(status_code=409, detail=f"set {slug!r} already exists")

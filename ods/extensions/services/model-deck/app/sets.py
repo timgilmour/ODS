@@ -269,7 +269,20 @@ def upgrade_legacy_set(raw: dict) -> dict:
     Called on LOAD only (``SetStore._scan``/``get``); ``SetStore.save``
     always writes the new shape, so a set is upgraded at most once — the
     NEXT save silently drops the legacy shape for good.
+
+    ``raw`` is untrusted disk content — a top level that parsed as JSON but
+    isn't an object (``"hello"``, ``[1, 2]``) is passed straight through
+    UNCHANGED rather than crashing on ``.get`` ([c44] re-opened, T8 review
+    I1): this function's job is reshaping a dict, not validating one: a
+    non-dict is exactly as "not the legacy per-kind shape" as a dict with
+    no ephemeral key, and letting it through here means
+    ``ConfigSet.model_validate`` is what raises the named ``ValidationError``
+    below (``SetStore.get``/``_scan`` already turn that into "unreadable",
+    same as before this function existed) — not a bare ``AttributeError``
+    escaping this one.
     """
+    if not isinstance(raw, dict):
+        return raw
     eph = raw.get("ephemeral")
     if not isinstance(eph, dict) or "resources" in eph or not (
         set(eph) & set(_LEGACY_KIND_NAMES)
@@ -686,8 +699,14 @@ def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None)
             if tenant["queue"] == 0:
                 frees.append({"step": "free", "resource": resource})
             else:
+                # "busy-skipped", not "comfyui-busy-skipped" (T8 review I3):
+                # the reason string is a kind-agnostic catalogued message
+                # (spec §8 — no engine-kind-name literal outside
+                # app.engine_kinds), same as every step verb already is;
+                # WHICH resource is carried in the detail's own "resource"
+                # key, not baked into the reason text.
                 frees.append(
-                    {"step": "warn", "reason": "comfyui-busy-skipped", "resource": resource}
+                    {"step": "warn", "reason": "busy-skipped", "resource": resource}
                 )
 
         elif rd.desired == "parked" and "park" in verbs and tenant["state"] in ("running", "loading"):
@@ -1055,7 +1074,14 @@ def _run_apply(
 
         if name == "warn":
             report["warnings"].append(step["reason"])
-            log_event(events_path, "apply-warn", {"reason": step["reason"]})
+            # "resource" carried through when plan_apply attached one (T8
+            # review M2) — a resource-less warn (e.g. durable-revert-
+            # unavailable) still logs cleanly via .get, no KeyError.
+            log_event(
+                events_path,
+                "apply-warn",
+                {"reason": step["reason"], "resource": step.get("resource")},
+            )
             continue
 
         try:
@@ -1073,10 +1099,24 @@ def _run_apply(
         except _HALT_EXCEPTIONS as exc:
             report["failed"] = step
             report["error"] = str(exc)
+            # "resource" included (T8 review M1): two same-kind resources
+            # failing the same verb with the same error text must stay
+            # distinguishable in the event log — a bare verb alone is
+            # exactly the invisibility class this branch has already ruled
+            # forbidden (app.engine_kinds' execute_unload/execute_load
+            # folding "resource" into their own failure details for the
+            # identical reason). box-wide steps (activate/policy_patch/
+            # restore_settings) carry no resource — .get keeps this a
+            # clean None for those, never a KeyError.
             log_event(
                 events_path,
                 "apply-end",
-                {"outcome": "failed", "step": name, "error": str(exc)},
+                {
+                    "outcome": "failed",
+                    "step": name,
+                    "resource": step.get("resource"),
+                    "error": str(exc),
+                },
             )
             return report
 

@@ -413,6 +413,34 @@ def test_no_context_skips_kind_validation():
     assert cfgset.ephemeral.resources["img"].desired == "parked"
 
 
+def test_create_set_validation_error_never_echoes_the_payload(tmp_path, monkeypatch):
+    """T8 review I2 (worst finding): create_set's hand-rolled
+    ``ConfigSet.model_validate`` used to bypass app.main's REDACTING
+    RequestValidationError handler entirely — a pydantic "missing" error
+    (here: the top-level required "name" field) echoes the WHOLE payload as
+    ``input``, so an unredacted 422 would leak whatever else the body
+    carried (e.g. a real secret sitting in ``settings_snapshot``). Proven
+    with a distinctive marker planted in exactly that field: the full
+    response text must never contain it, and the response must still be a
+    real structured 422 (never a 500 from some OTHER, worse leak)."""
+    client, _ = _make_deck_app(tmp_path, monkeypatch)
+    marker = "MARKER-DO-NOT-ECHO-9f3a2b"
+
+    resp = client.post("/api/sets", json={
+        # "name" deliberately omitted — pydantic's "missing" error type
+        # echoes the entire top-level payload as `input`.
+        "settings_snapshot": {
+            "engines": {"sparky/vllm": {"args": {"TOKEN": marker}}},
+        },
+    })
+
+    assert resp.status_code == 422
+    assert marker not in resp.text
+    body = resp.json()
+    assert isinstance(body["detail"], list)
+    assert all("input" not in error for error in body["detail"])
+
+
 # ===========================================================================
 # upgrade_legacy_set (E1 Task 8) — pure, LOAD-time-only shape upgrade
 # ===========================================================================
@@ -637,6 +665,27 @@ def test_one_corrupt_set_file_does_not_down_the_listing(tmp_path):
     assert store.unreadable() == ["bad"]
 
 
+@pytest.mark.parametrize("garbage", ['"hello"', "[1, 2]", "42", "null"])
+def test_non_dict_top_level_json_does_not_down_the_listing(tmp_path, garbage):
+    """T8 review I1 ([c44] re-opened): a stored file whose JSON top level
+    parses fine but isn't an object used to crash upgrade_legacy_set with a
+    bare AttributeError (``raw.get("ephemeral")`` on a str/list/int/None) —
+    escaping _scan()'s catch entirely and downing list()/unreadable() (and
+    a 500 through the /api/sets route) for every OTHER healthy set in the
+    same directory. Fixed at the boundary: upgrade_legacy_set passes a
+    non-dict straight through, so ConfigSet.model_validate is what raises
+    the ordinary named ValidationError, same as any other malformed file."""
+    store = SetStore(tmp_path)
+    store.save(ConfigSet(name="good", ephemeral=_eph(lemonade={"state": "loaded"})))
+    (tmp_path / "bad.json").write_text(garbage)
+
+    names = [s.name for s in store.list()]  # must not raise
+    assert names == ["good"]
+    assert store.unreadable() == ["bad"]
+    with pytest.raises(ValueError, match=r"stored set 'bad'"):
+        store.get("bad")
+
+
 def test_get_of_a_corrupt_set_raises_a_named_valueerror(tmp_path):
     (tmp_path / "bad.json").write_text("{not json")
     # Pins the actual message CONTRACT (slug named, "stored set" prefix),
@@ -799,7 +848,7 @@ def test_comfy_busy_warns_not_frees():
     world = make_world(comfy=("busy", 3))
     cfg = ConfigSet(name="free", ephemeral=_eph(comfyui={"state": "free"}))
     assert plan_apply(cfg, world) == [
-        {"step": "warn", "reason": "comfyui-busy-skipped", "resource": "comfyui"}
+        {"step": "warn", "reason": "busy-skipped", "resource": "comfyui"}
     ]
 
 
@@ -807,7 +856,7 @@ def test_comfy_unknown_queue_is_not_freed():
     world = make_world(comfy=("unknown", None))
     cfg = ConfigSet(name="free", ephemeral=_eph(comfyui={"state": "free"}))
     assert plan_apply(cfg, world) == [
-        {"step": "warn", "reason": "comfyui-busy-skipped", "resource": "comfyui"}
+        {"step": "warn", "reason": "busy-skipped", "resource": "comfyui"}
     ]
 
 
@@ -1094,7 +1143,7 @@ def test_apply_warn_recorded_not_executed(tmp_path):
     cfg = ConfigSet(name="skip", ephemeral=_eph(comfyui={"state": "free"}))
     report, clients = run_apply(cfg, world, tmp_path)
 
-    assert report["warnings"] == ["comfyui-busy-skipped"]
+    assert report["warnings"] == ["busy-skipped"]
     assert report["completed"] == []
     assert report["failed"] is None
     assert clients["comfy"].calls == []
