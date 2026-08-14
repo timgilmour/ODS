@@ -1,40 +1,94 @@
 import { describe, expect, it } from "vitest";
-import type { DeckNodeEntry, LifecycleEntry, SettingsDrift, SparkStatus, StateResponse } from "../api";
+import type {
+  DeckNodeEntry,
+  Gpu,
+  LifecycleEntry,
+  PolicyMap,
+  ResourceTenant,
+  SettingsDrift,
+  SparkStatus,
+  StateResponse,
+} from "../api";
 import {
   buildNodes,
   findPlacement,
   isSwapSlotId,
-  isTenantName,
   nodeIdOfPlacement,
   swapNodes,
-  TENANT_ORDER,
 } from "./nodes";
 
-function state(overrides: Partial<StateResponse> = {}): StateResponse {
+// Fixture rule (design §7, binding): generalization fixtures set AWAY from
+// today's live topology — resource names gguf-a/img/agent (never
+// lemonade/comfyui/hipfire), GPUs 2/3 (never 0/1). A same-shape fixture
+// (three resources named after their kinds, on GPUs 0/1) cannot catch a
+// resource-vs-kind-name confusion, because the two coincide by construction
+// ([[defaults-that-hide-bugs]]).
+
+const DEFAULT_GPUS: Gpu[] = [
+  { index: 2, total: 34_000_000_000, used: 22_100_000_000, free: 11_900_000_000 },
+  { index: 3, total: 34_000_000_000, used: 200_000_000, free: 33_800_000_000 },
+];
+
+// One of each kind: "agent" (hipfire-kind, GPU 2), "gguf-a" (lemonade-kind,
+// GPU 3), "img" (comfyui-kind, GPU 3, sharing gguf-a's GPU on purpose — a
+// co-residency case today's live box doesn't have).
+const DEFAULT_TENANTS: Record<string, ResourceTenant> = {
+  agent: {
+    engine: "hipfire", gpu_index: 2, state: "running",
+    model: "Qwen3.6-35B-A3B-heretic-NVFP4", footprint: 21_400_000_000, queue_depth: 0,
+  },
+  "gguf-a": {
+    engine: "lemonade", gpu_index: 3, state: "unloaded",
+    model: null, footprint: null, idle_s: null,
+  },
+  img: { engine: "comfyui", gpu_index: 3, state: "idle", queue: 0, idle_s: 12 },
+};
+
+const DEFAULT_POLICY: PolicyMap = {
+  "gguf-a": { priority: 1, pinned: false, idle_ttl: 900 },
+  img: { priority: 2, pinned: false, idle_ttl: 300 },
+  agent: { priority: 3, pinned: true, idle_ttl: 0 },
+};
+
+const GENERIC_POLICY = { priority: 0, pinned: false, idle_ttl: 0 };
+
+function stateWith(
+  overrides: Partial<{
+    tenants: Record<string, ResourceTenant>;
+    gpus: Gpu[];
+    externals: StateResponse["world"]["externals"];
+    policy: PolicyMap;
+    lifecycle: StateResponse["lifecycle"];
+    nodes: DeckNodeEntry[];
+  }> = {},
+): StateResponse {
+  // Shallow copy: tests reassign a whole per-resource entry (never mutate
+  // one in place), but without this every call sharing the default would
+  // alias the SAME object — an earlier test's `s.world.tenants.x = {...}`
+  // would silently leak into a later test's default fixture.
+  const tenants = overrides.tenants ?? { ...DEFAULT_TENANTS };
   return {
     node: { id: "local", label: "autarch" },
     world: {
-      gpus: [
-        { index: 0, total: 34_000_000_000, used: 22_100_000_000, free: 11_900_000_000 },
-        { index: 1, total: 34_000_000_000, used: 200_000_000, free: 33_800_000_000 },
-      ],
-      tenants: {
-        lemonade: { state: "unloaded", model: null, footprint: null, idle_s: null },
-        comfyui: { state: "idle", queue: 0, idle_s: 12 },
-        hipfire: { state: "running", model: "Qwen3.6-35B-A3B-heretic-NVFP4", footprint: 21_400_000_000, queue_depth: 0 },
-      },
-      externals: [],
+      gpus: overrides.gpus ?? DEFAULT_GPUS,
+      tenants,
+      externals: overrides.externals ?? [],
       default_route: null,
-      placement: { hipfire: 0, lemonade: 1, comfyui: 1 },
+      // Redundant with each tenant's own gpu_index (see api.ts's World.placement
+      // doc) — derived here so a fixture never has to state the same fact twice.
+      placement: Object.fromEntries(Object.entries(tenants).map(([r, t]) => [r, t.gpu_index])),
     },
-    policy: {
-      lemonade: { priority: 1, pinned: false, idle_ttl: 900 },
-      comfyui: { priority: 2, pinned: false, idle_ttl: 300 },
-      hipfire: { priority: 3, pinned: true, idle_ttl: 0 },
-    },
+    // Every declared resource needs a policy row or tenantPlacement's
+    // `policy[resource]` throws — known resources get their named default
+    // above, an unlisted one (a test's own bespoke resource name) gets a
+    // harmless generic row, since most tests exercising a custom name don't
+    // care about its policy.
+    policy: overrides.policy ?? Object.fromEntries(
+      Object.keys(tenants).map((r) => [r, DEFAULT_POLICY[r] ?? GENERIC_POLICY]),
+    ),
     models: [],
-    lifecycle: {},
-    ...overrides,
+    lifecycle: overrides.lifecycle ?? {},
+    nodes: overrides.nodes,
   };
 }
 
@@ -44,162 +98,249 @@ describe("buildNodes", () => {
   });
 
   it("names the local node from the backend, not a hardcoded string", () => {
-    const [local] = buildNodes(state(), {});
+    const [local] = buildNodes(stateWith(), {});
     expect(local.id).toBe("local");
     expect(local.label).toBe("autarch");
     expect(local.status).toBe("reachable");
   });
 
-  it("makes one resource per GPU, in index order", () => {
-    const [local] = buildNodes(state(), {});
-    expect(local.resources.map((r) => r.id)).toEqual(["gpu0", "gpu1"]);
-    expect(local.resources[0].label).toBe("GPU 0");
+  it("local card renders every declared resource, none hardcoded", () => {
+    // The brief's Step-1 test, verbatim shape: resources come straight off
+    // the payload map, keyed by their own resource name — never a fixed
+    // triple, never a per-GPU card.
+    const nodes = buildNodes(
+      stateWith({
+        tenants: {
+          "gguf-a": {
+            engine: "lemonade", gpu_index: 2, state: "loaded",
+            model: "a.gguf", footprint: 10, idle_s: 0,
+          },
+          img: { engine: "comfyui", gpu_index: 3, state: "idle", queue: 0, idle_s: 5 },
+        },
+        policy: {
+          "gguf-a": { priority: 0, pinned: false, idle_ttl: 0 },
+          img: { priority: 0, pinned: false, idle_ttl: 0 },
+        },
+      }),
+      {},
+    );
+    const local = nodes.find((n) => n.id === "local")!;
+    expect(local.resources.map((r) => r.id)).toEqual(["gguf-a", "img"]);
+  });
+
+  it("empty declaration renders an empty local card, not unknowns", () => {
+    const nodes = buildNodes(stateWith({ tenants: {}, policy: {} }), {});
+    const local = nodes.find((n) => n.id === "local")!;
+    expect(local.resources).toEqual([]);
+  });
+
+  it("makes one resource per declared engine, ordered by gpu_index then resource name", () => {
+    const [local] = buildNodes(stateWith(), {});
+    expect(local.resources.map((r) => r.id)).toEqual(["agent", "gguf-a", "img"]);
+    expect(local.resources[0].label).toBe("agent");
     expect(local.resources[0].capacity).toEqual({ used: 22_100_000_000, total: 34_000_000_000 });
   });
 
-  it("places a tenant on the GPU the backend assigned it", () => {
-    const [local] = buildNodes(state(), {});
-    const gpu0 = local.resources[0];
-    expect(gpu0.placements.map((p) => p.name)).toEqual(["Qwen3.6-35B-A3B-heretic-NVFP4"]);
-    expect(gpu0.placements[0].engine).toBe("hipfire");
-    expect(gpu0.placements[0].bytes).toBe(21_400_000_000);
+  it("reports unknown capacity, not a fabricated zero, when a resource's gpu_index matches no live GPU", () => {
+    const s = stateWith({ gpus: [DEFAULT_GPUS[1]] }); // GPU 2 (agent's) dropped
+    const [local] = buildNodes(s, {});
+    expect(local.resources.find((r) => r.id === "agent")!.capacity).toBeNull();
+  });
+
+  it("renders as many cards as are declared — design §5's 'zero, three, or five', proven at five", () => {
+    const tenants: Record<string, ResourceTenant> = {
+      "gguf-a": { engine: "lemonade", gpu_index: 2, state: "unloaded", model: null, footprint: null, idle_s: null },
+      "gguf-b": { engine: "lemonade", gpu_index: 3, state: "unloaded", model: null, footprint: null, idle_s: null },
+      img: { engine: "comfyui", gpu_index: 2, state: "idle", queue: 0, idle_s: 0 },
+      agent: { engine: "hipfire", gpu_index: 3, state: "parked", model: null, footprint: 0, queue_depth: null },
+      agent2: { engine: "hipfire", gpu_index: 3, state: "parked", model: null, footprint: 0, queue_depth: null },
+    };
+    const [local] = buildNodes(
+      stateWith({
+        tenants,
+        policy: Object.fromEntries(Object.keys(tenants).map((r) => [r, GENERIC_POLICY])),
+      }),
+      {},
+    );
+    expect(local.resources.map((r) => r.id)).toEqual(["gguf-a", "img", "agent", "agent2", "gguf-b"]);
+  });
+
+  it("shows the resource's placement when it is occupying its slot", () => {
+    const [local] = buildNodes(stateWith(), {});
+    const agent = local.resources.find((r) => r.id === "agent")!;
+    expect(agent.placements.map((p) => p.name)).toEqual(["Qwen3.6-35B-A3B-heretic-NVFP4"]);
+    expect(agent.placements[0].engine).toBe("hipfire");
+    expect(agent.placements[0].bytes).toBe(21_400_000_000);
   });
 
   it("keeps a model identity verbatim", () => {
-    const [local] = buildNodes(state(), {});
-    expect(local.resources[0].placements[0].name).toBe("Qwen3.6-35B-A3B-heretic-NVFP4");
-  });
-
-  it("omits an unloaded tenant rather than showing an empty chip", () => {
-    const [local] = buildNodes(state(), {});
-    const gpu1 = local.resources[1];
-    expect(gpu1.placements.some((p) => p.engine === "lemonade")).toBe(false);
-  });
-
-  it("omits a lemonade load in flight the same as unloaded (no chip mid-load)", () => {
-    // tenantPlacement's `t.state !== "loaded"` guard also covers "loading" —
-    // deliberate: the PlacementActions pill (STATE_TONE) is where a load in
-    // flight shows up today; a dedicated chip treatment is deferred.
-    const s = state();
-    s.world.tenants.lemonade = { state: "loading", model: null, footprint: null, idle_s: null };
-    const [local] = buildNodes(s, {});
-    expect(local.resources[1].placements.some((p) => p.engine === "lemonade")).toBe(false);
-  });
-
-  it("keeps an unloaded tenant's controls on its resource", () => {
-    // The empty-slot case: no chip, but lemonade's Load dropdown still has
-    // to render somewhere, so the resource carries the control list.
-    const [local] = buildNodes(state(), {});
-    expect(local.resources[1].controls).toEqual(["lemonade", "comfyui"]);
-    expect(local.resources[0].controls).toEqual(["hipfire"]);
-  });
-
-  it("shows a loaded tenant", () => {
-    const s = state();
-    s.world.tenants.lemonade = {
-      state: "loaded",
-      model: "qwen2.5-14b-instruct-4k-q4_k_m.gguf",
-      footprint: 9_500_000_000,
-      idle_s: 4,
-    };
-    const [local] = buildNodes(s, {});
-    expect(local.resources[1].placements.map((p) => p.name)).toContain(
-      "qwen2.5-14b-instruct-4k-q4_k_m.gguf",
+    const [local] = buildNodes(stateWith(), {});
+    expect(local.resources.find((r) => r.id === "agent")!.placements[0].name).toBe(
+      "Qwen3.6-35B-A3B-heretic-NVFP4",
     );
   });
 
-  it("omits a parked hipfire", () => {
-    const s = state();
-    s.world.tenants.hipfire = { state: "parked", model: null, footprint: 0, queue_depth: null };
+  it("omits an unloaded tenant rather than showing an empty chip", () => {
+    const [local] = buildNodes(stateWith(), {});
+    expect(local.resources.find((r) => r.id === "gguf-a")!.placements).toEqual([]);
+  });
+
+  it("omits a load in flight the same as unloaded (no chip mid-load)", () => {
+    // tenantPlacement's `state !== "loaded"` guard also covers "loading" —
+    // deliberate: the PlacementActions pill (STATE_TONE) is where a load in
+    // flight shows up today; a dedicated chip treatment is deferred.
+    const s = stateWith();
+    s.world.tenants["gguf-a"] = {
+      engine: "lemonade", gpu_index: 3, state: "loading", model: null, footprint: null, idle_s: null,
+    };
     const [local] = buildNodes(s, {});
-    expect(local.resources[0].placements).toEqual([]);
+    expect(local.resources.find((r) => r.id === "gguf-a")!.placements).toEqual([]);
+  });
+
+  it("keeps an unloaded tenant's controls on its resource", () => {
+    // The empty-slot case: no chip, but a load-verb kind's Load dropdown
+    // still has to render somewhere, so the resource carries the control.
+    const [local] = buildNodes(stateWith(), {});
+    expect(local.resources.find((r) => r.id === "gguf-a")!.controls).toEqual(["gguf-a"]);
+    expect(local.resources.find((r) => r.id === "agent")!.controls).toEqual(["agent"]);
+  });
+
+  it("shows a loaded tenant", () => {
+    const s = stateWith();
+    s.world.tenants["gguf-a"] = {
+      engine: "lemonade", gpu_index: 3, state: "loaded",
+      model: "qwen2.5-14b-instruct-4k-q4_k_m.gguf", footprint: 9_500_000_000, idle_s: 4,
+    };
+    const [local] = buildNodes(s, {});
+    expect(
+      local.resources.find((r) => r.id === "gguf-a")!.placements.map((p) => p.name),
+    ).toContain("qwen2.5-14b-instruct-4k-q4_k_m.gguf");
+  });
+
+  it("omits a parked hipfire-kind resource", () => {
+    const s = stateWith();
+    s.world.tenants.agent = {
+      engine: "hipfire", gpu_index: 2, state: "parked", model: null, footprint: 0, queue_depth: null,
+    };
+    const [local] = buildNodes(s, {});
+    expect(local.resources.find((r) => r.id === "agent")!.placements).toEqual([]);
   });
 
   it("surfaces an external process as its own placement", () => {
-    const s = state();
-    s.world.externals = [{ pid: 4242, gpu: 0, bytes: 1_200_000_000 }];
+    const s = stateWith();
+    s.world.externals = [{ pid: 4242, gpu: 2, bytes: 1_200_000_000 }];
     const [local] = buildNodes(s, {});
-    const external = local.resources[0].placements.find((p) => p.kind === "external");
+    const agent = local.resources.find((r) => r.id === "agent")!;
+    const external = agent.placements.find((p) => p.kind === "external");
     expect(external?.bytes).toBe(1_200_000_000);
     expect(external?.status).toBe("unmanaged");
+  });
+
+  it("attributes a shared GPU's external to only the FIRST resource card on it, never both", () => {
+    // gguf-a and img both sit on GPU 3 — an external there must not render
+    // twice (once per co-located card), double-counting one fact.
+    const s = stateWith();
+    s.world.externals = [{ pid: 99, gpu: 3, bytes: 2_000_000_000 }];
+    const [local] = buildNodes(s, {});
+    const gguf = local.resources.find((r) => r.id === "gguf-a")!;
+    const img = local.resources.find((r) => r.id === "img")!;
+    const onGguf = gguf.placements.some((p) => p.kind === "external");
+    const onImg = img.placements.some((p) => p.kind === "external");
+    expect(onGguf).not.toBe(onImg); // exactly one of the two, never neither, never both
   });
 
   it("carries each tenant's policy onto its placement", () => {
     // The board's 📌 and P{n}. They come from state.policy, which buildNodes
     // already has in hand — the alternative is drilling a `policy` prop back
     // down to every card, which is the coupling this adapter exists to end.
-    const s = state();
-    s.world.tenants.lemonade = {
-      state: "loaded", model: "qwen.gguf", footprint: 9_000_000_000, idle_s: 4,
+    const s = stateWith();
+    s.world.tenants["gguf-a"] = {
+      engine: "lemonade", gpu_index: 3, state: "loaded", model: "qwen.gguf",
+      footprint: 9_000_000_000, idle_s: 4,
     };
     const [local] = buildNodes(s, {});
-    const hipfire = local.resources[0].placements[0];
-    const lemonade = local.resources[1].placements.find((p) => p.engine === "lemonade");
+    const agent = local.resources.find((r) => r.id === "agent")!.placements[0];
+    const gguf = local.resources.find((r) => r.id === "gguf-a")!.placements
+      .find((p) => p.engine === "lemonade");
 
-    expect(hipfire.pinned).toBe(true);
-    expect(hipfire.priority).toBe(3);
-    expect(lemonade?.pinned).toBe(false);
-    expect(lemonade?.priority).toBe(1);
+    expect(agent.pinned).toBe(true);
+    expect(agent.priority).toBe(3);
+    expect(gguf?.pinned).toBe(false);
+    expect(gguf?.priority).toBe(1);
   });
 
   it("marks hipfire busy when a turn is in flight, and not otherwise", () => {
     // Predicts the park refusal BEFORE the click: hipfire's single admission
     // slot is what makes park/apply 409 without force.
-    const idle = buildNodes(state(), {})[0].resources[0].placements[0];
+    const idle = buildNodes(stateWith(), {})[0].resources.find((r) => r.id === "agent")!.placements[0];
     expect(idle.busy).toBe(false);
 
-    const s = state();
-    s.world.tenants.hipfire = { ...s.world.tenants.hipfire, queue_depth: 2 };
-    expect(buildNodes(s, {})[0].resources[0].placements[0].busy).toBe(true);
+    const s = stateWith();
+    s.world.tenants.agent = { ...s.world.tenants.agent, queue_depth: 2 };
+    const busy = buildNodes(s, {})[0].resources.find((r) => r.id === "agent")!.placements[0];
+    expect(busy.busy).toBe(true);
   });
 
   it("treats a missing hipfire queue reading as not busy", () => {
-    const s = state();
-    s.world.tenants.hipfire = { ...s.world.tenants.hipfire, queue_depth: null };
-    expect(buildNodes(s, {})[0].resources[0].placements[0].busy).toBe(false);
+    const s = stateWith();
+    s.world.tenants.agent = { ...s.world.tenants.agent, queue_depth: null };
+    const placement = buildNodes(s, {})[0].resources.find((r) => r.id === "agent")!.placements[0];
+    expect(placement.busy).toBe(false);
   });
 
   it("carries ComfyUI's queue and idle time, and gives hipfire neither", () => {
-    const s = state();
-    s.world.tenants.comfyui = { state: "busy", queue: 3, idle_s: 0 };
+    const s = stateWith();
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 3, idle_s: 0 };
     const [local] = buildNodes(s, {});
-    const comfy = local.resources[1].placements.find((p) => p.engine === "comfyui");
-    const hipfire = local.resources[0].placements[0];
+    const img = local.resources.find((r) => r.id === "img")!.placements
+      .find((p) => p.engine === "comfyui");
+    const agent = local.resources.find((r) => r.id === "agent")!.placements[0];
 
-    expect(comfy?.queue).toBe(3);
-    expect(comfy?.idleSeconds).toBe(0);
+    expect(img?.queue).toBe(3);
+    expect(img?.idleSeconds).toBe(0);
     // Absent, not zero: hipfire has no queue and reports no idle time, and
     // "0" on screen would be a claim neither engine ever made.
-    expect(hipfire.queue).toBeUndefined();
-    expect(hipfire.idleSeconds).toBeUndefined();
+    expect(agent.queue).toBeUndefined();
+    expect(agent.idleSeconds).toBeUndefined();
   });
 
   it("keeps a drained ComfyUI queue distinct from an unreadable one", () => {
-    const zero = buildNodes(state(), {})[0].resources[1].placements
+    const zero = buildNodes(stateWith(), {})[0].resources.find((r) => r.id === "img")!.placements
       .find((p) => p.engine === "comfyui");
     expect(zero?.queue).toBe(0);
 
-    const s = state();
-    s.world.tenants.comfyui = { state: "unknown", queue: null, idle_s: null };
-    const unknown = buildNodes(s, {})[0].resources[1].placements
+    const s = stateWith();
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "unknown", queue: null, idle_s: null };
+    const unknown = buildNodes(s, {})[0].resources.find((r) => r.id === "img")!.placements
       .find((p) => p.engine === "comfyui");
     expect(unknown?.queue).toBeNull();
   });
 
+  it("names a non-model engine placement after its RESOURCE, not a hardcoded kind literal", () => {
+    // Two comfyui-kind resources would otherwise both render "comfyui" —
+    // the resource name is what tells them apart on screen.
+    const s = stateWith();
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "idle", queue: 0, idle_s: 12 };
+    const [local] = buildNodes(s, {});
+    const img = local.resources.find((r) => r.id === "img")!.placements
+      .find((p) => p.engine === "comfyui");
+    expect(img?.name).toBe("img");
+  });
+
   it("never badges a local tenant with its own engine name", () => {
     // The badge answers "what is this node running that it usually isn't".
-    // On the local box each tenant IS its engine, so there is no such
-    // question and no badge.
-    const [local] = buildNodes(state(), {});
+    // On the local box each resource IS its declared kind, so there is no
+    // such question and no badge.
+    const [local] = buildNodes(stateWith(), {});
     for (const r of local.resources) {
       for (const p of r.placements) expect(p.engineBadge).toBeUndefined();
     }
   });
 
   it("takes a placement's status from the lifecycle view", () => {
-    const s = state();
+    const s = stateWith();
     s.lifecycle = {
-      "local/hipfire": {
+      "local/agent": {
         status: "drifted",
         reason: "settings changed",
         intent: null,
@@ -209,13 +350,13 @@ describe("buildNodes", () => {
       },
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources[0].placements[0].status).toBe("drifted");
+    expect(local.resources.find((r) => r.id === "agent")!.placements[0].status).toBe("drifted");
   });
 
   it("carries settings drift onto a placement from the lifecycle view", () => {
-    // Task 11's adapter copy — app/routers/__init__.py:116 writes
-    // `settings_drift` onto every lifecycle entry; this is the one place
-    // that value crosses into the board's own Placement shape.
+    // app/routers/__init__.py:116 writes `settings_drift` onto every
+    // lifecycle entry; this is the one place that value crosses into the
+    // board's own Placement shape.
     const drift: SettingsDrift = {
       changed: ["args:max-model-len"],
       entries: [
@@ -223,9 +364,9 @@ describe("buildNodes", () => {
       ],
       since: "2026-08-07T00:00:00Z",
     };
-    const s = state();
+    const s = stateWith();
     s.lifecycle = {
-      "local/hipfire": {
+      "local/agent": {
         status: "drifted",
         reason: "settings changed",
         intent: null,
@@ -235,13 +376,13 @@ describe("buildNodes", () => {
       },
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources[0].placements[0].settingsDrift).toEqual(drift);
+    expect(local.resources.find((r) => r.id === "agent")!.placements[0].settingsDrift).toEqual(drift);
   });
 
   it("leaves settingsDrift undefined when the lifecycle entry carries none", () => {
-    const s = state();
+    const s = stateWith();
     s.lifecycle = {
-      "local/hipfire": {
+      "local/agent": {
         status: "serving",
         reason: "",
         intent: null,
@@ -251,7 +392,7 @@ describe("buildNodes", () => {
       },
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources[0].placements[0].settingsDrift).toBeUndefined();
+    expect(local.resources.find((r) => r.id === "agent")!.placements[0].settingsDrift).toBeUndefined();
   });
 });
 
@@ -331,7 +472,7 @@ const boxbEntry: DeckNodeEntry = {
 
 describe("buildNodes — swap nodes", () => {
   it("makes one card per swap node, each with its own placement id and label from the registry", () => {
-    const s = state({ nodes: [localEntry, boxaEntry, boxbEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry, boxbEntry] });
     const nodes = buildNodes(s, {
       boxa: sparkStatus(),
       boxb: sparkStatus({
@@ -362,7 +503,7 @@ describe("buildNodes — swap nodes", () => {
   });
 
   it("reports unknown capacity rather than zero", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
     expect(boxa.resources[0].capacity).toBeNull();
   });
@@ -372,14 +513,14 @@ describe("buildNodes — swap nodes", () => {
     // heraEntry already reports `serving` on the wire and is handed a real
     // SparkStatus here too, and still must render observe-only — presence of
     // serving data must never promote a node, only the DECLARED control does.
-    const s = state({ nodes: [localEntry, heraEntry] });
+    const s = stateWith({ nodes: [localEntry, heraEntry] });
     const hera = buildNodes(s, { hera: sparkStatus() }).find((n) => n.id === "hera")!;
     expect(hera.resources[0].controls).toEqual([]);
     expect(hera.resources[0].placements).toEqual([]);
   });
 
   it("falls back to the observe-only card when no status has landed yet, never a phantom control surface", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, { boxa: null }).find((n) => n.id === "boxa")!;
     expect(boxa.label).toBe("Box Alpha"); // the registry label, same as the swap card would show
     expect(boxa.resources[0].controls).toEqual([]);
@@ -387,13 +528,13 @@ describe("buildNodes — swap nodes", () => {
   });
 
   it("also falls back to observe-only when the id is simply absent from servingByNode (fetch not landed)", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, {}).find((n) => n.id === "boxa")!;
     expect(boxa.resources[0].controls).toEqual([]);
   });
 
   it("retains last-known placements when unreachable, and marks them stale", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
       "boxa/slot0": lifecycleEntry({
         status: "unreachable",
@@ -421,7 +562,7 @@ describe("buildNodes — swap nodes", () => {
     // app/observe.py:180-184 says so outright — "Identity is the PROFILE the
     // node last swapped to, not the served model name ... comparing served
     // names would report permanent drift for a correct placement".
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, {
       boxa: sparkStatus({
         // engine "ds4" on a profile named mm27b is a deliberately
@@ -449,13 +590,13 @@ describe("buildNodes — swap nodes", () => {
     // swap_status null is a real state (a node up since before the deck
     // watched it). Callers fall back to placement.name, so this must be
     // absent rather than an empty string.
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
     expect(boxa.resources[0].placements[0].profile).toBeUndefined();
   });
 
   it("reads as warming while a swap is in flight and the endpoint is down", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, {
       boxa: sparkStatus({
         serving: { model: "heretic", endpoint_ok: false, container_status: "running" },
@@ -475,7 +616,7 @@ describe("buildNodes — swap nodes", () => {
     // minutes of weight load and autotune look like this: state "done",
     // endpoint still down. app/observe.py's boot_in_flight() is what knows
     // better, and it arrives here as observed.transitioning.
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
       "boxa/slot0": lifecycleEntry({
         status: "warming",
@@ -496,7 +637,7 @@ describe("buildNodes — swap nodes", () => {
   });
 
   it("is down, not warming, when the endpoint is dead with no swap running", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, {
       boxa: sparkStatus({ serving: { model: "heretic", endpoint_ok: false, container_status: "exited" } }),
     }).find((n) => n.id === "boxa")!;
@@ -505,7 +646,7 @@ describe("buildNodes — swap nodes", () => {
 
   it("is unreachable when the lifecycle view says so, even with a healthy-looking serving payload", () => {
     // Status derivation order: `!reachable` wins over everything else.
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
       "boxa/slot0": lifecycleEntry({
         status: "unreachable",
@@ -519,7 +660,7 @@ describe("buildNodes — swap nodes", () => {
   });
 
   it("badges a non-default engine and stays silent about the default one", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const vllm = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
     expect(vllm.resources[0].placements[0].engine).toBe("vllm");
     expect(vllm.resources[0].placements[0].engineBadge).toBeUndefined();
@@ -536,7 +677,7 @@ describe("buildNodes — swap nodes", () => {
   it("carries the swap helper's error text as the node's detail", () => {
     // The failed-swap case: without this the board shows a red pill and
     // nothing anywhere says the helper died.
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, {
       boxa: sparkStatus({
         serving: { model: null, endpoint_ok: false, container_status: "exited" },
@@ -552,7 +693,7 @@ describe("buildNodes — swap nodes", () => {
   });
 
   it("falls back to lifecycle's own reason when no swap failed", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
       "boxa/slot0": lifecycleEntry({
         status: "down",
@@ -570,7 +711,7 @@ describe("buildNodes — swap nodes", () => {
   it("prefers a real reason over an error swap with an empty message", () => {
     // A blank explanation is worse than the generic one: it renders as a
     // banner trailing an em-dash into nothing.
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
       "boxa/slot0": lifecycleEntry({
         status: "down",
@@ -591,7 +732,7 @@ describe("buildNodes — swap nodes", () => {
   });
 
   it("leaves detail absent when the backend offered no reason at all", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, {
       boxa: sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: "exited" } }),
     }).find((n) => n.id === "boxa")!;
@@ -606,7 +747,7 @@ describe("buildNodes — swap nodes", () => {
       entries: [],
       since: "2026-08-07T00:00:00Z",
     };
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     s.lifecycle = {
       "boxa/slot0": lifecycleEntry({ settings_drift: drift }),
     };
@@ -615,29 +756,11 @@ describe("buildNodes — swap nodes", () => {
   });
 
   it("has an empty slot when nothing is serving", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, {
       boxa: sparkStatus({ serving: { model: null, endpoint_ok: false, container_status: null } }),
     }).find((n) => n.id === "boxa")!;
     expect(boxa.resources[0].placements).toEqual([]);
-  });
-});
-
-describe("isTenantName", () => {
-  it("accepts every tenant the adapter can emit as a control", () => {
-    for (const t of TENANT_ORDER) expect(isTenantName(t)).toBe(true);
-  });
-
-  it("rejects the spark control, which is a surface and not a tenant", () => {
-    // The board dispatches on this: if it ever returned true for "spark",
-    // PlacementActions would be handed a non-tenant and read
-    // world.tenants.spark — the exact confusion the guard exists to stop.
-    expect(isTenantName("spark")).toBe(false);
-  });
-
-  it("rejects an unknown control rather than guessing", () => {
-    expect(isTenantName("vllm")).toBe(false);
-    expect(isTenantName("")).toBe(false);
   });
 });
 
@@ -648,7 +771,7 @@ describe("isSwapSlotId", () => {
   });
 
   it("rejects a local tenant placement id", () => {
-    expect(isSwapSlotId("local/hipfire")).toBe(false);
+    expect(isSwapSlotId("local/agent")).toBe(false);
   });
 
   it("rejects an external placement id", () => {
@@ -662,13 +785,13 @@ describe("nodeIdOfPlacement", () => {
   });
 
   it("takes the node id off a local tenant placement id the same way", () => {
-    expect(nodeIdOfPlacement("local/hipfire")).toBe("local");
+    expect(nodeIdOfPlacement("local/agent")).toBe("local");
   });
 });
 
 describe("swapNodes", () => {
   it("returns only the control:swap entries, declared not inferred", () => {
-    const s = state({ nodes: [localEntry, heraEntry, boxaEntry, boxbEntry] });
+    const s = stateWith({ nodes: [localEntry, heraEntry, boxaEntry, boxbEntry] });
     expect(swapNodes(s).map((e) => e.id)).toEqual(["boxa", "boxb"]);
   });
 
@@ -677,21 +800,21 @@ describe("swapNodes", () => {
   });
 
   it("returns nothing when the registry carries no swap nodes", () => {
-    expect(swapNodes(state({ nodes: [localEntry, heraEntry] }))).toEqual([]);
+    expect(swapNodes(stateWith({ nodes: [localEntry, heraEntry] }))).toEqual([]);
   });
 });
 
 describe("findPlacement", () => {
-  const nodes = buildNodes(state({ nodes: [localEntry, boxaEntry] }), { boxa: sparkStatus() });
+  const nodes = buildNodes(stateWith({ nodes: [localEntry, boxaEntry] }), { boxa: sparkStatus() });
 
   it("finds a local tenant placement and hands back the resource that carries it", () => {
     // The drawer needs the RESOURCE too: its `controls` are what decide
     // which verbs (if any) that placement gets.
-    const spot = findPlacement(nodes, "local/hipfire");
+    const spot = findPlacement(nodes, "local/agent");
     expect(spot?.node.id).toBe("local");
-    expect(spot?.resource.id).toBe("gpu0");
+    expect(spot?.resource.id).toBe("agent");
     expect(spot?.placement.name).toBe("Qwen3.6-35B-A3B-heretic-NVFP4");
-    expect(spot?.resource.controls).toContain("hipfire");
+    expect(spot?.resource.controls).toContain("agent");
   });
 
   it("finds a swap node's slot on the remote node", () => {
@@ -704,22 +827,22 @@ describe("findPlacement", () => {
   it("returns null once the placement leaves the board", () => {
     // Parked/unloaded/swapped away: a real answer, not a lookup failure —
     // the drawer keeps its last-known data and says the placement is gone.
-    const parked = state();
-    parked.world.tenants.hipfire = {
-      state: "parked", model: null, footprint: 0, queue_depth: null,
+    const parked = stateWith();
+    parked.world.tenants.agent = {
+      engine: "hipfire", gpu_index: 2, state: "parked", model: null, footprint: 0, queue_depth: null,
     };
-    expect(findPlacement(buildNodes(parked, {}), "local/hipfire")).toBeNull();
+    expect(findPlacement(buildNodes(parked, {}), "local/agent")).toBeNull();
   });
 
   it("returns null for an id no node ever carried", () => {
     expect(findPlacement(nodes, "local/nope")).toBeNull();
-    expect(findPlacement([], "local/hipfire")).toBeNull();
+    expect(findPlacement([], "local/agent")).toBeNull();
   });
 });
 
 describe("buildNodes — registry nodes", () => {
   it("a registry node-agent entry with control:'none' becomes an observe-only card", () => {
-    const s = state({ nodes: [localEntry, heraEntry] });
+    const s = stateWith({ nodes: [localEntry, heraEntry] });
     const nodes = buildNodes(s, {});
     const hera = nodes.find((n) => n.id === "hera")!;
     expect(hera.label).toBe("Hera Box");
@@ -738,7 +861,7 @@ describe("buildNodes — registry nodes", () => {
     ["unconfigured", "unreachable"],
     [null, "unreachable"],
   ] as const)("observer status %s renders as %s", (status, expected) => {
-    const s = state({ nodes: [localEntry, { ...heraEntry, status,
+    const s = stateWith({ nodes: [localEntry, { ...heraEntry, status,
       error: "backend sentence" }] });
     const hera = buildNodes(s, {}).find((n) => n.id === "hera")!;
     expect(hera.status).toBe(expected);
@@ -746,7 +869,7 @@ describe("buildNodes — registry nodes", () => {
   });
 
   it("a swap node's label always comes from the registry, never a hardcoded id", () => {
-    const s = state({ nodes: [localEntry, boxaEntry] });
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const nodes = buildNodes(s, { boxa: sparkStatus() });
     // Exactly one card for the entry — never a second, separately-built one.
     expect(nodes.filter((n) => n.id === "boxa")).toHaveLength(1);

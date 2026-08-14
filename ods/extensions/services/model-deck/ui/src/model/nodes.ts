@@ -1,11 +1,12 @@
 /**
  * The board's data model — and the seam this whole redesign hangs off.
  *
- * Everything the board renders is a `DeckNode[]`. Today that is synthesized
- * from a backend that has no node concept: one local box (GPUs + three named
- * tenants) plus a special-cased spark. When a real node registry lands, THIS
- * FILE should be the only one that changes. If a registry change forces edits
- * in components, the seam was drawn in the wrong place.
+ * Everything the board renders is a `DeckNode[]`. The local box is one GPU
+ * set plus whatever engines are DECLARED on it (E1: zero, three, or five —
+ * spec §5) — one card per declared resource, never a fixed lemonade/comfyui/
+ * hipfire triple — plus a special-cased spark. When a real node registry
+ * lands, THIS FILE should be the only one that changes. If a registry change
+ * forces edits in components, the seam was drawn in the wrong place.
  *
  * Pure: no React, no fetch, no clock. Everything is a function of its inputs.
  *
@@ -17,11 +18,11 @@
  * which is dispatched separately and never touches `world`, so nothing reads
  * the wrong host today — a registry with N swap nodes keeps the landmine
  * dormant the same way one hardcoded sparky used to (design §7: swap nodes
- * still carry no local-world props). The moment a second box exposes
- * lemonade/comfyui/hipfire verbs, those props start describing the wrong
- * machine and the board will render plausible, wrong numbers with no error
- * anywhere. The fix then is a richer `controls` type carrying its own node's
- * data, decided HERE — not a per-component guard.
+ * still carry no local-world props). The moment a second box exposes local
+ * engine verbs, those props start describing the wrong machine and the board
+ * will render plausible, wrong numbers with no error anywhere. The fix then
+ * is a richer `controls` type carrying its own node's data, decided HERE —
+ * not a per-component guard.
  */
 
 import type {
@@ -30,11 +31,10 @@ import type {
   LifecycleMap,
   LifecycleStatus,
   PolicyMap,
+  ResourceTenant,
   SettingsDrift,
   SparkStatus,
   StateResponse,
-  TenantName,
-  World,
 } from "../api";
 
 /** Node-level rollup. Deliberately NOT LifecycleStatus: that describes one
@@ -115,12 +115,15 @@ export interface DeckResource {
    * distinct from a real zero. An unreachable node reports null, never 0. */
   capacity: { used: number; total: number } | null;
   placements: Placement[];
-  /** Which control surfaces belong to this resource, by engine name. This
-   * exists because an EMPTY resource still needs its verbs: lemonade's Load
-   * dropdown has to render on a GPU with nothing on it, and there is no
-   * placement to hang it off. Keeping it here rather than letting components
-   * re-derive it from `world.placement` is what keeps node-specific
-   * knowledge inside this file. */
+  /** Which control surfaces belong to this resource. For a local resource
+   * this is `[resource]` (its own declared name — dispatched through Task
+   * 7's generic `/api/tenants/{resource}/{verb}` route); for a swap node's
+   * slot it is `[SPARK_CONTROL]`; observe-only cards carry none. This
+   * exists because an EMPTY resource still needs its verbs: a load-verb
+   * kind's Load dropdown has to render on a resource with nothing loaded,
+   * and there is no placement to hang it off. Keeping it here rather than
+   * letting components re-derive it is what keeps node-specific knowledge
+   * inside this file. */
   controls: string[];
 }
 
@@ -155,21 +158,6 @@ const SPARK_CONTROL = "spark";
  * chip; this one does not, because it is the unremarkable case. */
 const SPARK_DEFAULT_ENGINE = "vllm";
 
-/** Fixed display order — and the authoritative list of what a tenant
- * control name can be. Exported so components dispatch off THIS list
- * instead of keeping a second copy: a copy makes adding a tenant here
- * silently drop its verbs there. */
-export const TENANT_ORDER: TenantName[] = ["hipfire", "lemonade", "comfyui"];
-
-/** Narrows a `DeckResource.controls` entry to a tenant. `controls` is
- * deliberately `string[]` (the spark resource sets "spark", which is not a
- * tenant name), so the board needs a guard rather than a cast — a cast lets
- * an unrecognized control render as nothing at all, with no type error and
- * no failing test to catch it. */
-export function isTenantName(control: string): control is TenantName {
-  return (TENANT_ORDER as readonly string[]).includes(control);
-}
-
 function statusOf(lifecycle: LifecycleMap, key: string, fallback: LifecycleStatus): LifecycleStatus {
   return lifecycle[key]?.status ?? fallback;
 }
@@ -181,52 +169,60 @@ function driftOf(lifecycle: LifecycleMap, key: string): SettingsDrift | undefine
   return lifecycle[key]?.settings_drift ?? undefined;
 }
 
-/** Whether a tenant is currently occupying its GPU with something worth a
- * chip. An unloaded lemonade or a parked hipfire gets no chip — that empty
- * space is the point, it is where the "serving slot" dropzone shows. */
+/** Whether a declared resource is currently occupying its GPU with
+ * something worth a chip. An unloaded lemonade-kind or a parked
+ * hipfire-kind resource gets no chip — that empty space is the point, it is
+ * where the "serving slot" dropzone shows.
+ *
+ * Branches on `tenant.engine` (the resource's declared KIND), never on the
+ * resource's NAME — `KNOWN_KINDS` (app/engine_kinds.py:90-94) is the closed
+ * backend enum this mirrors; a resource can be named anything. Adding a
+ * kind there needs a branch here too, same as `PlacementActions.tsx` and
+ * `ui/src/model/setDraft.ts`'s `KIND_DRAFT_SPEC`. */
 function tenantPlacement(
-  name: TenantName,
-  world: World,
+  resource: string,
+  tenant: ResourceTenant,
   lifecycle: LifecycleMap,
   policy: PolicyMap,
 ): Placement | null {
-  const key = `local/${name}`;
-  // Policy is per-tenant and identical for every placement of that tenant,
-  // so it is read once here rather than drilled to the board as a prop.
-  const { pinned, priority } = policy[name];
+  const key = `local/${resource}`;
+  // Policy is per-resource and identical for every placement of that
+  // resource, so it is read once here rather than drilled to the board as
+  // a prop.
+  const { pinned, priority } = policy[resource];
 
-  if (name === "lemonade") {
-    const t = world.tenants.lemonade;
-    if (t.state !== "loaded" || !t.model) return null;
+  if (tenant.engine === "lemonade") {
+    if (tenant.state !== "loaded" || !tenant.model) return null;
     return {
-      id: key, name: t.model, bytes: t.footprint, engine: "lemonade",
+      id: key, name: tenant.model, bytes: tenant.footprint ?? null, engine: "lemonade",
       kind: "model", stale: false, status: statusOf(lifecycle, key, "serving"),
-      pinned, priority, idleSeconds: t.idle_s, settingsDrift: driftOf(lifecycle, key),
+      pinned, priority, idleSeconds: tenant.idle_s ?? null, settingsDrift: driftOf(lifecycle, key),
     };
   }
 
-  if (name === "hipfire") {
-    const t = world.tenants.hipfire;
-    if (t.state === "parked" || !t.model) return null;
+  if (tenant.engine === "hipfire") {
+    if (tenant.state === "parked" || !tenant.model) return null;
     return {
-      id: key, name: t.model, bytes: t.footprint, engine: "hipfire",
+      id: key, name: tenant.model, bytes: tenant.footprint ?? null, engine: "hipfire",
       kind: "model", stale: false,
-      status: statusOf(lifecycle, key, t.state === "loading" ? "warming" : "serving"),
+      status: statusOf(lifecycle, key, tenant.state === "loading" ? "warming" : "serving"),
       pinned, priority,
       // hipfire reports no idle_s at all — it has one admission slot, and
       // what matters about it is whether a turn is in flight right now.
-      busy: (t.queue_depth ?? 0) > 0,
+      busy: (tenant.queue_depth ?? 0) > 0,
       settingsDrift: driftOf(lifecycle, key),
     };
   }
 
-  // ComfyUI holds VRAM whether or not it is mid-render, and has no model
-  // identity of its own, so it is always present and always an "engine".
-  const comfy = world.tenants.comfyui;
+  // Any other kind (comfyui today) holds VRAM whether or not it is
+  // mid-render, and has no model identity of its own, so it is always
+  // present and always an "engine" — named by the RESOURCE now (the old
+  // code hardcoded the literal "comfyui" here, back when resource name and
+  // kind name were the same fact by construction).
   return {
-    id: key, name: "comfyui", bytes: null, engine: "comfyui",
+    id: key, name: resource, bytes: null, engine: tenant.engine,
     kind: "engine", stale: false, status: statusOf(lifecycle, key, "idle"),
-    pinned, priority, queue: comfy.queue, idleSeconds: comfy.idle_s,
+    pinned, priority, queue: tenant.queue ?? null, idleSeconds: tenant.idle_s ?? null,
     settingsDrift: driftOf(lifecycle, key),
   };
 }
@@ -245,6 +241,20 @@ function externalPlacement(e: ExternalProc): Placement {
 
 function localNode(state: StateResponse): DeckNode {
   const { world, lifecycle, policy } = state;
+  // One card per DECLARED resource (spec §5: zero, three, or five), ordered
+  // by gpu_index then resource name — never a fixed triple, never one card
+  // per physical GPU (two resources may share a GPU; each still gets its
+  // own card, the design this task's brief test pins).
+  const sorted = Object.entries(world.tenants).sort(
+    ([nameA, a], [nameB, b]) => a.gpu_index - b.gpu_index || nameA.localeCompare(nameB),
+  );
+  // An external process is attributed to the FIRST resource card on its
+  // GPU (in the sorted order above) rather than every card sharing that
+  // GPU — otherwise two co-located resources would each show the same
+  // external pid, double-counting one fact. Best-effort either way (see
+  // app/state.py's own externals docstring); this just avoids the
+  // duplicate-rendering failure mode a naive per-resource filter would add.
+  const externalsClaimed = new Set<number>();
   return {
     id: state.node.id,
     label: state.node.label,
@@ -252,21 +262,30 @@ function localNode(state: StateResponse): DeckNode {
     // definition. A failed poll is an App-level error, not a node state.
     status: "reachable",
     lastSeen: null,
-    resources: world.gpus.map((gpu) => {
-      // One pass, used for BOTH the control list and the placements: they
-      // are the same set of tenants by definition, and computing it twice
-      // is how those two answers eventually drift apart.
-      const tenants = TENANT_ORDER.filter((t) => world.placement[t] === gpu.index);
+    resources: sorted.map(([resource, tenant]) => {
+      const gpu = world.gpus.find((g) => g.index === tenant.gpu_index);
+      const placement = tenantPlacement(resource, tenant, lifecycle, policy);
+      const claimExternals = !externalsClaimed.has(tenant.gpu_index);
+      if (claimExternals) externalsClaimed.add(tenant.gpu_index);
       return {
-        id: `gpu${gpu.index}`,
-        label: `GPU ${gpu.index}`,
-        capacity: { used: gpu.used, total: gpu.total },
-        controls: tenants,
+        id: resource,
+        label: resource,
+        // Unknown, not zero: a resource whose declared gpu_index matches no
+        // entry in the live world.gpus (a data inconsistency) reports
+        // capacity unknown rather than a fabricated 0/0.
+        capacity: gpu ? { used: gpu.used, total: gpu.total } : null,
+        // A local resource's only control is itself (PlacementActions
+        // dispatches its verbs by resource name, per Task 7's generic
+        // `/api/tenants/{resource}/{verb}` route) — one element, always
+        // present, even for an empty/unloaded resource: the Load dropdown
+        // (or Free/Park button) has to render somewhere with no placement
+        // to hang it off.
+        controls: [resource],
         placements: [
-          ...tenants
-            .map((t) => tenantPlacement(t, world, lifecycle, policy))
-            .filter((p): p is Placement => p !== null),
-          ...world.externals.filter((e) => e.gpu === gpu.index).map(externalPlacement),
+          ...(placement ? [placement] : []),
+          ...(claimExternals
+            ? world.externals.filter((e) => e.gpu === tenant.gpu_index).map(externalPlacement)
+            : []),
         ],
       };
     }),

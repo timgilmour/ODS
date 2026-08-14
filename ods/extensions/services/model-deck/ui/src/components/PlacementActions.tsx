@@ -6,7 +6,6 @@ import {
   truncateMiddle,
   type ModelFile,
   type StorageUnit,
-  type TenantName,
   type World,
 } from "../api";
 import { isArmedFor } from "../model/armed";
@@ -28,30 +27,40 @@ const STATE_TONE: Record<string, string> = {
   unknown: "bad",
 };
 
-/** Controls for one tenant on one resource, plus the guard banners its
- * actions can raise. Keyed by tenant rather than by placement, because an
- * UNLOADED tenant still needs its Load control and has no placement.
+/** Controls for one declared LOCAL RESOURCE, plus the guard banners its
+ * actions can raise. Keyed by resource (E1: no longer by a fixed tenant
+ * name) because an UNLOADED lemonade-kind resource still needs its Load
+ * control and has no placement.
+ *
+ * Branches on `world.tenants[resource].engine` (the resource's declared
+ * KIND), never on `resource` itself — `KNOWN_KINDS`
+ * (app/engine_kinds.py:90-94) is the closed backend enum this mirrors, the
+ * same posture `nodes.ts`'s `tenantPlacement` and `setDraft.ts`'s
+ * `KIND_DRAFT_SPEC` take. Every verb dispatches through Task 7's generic
+ * `POST /api/tenants/{resource}/{verb}` route, so a resource can be named
+ * anything and still hit the right kind's handler.
  *
  * Every action optimistic-disables while in flight, surfaces the response's
  * `detail`, and refetches either way. Two guards get inline offers rather
- * than a dead end: hipfire's park 409 (a chat is in flight or was recently
- * active) arms Force park, and a lemonade load against a cold model 409s
- * with `pull=true`, which arms a "Pull + load" confirm. */
+ * than a dead end: a park 409 (a chat is in flight or was recently active)
+ * arms Force park, and a lemonade-kind load against a cold model 409s with
+ * `pull=true`, which arms a "Pull + load" confirm. */
 export default function PlacementActions({
-  tenant,
+  resource,
   world,
   models,
   hasPlacement,
   coldGgufs,
   onRefresh,
 }: {
-  tenant: TenantName;
+  resource: string;
   world: World;
   models: ModelFile[];
-  /** Whether this tenant already has a chip on the resource above. When it
-   * does not — a parked hipfire, an unloaded lemonade — this control row is
-   * the only thing on the panel naming the tenant, so the state has to come
-   * with the name instead of being implied by which buttons are enabled. */
+  /** Whether this resource already has a chip on the card above. When it
+   * does not — a parked hipfire-kind resource, an unloaded lemonade-kind
+   * one — this control row is the only thing on the panel naming the
+   * resource, so the state has to come with the name instead of being
+   * implied by which buttons are enabled. */
   hasPlacement: boolean;
   /** Resident-but-cold GGUFs (App.tsx's coldGgufs) — surfaced as a separate
    * optgroup in the Load dropdown; empty array (never undefined) so these
@@ -64,7 +73,7 @@ export default function PlacementActions({
   const [offerForcePark, setOfferForcePark] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
   // Pull-through idiom (Force-park's armed-confirm, applied to a cold
-  // lemonade load): a 409 whose detail contains "pull=true" arms this
+  // lemonade-kind load): a 409 whose detail contains "pull=true" arms this
   // banner instead of the plain error one; confirming retries with
   // ?pull=true. pullingModel tracks the in-flight pull-then-load by bare
   // model name until a later poll reports it loaded (see the effect below).
@@ -88,7 +97,7 @@ export default function PlacementActions({
       // load" confirm's own retry, which sets pullingModel from inside its
       // action and must not have this wipe it out immediately after. Any
       // *other* successful lemonade action means whatever pullingModel was
-      // tracking is stale (superseded by a fresh load, or the tenant was
+      // tracking is stale (superseded by a fresh load, or the resource was
       // unloaded out from under it), so it's cleared here rather than left
       // for the pulling banner to reason about.
       clearPulling?: boolean;
@@ -118,43 +127,39 @@ export default function PlacementActions({
     }
   }
 
-  // lemonade reports its loaded model with an internal "extra." namespace
-  // prefix (e.g. "extra.foo.gguf"; see LemonadeClient.status() docstring),
-  // so endsWith() matches without knowing the exact prefix string.
-  const lemonade = world.tenants.lemonade;
+  const tenant = world.tenants[resource];
+  const kind = tenant.engine;
 
-  // ComfyUI holds VRAM until it is idle AND its queue has drained; Free
-  // refuses otherwise, so the button says so up front.
-  const comfyuiBlocked =
-    world.tenants.comfyui.state === "busy" || (world.tenants.comfyui.queue ?? 0) > 0;
+  // ComfyUI-kind holds VRAM until it is idle AND its queue has drained;
+  // Free refuses otherwise, so the button says so up front.
+  const comfyuiBlocked = tenant.state === "busy" || (tenant.queue ?? 0) > 0;
 
   // One-shot consumption of the pull-tracking token: the moment a poll sees
   // the pulled model actually loaded, clear it, so a LATER unload (or
   // loading something else) can never resurrect the chip from a stale
   // value. The banner below is a dumb `!= null` check; clearing is entirely
   // this effect's (plus runAction's clearPulling, plus the banner's own
-  // dismiss button) job.
+  // dismiss button) job. Only ever armed for a lemonade-kind resource (the
+  // Load dropdown below is the only thing that sets it), so this is a
+  // harmless no-op for any other kind.
   useEffect(() => {
     if (
       pullingModel != null &&
-      lemonade.state === "loaded" &&
-      lemonade.model?.endsWith(pullingModel)
+      tenant.state === "loaded" &&
+      tenant.model?.endsWith(pullingModel)
     ) {
       setPullingModel(null);
     }
-  }, [lemonade.state, lemonade.model, pullingModel]);
-
-  const state = world.tenants[tenant].state;
+  }, [tenant.state, tenant.model, pullingModel]);
 
   return (
     <div className="tenant-actions">
-      {/* Names the group. On a GPU hosting two tenants these would otherwise
-          be two anonymous rows of buttons; and when the tenant has no chip
-          above (parked hipfire, unloaded lemonade) this is the only thing
-          saying which tenant it is and what it is doing. */}
-      <span className="tenant-name">{tenant}</span>
+      {/* Names the resource. When it has no chip above (parked hipfire-kind,
+          unloaded lemonade-kind) this is the only thing saying which
+          resource it is and what it is doing. */}
+      <span className="tenant-name">{resource}</span>
       {!hasPlacement && (
-        <span className={`ui-pill ui-pill-${STATE_TONE[state] ?? "off"}`}>{state}</span>
+        <span className={`ui-pill ui-pill-${STATE_TONE[tenant.state] ?? "off"}`}>{tenant.state}</span>
       )}
 
       {error && (
@@ -175,7 +180,7 @@ export default function PlacementActions({
           disabled={busy}
           armed={isArmedFor(armedForSeq, refusalSeq)}
           onArm={() => setArmedForSeq(refusalSeq)}
-          onConfirm={() => runAction(() => postAction("/tenants/hipfire/park?force=true"))}
+          onConfirm={() => runAction(() => postAction(`/tenants/${resource}/park?force=true`))}
         />
       )}
 
@@ -184,7 +189,7 @@ export default function PlacementActions({
           message={messages.modelIsCold(bytesToGB(pullOffer.sizeBytes))}
           onAction={() =>
             runAction(async () => {
-              const res = (await postAction("/tenants/lemonade/load?pull=true", {
+              const res = (await postAction(`/tenants/${resource}/load?pull=true`, {
                 model: pullOffer.model,
               })) as { status?: string };
               if (res.status === "pulling") setPullingModel(pullOffer.model);
@@ -204,7 +209,7 @@ export default function PlacementActions({
         />
       )}
 
-      {tenant === "lemonade" && (
+      {kind === "lemonade" && (
         <>
           <select
             aria-label={labels.modelToLoad}
@@ -236,7 +241,7 @@ export default function PlacementActions({
             disabled={busy || !selectedModel}
             onClick={() => {
               const coldUnit = coldGgufs.find((u) => u.name === selectedModel);
-              runAction(() => postAction("/tenants/lemonade/load", { model: selectedModel }), {
+              runAction(() => postAction(`/tenants/${resource}/load`, { model: selectedModel }), {
                 pullGuard: coldUnit
                   ? { model: selectedModel, sizeBytes: coldUnit.size }
                   : undefined,
@@ -247,9 +252,9 @@ export default function PlacementActions({
             {labels.load}
           </button>
           <button
-            disabled={busy || lemonade.state !== "loaded"}
+            disabled={busy || tenant.state !== "loaded"}
             onClick={() =>
-              runAction(() => postAction("/tenants/lemonade/unload", {}), { clearPulling: true })
+              runAction(() => postAction(`/tenants/${resource}/unload`, {}), { clearPulling: true })
             }
           >
             {labels.unload}
@@ -257,31 +262,31 @@ export default function PlacementActions({
         </>
       )}
 
-      {tenant === "comfyui" && (
+      {kind === "comfyui" && (
         <button
           disabled={busy || comfyuiBlocked}
           // Tooltip tracks the SAME condition as `disabled`: a non-empty
-          // queue disables Free while the tenant still reads "idle", so
+          // queue disables Free while the resource still reads "idle", so
           // narrowing this to state === "busy" would leave that case a
           // greyed-out button with no explanation.
           title={comfyuiBlocked ? labels.comfyuiBlockedTitle : undefined}
-          onClick={() => runAction(() => postAction("/tenants/comfyui/free"))}
+          onClick={() => runAction(() => postAction(`/tenants/${resource}/free`))}
         >
           {labels.free}
         </button>
       )}
 
-      {tenant === "hipfire" && (
+      {kind === "hipfire" && (
         <>
           <button
-            disabled={busy || world.tenants.hipfire.state === "parked"}
-            onClick={() => runAction(() => postAction("/tenants/hipfire/park"), { parkGuard: true })}
+            disabled={busy || tenant.state === "parked"}
+            onClick={() => runAction(() => postAction(`/tenants/${resource}/park`), { parkGuard: true })}
           >
             {labels.park}
           </button>
           <button
-            disabled={busy || world.tenants.hipfire.state === "running"}
-            onClick={() => runAction(() => postAction("/tenants/hipfire/resume"))}
+            disabled={busy || tenant.state === "running"}
+            onClick={() => runAction(() => postAction(`/tenants/${resource}/resume`))}
           >
             {labels.resume}
           </button>

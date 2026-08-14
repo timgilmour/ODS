@@ -10,8 +10,6 @@
 // app/events.py exactly (bytes/seconds throughout, never pre-converted).
 // ---------------------------------------------------------------------------
 
-export type TenantName = "lemonade" | "comfyui" | "hipfire";
-
 export interface Gpu {
   index: number;
   total: number;
@@ -25,42 +23,55 @@ export interface ExternalProc {
   bytes: number;
 }
 
-export interface LemonadeTenant {
-  // "loading" = a load is in flight; health reports nothing loaded while
-  // weights stream in (World._snapshot_lemonade, app/state.py:143-144).
-  state: "loaded" | "unloaded" | "loading" | "unknown";
-  model: string | null;
-  footprint: number | null;
-  idle_s: number | null;
-}
-
-export interface ComfyuiTenant {
-  state: "busy" | "idle" | "unknown";
-  queue: number | null;
-  idle_s: number | null;
-}
-
-export interface HipfireTenant {
-  state: "running" | "loading" | "parked" | "unknown";
-  model: string | null;
-  footprint: number;
+/** One declared local engine's live status, keyed by RESOURCE NAME in
+ * World.tenants (E1 Task 3/11: replaces the fixed lemonade/comfyui/hipfire
+ * triple — any number of any-kind declared resources now).
+ *
+ * `engine` and `gpu_index` are stamped uniformly on every entry regardless
+ * of kind (app/state.py's World.snapshot: `obs["engine"] = kind` /
+ * `obs["gpu_index"] = entry["gpu_index"]`, app/state.py:158-159). Every
+ * other field is that resource's declared KIND's own
+ * `app.engine_kinds.ENGINE_KINDS[kind].observe()` shape — a union of every
+ * kind's fields rather than a discriminated one, because `kind` is data
+ * (`KNOWN_KINDS`, app/engine_kinds.py:90-94), not a TS literal the compiler
+ * can narrow on. Fields a given kind never sets are simply absent:
+ * - lemonade-kind: state "loaded"|"unloaded"|"loading"|"unknown", model,
+ *   footprint, idle_s (app/engine_kinds.py `_LemonadeAdapter.observe`,
+ *   :211-214).
+ * - comfyui-kind: state "busy"|"idle"|"unknown", queue, idle_s
+ *   (`_ComfyAdapter.observe`, :478).
+ * - hipfire-kind: state "running"|"loading"|"parked"|"unknown", model,
+ *   footprint (never null — 0 when not running), queue_depth
+ *   (`_HipfireAdapter.observe`, :613).
+ */
+export interface ResourceTenant {
+  engine: string;
+  gpu_index: number;
+  state: string;
+  model?: string | null;
+  footprint?: number | null;
+  idle_s?: number | null;
+  queue?: number | null;
   /** In-flight requests holding hipfire's single admission slot (from the
    * daemon's /stats); null when parked/unreachable. > 0 means a
    * conversation turn is being served RIGHT NOW — park/apply will refuse
    * without force. */
-  queue_depth: number | null;
+  queue_depth?: number | null;
 }
 
 export interface World {
   gpus: Gpu[];
-  tenants: {
-    lemonade: LemonadeTenant;
-    comfyui: ComfyuiTenant;
-    hipfire: HipfireTenant;
-  };
+  /** Keyed by resource name (app/state.py's World.snapshot `tenants[resource]
+   * = obs`) — never a fixed lemonade/comfyui/hipfire shape. Empty when
+   * nothing is declared (spec §1: absence is representable). */
+  tenants: Record<string, ResourceTenant>;
   externals: ExternalProc[];
   default_route: string | null;
-  placement: Record<TenantName, number>;
+  /** resource -> declared GPU index (app/state.py's World.snapshot
+   * `"placement": {resource: entry["gpu_index"] ...}`) — redundant with
+   * each tenant's own `gpu_index` field; kept because it is still on the
+   * wire, even though `nodes.ts` reads `gpu_index` off the tenant directly. */
+  placement: Record<string, number>;
 }
 
 export interface TenantPolicy {
@@ -69,7 +80,7 @@ export interface TenantPolicy {
   idle_ttl: number;
 }
 
-export type PolicyMap = Record<TenantName, TenantPolicy>;
+export type PolicyMap = Record<string, TenantPolicy>;
 
 export interface ModelFile {
   file: string;
@@ -305,23 +316,24 @@ export interface Durable {
   activate_model_id: string | null;
 }
 
-export interface LemonadeEphemeral {
-  state: "loaded" | "unloaded";
+/** One resource's drafted goal (app/sets.py's `ResourceDesired`). Which
+ * `desired` values a resource's declared KIND actually accepts is verb
+ * membership in that kind's `human_verbs()` crossed with app/sets.py's
+ * `_DESIRED_VERBS` table (:129-134) — never a hardcoded kind name there,
+ * mirrored the same verb-generic way in `ui/src/model/setDraft.ts`'s
+ * `KIND_DRAFT_SPEC`. `model` is accepted only when the kind supports
+ * "load" (today: lemonade-kind alone) — app/sets.py:203-204. */
+export interface ResourceDesired {
+  desired: "loaded" | "unloaded" | "parked" | "freed";
+  model?: string | null;
 }
 
-export interface ComfyuiEphemeral {
-  state: "free" | "leave";
-  reserve_gb: number;
-}
-
-export interface HipfireEphemeral {
-  state: "running" | "parked";
-}
-
+/** app/sets.py's `Ephemeral` — resource -> desired state. An ABSENT
+ * resource means "don't touch it" (E1 Task 8: replaces the old fixed
+ * lemonade/comfyui/hipfire sub-sections — any number of any-kind DECLARED
+ * resources now, keyed by name, not by kind). */
 export interface Ephemeral {
-  lemonade: LemonadeEphemeral | null;
-  comfyui: ComfyuiEphemeral | null;
-  hipfire: HipfireEphemeral | null;
+  resources: Record<string, ResourceDesired>;
 }
 
 export interface ConfigSet {

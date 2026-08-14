@@ -85,6 +85,15 @@ export const messages = {
       "number, or leave it empty for no watermark.",
   }),
 
+  // "Refused" is deliberately generic — the detail carries the reason.
+  // Two recurring producers, catalogued here so the exact wording stays
+  // traceable even though they pass through VERBATIM rather than being
+  // re-templated (the backend already names the exact resource/kind/verb
+  // the operator needs — see PROBE_URL_WARNING's identical passthrough
+  // reasoning above, nodeMisconfigured):
+  // - 404 `unknown resource {resource!r}` (app/routers/control.py:144)
+  // - 405 `{resource} ({kind}) does not support {verb}`
+  //   (app/routers/control.py:148)
   guardRefused: (detail: string): Message => ({
     tone: "danger",
     title: "Refused",
@@ -399,17 +408,50 @@ export const labels = {
   idleTitle: "time since last activity — counts towards the idle-TTL eviction",
 
   // Set-apply step vocabulary — one label per "step" kind app/sets.py's
-  // plan_apply() emits: unload_lemonade, free_comfyui, warn, park_hipfire,
-  // activate, resume_hipfire, load_lemonade, policy_patch. Named, not
-  // line-cited: those numbers drifted three times across this wave.
-  stepUnload: "Unload",
-  stepLoad: "Load",
-  stepFreeComfyui: "Free ComfyUI VRAM",
-  stepParkHipfire: "Park hipfire",
-  stepResumeHipfire: "Resume hipfire",
+  // plan_apply() emits. E1 Task 8 made every per-resource verb
+  // GENERIC + resource-tagged (unload/load/free/park/resume, each
+  // carrying its own "resource" field) — the old kind-suffixed names
+  // (unload_lemonade, free_comfyui, park_hipfire, resume_hipfire) are
+  // gone from the wire. Named, not line-cited: those numbers drifted three
+  // times across this wave.
+  stepUnload: (resource: string | null) => (resource ? `Unload — ${resource}` : "Unload"),
+  stepLoad: (resource: string | null) => (resource ? `Load — ${resource}` : "Load"),
+  stepFree: (resource: string | null) => (resource ? `Free — ${resource}` : "Free"),
+  stepPark: (resource: string | null) => (resource ? `Park — ${resource}` : "Park"),
+  stepResume: (resource: string | null) => (resource ? `Resume — ${resource}` : "Resume"),
   stepActivate: "Activate catalog model",
   stepPolicyPatch: "Apply policy overrides",
+  // New in E1 Task 9 (app/sets.py:779's `{"step": "restore_settings", ...}`)
+  // — not on the old vocabulary list above at all; added here so it never
+  // falls through applySteps.ts's default (verbatim-kind) branch.
+  stepRestoreSettings: "Restore settings",
   stepWarn: "Warning",
+  /** A "warn" step's `reason` — a machine token (app/sets.py) — translated
+   * to operator language; this is the one place that happens. Unknown
+   * reasons render verbatim (same ugly-but-true rule applySteps.ts's
+   * default step-kind branch follows), so a future backend reason degrades
+   * gracefully instead of vanishing.
+   *
+   * "busy-skipped" (app/sets.py:709, resource-tagged — T8 review I3 renamed
+   * it from the kind-baked "comfyui-busy-skipped": a park-verb resource's
+   * conversation guard was busy, same refusal class as the live park
+   * route's 409). "no-model-to-load" (app/sets.py:758, resource-tagged): a
+   * "loaded" goal on a load-verb resource named no model, live or in the
+   * set. "durable-revert-unavailable" (app/sets.py:653, no resource — it is
+   * about the DURABLE route, not a per-resource actuation): the previous-set
+   * revert has no catalog id to re-activate the old default route with. */
+  stepWarnReason: (reason: string, resource?: string | null): string => {
+    switch (reason) {
+      case "durable-revert-unavailable":
+        return "durable revert unavailable — no catalog id to re-activate the previous model";
+      case "busy-skipped":
+        return resource ? `${resource} skipped — busy` : "skipped — busy";
+      case "no-model-to-load":
+        return resource ? `${resource} has no model to load` : "no model to load";
+      default:
+        return reason;
+    }
+  },
   estimate: (s: number) => `about ${s}s`,
   noChanges: "no changes — already matches this set",
   stepsCompleted: (n: number) => `${n} step(s) completed`,

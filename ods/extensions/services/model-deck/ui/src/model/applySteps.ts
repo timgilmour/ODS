@@ -16,31 +16,46 @@ function str(v: unknown): string | null {
 }
 
 /** Maps one plan step to display copy. The vocabulary is app/sets.py
- * plan_apply()'s, verbatim: unload_lemonade, free_comfyui, warn,
- * park_hipfire, activate, resume_hipfire, load_lemonade, policy_patch.
- * (Deliberately named rather than line-cited — these citations have drifted
- * three times; grep plan_apply for the emit sites.)
+ * plan_apply()'s, verbatim: unload, load, free, park, resume, activate,
+ * policy_patch, restore_settings, warn — verb-generic and resource-tagged
+ * since E1 Task 8 (the old kind-suffixed unload_lemonade/free_comfyui/
+ * park_hipfire/resume_hipfire names are gone from the wire). (Deliberately
+ * named rather than line-cited — these citations have drifted three times;
+ * grep plan_apply for the emit sites.)
  * Unknown kinds render verbatim — a future backend step must degrade to
  * ugly-but-true, never to a crash or a silent drop. */
 export function stepRow(step: Step, index: number): StepRow {
   const key = `${index}-${step.step}`;
+  // Every per-resource verb step carries "resource" (app/sets.py); the
+  // box-wide ones (activate/policy_patch/restore_settings) and a
+  // resource-less warn (durable-revert-unavailable) do not — `str` folds
+  // that absence to null rather than throwing on a missing field.
+  const resource = str(step.resource);
   switch (step.step) {
-    case "unload_lemonade":
-      return { key, label: labels.stepUnload, detail: str(step.model) };
-    case "load_lemonade":
-      return { key, label: labels.stepLoad, detail: str(step.model) };
-    case "free_comfyui":
-      return { key, label: labels.stepFreeComfyui, detail: null };
-    case "park_hipfire":
-      return { key, label: labels.stepParkHipfire, detail: null };
-    case "resume_hipfire":
-      return { key, label: labels.stepResumeHipfire, detail: null };
+    case "unload":
+      return { key, label: labels.stepUnload(resource), detail: str(step.model) };
+    case "load":
+      return { key, label: labels.stepLoad(resource), detail: str(step.model) };
+    case "free":
+      return { key, label: labels.stepFree(resource), detail: null };
+    case "park":
+      return { key, label: labels.stepPark(resource), detail: null };
+    case "resume":
+      return { key, label: labels.stepResume(resource), detail: null };
     case "activate":
       return { key, label: labels.stepActivate, detail: str(step.model_id) };
     case "policy_patch":
       return { key, label: labels.stepPolicyPatch, detail: null };
-    case "warn":
-      return { key, label: labels.stepWarn, detail: str(step.reason) };
+    case "restore_settings":
+      return { key, label: labels.stepRestoreSettings, detail: null };
+    case "warn": {
+      const reason = str(step.reason);
+      return {
+        key,
+        label: labels.stepWarn,
+        detail: reason !== null ? labels.stepWarnReason(reason, resource) : null,
+      };
+    }
     default:
       return { key, label: step.step, detail: null };
   }

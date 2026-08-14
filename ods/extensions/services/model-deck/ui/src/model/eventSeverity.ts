@@ -36,17 +36,30 @@ const ATTENTION_EXACT = new Set([
   // theirs overtook the pull-through mid-copy (app/routers/control.py).
   // Neutral would read as "nothing to see here".
   "pull-through-superseded",
-  // A PUT named a tenant outside DEFAULT_POLICIES. Deliberately ACCEPTED
-  // (defaults are seed data, not an allowlist), so the event is the only
-  // feedback that a typo'd tenant name is policying nothing —
-  // app/routers/policy.py's put_policy, NOT the store's boundary gate.
-  "policy-unknown-tenant",
   // A node-agent reported its own config makes serving detection blind
   // (app/arbiter.py's _node_observations, surfacing node-agent serving.py's
   // PROBE_URL_WARNING). Amber, not red: nothing has failed yet, but the
   // node's env wants fixing before the next blind swap — a decision.
   "lifecycle-node-misconfigured",
 ]);
+
+// E1 Task 11: exact-kind overrides that must win over the SUFFIX convention
+// below — unlike ATTENTION_EXACT above (kinds that never followed the
+// convention at all), these DO end in a classifying suffix but are
+// deliberately classified against it, so they have to be checked FIRST or
+// the suffix rule would shadow them.
+const OVERRIDE_EXACT: Record<string, Severity> = {
+  // app/notify.py:97-99 logs one resource's restart failure in ISOLATION —
+  // the module's docstring design is "Let It Crash: isolate per resource"
+  // (every declared resource sharing that destination still gets its OWN
+  // restart attempt regardless of an earlier one's failure, no rollback),
+  // and the eventual raise that actually fails the calling job (a move
+  // job's post-move hook, or the control route's request) already gets its
+  // OWN "-failed"/502-mapped event elsewhere. This per-resource notice is a
+  // degraded-but-isolated outcome, not the terminal failure — attention,
+  // not failure, even though the kind ends in "-failed".
+  "notify-restart-failed": "attention",
+};
 
 function normalize(kind: string): string {
   return kind.replace(/_/g, "-");
@@ -72,6 +85,8 @@ export function eventSeverity(kind: string, detail?: unknown): Severity {
   }
 
   const normalized = normalize(kind);
+
+  if (normalized in OVERRIDE_EXACT) return OVERRIDE_EXACT[normalized];
 
   if (FAILURE_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return "failure";
   if (SUCCESS_EXACT.has(normalized) || SUCCESS_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {

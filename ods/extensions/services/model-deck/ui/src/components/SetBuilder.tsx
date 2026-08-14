@@ -7,24 +7,25 @@ import {
   saveSet,
   slugify,
   truncateMiddle,
-  type ComfyuiEphemeral,
   type ConfigSet,
   type Durable,
   type Gpu,
-  type HipfireEphemeral,
-  type LemonadeEphemeral,
   type ModelFile,
+  type ResourceDesired,
   type TenantPolicy,
   type World,
 } from "../api";
 import { labels, messages } from "../model/messages";
-import { parseReserveGb } from "../model/reserveGb";
 import {
   buildDraft,
   derivePlacedModel,
+  draftChoiceFor,
+  draftedFootprintBytes,
   draftEquals,
   EXTRA_PREFIX,
   fieldsFromSet,
+  KIND_DRAFT_SPEC,
+  setResourceChoice,
 } from "../model/setDraft";
 import Banner from "../ui/Banner";
 import Meter from "../ui/Meter";
@@ -47,20 +48,33 @@ interface SetBuilderProps {
 
 // Backend's registry constant (app/registry.py:HIPFIRE_FOOTPRINT) — hipfire
 // has no live per-model footprint reading like lemonade does, so its
-// budgeted cost is this fixed figure whenever the draft's toggle is
-// "running".
+// budgeted cost is this fixed figure whenever a hipfire-kind resource is
+// drafted "loaded" (resume).
 const HIPFIRE_FOOTPRINT_BYTES = 33_000_000_000;
 
 // GPU real-VRAM fallback when a GPU index isn't present in the live world
 // snapshot (e.g. previewing a set on a box with fewer cards than the set
 // assumes) — matches GpuColumn's un-fallback-guarded read, made explicit
-// here since the builder must always render both columns regardless.
+// here since the builder must always render every declared resource's card
+// regardless.
 const DEFAULT_GPU_BYTES = 32_000_000_000;
 
 // Above this share of a card's VRAM the drafted footprint is called over
 // budget. A threshold, not a colour: Meter's own amber/red thresholds say
 // how full the bar looks, this says whether the operator gets a banner.
 const OVER_BUDGET_PCT = 90;
+
+// Button copy for the generic (non-model) desired-choice row — today the
+// only non-model kind offering "loaded" is hipfire-kind (resume), so that
+// entry reads "Running" rather than the generic verb; "unloaded" is
+// unreachable through this row (a load-verb kind takes the model-drop path
+// below instead) but listed for completeness/exhaustiveness.
+const DESIRED_BUTTON_LABEL: Record<ResourceDesired["desired"], string> = {
+  loaded: "Running",
+  unloaded: "Unload",
+  parked: "Parked",
+  freed: "Free",
+};
 
 // Snapshot taken the instant a 409 fires on save: the exact draft + the
 // slug it collided with. Frozen at that moment rather than re-derived from
@@ -73,17 +87,18 @@ interface OverwriteSnapshot {
 }
 
 /** Drag-and-drop set editor: one dashed DRAFT card standing for the local
- * node, holding the hipfire column (a toggle, not a drop target) and the
- * lemonade/comfyui column (a drop target). Both mirror GpuColumn's tenant
- * grouping but render bespoke controls per tenant rather than TenantCard's
- * live-status view — this is a *draft* of desired state, not a live status
- * card, which is what the dashed border and the DRAFT pill say out loud.
- * Column indices (which physical GPU each one is) come from the world
- * snapshot's placement map, not a hardcoded layout — GpuColumn no longer
- * hardcodes it either.
+ * node, holding one control block per DECLARED resource (E1 Task 11:
+ * replaces the fixed hipfire/lemonade/comfyui two-GPU layout — any number
+ * of any-kind declared resources now, each its own card, mirroring
+ * `nodes.ts`'s board redesign). A load-verb kind's resource (today:
+ * lemonade alone, `KIND_DRAFT_SPEC`) gets the model-library drop target;
+ * every other kind gets a plain choice row built from its own
+ * `KIND_DRAFT_SPEC.options`. This is a *draft* of desired state, not a live
+ * status card, which is what the dashed border and the DRAFT pill say out
+ * loud.
  *
- * Scope: `ConfigSet` (see api.ts `Ephemeral`) has legs for lemonade,
- * comfyui and hipfire only — there is no spark leg — so the builder drafts
+ * Scope: `ConfigSet` (see api.ts `Ephemeral`) has one leg per DECLARED
+ * resource, keyed by name — there is no spark leg — so the builder drafts
  * the local node and nothing else. A second node card here would be a
  * control for a set field that does not exist. */
 export default function SetBuilder({
@@ -101,19 +116,9 @@ export default function SetBuilder({
   const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
   const [durable, setDurable] = useState<Durable | null>(null);
-  const [lemonade, setLemonade] = useState<LemonadeEphemeral | null>(null);
-  const [comfyui, setComfyui] = useState<ComfyuiEphemeral | null>(null);
-  // null = "don't touch" (matches lemonade/comfyui's pattern) — must never
-  // be defaulted to a concrete state, see CRITICAL 2.
-  const [hipfire, setHipfire] = useState<HipfireEphemeral | null>(null);
+  const [resources, setResources] = useState<Record<string, ResourceDesired>>({});
   const [placedModel, setPlacedModel] = useState<string | null>(null);
   const [catalogId, setCatalogId] = useState("");
-  const [reserveGb, setReserveGb] = useState(24);
-  // The RAW string is what the input renders. Committing only valid parses
-  // means clearing the field no longer snaps a digit under the operator's
-  // cursor: the old `Math.max(1, Math.round(value || 0))` turned an empty
-  // field (Number("") === 0) into 1 mid-edit [max-review c35].
-  const [reserveGbRaw, setReserveGbRaw] = useState("24");
   // policy_overrides is not editable in v1, but must survive load->save
   // verbatim (a loaded set that carries overrides keeps them on the next
   // save). New drafts keep it null; a badge surfaces its presence.
@@ -145,13 +150,9 @@ export default function SetBuilder({
     setName("");
     setNotes("");
     setDurable(null);
-    setLemonade(null);
-    setComfyui(null);
-    setHipfire(null);
+    setResources({});
     setPlacedModel(null);
     setCatalogId("");
-    setReserveGb(24);
-    setReserveGbRaw("24");   // both states, always together — see updateReserveGb
     setPolicyOverrides(null);
     setSaveError(null);
     setOverwriteSnapshot(null);
@@ -162,14 +163,9 @@ export default function SetBuilder({
     setName(f.name);
     setNotes(f.notes);
     setDurable(f.durable);
-    setLemonade(f.lemonade);
-    setComfyui(f.comfyui);
-    setHipfire(f.hipfire);
+    setResources(f.resources);
     setPolicyOverrides(f.policyOverrides);
     setCatalogId(cfgset.durable?.activate_model_id ?? "");
-    const loadedReserve = cfgset.ephemeral?.comfyui?.reserve_gb ?? 24;
-    setReserveGb(loadedReserve);
-    setReserveGbRaw(String(loadedReserve));   // both states, always together
     setPlacedModel(derivePlacedModel(cfgset));
     setSaveError(null);
     setOverwriteSnapshot(null);
@@ -191,10 +187,7 @@ export default function SetBuilder({
     setSavedSet(null);
   }
 
-  const draft = buildDraft({
-    name, notes, durable, lemonade, comfyui, hipfire,
-    policyOverrides,
-  });
+  const draft = buildDraft({ name, notes, durable, resources, policyOverrides });
   const isSavedUnchanged = savedSet !== null && draftEquals(draft, savedSet);
 
   // overwrite=true always saves the frozen snapshot from the moment the 409
@@ -250,11 +243,21 @@ export default function SetBuilder({
     }
   }
 
-  // --- Placement (drag or click-to-place; both funnel through here) -------
+  // --- Model placement (drag or click-to-place; both funnel through here) -
+
+  // The one declared resource whose kind carries a model (E1: any number of
+  // declared resources now — `KIND_DRAFT_SPEC.supportsModel` is true only
+  // for a load-verb kind, lemonade today). The model-library drop
+  // target/picker is keyed to it; with none declared, there is nothing to
+  // place a model onto and the library panel does not render (below).
+  const loadResource = Object.entries(world.tenants).find(
+    ([, tenant]) => KIND_DRAFT_SPEC[tenant.engine]?.supportsModel,
+  )?.[0] ?? null;
 
   function placeModel(file: string) {
+    if (!loadResource) return;
     setPlacedModel(file);
-    setLemonade({ state: "loaded" });
+    setResources((r) => setResourceChoice(r, loadResource, "loaded"));
     setDurable({
       default_route_model: `${EXTRA_PREFIX}${file}`,
       activate_model_id: catalogId.trim() || null,
@@ -272,18 +275,19 @@ export default function SetBuilder({
   }
 
   function removeModel() {
+    if (!loadResource) return;
     setPlacedModel(null);
-    setLemonade({ state: "unloaded" });
+    setResources((r) => setResourceChoice(r, loadResource, "unloaded"));
     setDurable(null);
   }
 
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
-    // The lemonade/comfyui drop target isn't a form control, so the disabled
-    // <fieldset> around the rest of the form doesn't block it natively —
-    // guard explicitly so a drag can't mutate the draft while an overwrite
+    // The drop target isn't a form control, so the disabled <fieldset>
+    // around the rest of the form doesn't block it natively — guard
+    // explicitly so a drag can't mutate the draft while an overwrite
     // confirmation is pending (CRITICAL 1).
-    if (overwriteSnapshot) return;
+    if (overwriteSnapshot || !loadResource) return;
     const file = e.dataTransfer.getData("text/plain");
     // Malformed/unknown drops (empty payload, or a file not in the current
     // registry scan) are ignored silently rather than surfaced as an error
@@ -292,76 +296,18 @@ export default function SetBuilder({
     placeModel(file);
   }
 
-  // --- Hipfire three-way (don't touch / running / parked) -----------------
-  // Mirrors lemonade/comfyui's null-means-"don't touch" pattern exactly.
-
-  function setHipfireChoice(choice: "none" | "running" | "parked") {
-    if (choice === "none") {
-      setHipfire(null);
-      return;
-    }
-    setHipfire({ state: choice });
-  }
-
-  // --- ComfyUI three-way (don't touch / leave-reserve / free) -------------
-
-  function setComfyChoice(choice: "none" | "leave" | "free") {
-    if (choice === "none") {
-      setComfyui(null);
-      return;
-    }
-    setComfyui({ state: choice, reserve_gb: reserveGb });
-  }
-
-  // Whole GB only — fractional input causes an avoidable server 422.
-  //
-  // An unparseable or out-of-range edit updates the VISIBLE string but does
-  // not touch the committed draft: the operator can clear the field, type,
-  // and correct themselves without the value being rewritten under them, and
-  // the draft keeps the last thing they actually meant. onBlur re-syncs an
-  // abandoned edit so the field and the draft agree again.
-  function updateReserveGb(raw: string) {
-    setReserveGbRaw(raw);
-    const n = parseReserveGb(raw);           // model/reserveGb.ts — testable
-    if (n === null) return;                  // mid-edit or invalid: draft stands
-    setReserveGb(n);
-    if (comfyui) setComfyui({ ...comfyui, reserve_gb: n });
-  }
-
   // --- Footprint budgets ----------------------------------------------------
-
-  // Which physical GPU each column represents — derived from the world
-  // snapshot's placement map (World.snapshot "placement"), not hardcoded;
-  // GpuColumn derives the same values independently for its own layout.
-  const hipfireGpu = world.placement.hipfire;
-  const sharedGpu = world.placement.lemonade;
-
-  const gpu0Total = gpus.find((g) => g.index === hipfireGpu)?.total ?? DEFAULT_GPU_BYTES;
-  const gpu1Total = gpus.find((g) => g.index === sharedGpu)?.total ?? DEFAULT_GPU_BYTES;
 
   const placedFootprint = placedModel
     ? (models.find((m) => m.file === placedModel)?.footprint ?? 0)
     : 0;
-  const comfyReserveBytes = comfyui?.state === "leave" ? comfyui.reserve_gb * 1e9 : 0;
 
-  // null ("don't touch") shows the CURRENT live footprint (world state
-  // already reports 0 when hipfire isn't running, see
-  // app/state.py:HIPFIRE_FOOTPRINT-if-running-else-0) rather than a guessed
-  // number — the meter gets a subdued style below so it reads as "this is
-  // what's there now," not "this is what the draft will do."
-  const gpu0Bytes =
-    hipfire === null
-      ? world.tenants.hipfire.footprint
-      : hipfire.state === "running"
-        ? HIPFIRE_FOOTPRINT_BYTES
-        : 0;
-  const gpu1Bytes = placedFootprint + comfyReserveBytes;
-
-  const gpu0Pct = gpu0Total > 0 ? (gpu0Bytes / gpu0Total) * 100 : 0;
-  const gpu1Pct = gpu1Total > 0 ? (gpu1Bytes / gpu1Total) * 100 : 0;
-
-  const hipfireChoice: "none" | "running" | "parked" = hipfire === null ? "none" : hipfire.state;
-  const comfyChoice: "none" | "leave" | "free" = comfyui === null ? "none" : comfyui.state;
+  // One card per declared resource, ordered the same way the board is
+  // (nodes.ts: gpu_index then resource name) so the draft and the live
+  // board read the same left-to-right.
+  const resourceEntries = Object.entries(world.tenants).sort(
+    ([nameA, a], [nameB, b]) => a.gpu_index - b.gpu_index || nameA.localeCompare(nameB),
+  );
 
   return (
     <>
@@ -388,12 +334,17 @@ export default function SetBuilder({
             boundaries: ModelLibrary's search and Place buttons, SavedSets'
             per-row Load/Duplicate/Delete, and every control in the draft
             card) whenever an overwrite confirmation is pending — see
-            CRITICAL 1. The lemonade/comfyui drop target isn't a form
-            control, so handleDrop also short-circuits explicitly while a
-            snapshot is pending. */}
+            CRITICAL 1. The drop target isn't a form control, so handleDrop
+            also short-circuits explicitly while a snapshot is pending. */}
         <fieldset className="builder-fieldset" disabled={overwriteSnapshot !== null}>
           <div className="builder-side">
-            <ModelLibrary models={models} onPlace={placeModel} targetGpu={sharedGpu} />
+            {loadResource && (
+              <ModelLibrary
+                models={models}
+                onPlace={placeModel}
+                targetGpu={world.tenants[loadResource].gpu_index}
+              />
+            )}
             <SavedSets
               sets={sets}
               listError={listError}
@@ -478,149 +429,116 @@ export default function SetBuilder({
               title={nodeLabel}
               actions={<span className="ui-pill ui-pill-busy">{labels.draftPill}</span>}
             >
-              <div className="builder-gpu-row">
-                <div className="builder-gpu">
-                  <h3>GPU {hipfireGpu}</h3>
-                  {gpu0Pct > OVER_BUDGET_PCT && <Banner message={messages.overBudget()} />}
-                  {/* Subdued only while hipfire is "don't touch": the bar is
-                      then reporting the LIVE footprint, not a drafted one,
-                      and the caption underneath says so in words. */}
-                  <div className={hipfire === null ? "builder-meter-subdued" : undefined}>
-                    <Meter capacity={{ used: gpu0Bytes, total: gpu0Total }} />
-                  </div>
-                  {hipfire === null && <p className="helper-text">current live state</p>}
+              {resourceEntries.length === 0 ? (
+                <p className="helper-text">nothing declared on this node yet</p>
+              ) : (
+                <div className="builder-gpu-row">
+                  {resourceEntries.map(([resource, tenant]) => {
+                    const spec = KIND_DRAFT_SPEC[tenant.engine];
+                    const gpuTotal =
+                      gpus.find((g) => g.index === tenant.gpu_index)?.total ?? DEFAULT_GPU_BYTES;
+                    const choice = draftChoiceFor(resources, resource);
+                    const bytes = draftedFootprintBytes(
+                      tenant, choice, placedFootprint, HIPFIRE_FOOTPRINT_BYTES,
+                    );
+                    const pct = gpuTotal > 0 ? (bytes / gpuTotal) * 100 : 0;
+                    const isLoadResource = resource === loadResource;
 
-                  <div className="tenant-card">
-                    <div className="tenant-card-head">
-                      <span className="tenant-name">hipfire</span>
-                    </div>
-                    <div className="tenant-actions">
-                      <button
-                        type="button"
-                        className={hipfireChoice === "none" ? "primary" : undefined}
-                        onClick={() => setHipfireChoice("none")}
+                    return (
+                      <div
+                        key={resource}
+                        className={isLoadResource ? "builder-gpu set-builder-drop" : "builder-gpu"}
+                        {...(isLoadResource
+                          ? { onDragOver: (e: DragEvent<HTMLDivElement>) => e.preventDefault(), onDrop: handleDrop }
+                          : {})}
                       >
-                        don't touch
-                      </button>
-                      <button
-                        type="button"
-                        className={hipfireChoice === "running" ? "primary" : undefined}
-                        onClick={() => setHipfireChoice("running")}
-                      >
-                        Running
-                      </button>
-                      <button
-                        type="button"
-                        className={hipfireChoice === "parked" ? "primary" : undefined}
-                        onClick={() => setHipfireChoice("parked")}
-                      >
-                        Parked
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  className="builder-gpu set-builder-drop"
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={handleDrop}
-                >
-                  <h3>GPU {sharedGpu}</h3>
-                  {gpu1Pct > OVER_BUDGET_PCT && <Banner message={messages.overBudget()} />}
-                  <Meter capacity={{ used: gpu1Bytes, total: gpu1Total }} />
-
-                  <div className="tenant-card">
-                    <div className="tenant-card-head">
-                      <span className="tenant-name">lemonade</span>
-                    </div>
-                    {placedModel ? (
-                      <>
-                        <div className="tenant-meta">
-                          <span title={placedModel}>{truncateMiddle(placedModel)}</span>
-                          <span>{bytesToGB(placedFootprint)} GB</span>
+                        <h3>{resource} · GPU {tenant.gpu_index}</h3>
+                        {pct > OVER_BUDGET_PCT && <Banner message={messages.overBudget()} />}
+                        {/* Subdued only at "don't touch": the bar is then
+                            reporting the LIVE footprint, not a drafted one,
+                            and the caption underneath says so in words. */}
+                        <div className={choice === "none" ? "builder-meter-subdued" : undefined}>
+                          <Meter capacity={{ used: bytes, total: gpuTotal }} />
                         </div>
-                        <p className="helper-text">Placed model becomes the default chat route.</p>
-                        <input
-                          type="text"
-                          className="builder-catalog-id"
-                          placeholder="catalog id (optional, enables durable revert)"
-                          value={catalogId}
-                          onChange={(e) => updateCatalogId(e.target.value)}
-                        />
-                        <div className="tenant-actions">
-                          <button type="button" onClick={removeModel}>
-                            remove model
-                          </button>
+                        {choice === "none" && <p className="helper-text">current live state</p>}
+
+                        <div className="tenant-card">
+                          <div className="tenant-card-head">
+                            <span className="tenant-name">{resource}</span>
+                          </div>
+
+                          {isLoadResource ? (
+                            placedModel ? (
+                              <>
+                                <div className="tenant-meta">
+                                  <span title={placedModel}>{truncateMiddle(placedModel)}</span>
+                                  <span>{bytesToGB(placedFootprint)} GB</span>
+                                </div>
+                                <p className="helper-text">Placed model becomes the default chat route.</p>
+                                <input
+                                  type="text"
+                                  className="builder-catalog-id"
+                                  placeholder="catalog id (optional, enables durable revert)"
+                                  value={catalogId}
+                                  onChange={(e) => updateCatalogId(e.target.value)}
+                                />
+                                <div className="tenant-actions">
+                                  <button type="button" onClick={removeModel}>
+                                    remove model
+                                  </button>
+                                </div>
+                              </>
+                            ) : durable ? (
+                              // durable persists even though no placedModel
+                              // could be derived from it (e.g.
+                              // default_route_model without the "extra."
+                              // prefix) — surfaced explicitly so it can
+                              // never silently ride along on save.
+                              <div className="durable-chip">
+                                <span>durable route: {durable.default_route_model}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setDurable(null)}
+                                  aria-label="clear durable route"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ) : (
+                              <>
+                                <div className="builder-dropzone">{labels.dropToAssign}</div>
+                                {choice === "unloaded" && (
+                                  <p className="helper-text">currently set to unload</p>
+                                )}
+                              </>
+                            )
+                          ) : (
+                            <div className="tenant-actions">
+                              <button
+                                type="button"
+                                className={choice === "none" ? "primary" : undefined}
+                                onClick={() => setResources((r) => setResourceChoice(r, resource, "none"))}
+                              >
+                                don't touch
+                              </button>
+                              {spec?.options.map((opt) => (
+                                <button
+                                  key={opt}
+                                  type="button"
+                                  className={choice === opt ? "primary" : undefined}
+                                  onClick={() => setResources((r) => setResourceChoice(r, resource, opt))}
+                                >
+                                  {DESIRED_BUTTON_LABEL[opt]}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                      </>
-                    ) : durable ? (
-                      // durable persists even though no placedModel could be
-                      // derived from it (e.g. default_route_model without the
-                      // "extra." prefix) — surfaced explicitly so it can
-                      // never silently ride along on save. See IMPORTANT 4.
-                      <div className="durable-chip">
-                        <span>durable route: {durable.default_route_model}</span>
-                        <button
-                          type="button"
-                          onClick={() => setDurable(null)}
-                          aria-label="clear durable route"
-                        >
-                          ✕
-                        </button>
                       </div>
-                    ) : (
-                      <>
-                        <div className="builder-dropzone">{labels.dropToAssign}</div>
-                        {lemonade?.state === "unloaded" && (
-                          <p className="helper-text">currently set to unload</p>
-                        )}
-                      </>
-                    )}
-                  </div>
-
-                  <div className="tenant-card">
-                    <div className="tenant-card-head">
-                      <span className="tenant-name">comfyui</span>
-                    </div>
-                    <div className="tenant-actions">
-                      <button
-                        type="button"
-                        className={comfyChoice === "none" ? "primary" : undefined}
-                        onClick={() => setComfyChoice("none")}
-                      >
-                        don't touch
-                      </button>
-                      <button
-                        type="button"
-                        className={comfyChoice === "leave" ? "primary" : undefined}
-                        onClick={() => setComfyChoice("leave")}
-                      >
-                        leave (reserve)
-                      </button>
-                      <button
-                        type="button"
-                        className={comfyChoice === "free" ? "primary" : undefined}
-                        onClick={() => setComfyChoice("free")}
-                      >
-                        free
-                      </button>
-                    </div>
-                    {comfyChoice === "leave" && (
-                      <label className="builder-field builder-field-inline">
-                        reserve GB
-                        <input
-                          type="number"
-                          min={1}
-                          step={1}
-                          value={reserveGbRaw}
-                          onChange={(e) => updateReserveGb(e.target.value)}
-                          onBlur={() => setReserveGbRaw(String(reserveGb))}
-                        />
-                      </label>
-                    )}
-                  </div>
+                    );
+                  })}
                 </div>
-              </div>
+              )}
             </Panel>
           </div>
         </fieldset>

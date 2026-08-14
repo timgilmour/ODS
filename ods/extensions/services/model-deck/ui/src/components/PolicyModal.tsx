@@ -5,7 +5,6 @@ import {
   updateLocation,
   type PolicyMap,
   type StorageState,
-  type TenantName,
 } from "../api";
 import { labels, messages } from "../model/messages";
 import { parseWatermark } from "../model/watermark";
@@ -24,28 +23,30 @@ interface PolicyModalProps {
 
 // Priorities assigned top-to-bottom on Save, by final row order — reordering
 // via Up/Down never lets a rank gap or duplicate happen, since it's always
-// re-derived from row position rather than edited directly.
-const RANKS = [100, 50, 40];
+// re-derived from row position rather than edited directly. E1: any number
+// of declared resources now (not a fixed three), so this is a FORMULA, not
+// a fixed list — still strictly descending, still gapped by 10 so a later
+// manual policy.json edit between two ranks has room.
+function rankFor(rowIndex: number): number {
+  return 100 - rowIndex * 10;
+}
 
-/** Tenant policy table: reorder (Up/Down, not drag — simpler and
+/** Resource policy table: reorder (Up/Down, not drag — simpler and
  * keyboard-accessible) assigns descending priority; pinned + idle_ttl are
- * edited in place per row. Save PUTs the full three-tenant mapping and
+ * edited in place per row. Save PUTs the full resource->policy mapping and
  * closes; Cancel discards every local edit (nothing is written until
  * Save). */
 export default function PolicyModal({ policy, storageState, onClose, onSaved }: PolicyModalProps) {
-  const [order, setOrder] = useState<TenantName[]>(
-    () =>
-      (Object.keys(policy) as TenantName[]).sort(
-        (a, b) => policy[b].priority - policy[a].priority,
-      ),
+  const [order, setOrder] = useState<string[]>(
+    () => Object.keys(policy).sort((a, b) => policy[b].priority - policy[a].priority),
   );
-  const [pinned, setPinned] = useState<Record<TenantName, boolean>>(() => {
-    const out = {} as Record<TenantName, boolean>;
+  const [pinned, setPinned] = useState<Record<string, boolean>>(() => {
+    const out: Record<string, boolean> = {};
     for (const t of order) out[t] = policy[t].pinned;
     return out;
   });
-  const [idleTtl, setIdleTtl] = useState<Record<TenantName, number>>(() => {
-    const out = {} as Record<TenantName, number>;
+  const [idleTtl, setIdleTtl] = useState<Record<string, number>>(() => {
+    const out: Record<string, number> = {};
     for (const t of order) out[t] = policy[t].idle_ttl;
     return out;
   });
@@ -96,7 +97,7 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
     setError(null);
     const payload = {} as PolicyMap;
     order.forEach((tenant, i) => {
-      payload[tenant] = { priority: RANKS[i], pinned: pinned[tenant], idle_ttl: idleTtl[tenant] };
+      payload[tenant] = { priority: rankFor(i), pinned: pinned[tenant], idle_ttl: idleTtl[tenant] };
     });
     // REFUSE BEFORE ANY WRITE [max-review #15]. An unparseable watermark used
     // to coerce to null, and `watermark_gb: null` is a legal value meaning "no
@@ -182,7 +183,7 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
         <tbody>
           {order.map((tenant, i) => (
             <tr key={tenant}>
-              <td>P{RANKS[i]}</td>
+              <td>P{rankFor(i)}</td>
               <td className="tenant-name">{tenant}</td>
               <td>
                 <input

@@ -23,7 +23,13 @@ import {
   tagsWith,
 } from "../model/factsView";
 import { labels, messages } from "../model/messages";
-import { isSwapSlotId, isTenantName, nodeIdOfPlacement, type DeckResource, type Placement } from "../model/nodes";
+import {
+  isSwapSlotId,
+  nodeIdOfPlacement,
+  SPARK_CONTROL,
+  type DeckResource,
+  type Placement,
+} from "../model/nodes";
 import { settingsIdentityFor, settingsKeyOf } from "../model/settingsView";
 import Banner from "../ui/Banner";
 import ProvenanceDot from "../ui/ProvenanceDot";
@@ -299,13 +305,14 @@ export default function ModelDetailDrawer({
     }
   }
 
-  // A tenant control belonging to THIS placement. The resource's controls are
-  // the authority on what is a local tenant (isTenantName narrows the
-  // deliberately-`string[]` list), but a GPU can host two tenants and this
-  // drawer is about one placement — the other tenant's verbs belong to its
-  // own chip, not to this one.
+  // A local resource control belonging to THIS placement. E1: one card per
+  // declared resource now (not per GPU), so `controls` carries at most one
+  // non-spark entry — the resource's own name — and it always IS the
+  // resource that owns this placement (there is no second tenant sharing
+  // the card to disambiguate against anymore, unlike the pre-E1 GPU-card
+  // model this replaced).
   const tenantControl = placedOn
-    ? (placedOn.resource.controls.filter(isTenantName).find((c) => c === placement.engine) ?? null)
+    ? (placedOn.resource.controls.find((c) => c !== SPARK_CONTROL) ?? null)
     : null;
   // A swap node's slot key is a fixed convention backend-side
   // (app/observe.py:slot_key, mirrored in nodes.ts's isSwapSlotId).
@@ -602,12 +609,10 @@ export default function ModelDetailDrawer({
                   second set of rules to keep in step. */}
               {tenantControl && (
                 <PlacementActions
-                  tenant={tenantControl}
+                  resource={tenantControl}
                   world={world}
                   models={models}
-                  hasPlacement={placedOn.resource.placements.some(
-                    (p) => p.engine === tenantControl,
-                  )}
+                  hasPlacement={placedOn.resource.placements.some((p) => p.id === placement.id)}
                   coldGgufs={coldGgufs}
                   onRefresh={onRefresh}
                 />

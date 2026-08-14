@@ -217,6 +217,28 @@ describe("labels", () => {
     expect(labels.pinnedTitle).toContain("evict");
     expect(labels.inUseTitle).toContain("force");
   });
+
+  it("translates a warn-step reason code into a resource-tagged sentence", () => {
+    // app/sets.py:709 — resource-tagged.
+    expect(labels.stepWarnReason("busy-skipped", "agent")).toBe("agent skipped — busy");
+    // app/sets.py:758 — resource-tagged.
+    expect(labels.stepWarnReason("no-model-to-load", "gguf-a")).toBe(
+      "gguf-a has no model to load",
+    );
+    // app/sets.py:653 — box-wide, no resource.
+    expect(labels.stepWarnReason("durable-revert-unavailable")).toBe(
+      "durable revert unavailable — no catalog id to re-activate the previous model",
+    );
+  });
+
+  it("degrades an unrecognized warn reason to the raw code rather than inventing a sentence", () => {
+    expect(labels.stepWarnReason("some-future-reason")).toBe("some-future-reason");
+  });
+
+  it("falls back to a plain verb when a step label is called with no resource", () => {
+    expect(labels.stepUnload(null)).toBe("Unload");
+    expect(labels.stepLoad("gguf-a")).toBe("Load — gguf-a");
+  });
 });
 
 describe("humanizeAge", () => {

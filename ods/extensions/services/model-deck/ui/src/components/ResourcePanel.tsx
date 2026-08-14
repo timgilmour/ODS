@@ -1,6 +1,6 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import { labels, messages } from "../model/messages";
-import { isTenantName, SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
+import { SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
 import Meter from "../ui/Meter";
 import ModelChip from "../ui/ModelChip";
 import Panel from "../ui/Panel";
@@ -135,22 +135,26 @@ export default function ResourcePanel({
             spark && (
               <SparkSwap key={control} nodeId={nodeId} spark={spark} onChanged={onRefresh} />
             )
-          ) : isTenantName(control) ? (
+          ) : (
+            // Any non-spark control is a local resource's own name (E1:
+            // nodes.ts's DeckResource.controls carries exactly `[resource]`
+            // for a declared local resource — never an unrecognized
+            // string), so no narrowing guard is needed here anymore.
             <PlacementActions
               key={control}
-              tenant={control}
+              resource={control}
               world={world}
               models={models}
-              // Whether this tenant already has a chip on this resource. A
-              // parked hipfire deliberately has none, and then the control
-              // row is the only thing that can say which tenant it is and
-              // what state it is in. Computed here because the placements
-              // are already in hand.
-              hasPlacement={resource.placements.some((p) => p.engine === control)}
+              // Whether this resource already has a chip on this card. A
+              // parked hipfire-kind resource deliberately has none, and then
+              // the control row is the only thing that can say what state
+              // it is in. One resource, at most one non-external placement
+              // now (E1: one card per resource, not per GPU).
+              hasPlacement={resource.placements.some((p) => p.kind !== "external")}
               coldGgufs={coldGgufs}
               onRefresh={onRefresh}
             />
-          ) : null,
+          ),
         )}
     </Panel>
   );

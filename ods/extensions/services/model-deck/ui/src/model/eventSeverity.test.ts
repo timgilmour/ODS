@@ -43,7 +43,7 @@ describe("eventSeverity — outcome outranks the suffix", () => {
     // :835 {"outcome": "failed", "step", "error"} and :850 {"outcome": "ok"}.
     // The kind alone therefore cannot classify it, and the suffix rule made
     // a failed apply render GREEN [max-review #14].
-    expect(eventSeverity("apply-end", { outcome: "failed", step: "load_lemonade" }))
+    expect(eventSeverity("apply-end", { outcome: "failed", step: "load" }))
       .toBe("failure");
   });
 
@@ -54,7 +54,7 @@ describe("eventSeverity — outcome outranks the suffix", () => {
   it("falls back to the suffix convention when there is no outcome", () => {
     // The bare-kind expectation below stays valid; only the failed case was
     // ever wrong. Also covers a detail that is not an object at all.
-    expect(eventSeverity("apply-end", { step: "load_lemonade" })).toBe("success");
+    expect(eventSeverity("apply-end", { step: "load" })).toBe("success");
     expect(eventSeverity("apply-end", null)).toBe("success");
     expect(eventSeverity("apply-end", "nonsense")).toBe("success");
   });
@@ -63,6 +63,34 @@ describe("eventSeverity — outcome outranks the suffix", () => {
     // Only "failed" outranks; nothing else in a detail may reclassify.
     expect(eventSeverity("noop", { outcome: "ok" })).toBe("neutral");
   });
+
+  it("still classifies a resource-tagged failed apply-end as failure (E1 Task 8's resource field must not disturb the outcome check)", () => {
+    // app/sets.py's failing-step branch now also carries "resource" in the
+    // detail (T8 review M1) — the apply-end-failures-render-green bug class
+    // this whole describe block guards against, re-pinned with the new
+    // resource-tagged shape so a regression there is caught the same way.
+    expect(
+      eventSeverity("apply-end", {
+        outcome: "failed", step: "unload", resource: "gguf-a", error: "boom",
+      }),
+    ).toBe("failure");
+  });
+});
+
+describe("eventSeverity — exact overrides that beat the suffix convention", () => {
+  it("classifies notify-restart-failed as attention, not failure, despite the -failed suffix", () => {
+    // app/notify.py:97-99: one resource's restart failure, logged in
+    // ISOLATION — every sibling resource sharing that destination still
+    // gets its own restart attempt regardless (the module's per-resource
+    // Let-It-Crash design), and the eventual raise that fails the calling
+    // job already gets its own "-failed"/502 event elsewhere. This is a
+    // degraded-but-isolated per-resource notice, not the terminal failure.
+    expect(eventSeverity("notify-restart-failed")).toBe("attention");
+  });
+
+  it("still classifies an UNRELATED kind's real -failed suffix as failure — the override is exact-match only, not a blanket exemption", () => {
+    expect(eventSeverity("load-failed")).toBe("failure");
+  });
 });
 
 describe("eventSeverity — attention kinds without the suffix", () => {
@@ -70,12 +98,6 @@ describe("eventSeverity — attention kinds without the suffix", () => {
     // app/routers/control.py logs this when an operator action overtook a
     // pull-through mid-copy. Neutral would read as "nothing to see here".
     expect(eventSeverity("pull-through-superseded")).toBe("attention");
-  });
-
-  it("flags an unknown policy tenant", () => {
-    // app/routers/policy.py's put_policy: the tenant is ACCEPTED, so this
-    // event is the only sign a typo'd name is policying nothing.
-    expect(eventSeverity("policy-unknown-tenant")).toBe("attention");
   });
 
   it("flags a misconfigured node", () => {
@@ -135,17 +157,30 @@ describe("eventSeverity — attention", () => {
 
 describe("eventSeverity — neutral", () => {
   it("classifies real routine kinds as neutral", () => {
+    // E1 Task 8 renamed the per-step success kinds from kind-suffixed
+    // (park_hipfire, unload_lemonade, free_comfyui, ...) to bare
+    // verb-generic ones (app/sets.py's `_run_apply`: `log_event(events_path,
+    // name, detail)` where `name = step["step"]`) — still unmatched by any
+    // suffix/exact table, so still neutral, just under the new spelling.
     expect(eventSeverity("noop")).toBe("neutral");
     expect(eventSeverity("activate")).toBe("neutral");
-    expect(eventSeverity("park_hipfire")).toBe("neutral");
-    expect(eventSeverity("resume_hipfire")).toBe("neutral");
+    expect(eventSeverity("park")).toBe("neutral");
+    expect(eventSeverity("resume")).toBe("neutral");
     expect(eventSeverity("policy_patch")).toBe("neutral");
-    expect(eventSeverity("unload_lemonade")).toBe("neutral");
-    expect(eventSeverity("free_comfyui")).toBe("neutral");
+    expect(eventSeverity("restore_settings")).toBe("neutral");
+    expect(eventSeverity("unload")).toBe("neutral");
+    expect(eventSeverity("load")).toBe("neutral");
+    expect(eventSeverity("free")).toBe("neutral");
     expect(eventSeverity("load-retriggered")).toBe("neutral");
     expect(eventSeverity("move_cancelled")).toBe("neutral");
     expect(eventSeverity("storage_skip")).toBe("neutral");
     expect(eventSeverity("storage_notify_deferred")).toBe("neutral");
+  });
+
+  it("a resource-tagged detail never disturbs a bare verb-generic step's neutral classification", () => {
+    // Kind alone still decides here — "resource" riding in the detail
+    // (E1 Task 8) is not "outcome", so it cannot promote/demote anything.
+    expect(eventSeverity("unload", { resource: "gguf-a", model: "extra.m.gguf" })).toBe("neutral");
   });
 
   it("falls through to neutral for a kind nobody enumerated here — the whole point of matching by convention", () => {
