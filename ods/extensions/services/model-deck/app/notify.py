@@ -38,23 +38,49 @@ raises, the container is very likely just still stopping — wait out
 Docker's grace period, then attempt start() anyway (the normal next step
 regardless of how stop() finished). If start() then succeeds, the goal
 state ("container restarting") is reached for that resource and it
-contributes no warning, same as the happy path. If start() also raises,
-that EngineError propagates — a real double failure, not a timing race,
-should surface as a failure (and, per the house "let it crash" policy,
-abandons any remaining resources still queued in the loop rather than
-guessing at a partial-failure summary).
+contributes no warning, same as the happy path.
+
+E1 Task 9 review fix — a restart failure (start() still raising after the
+stop-retry, or a plain start() failure) must not fail INVISIBLY, and one
+resource's failure must not silently swallow whether its SIBLINGS ever got
+attempted. Chosen semantic: ISOLATE per resource, like
+`app.engine_kinds`' `execute_unload`/`execute_load` and `app.arbiter`'s
+`_execute_restore` already do for every other per-resource actuation loop
+in this codebase (a raise from one action must not abort the rest) — NOT
+`app.sets.apply`'s halt-on-first-step precedent, which fits a single
+operator-authored PLAN whose later steps may depend on earlier ones; these
+are independent resources sharing nothing but a destination store, so a
+failed restart on one has no bearing on whether a sibling's restart can
+still succeed. So: every declared entry still gets its OWN restart
+attempt regardless of an earlier entry's failure (no rollback, no
+transaction across resources — Let It Crash: a resource that already
+restarted successfully STAYS restarted even if a sibling then fails), but
+the overall call still ends by raising (never swallowing a failure into a
+benign warning return) once every entry has been attempted, so the
+caller's existing failure path (an app-wide EngineError->502 handler, or a
+job's post-move failure) still fires. Each failure is logged as its own
+resource+container-scoped event (`notify-restart-failed`) BEFORE moving on
+— the same "resource" field app.sets.apply's failing-step event and
+app.engine_kinds' unload-failed/load-failed events already carry, for the
+identical reason: two same-kind resources failing identically must stay
+distinguishable in the log, not collapse into one anonymous line. When
+more than one entry fails, the FIRST failure encountered is what
+ultimately propagates (deterministic, and every failure — first or not —
+already has its own logged event regardless).
 """
 
 import time
 
 from app.engine_kinds import ENGINE_KINDS
 from app.engines import EngineError
+from app.events import log_event
 
 
 def notify_engine(location: dict, deck: dict) -> str | None:
     local = deck["node_store"].get("local")
     engines = local.get("engines", []) if local is not None else []
     deferred: list[str] = []
+    failure: EngineError | None = None
     for entry in engines:
         if entry["kind"] != location["engine"]:
             continue
@@ -71,10 +97,16 @@ def notify_engine(location: dict, deck: dict) -> str | None:
             deferred.append(resource)
             continue
         try:
-            deck["dockerctl"].stop(container)
-        except EngineError:
-            time.sleep(10)
-        deck["dockerctl"].start(container)
+            _restart(deck, container)
+        except EngineError as exc:
+            log_event(deck["events_path"], "notify-restart-failed",
+                      {"resource": resource, "container": container,
+                       "error": str(exc)})
+            if failure is None:
+                failure = exc
+            continue
+    if failure is not None:
+        raise failure
     if deferred:
         return "; ".join(
             f"{resource} has a model loaded — restart deferred; the new "
@@ -82,3 +114,11 @@ def notify_engine(location: dict, deck: dict) -> str | None:
             for resource in deferred
         )
     return None
+
+
+def _restart(deck: dict, container: str) -> None:
+    try:
+        deck["dockerctl"].stop(container)
+    except EngineError:
+        time.sleep(10)
+    deck["dockerctl"].start(container)
