@@ -591,6 +591,11 @@ def create_app() -> FastAPI:
     app.include_router(rename.router, prefix="/api")
     app.include_router(provenance_router.router, prefix="/api")
     app.include_router(nodes_router.router, prefix="/api")
+    # Unprefixed sibling of nodes_router.router (E1 Task 10): GET
+    # /engine-kinds is the UI kind picker's source, not a per-node
+    # resource — see app/routers/nodes.py's module docstring for why it
+    # lives in a second, separately-mounted router in the same file.
+    app.include_router(nodes_router.kinds_router, prefix="/api")
 
     # ui/dist doesn't exist until the UI build lands — mount only when
     # present so the API keeps working standalone until then. Mounted LAST:

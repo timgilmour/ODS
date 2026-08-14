@@ -222,6 +222,25 @@ class PolicyStore:
             data[_AUTO_KEY] = {"enabled": bool(enabled)}
             self._save(data)
 
+    def forget(self, resource: str) -> None:
+        """Drop the stored row for `resource`, if any — E1 Task 10's
+        'forget' semantics (spec §6.2 names policy rows deck bookkeeping,
+        alongside IntentStore's per-key record): a resource forgotten
+        through the engines API must not leave an override behind for a
+        LATER re-declaration of the same name to silently inherit — the
+        undeclared-row-survives behavior `get()`/the module docstring
+        document is deliberate for hand-edits/old writes, but an explicit
+        forget is the operator (or this router) saying "erase the row",
+        not "stop looking at it". No-op when there is no stored row for
+        `resource` (mirrors IntentStore.forget's absent-key no-op) — does
+        NOT require `resource` to be currently undeclared; the caller here
+        removes the declaration entry first, but this method doesn't
+        depend on that ordering to behave correctly."""
+        with self._lock:
+            data = self._load() or {}
+            if data.pop(resource, None) is not None:
+                self._save(data)
+
 
 # --- Storage tiering policy -------------------------------------------------
 

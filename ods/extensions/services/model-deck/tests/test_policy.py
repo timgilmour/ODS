@@ -489,6 +489,34 @@ def test_policy_rows_come_from_declaration(tmp_path):
     assert store.get()["gguf-a"]["priority"] == 99
 
 
+def test_forget_removes_a_stored_row(tmp_path):
+    """E1 Task 10: forget() pops the row from disk (IntentStore.forget's
+    sibling — tests/test_intent.py's test_forget_removes_the_key)."""
+    store = _policy_store(tmp_path, declared={})
+    store.put({"gguf-a": {"priority": 1, "pinned": False, "idle_ttl": 5}})
+
+    store.forget("gguf-a")
+
+    assert "gguf-a" not in json.loads((tmp_path / "policy.json").read_text())
+
+
+def test_forget_of_a_key_with_no_row_is_a_noop(tmp_path):
+    store = _policy_store(tmp_path, declared={})
+
+    store.forget("ghost")  # must not raise
+
+
+def test_forget_then_redeclare_gets_a_fresh_default_not_the_old_row(tmp_path):
+    """The point of forget deleting rather than merely hiding: a stored
+    override must not resurrect under a re-declaration of the same name."""
+    store = _policy_store(tmp_path, declared={
+        "gguf-a": {"priority": 10, "pinned": False, "idle_ttl": 60}})
+    store.put({"gguf-a": {"priority": 999, "pinned": True, "idle_ttl": 0}})
+    store.forget("gguf-a")
+
+    assert store.get()["gguf-a"] == {"priority": 10, "pinned": False, "idle_ttl": 60}
+
+
 def test_undeclared_stored_row_is_invisible_but_kept(tmp_path):
     """Orphaned row (e.g. hand-edited in): kept on disk but invisible on read.
 

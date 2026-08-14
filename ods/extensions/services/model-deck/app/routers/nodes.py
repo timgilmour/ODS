@@ -1,4 +1,6 @@
-"""Nodes router — the registry's CRUD + the test-connection probe.
+"""Nodes router — the registry's CRUD + the test-connection probe + (E1
+Task 10) the local node's declared-engines CRUD and the engine-kinds
+catalog.
 
 Same conventions as the sibling routers: deps from request.app.state.deck,
 GuardError/ValueError left to the app-wide handlers (409/422), no auth.
@@ -16,15 +18,46 @@ specifically: `node-updated`'s event detail carries the field NAME
 
 Event kinds ride ui/src/model/eventSeverity.ts's suffix convention
 (-failed => failure severity), so the Events tab needs zero new mapping.
+
+E1 Task 10 — declared-engines CRUD (spec §1/§5/§6.2): the engine bodies
+below (`add_engine`/`update_engine`) are bound as a bare `dict`, never a
+strict pydantic model, so a shape defect is diagnosed by
+`app.engine_kinds.validate_engines` — the single module allowed to know a
+kind's connection schema (spec §8) — and its ONE-LINE message surfaces
+verbatim. A stricter pydantic body model would validate (and word its
+errors) before validate_engines ever ran. The resulting ValueError is
+re-raised as a `RequestValidationError` (never left to the app-wide bare
+ValueError handler) so it goes through app.main's REDACTING handler —
+the same posture app.routers.sets.create_set's hand-rolled
+`ConfigSet.model_validate` established (that module's docstring): today's
+connection fields (url, metrics_url, container) carry no secret, but the
+route makes no kind-specific exception, since E2 opens this schema up to
+kinds that might.
+
+`forget` (DELETE) is bookkeeping-only (spec §6.2 / coexistence ruling): it
+drops the declaration entry plus the deck's OWN bookkeeping for it — the
+intent record and the stored policy row — and nothing else (settings
+scopes/provenance/events all survive, same posture as NodeStore.remove's
+own docstring). It never calls the engine — no client lookup appears
+anywhere in `forget_engine` below.
+
+`kinds_router` is a SEPARATE, unprefixed router (mounted at `/api` in
+app.main alongside `router` below) so `GET /engine-kinds` lands at
+`/api/engine-kinds`, not nested under `/api/nodes` — it is the UI's kind
+picker source (spec §5), not a per-node resource.
 """
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 
+from app.engine_kinds import ENGINE_KINDS, KNOWN_KINDS, validate_engines
 from app.engines import EngineError
 from app.events import log_event
+from app.observe import local_key
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
+kinds_router = APIRouter(tags=["engine-kinds"])
 
 
 class NodeCreate(BaseModel):
@@ -162,3 +195,117 @@ def test_connection(body: NodeTestBody, request: Request) -> dict:
     return {"ok": True, "name": info.get("name"), "platform": info.get("platform"),
             "capabilities": info.get("capabilities", []),
             "gpu_count": len(info.get("gpus") or [])}
+
+
+# ===========================================================================
+# E1 Task 10 — declared-engines CRUD (local node only, spec §1/§4)
+# ===========================================================================
+
+
+def _local_engines(deck: dict) -> list[dict]:
+    """The local node's `engines[]` declaration, read LIVE off node_store —
+    never a boot-time copy (same posture as app.routers.control._declared_kind
+    / app.routers.build_world_snapshot)."""
+    local = deck["node_store"].get("local")
+    return list(local.get("engines", [])) if local is not None else []
+
+
+def _shape_error(msg: str, *loc: str) -> RequestValidationError:
+    """Wrap a body-shape defect as a RequestValidationError (module
+    docstring: never the bare ValueError handler for a request body) —
+    `loc` mirrors pydantic's own error-location tuple convention."""
+    return RequestValidationError(
+        [{"type": "value_error", "loc": ("body", *loc), "msg": msg}])
+
+
+@router.post("/local/engines")
+def add_engine(body: dict, request: Request) -> dict:
+    """Declare a new local engine. 422 (validate_engines' own message) for
+    a shape defect; 409 for a resource already declared — checked AFTER
+    shape validation (NodeStore.add's own order: full validate, then
+    duplicate-identity check)."""
+    deck = request.app.state.deck
+    store = deck["node_store"]
+    try:
+        validate_engines([body])
+    except ValueError as exc:
+        raise _shape_error(str(exc)) from exc
+    resource = body["resource"]
+    engines = _local_engines(deck)
+    if any(e["resource"] == resource for e in engines):
+        raise HTTPException(status_code=409,
+                            detail=f"engine {resource!r} already exists")
+    entry = store.update("local", {"engines": engines + [body]})
+    log_event(deck["events_path"], "engine-added",
+              {"resource": resource, "kind": body["kind"]})
+    return next(e for e in entry["engines"] if e["resource"] == resource)
+
+
+@router.put("/local/engines/{resource}")
+def update_engine(resource: str, body: dict, request: Request) -> dict:
+    """Full-entry replace. `resource` in the body must equal the path — a
+    declared resource's identity is immutable (it keys `local/<resource>`
+    intent, policy, and settings scopes, the same rationale
+    app/node_store.py's `id` docstring states for nodes) — a mismatch is
+    refused as a rename attempt (422), never coerced to either side
+    ([[literal-declared-inputs]]). 404 when the path resource isn't
+    currently declared."""
+    deck = request.app.state.deck
+    store = deck["node_store"]
+    if body.get("resource") != resource:
+        raise _shape_error(
+            f"resource {body.get('resource')!r} must match the path "
+            f"{resource!r} — rename is refused; forget and re-add instead",
+            "resource")
+    engines = _local_engines(deck)
+    if not any(e["resource"] == resource for e in engines):
+        raise HTTPException(status_code=404, detail=f"unknown engine {resource!r}")
+    try:
+        validate_engines([body])
+    except ValueError as exc:
+        raise _shape_error(str(exc)) from exc
+    new_engines = [body if e["resource"] == resource else e for e in engines]
+    entry = store.update("local", {"engines": new_engines})
+    log_event(deck["events_path"], "engine-updated", {"resource": resource})
+    return next(e for e in entry["engines"] if e["resource"] == resource)
+
+
+@router.delete("/local/engines/{resource}")
+def forget_engine(resource: str, request: Request) -> dict:
+    """Forget (spec §6.2 / coexistence ruling — module docstring):
+    bookkeeping only. Drops the declaration entry, the intent record, and
+    the stored policy row — nothing else. Never calls the engine: no
+    client lookup anywhere in this function. 404 when unknown."""
+    deck = request.app.state.deck
+    store = deck["node_store"]
+    engines = _local_engines(deck)
+    if not any(e["resource"] == resource for e in engines):
+        raise HTTPException(status_code=404, detail=f"unknown engine {resource!r}")
+    new_engines = [e for e in engines if e["resource"] != resource]
+    # Declaration first: PolicyStore.forget's row-pop must see the resource
+    # as ALREADY undeclared, or its own boundary gate would just
+    # re-materialize the default row it's about to pop (app/policy.py's
+    # forget docstring).
+    store.update("local", {"engines": new_engines})
+    deck["intent_store"].forget(local_key(resource))
+    deck["policy_store"].forget(resource)
+    log_event(deck["events_path"], "engine-removed", {"resource": resource})
+    return {"status": "ok"}
+
+
+@kinds_router.get("/engine-kinds")
+def list_engine_kinds() -> dict:
+    """The UI's kind picker source (spec §5): every known kind's connection
+    schema (field -> required) and its human-initiated verb vocabulary,
+    served from app.engine_kinds — the one module allowed to know engine
+    names (spec §8) — so the picker never bakes a kind name into the UI."""
+    kinds = []
+    for kind in sorted(KNOWN_KINDS):
+        schema = KNOWN_KINDS[kind]
+        kinds.append({
+            "kind": kind,
+            "connection": {field: {"required": required}
+                          for field, required in schema.items()},
+            "human_verbs": sorted(ENGINE_KINDS[kind].human_verbs()),
+        })
+    return {"kinds": kinds}

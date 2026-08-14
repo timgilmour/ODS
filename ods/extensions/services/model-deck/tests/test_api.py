@@ -19,6 +19,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.engine_kinds import KNOWN_KINDS
 from app.engines import EngineError, GuardError
 from app.intent import IntentStore
 from app.main import create_app
@@ -298,6 +299,19 @@ class FakeLocalClients:
     def retire_absent(self, keep_resources) -> None:
         pass  # nothing built to retire — every lookup is live, see client_for
 
+    def fake(self, resource: str) -> "FakeLemonade":
+        """T10: wire (and return) a fresh FakeLemonade for `resource`,
+        stored wherever `client_for` resolves it (the same deck-key
+        convention `_declare_local`'s docstring documents for a resource
+        outside the legacy trio's `_DECK_KEY` map). FakeLemonade specifically
+        — not a per-kind dispatch — because every use of this accessor to
+        date only needs the shared `.calls` list a bookkeeping-only
+        assertion (e.g. forget) reads; nothing here depends on lemonade's
+        load/unload semantics."""
+        instance = FakeLemonade()
+        self._deck[resource] = instance
+        return instance
+
 
 def make_app(tmp_path, monkeypatch):
     """create_app() with MODEL_DECK_NO_WATCHER=1 and every engine client /
@@ -310,9 +324,21 @@ def make_app(tmp_path, monkeypatch):
     deck = app.state.deck
 
     def _get_declared_policy_defaults():
-        """Provide declared policy defaults from test _ENGINES."""
+        """Provide declared policy defaults LIVE off node_store's local
+        `engines[]` (mirrors app.main._build_deck's own same-named helper)
+        — not a frozen snapshot of the module-level `_ENGINES` fixture, so
+        a test that edits the declaration after construction (`_declare_local`,
+        or — T10 — the engines CRUD routes themselves) sees policy defaults
+        that track the edit, the same as production. `_ENGINES` is still
+        what `make_app` SEEDS node_store with below, so every test that never
+        calls `_declare_local` sees byte-identical behavior to before this
+        fixture fix (disclosed, T10: the static version predates any test
+        combining `_declare_local` with a policy assertion, so this gap was
+        never exercised until T10's forget-deletes-the-policy-row test)."""
+        local = deck["node_store"].get("local")
+        engines = local.get("engines", []) if local is not None else []
         declared = {}
-        for engine in _ENGINES:
+        for engine in engines:
             if "resource" in engine and "policy_defaults" in engine:
                 declared[engine["resource"]] = engine["policy_defaults"]
         return declared
@@ -3484,3 +3510,218 @@ def test_unbuilt_mech_error_renders_501_not_502(tmp_path, monkeypatch):
     resp = client.get("/__test/unbuilt-mech")
     assert resp.status_code == 501
     assert "not implemented" in resp.json()["detail"]
+
+
+# ===========================================================================
+# E1 Task 10 — GET /api/engine-kinds, declared-engines CRUD, forget
+# ===========================================================================
+
+
+def test_engine_kinds_route_shape(tmp_path, monkeypatch):
+    """The UI kind picker's source (spec §5): every KNOWN_KINDS entry,
+    its connection schema (field -> required), and its human verb
+    vocabulary — served by the backend, never baked into the UI."""
+    app, _deck = make_app(tmp_path, monkeypatch)
+    resp = TestClient(app).get("/api/engine-kinds")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    kinds = {k["kind"]: k for k in body["kinds"]}
+    assert set(kinds) == set(KNOWN_KINDS)
+    assert kinds["lemonade"]["connection"] == {
+        "url": {"required": True},
+        "metrics_url": {"required": True},
+        "container": {"required": True},
+    }
+    assert kinds["comfyui"]["connection"] == {"url": {"required": True}}
+    assert kinds["hipfire"]["connection"] == {"container": {"required": True}}
+    assert set(kinds["lemonade"]["human_verbs"]) == {"load", "unload"}
+    assert set(kinds["comfyui"]["human_verbs"]) == {"free"}
+    assert set(kinds["hipfire"]["human_verbs"]) == {"park", "resume"}
+
+
+def test_engine_add_validates_and_lands(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+
+    r = TestClient(app).post("/api/nodes/local/engines", json=_GGUF_A_ENTRY)
+
+    assert r.status_code == 200
+    assert deck["node_store"].get("local")["engines"] == [_GGUF_A_ENTRY]
+
+    bad = dict(_GGUF_A_ENTRY, kind="vllm")
+    r2 = TestClient(app).post("/api/nodes/local/engines", json=bad)
+    assert r2.status_code == 422
+
+
+def test_engine_add_422_surfaces_validate_engines_message_via_redacting_handler(
+    tmp_path, monkeypatch
+):
+    """The 422 body must carry validate_engines' own one-line reason, and
+    must go through the REDACTING RequestValidationError handler (a list
+    of error objects, no `input` echoed) — not the bare app-wide ValueError
+    handler (a plain string `detail`), per this router's module docstring."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+    bad = dict(_GGUF_A_ENTRY, kind="vllm")
+
+    r = TestClient(app).post("/api/nodes/local/engines", json=bad)
+
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert isinstance(detail, list)
+    assert "unknown kind" in detail[0]["msg"]
+    assert all("input" not in err for err in detail)
+
+
+def test_engine_add_duplicate_409(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+
+    r = TestClient(app).post("/api/nodes/local/engines", json=_GGUF_A_ENTRY)
+
+    assert r.status_code == 409
+    assert deck["node_store"].get("local")["engines"] == [_GGUF_A_ENTRY]
+
+
+def test_engine_update_replaces_full_entry(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    moved = dict(_GGUF_A_ENTRY, gpu_index=5,
+                 policy_defaults={"priority": 1, "pinned": True, "idle_ttl": 0})
+
+    r = TestClient(app).put("/api/nodes/local/engines/gguf-a", json=moved)
+
+    assert r.status_code == 200
+    assert deck["node_store"].get("local")["engines"] == [moved]
+
+
+def test_engine_rename_refused(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    moved = dict(_GGUF_A_ENTRY, resource="gguf-z")
+
+    r = TestClient(app).put("/api/nodes/local/engines/gguf-a", json=moved)
+
+    assert r.status_code == 422
+    # Refused before any write: the original entry is untouched.
+    assert deck["node_store"].get("local")["engines"] == [_GGUF_A_ENTRY]
+
+
+def test_engine_update_unknown_404(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+
+    r = TestClient(app).put("/api/nodes/local/engines/gguf-a", json=_GGUF_A_ENTRY)
+
+    assert r.status_code == 404
+
+
+def test_engine_delete_unknown_404(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+
+    r = TestClient(app).delete("/api/nodes/local/engines/gguf-a")
+
+    assert r.status_code == 404
+
+
+def test_engine_forget_is_bookkeeping_only(tmp_path, monkeypatch):
+    """Spec §6.2: removal never touches the engine. The fake keeps
+    serving; only the deck's records go."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    fake = deck["local_clients"].fake("gguf-a")     # extend the fake map
+    deck["intent_store"].record("local/gguf-a", state="loaded",
+                                model="m.gguf", engine="lemonade")
+
+    r = TestClient(app).delete("/api/nodes/local/engines/gguf-a")
+
+    assert r.status_code == 200
+    assert "local/gguf-a" not in deck["intent_store"].get()
+    assert fake.calls == []                          # nothing actuated
+    assert deck["node_store"].get("local")["engines"] == []
+
+
+def test_engine_forget_deletes_the_stored_policy_row(tmp_path, monkeypatch):
+    """Controller ruling: forget deletes the resource's STORED policy row
+    (spec §6.2 names policy rows deck bookkeeping), not just makes it
+    invisible-until-redeclared — a later re-add of the same resource name
+    must not silently inherit a stale override."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    deck["policy_store"].put(
+        {"gguf-a": {"priority": 999, "pinned": True, "idle_ttl": 12345}})
+    assert deck["policy_store"].get()["gguf-a"]["priority"] == 999
+
+    r = TestClient(app).delete("/api/nodes/local/engines/gguf-a")
+    assert r.status_code == 200
+
+    # Re-add the same resource name: policy must come back at its
+    # DECLARED default, not the override the deleted row would have
+    # resurrected.
+    TestClient(app).post("/api/nodes/local/engines", json=_GGUF_A_ENTRY)
+    assert deck["policy_store"].get()["gguf-a"] == _GGUF_A_ENTRY["policy_defaults"]
+
+
+def test_engine_forget_leaves_settings_scopes_and_events_untouched(tmp_path, monkeypatch):
+    """Controller ruling: NOTHING besides the declaration entry, the intent
+    record, and the policy row goes. Settings scopes and the event log
+    survive a forget."""
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    client = TestClient(app)
+    client.put("/api/settings/engines/local/lemonade",
+               json={"namespace": "args", "values": {"seed": "1"}})
+    events_before = len(client.get("/api/events").json()["events"])
+
+    r = client.delete("/api/nodes/local/engines/gguf-a")
+
+    assert r.status_code == 200
+    assert deck["settings_store"].get()["engines"]["local/lemonade"]["args"] == {"seed": "1"}
+    events_after = client.get("/api/events").json()["events"]
+    assert len(events_after) == events_before + 1     # only the new engine-removed line
+    assert events_after[-1]["kind"] == "engine-removed"
+
+
+def test_state_tenants_reflect_a_live_engine_declaration_edit(tmp_path, monkeypatch):
+    """T10's whole point, verified end to end at the route: a declaration
+    edit made through the new CRUD API is picked up by /api/state's
+    world.tenants on the VERY NEXT request — Task 3's live-read promise,
+    exercised through this task's own write path rather than a direct
+    node_store call."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+    client = TestClient(app)
+
+    r = client.post("/api/nodes/local/engines", json=_GGUF_A_ENTRY)
+    assert r.status_code == 200
+    deck["gguf-a"] = FakeLemonade(loaded="extra.m.gguf")
+
+    body = client.get("/api/state").json()
+
+    assert body["world"]["tenants"]["gguf-a"]["state"] == "loaded"
+    assert body["world"]["tenants"]["gguf-a"]["engine"] == "lemonade"
+    assert body["world"]["placement"]["gguf-a"] == _GGUF_A_ENTRY["gpu_index"]
+
+    client.delete("/api/nodes/local/engines/gguf-a")
+    body_after = client.get("/api/state").json()
+    assert "gguf-a" not in body_after["world"]["tenants"]
+
+
+def test_api_state_exact_shape_tests_already_match_the_approved_interface(tmp_path, monkeypatch):
+    """T10 disclosure (design §4: 'the two exact-shape tests update to the
+    approved interface, disclosed'): `test_api_state_shape`'s top-level key
+    set and `test_state_provenance_block_carries_an_updates_count`'s
+    provenance-block key set already pin exactly the current interface —
+    verified by re-asserting the same envelope here rather than silently
+    assuming Task 3's wiring covers it. No change to either test was
+    needed; this is the verification, not a duplicate assertion of intent."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    body = TestClient(app).get("/api/state").json()
+    assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle",
+                                "provenance", "nodes"}
+    assert set(body["provenance"]) == {"drift", "gaps", "updates"}
