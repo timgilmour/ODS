@@ -117,6 +117,32 @@ describe("messages", () => {
   });
 });
 
+describe("engines editor messages (E1 Task 12)", () => {
+  it("reports an engines-load failure as danger, with a retry action", () => {
+    const m = messages.enginesLoadFailed("500 Internal Server Error");
+    expect(m.tone).toBe("danger");
+    expect(m.body).toBe("500 Internal Server Error");
+    expect(m.action?.label).toBe("Retry");
+  });
+
+  it("treats an empty declaration as neutral, not a failure", () => {
+    // Task 3/11's "zero, three, or five" starting point (spec §5) — an
+    // empty engines[] is a legal, expected state, not an error.
+    expect(messages.enginesEmpty().tone).toBe("neutral");
+    expect(messages.enginesEmpty().title).toBe("no engines declared");
+  });
+
+  it("states that Forget only removes the declaration — a running engine is untouched", () => {
+    // The armed-confirm copy this Message backs: DELETE /api/nodes/local/
+    // engines/{resource} = forget_engine (app/routers/nodes.py:273-321) is
+    // bookkeeping-only and never calls the engine.
+    const m = messages.forgetEngineConfirm();
+    expect(m.tone).toBe("neutral");
+    expect(m.title.toLowerCase()).toContain("declaration only");
+    expect(m.title.toLowerCase()).toContain("keeps running");
+  });
+});
+
 describe("model detail drawer messages", () => {
   it("can honestly say nothing was written when a declared save fails", () => {
     // Unlike settingsSaveFailed's multi-scope walk: one declared edit is one
@@ -244,6 +270,19 @@ describe("labels", () => {
   it("falls back to a plain verb when a step label is called with no resource", () => {
     expect(labels.stepUnload(null)).toBe("Unload");
     expect(labels.stepLoad("gguf-a")).toBe("Load — gguf-a");
+  });
+
+  it("derives a connection field's label from its own key, never a per-field literal", () => {
+    // spec §5: field IDENTITY is never a UI literal — this only makes an
+    // underscore-joined payload key readable.
+    expect(labels.engineFieldLabel("metrics_url")).toBe("metrics url");
+    expect(labels.engineFieldLabel("url")).toBe("url");
+  });
+
+  it("names a missing engine-form field, mirroring engine_kinds.py's requiredness", () => {
+    expect(labels.engineConnectionFieldRequired("container")).toBe(
+      "container is required for this kind",
+    );
   });
 });
 

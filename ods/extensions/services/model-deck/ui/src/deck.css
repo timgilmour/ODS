@@ -1995,3 +1995,98 @@ button.danger {
   border-color: var(--accent);
   color: var(--accent-text);
 }
+
+/* --------------------------------------------------------- engines editor */
+/* E1 Task 12 — the local node's declared-engine list + add/edit sub-form,
+   nested under .nodes-form on the local node's card. */
+
+.engines-section {
+  margin-top: calc(var(--space) * 2);
+  padding-top: var(--space);
+  border-top: 1px solid var(--panel-border);
+}
+
+.engines-section h3 {
+  margin: 0 0 var(--space);
+  font-size: 0.95rem;
+}
+
+.engines-empty {
+  color: var(--text-dim);
+}
+
+.engines-list {
+  list-style: none;
+  margin: 0 0 var(--space);
+  padding: 0;
+}
+
+.engine-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: calc(var(--space) / 2) var(--space);
+  padding: var(--space) 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.engine-row:last-child {
+  border-bottom: none;
+}
+
+.engine-row-resource {
+  font-weight: 600;
+}
+
+.engine-row-kind,
+.engine-row-gpu {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+/* Pushes Edit/Forget to the row's trailing edge without a fixed width, so a
+   long resource/kind pair never crowds the actions off the row. */
+.engine-row-actions {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--space) / 2);
+  margin-left: auto;
+}
+
+.engine-caption {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.engine-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  max-width: 420px;
+  margin-top: var(--space);
+}
+
+.engine-form label {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) / 2);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.engine-form input,
+.engine-form select {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+}
+
+.engine-form-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space);
+}

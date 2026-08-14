@@ -291,7 +291,12 @@ export default function App() {
       )}
 
       {view === "nodes" && (
-        <NodesView nodes={state?.nodes ?? []} onChanged={refreshAll} />
+        <NodesView
+          nodes={state?.nodes ?? []}
+          gpus={state?.world.gpus ?? []}
+          policy={state?.policy ?? {}}
+          onChanged={refreshAll}
+        />
       )}
 
       {view === "events" && <EventsView refreshTrigger={refreshTrigger} />}

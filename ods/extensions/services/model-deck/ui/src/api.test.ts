@@ -1,15 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  addEngine,
   ApiError,
   createNode,
   errorMessage,
+  forgetEngine,
+  getEngineKinds,
   getNodeServingStatus,
+  listNodeRegistry,
   postNodeReload,
   postNodeSwap,
   putUnitPinned,
+  updateEngine,
   updateNode,
 } from "./api";
-import type { NodeRegistryEntry, SparkStatus } from "./api";
+import type { DeclaredEngine, NodeRegistryEntry, SparkStatus } from "./api";
 
 // The registry-CRUD wire shape, exactly as app/routers/nodes.py::_public
 // produces it over NodeStore.add()/update() (app/node_store.py:104-139):
@@ -265,5 +270,85 @@ describe("postNodeReload", () => {
     }));
     await postNodeReload("box a/weird#name");
     expect(calls[0]).toBe("/api/nodes/box%20a%2Fweird%23name/serving/reload");
+  });
+});
+
+// E1 Task 12 — declared-engines CRUD (app/routers/nodes.py:200-339).
+
+describe("listNodeRegistry", () => {
+  it("resolves {nodes} verbatim, including the local entry's engines[]", async () => {
+    // The one producer whose local row carries `engines[]` — _public
+    // (app/routers/nodes.py:88-89) spreads the stored NodeStore entry
+    // as-is, unlike /api/state's `nodes` block (DeckNodeEntry).
+    const body = {
+      nodes: [
+        { ...registryResponse, id: "local", agent_kind: "local", address: null,
+          serving_address: null, engines: [] },
+      ],
+    };
+    mockFetchOnce(body);
+    const result = await listNodeRegistry();
+    expect(result).toEqual(body);
+    expect(result.nodes[0].engines).toEqual([]);
+  });
+});
+
+const widgetEngine: DeclaredEngine = {
+  resource: "widget-a",
+  kind: "widget",
+  connection: { host: "http://widget-a:9000" },
+  gpu_index: 2,
+  policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
+};
+
+describe("getEngineKinds", () => {
+  it("resolves the {kinds} body verbatim", async () => {
+    const body = {
+      kinds: [{ kind: "widget", connection: { host: { required: true } }, human_verbs: ["free"] }],
+    };
+    mockFetchOnce(body);
+    expect(await getEngineKinds()).toEqual(body);
+  });
+});
+
+describe("addEngine", () => {
+  it("POSTs the body verbatim to /api/nodes/local/engines", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => widgetEngine } as Response;
+    }));
+    const result = await addEngine(widgetEngine);
+    expect(calls[0].url).toBe("/api/nodes/local/engines");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual(widgetEngine);
+    expect(result).toEqual(widgetEngine);
+  });
+});
+
+describe("updateEngine", () => {
+  it("PUTs to the resource-encoded path", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => widgetEngine } as Response;
+    }));
+    await updateEngine("widget a/weird#name", { ...widgetEngine, resource: "widget a/weird#name" });
+    expect(calls[0].url).toBe("/api/nodes/local/engines/widget%20a%2Fweird%23name");
+    expect(calls[0].init?.method).toBe("PUT");
+  });
+});
+
+describe("forgetEngine", () => {
+  it("DELETEs the resource-encoded path", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ status: "ok" }) } as Response;
+    }));
+    const result = await forgetEngine("widget-a");
+    expect(calls[0].url).toBe("/api/nodes/local/engines/widget-a");
+    expect(calls[0].init?.method).toBe("DELETE");
+    expect(result).toEqual({ status: "ok" });
   });
 });

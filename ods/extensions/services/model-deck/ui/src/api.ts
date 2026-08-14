@@ -844,6 +844,15 @@ export interface NodeRegistryEntry {
   // carries `control` (app/node_store.py _CONTROLS, healed by
   // `_heal_control` if ever missing/invalid).
   control: "none" | "swap";
+  // Optional, present ONLY on the local entry (app/node_store.py's
+  // `_heal_engines` strips this key from every non-local row) — the local
+  // node's declared local-engine list, verbatim off NodeStore (E1 Task 10).
+  // `_public` (app/routers/nodes.py:88-89) spreads the stored dict as-is,
+  // so this is the one GET this file exposes that carries `engines[]` —
+  // `/api/state`'s `nodes` block (DeckNodeEntry, status.py's `_nodes_block`)
+  // never does, which is why the Engines editor reads `listNodeRegistry()`
+  // rather than the board's own node list.
+  engines?: DeclaredEngine[];
 }
 
 export function createNode(body: {
@@ -880,4 +889,105 @@ export function testNode(body: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+/** GET /api/nodes (app/routers/nodes.py's `list_nodes`) — the registry's
+ * OWN listing. Used by the Engines editor (E1 Task 12) specifically because
+ * it is the one producer whose local entry carries `engines[]`; every other
+ * screen reading node identity uses `/api/state`'s `nodes` block instead. */
+export function listNodeRegistry(): Promise<{ nodes: NodeRegistryEntry[] }> {
+  return request<{ nodes: NodeRegistryEntry[] }>("/api/nodes");
+}
+
+// ---------------------------------------------------------------------------
+// Declared local engines (/api/nodes/local/engines, /api/engine-kinds — see
+// app/routers/nodes.py's E1 Task 10 section, :200-339) — the local node's
+// declared-engine CRUD, plus the kind catalog that drives the UI's kind
+// picker and per-kind connection fields (spec §5: never a UI literal).
+// ---------------------------------------------------------------------------
+
+/** One connection field's requiredness for a given kind — GET
+ * /api/engine-kinds's per-kind `connection` map
+ * (app/routers/nodes.py:334-336, sourced from `KNOWN_KINDS`,
+ * app/engine_kinds.py:90-94). */
+export interface EngineConnectionFieldSchema {
+  required: boolean;
+}
+
+export interface EngineKindDef {
+  kind: string;
+  connection: Record<string, EngineConnectionFieldSchema>;
+  human_verbs: string[];
+}
+
+/** GET /api/engine-kinds's body (app/routers/nodes.py:324-339's
+ * `list_engine_kinds`). */
+export interface EngineKindsResponse {
+  kinds: EngineKindDef[];
+}
+
+export interface EnginePolicyDefaults {
+  priority: number;
+  pinned: boolean;
+  idle_ttl: number;
+}
+
+/** One declared local engine — the exact shape
+ * `app.engine_kinds.validate_engines` accepts (app/engine_kinds.py:103-150:
+ * resource, kind, connection, gpu_index, policy_defaults, no other field),
+ * what POST/PUT `/api/nodes/local/engines*` both accept and echo back, and
+ * what `NodeRegistryEntry.engines[]` carries verbatim off the local
+ * NodeStore row. */
+export interface DeclaredEngine {
+  resource: string;
+  kind: string;
+  connection: Record<string, string>;
+  gpu_index: number;
+  policy_defaults: EnginePolicyDefaults;
+}
+
+/** GET /api/engine-kinds (app/routers/nodes.py:324-339) — the UI's kind
+ * picker + per-kind connection-field source; never a UI literal (spec §5). */
+export function getEngineKinds(): Promise<EngineKindsResponse> {
+  return request<EngineKindsResponse>("/api/engine-kinds");
+}
+
+/** POST /api/nodes/local/engines (app/routers/nodes.py:221-241's
+ * `add_engine`). 422 (via the redacting handler — `app.main`'s
+ * RequestValidationError handler) for a shape defect, with
+ * `app.engine_kinds.validate_engines`' own one-line message as `detail`;
+ * 409 when the resource is already declared. */
+export function addEngine(body: DeclaredEngine): Promise<DeclaredEngine> {
+  return request<DeclaredEngine>("/api/nodes/local/engines", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** PUT /api/nodes/local/engines/{resource} (app/routers/nodes.py:244-270's
+ * `update_engine`) — full-entry replace. `resource` in `body` must equal
+ * `resource` here or the route 422s the rename ("forget and re-add
+ * instead") — callers never offer renaming, they keep the path resource and
+ * the body resource in lockstep. */
+export function updateEngine(resource: string, body: DeclaredEngine): Promise<DeclaredEngine> {
+  return request<DeclaredEngine>(
+    `/api/nodes/local/engines/${encodeURIComponent(resource)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/** DELETE /api/nodes/local/engines/{resource} (app/routers/nodes.py:273-321's
+ * `forget_engine`) — FORGET, bookkeeping only: drops the declaration plus
+ * the deck's own intent record and stored policy row. Never calls the
+ * engine itself — a running process, if any, is left exactly as it is. */
+export function forgetEngine(resource: string): Promise<{ status: string }> {
+  return request<{ status: string }>(
+    `/api/nodes/local/engines/${encodeURIComponent(resource)}`,
+    { method: "DELETE" },
+  );
 }

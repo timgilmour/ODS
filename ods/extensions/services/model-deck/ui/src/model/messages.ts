@@ -331,6 +331,40 @@ export const messages = {
     title: "Connection failed",
     body: detail,
   }),
+
+  // Engines editor (E1 Task 12) — the local node's declared local-engine
+  // CRUD (app/routers/nodes.py:200-321). Kind identity and per-kind
+  // connection FIELD identity never come from here (spec §5: GET
+  // /api/engine-kinds, model/engineForm.ts, is the one source) — these
+  // three cover the section's own load/empty/forget states.
+
+  enginesLoadFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Could not load engines",
+    body: detail,
+    action: { label: "Retry" },
+  }),
+
+  // Neutral: an empty declaration is not a failure — it is Task 3/11's
+  // "zero, three, or five" starting point (spec §5), same posture
+  // nodesEmptyTitle above takes for a fresh registry.
+  enginesEmpty: (): Message => ({
+    tone: "neutral",
+    title: "no engines declared",
+    body: "declare a local engine to give the deck something to schedule here.",
+  }),
+
+  // DELETE /api/nodes/local/engines/{resource} — forget_engine
+  // (app/routers/nodes.py:273-321): bookkeeping only, never calls the
+  // engine. Shown while a row's Forget button is ARMED (the confirm step)
+  // rather than always-on, so the one click that actually asks "are you
+  // sure" is also the one that explains what "sure" means — a two-click
+  // delete that LOOKS as destructive as any other must not let the
+  // operator assume it stops a running process.
+  forgetEngineConfirm: (): Message => ({
+    tone: "neutral",
+    title: "removes the declaration only — a running engine keeps running, untouched",
+  }),
 };
 
 /** Short labels — control text, badges, captions and the `title` tooltips
@@ -365,7 +399,13 @@ export const labels = {
   // came from here, which is precisely how a half-applied rule dies: the
   // next author copies whichever neighbour they happened to read first.
   appTitle: "Model Deck",
-  appSubtitle: "GPU/VRAM control for lemonade, ComfyUI, hipfire",
+  // Was "GPU/VRAM control for lemonade, ComfyUI, hipfire" — a fixed-triple
+  // literal that predates E1's any-kind declared engines (Task 3/11's
+  // "zero, three, or five", now genuinely open-ended once Task 12's
+  // Engines editor lets an operator declare something other than the old
+  // three). Flagged as a follow-up in Task 11's report; fixed here since
+  // this task is exactly what makes the old wording wrong.
+  appSubtitle: "GPU/VRAM control for declared local engines",
   deck: "On Deck",
   setBuilder: "Set Builder",
   storage: "Storage",
@@ -758,6 +798,41 @@ export const labels = {
    * refuses control:"swap" for agent_kind:"local" unconditionally — local
    * actuation is docker-ctl, not the swap protocol (G1 revisits). */
   nodeControlLocalRefused: "the local node cannot operate a serving slot",
+
+  // Engines editor (E1 Task 12) — the local node's declared local-engine
+  // CRUD, nested under the Nodes tab's local-node form (app/routers/
+  // nodes.py:200-339). Kind names and connection FIELD names are never
+  // literals here — see model/engineForm.ts's docstring: the picker's
+  // options and each field's label are both DERIVED from GET
+  // /api/engine-kinds, not hardcoded per kind.
+  engines: "Engines",
+  addEngine: "+ Add engine",
+  editEngine: "Edit",
+  forgetEngine: "Forget",
+  engineResource: "Resource name",
+  engineKind: "Kind",
+  engineGpu: "GPU",
+  engineSelectGpu: "select a GPU…",
+  enginePinnedLabel: "Pinned",
+  enginePriority: "Priority",
+  engineIdleTtl: "Idle TTL (seconds)",
+  /** A connection field's label is DERIVED from the payload's own field key
+   * (GET /api/engine-kinds' `connection` map, e.g. "metrics_url") rather
+   * than a per-field literal here — spec §5's "never a UI literal" applies
+   * to field IDENTITY as much as kind identity. This only makes an
+   * underscore-joined key readable; it carries no knowledge of what any
+   * specific field means. */
+  engineFieldLabel: (field: string) => field.replace(/_/g, " "),
+
+  // model/engineForm.ts's formErrors() — pure decision logic that must not
+  // own its own copy, same rule nodeForm.ts's validate() follows (see
+  // nodeIdInvalid et al. above). Requiredness-only, mirroring
+  // app.engine_kinds.validate_engines (engine_kinds.py:116-140); the
+  // backend 422 stays authoritative.
+  engineResourceRequired: "resource name is required",
+  engineGpuRequired: "select a GPU",
+  engineConnectionFieldRequired: (field: string) =>
+    `${field.replace(/_/g, " ")} is required for this kind`,
 };
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is

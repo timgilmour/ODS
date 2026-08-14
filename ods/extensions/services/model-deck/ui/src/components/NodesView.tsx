@@ -1,12 +1,32 @@
-import { useState, type ChangeEvent } from "react";
+import { useEffect, useState, type ChangeEvent } from "react";
 import {
+  addEngine,
+  bytesToGB,
   createNode,
   deleteNode,
+  forgetEngine,
+  getEngineKinds,
+  listNodeRegistry,
   testNode,
+  updateEngine,
   updateNode,
   type DeckNodeEntry,
+  type DeclaredEngine,
+  type EngineKindsResponse,
+  type Gpu,
   type NodeTestResult,
+  type PolicyMap,
 } from "../api";
+import {
+  emptyForm as emptyEngineForm,
+  formErrors,
+  formForEntry as engineFormForEntry,
+  setField as setEngineField,
+  sortedEngines,
+  toPayload as toEnginePayload,
+  withKind,
+  type EngineFormState,
+} from "../model/engineForm";
 import { labels, messages } from "../model/messages";
 import {
   emptyForm,
@@ -17,6 +37,8 @@ import {
   validate,
   type NodeFormState,
 } from "../model/nodeForm";
+import { isArmedFor } from "../model/armed";
+import ArmedButton from "../ui/ArmedButton";
 import Banner from "../ui/Banner";
 import Panel from "../ui/Panel";
 
@@ -36,9 +58,23 @@ const DOT: Record<string, string> = {
 
 export default function NodesView({
   nodes,
+  gpus,
+  policy,
   onChanged,
 }: {
   nodes: DeckNodeEntry[];
+  /** The Engines editor's GPU-picker source (spec §5: `/api/state`'s
+   * `world.gpus`, never a UI literal) — threaded down to the local node's
+   * form only; every other node's form ignores it. */
+  gpus: Gpu[];
+  /** The Engines editor's pinned-badge source. LIVE policy
+   * (`/api/state`'s `policy` map, app/policy.py's `PolicyStore.get()`),
+   * not each engine's own frozen `policy_defaults` — PolicyStore always
+   * returns one row per currently-declared resource (declared default
+   * overlaid by any stored override), so this stays correct after an
+   * operator repins a resource from the Policy modal without re-editing
+   * its engine declaration. */
+  policy: PolicyMap;
   onChanged: () => void;
 }) {
   const [selected, setSelected] = useState<string | "add" | null>(null);
@@ -97,10 +133,13 @@ export default function NodesView({
               key="add"
               mode="add"
               entry={null}
+              gpus={gpus}
+              policy={policy}
               onDone={(id) => {
                 setSelected(id);
                 onChanged();
               }}
+              onEnginesChanged={onChanged}
             />
           ) : entry ? (
             <>
@@ -114,11 +153,14 @@ export default function NodesView({
                 key={entry.id}
                 mode="edit"
                 entry={entry}
+                gpus={gpus}
+                policy={policy}
                 onDone={() => onChanged()}
                 onDeleted={() => {
                   setSelected(null);
                   onChanged();
                 }}
+                onEnginesChanged={onChanged}
               />
             </>
           ) : null}
@@ -156,13 +198,23 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
 function NodeForm({
   mode,
   entry,
+  gpus,
+  policy,
   onDone,
   onDeleted,
+  onEnginesChanged,
 }: {
   mode: "add" | "edit";
   entry: DeckNodeEntry | null;
+  gpus: Gpu[];
+  policy: PolicyMap;
   onDone: (id: string) => void;
   onDeleted?: () => void;
+  /** Bumps the board-level refresh after any engine add/edit/forget, so the
+   * board's resource cards and the live policy map (this form's own pinned
+   * badges included) catch up immediately rather than waiting for the next
+   * poll tick. */
+  onEnginesChanged: () => void;
 }) {
   // Seeded ONCE per mount. The parent keys this component by selection (see
   // NodesView above), so switching rows unmounts/remounts rather than
@@ -346,6 +398,336 @@ function NodeForm({
             {deleteArmed ? labels.reallyDelete : labels.deleteSet}
           </button>
         )}
+        <button
+          type="button"
+          className="primary"
+          disabled={errors.length > 0}
+          onClick={save}
+          title={errors.join("; ")}
+        >
+          {labels.save}
+        </button>
+      </div>
+
+      {/* Declared local engines (E1 Task 12) live only on the LOCAL node's
+          card: `engines[]` is only ever valid on the "local" entry
+          (app/node_store.py's `_validate`, ":engines is only valid on the
+          local node entry"; `_heal_engines` strips it from every other
+          row). */}
+      {mode === "edit" && entry && entry.agent_kind === "local" && (
+        <EnginesSection gpus={gpus} policy={policy} onChanged={onEnginesChanged} />
+      )}
+    </div>
+  );
+}
+
+/** The local node's declared-engine list + add/edit sub-form (E1 Task 12).
+ * Reads its own data independently of the outer `nodes` prop: neither
+ * `DeckNodeEntry` (this screen's own `nodes` prop, `/api/state`'s
+ * `_nodes_block`) nor `world.tenants` (the LIVE observation map) carries the
+ * raw declaration's `connection`/`policy_defaults` fields this editor needs
+ * to prefill an edit — only `listNodeRegistry()`'s local entry does
+ * (api.ts's `NodeRegistryEntry.engines` doc comment). */
+function EnginesSection({
+  gpus,
+  policy,
+  onChanged,
+}: {
+  gpus: Gpu[];
+  policy: PolicyMap;
+  onChanged: () => void;
+}) {
+  const [kinds, setKinds] = useState<EngineKindsResponse | null>(null);
+  const [engines, setEngines] = useState<DeclaredEngine[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | "add" | null>(null);
+
+  function reload() {
+    Promise.all([getEngineKinds(), listNodeRegistry()]).then(
+      ([k, { nodes: registry }]) => {
+        setKinds(k);
+        setEngines(registry.find((n) => n.id === "local")?.engines ?? []);
+        setLoadError(null);
+      },
+      (err) => setLoadError(err instanceof Error ? err.message : String(err)),
+    );
+  }
+
+  // Fires once per mount — the outer NodeForm only ever mounts an
+  // EnginesSection for the local entry (never re-keyed on anything this
+  // section itself changes), same posture as NodeForm's own "seeded once"
+  // initializer above.
+  useEffect(reload, []);
+
+  if (loadError) {
+    return (
+      <div className="engines-section">
+        <h3>{labels.engines}</h3>
+        <Banner message={messages.enginesLoadFailed(loadError)} onAction={reload} />
+      </div>
+    );
+  }
+  if (!kinds || !engines) {
+    return (
+      <div className="engines-section">
+        <h3>{labels.engines}</h3>
+        <div className="nodes-caption">{labels.loading}</div>
+      </div>
+    );
+  }
+
+  const sorted = sortedEngines(engines);
+
+  function afterMutate() {
+    setEditing(null);
+    reload();
+    onChanged();
+  }
+
+  return (
+    <div className="engines-section">
+      <h3>{labels.engines}</h3>
+      {sorted.length === 0 && editing === null && (
+        <div className="engines-empty">
+          <p>{messages.enginesEmpty().title}</p>
+          <button type="button" onClick={() => setEditing("add")}>
+            {labels.addEngine}
+          </button>
+        </div>
+      )}
+      {sorted.length > 0 && (
+        <ul className="engines-list">
+          {sorted.map((e) => (
+            <EngineRow
+              key={e.resource}
+              engine={e}
+              pinned={policy[e.resource]?.pinned ?? e.policy_defaults.pinned}
+              onEdit={() => setEditing(e.resource)}
+              onForgotten={afterMutate}
+            />
+          ))}
+        </ul>
+      )}
+      {sorted.length > 0 && editing === null && (
+        <button type="button" onClick={() => setEditing("add")}>
+          {labels.addEngine}
+        </button>
+      )}
+      {editing !== null && (
+        <EngineFormPanel
+          // Keyed on what's being edited — same "start a new buffer, don't
+          // inherit the last one" rule NodeForm's own key={entry.id} states
+          // above, applied one level down.
+          key={editing}
+          mode={editing === "add" ? "add" : "edit"}
+          entry={editing === "add" ? null : (sorted.find((e) => e.resource === editing) ?? null)}
+          kinds={kinds}
+          gpus={gpus}
+          onDone={afterMutate}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** One declared engine's row: identity + a pinned badge + Edit + an armed
+ * Forget. Forget reuses the deck's one armed-action machinery
+ * (`isArmedFor`/`ArmedButton`, model/armed.ts) rather than inventing a
+ * second inline arm/confirm — same pattern PlacementActions.tsx's Force
+ * park and SparkSwap.tsx's Force swap use, applied per-row here since each
+ * row is its own independent guarded action. */
+function EngineRow({
+  engine,
+  pinned,
+  onEdit,
+  onForgotten,
+}: {
+  engine: DeclaredEngine;
+  pinned: boolean;
+  onEdit: () => void;
+  onForgotten: () => void;
+}) {
+  const [refusalSeq, setRefusalSeq] = useState(0);
+  const [armedForSeq, setArmedForSeq] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const armed = isArmedFor(armedForSeq, refusalSeq);
+
+  async function doForget() {
+    try {
+      // DELETE /api/nodes/local/engines/{resource} = forget_engine
+      // (app/routers/nodes.py:273-321): bookkeeping only, never calls the
+      // engine — see messages.ts's forgetEngineConfirm, shown below while
+      // armed.
+      await forgetEngine(engine.resource);
+      onForgotten();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setRefusalSeq((n) => n + 1);
+    }
+  }
+
+  return (
+    <li className="engine-row">
+      <span className="engine-row-resource">{engine.resource}</span>
+      <span className="engine-row-kind">{engine.kind}</span>
+      <span className="engine-row-gpu">{`GPU ${engine.gpu_index}`}</span>
+      {pinned && (
+        <span className="ui-pill" title={labels.pinnedTitle}>
+          {labels.pinned}
+        </span>
+      )}
+      {error && (
+        <Banner message={messages.guardRefused(error)} onDismiss={() => setError(null)} />
+      )}
+      <div className="engine-row-actions">
+        <button type="button" onClick={onEdit}>
+          {labels.editEngine}
+        </button>
+        <ArmedButton
+          label={labels.forgetEngine}
+          armed={armed}
+          onArm={() => setArmedForSeq(refusalSeq)}
+          onConfirm={doForget}
+        />
+        {armed && <span className="engine-caption">{messages.forgetEngineConfirm().title}</span>}
+      </div>
+    </li>
+  );
+}
+
+/** The Add/Edit sub-form for one declared engine. `entry === null` is Add;
+ * otherwise Edit, pre-filled and with `resource` locked (rename is refused
+ * server-side — app/routers/nodes.py's `update_engine`, :244-259 — so this
+ * never offers it). `kind` stays editable in BOTH modes: app/state.py's
+ * snapshot (:141-150) explicitly accommodates a resource re-declared under
+ * a different kind, so an operator fixing a misdeclared kind does not need
+ * to forget-and-re-add. */
+function EngineFormPanel({
+  mode,
+  entry,
+  kinds,
+  gpus,
+  onDone,
+  onCancel,
+}: {
+  mode: "add" | "edit";
+  entry: DeclaredEngine | null;
+  kinds: EngineKindsResponse;
+  gpus: Gpu[];
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  // Seeded once per mount, same rationale as NodeForm's own `form` state
+  // above — the parent keys this by `editing`, so a different target
+  // remounts rather than reusing this instance's buffer.
+  const [form, setForm] = useState<EngineFormState>(
+    entry ? engineFormForEntry(entry, kinds) : emptyEngineForm(kinds, kinds.kinds[0]?.kind ?? ""),
+  );
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const errors = formErrors(form);
+
+  async function save() {
+    setSaveError(null);
+    try {
+      const payload = toEnginePayload(form);
+      if (mode === "add") {
+        await addEngine(payload);
+      } else if (entry) {
+        await updateEngine(entry.resource, payload);
+      }
+      onDone();
+    } catch (err) {
+      // The buffer (`form`) is deliberately left untouched on failure — a
+      // 422/409 must not cost the operator what they already typed.
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className="engine-form">
+      <label>
+        {labels.engineResource}
+        <input
+          type="text"
+          value={form.resource}
+          onChange={(e) => setForm({ ...form, resource: e.target.value })}
+          disabled={mode === "edit"}
+        />
+      </label>
+      <label>
+        {labels.engineKind}
+        <select
+          value={form.kind}
+          onChange={(e) => setForm(withKind(form, kinds, e.target.value))}
+        >
+          {kinds.kinds.map((k) => (
+            <option key={k.kind} value={k.kind}>
+              {k.kind}
+            </option>
+          ))}
+        </select>
+      </label>
+      {Object.keys(form.connection).map((field) => (
+        <label key={field}>
+          {labels.engineFieldLabel(field)}
+          {form.requiredConnectionFields.includes(field) ? " *" : ""}
+          <input
+            type="text"
+            value={form.connection[field]}
+            onChange={(e) => setForm(setEngineField(form, field, e.target.value))}
+          />
+        </label>
+      ))}
+      <label>
+        {labels.engineGpu}
+        <select
+          value={form.gpuIndex ?? ""}
+          onChange={(e) =>
+            setForm({ ...form, gpuIndex: e.target.value === "" ? null : Number(e.target.value) })
+          }
+        >
+          <option value="">{labels.engineSelectGpu}</option>
+          {gpus.map((g) => (
+            <option key={g.index} value={g.index}>
+              {`GPU ${g.index} — ${bytesToGB(g.free)} / ${bytesToGB(g.total)} GB free`}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          checked={form.pinned}
+          onChange={(e) => setForm({ ...form, pinned: e.target.checked })}
+        />
+        {labels.enginePinnedLabel}
+      </label>
+      <label>
+        {labels.enginePriority}
+        <input
+          type="number"
+          value={form.priority}
+          onChange={(e) => setForm({ ...form, priority: Number(e.target.value) })}
+        />
+      </label>
+      <label>
+        {labels.engineIdleTtl}
+        <input
+          type="number"
+          value={form.idleTtl}
+          onChange={(e) => setForm({ ...form, idleTtl: Number(e.target.value) })}
+        />
+      </label>
+
+      {saveError && (
+        <Banner message={messages.guardRefused(saveError)} onDismiss={() => setSaveError(null)} />
+      )}
+
+      <div className="engine-form-actions">
+        <button type="button" onClick={onCancel}>
+          {labels.cancel}
+        </button>
         <button
           type="button"
           className="primary"
