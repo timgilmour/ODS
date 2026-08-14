@@ -163,12 +163,21 @@ def observe_spark(spark_status: dict | None, node_id: str) -> dict[str, dict]:
     }
 
 
-# Which LOCAL engine owns each resource key. Used by `engine_for`, whose
-# one caller is the lifecycle router's adopt route (restore dispatch reads
-# the engine straight off the recorded intent, `action["engine"]`, and never
-# calls this); a new local engine adds a line here rather than editing the
-# caller. No swap-node row lives here — a `<node>/slot0` key's owner depends
-# on the registry (a PREPARED id-set, see engine_for), not a static literal.
+# Which LOCAL engine owns each resource key, for a caller with no live
+# declaration to consult (every caller before this fix). This static table
+# is the exact resource==kind-name-coincidence bug
+# test_adopt_a_swap_nodes_slot's docstring (N1 T12) already fixed for the
+# swap-node half of this same function: it only ever matched a resource
+# literally named lemonade/comfyui/hipfire, so a genuinely DECLARED (E1)
+# resource under some other name (e.g. "gguf-a", kind "lemonade") silently
+# 404'd out of the lifecycle router's adopt route with "no engine owns
+# ...". `local_kinds` below (E1 T13 fix) is the local-side counterpart to
+# `swap_node_ids` — a PREPARED resource->kind mapping the caller reads live
+# off node_store (mirrors app.routers.control._declared_kind /
+# app.routers.sets._declared_kinds) — checked FIRST when supplied. This
+# table remains the fallback for a caller that still doesn't thread one
+# through, so the three tests pinning its literal behavior stay exactly
+# correct.
 _LOCAL_ENGINE_BY_KEY = {
     local_key("lemonade"): "lemonade",
     LOCAL_HIPFIRE_KEY: "hipfire",
@@ -176,13 +185,26 @@ _LOCAL_ENGINE_BY_KEY = {
 }
 
 
-def engine_for(key: str, swap_node_ids: frozenset[str] | set[str] = frozenset()) -> str | None:
+def engine_for(
+    key: str,
+    swap_node_ids: frozenset[str] | set[str] = frozenset(),
+    local_kinds: dict[str, str] | None = None,
+) -> str | None:
     """The engine that owns `key`, or None if the key is unknown.
 
-    Local mappings are static; a ``<node>/slot0`` key maps to ``"spark"``
-    iff ``<node>`` is in `swap_node_ids` — a PREPARED id-set, not the store,
-    so this stays a pure function and each caller decides its own registry
-    read (design §4)."""
+    `local_kinds` (E1 T13, optional): resource -> declared kind for the
+    LOCAL node, checked first when supplied — see this module's own
+    `_LOCAL_ENGINE_BY_KEY` docstring for why. None (every pre-E1-T13
+    caller) skips straight to the static table below, unchanged.
+
+    Failing that, a ``<node>/slot0`` key maps to ``"spark"`` iff ``<node>``
+    is in `swap_node_ids` — a PREPARED id-set, not the store, so this stays
+    a pure function and each caller decides its own registry read (design
+    §4)."""
+    if local_kinds is not None:
+        resource = key.removeprefix(f"{_LOCAL_NODE}/")
+        if resource != key and resource in local_kinds:
+            return local_kinds[resource]
     engine = _LOCAL_ENGINE_BY_KEY.get(key)
     if engine is not None:
         return engine

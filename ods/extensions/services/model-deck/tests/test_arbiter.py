@@ -38,7 +38,7 @@ from app.harvest import _SENTINEL
 # literal or `settings.node_label`, so a future vocabulary regression here
 # would show up as an import/assertion mismatch, not a silently-passing
 # coincidence (see Watcher._configurable_engines's docstring, app/arbiter.py).
-from app.observe import _LOCAL_NODE, SparkObserver
+from app.observe import _LOCAL_NODE, SparkObserver, local_key
 
 # The reconcile pass is the first watcher code to call the hipfire client, so
 # it needs a real fake rather than the bare object() the arbitration tests
@@ -800,8 +800,20 @@ def _make_watcher(
     characteristics_store=None,
     gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
     configurable_engines=None, provenance_store=None, dockerctl=None,
-    node_store=None, local_clients=None, **sett,
+    node_store=None, local_clients=None, litellm=None, **sett,
 ):
+    # T13 review fix (Critical 1): `litellm` used to be hardcoded to a bare
+    # `object()` below with no override — silently correct for every
+    # FakeWorld-driven test in this file (which never calls litellm at all),
+    # but two_gguf_watcher drives a REAL World.snapshot, which calls
+    # `litellm.route_table()` unconditionally (app/state.py). A bare
+    # `object()` there raises AttributeError, which Watcher.tick()'s broad
+    # supervisor catch (app/arbiter.py) swallows into a `tick-error` event —
+    # the tick never reaches arbitration/reconciliation, so an assertion
+    # like "nothing was actuated" passes VACUOUSLY, proof-of-absence
+    # satisfied by a dead tick. `litellm=None` (every caller before this
+    # fix) preserves the exact old default; two_gguf_watcher now passes its
+    # own working `_FakeLiteLLMRoutes` fake.
     events_path = tmp_path / "events.jsonl"
     watcher = Watcher(
         settings=_settings(**sett),
@@ -809,7 +821,7 @@ def _make_watcher(
         lemonade=lemonade if lemonade is not None else FakeLemonade(),
         comfy=comfy if comfy is not None else FakeComfy(),
         hipfire=hipfire if hipfire is not None else object(),
-        litellm=object(),
+        litellm=litellm if litellm is not None else object(),
         registry=registry,
         policy_store=FakePolicyStore(policy, auto=auto),
         events_path=events_path,
@@ -919,6 +931,18 @@ class _PendingCapableLemonade:
     ergonomics, and it also guarantees the call is scoped to a resource
     that observes 'unloaded' (this class's own ``loaded_model``), the
     OTHER precondition _infer_pending checks.
+
+    ``calls``/``load_natively`` (T13, spec §6 coexistence proofs): ``calls``
+    is a unified DECK-ACTUATION log — every ``load()``/``unload()`` this
+    class's own caller (the watcher, control routes, set apply) drives
+    through, alongside the pre-existing kind-specific ``loaded``/
+    ``unloaded`` lists those calls already append to (kept so every T6
+    assertion against them stays exact). ``load_natively`` sets
+    ``loaded_model`` DIRECTLY, bypassing ``load()`` entirely — it never
+    touches ``calls``/``loaded`` — because it simulates ODS itself loading a
+    model outside the deck's own actuation path (the coexistence posture
+    spec §6 pins: the deck must observe this and do nothing, never treat it
+    as if the deck had done it).
     """
 
     def __init__(self, litellm: "_FakeLiteLLMRoutes", registry: "FakeRegistry",
@@ -928,6 +952,7 @@ class _PendingCapableLemonade:
         self.loaded_model = loaded
         self.unloaded = []
         self.loaded = []
+        self.calls = []  # T13: unified log, see class docstring
         # Mirror FakeLemonade's own raise-on-* knobs (review fix, T6 round
         # 2: the dedup-collision regression test needs two DIFFERENT
         # resources to fail identically, which the earlier version of this
@@ -946,6 +971,7 @@ class _PendingCapableLemonade:
 
     def unload(self, model: str) -> None:
         self.unloaded.append(model)
+        self.calls.append(("unload", model))
         if self._raise_on_unload is not None:
             raise self._raise_on_unload
         self.loaded_model = None
@@ -954,6 +980,15 @@ class _PendingCapableLemonade:
         if self._raise_on_load is not None:
             raise self._raise_on_load
         self.loaded.append(model)
+        self.calls.append(("load", model))
+        self.loaded_model = model
+
+    def load_natively(self, model: str) -> None:
+        """T13: an ODS-native load happening OUTSIDE the deck (e.g. a direct
+        llama-server request) — sets residency directly, never through
+        ``load()``, so it leaves no actuation trace (``calls``/``loaded``
+        stay empty) for the coexistence tests to (correctly) find nothing
+        in."""
         self.loaded_model = model
 
     def set_pending(self, model: str, *, footprint: int) -> None:
@@ -986,7 +1021,7 @@ class _TwoGgufWatcher:
     to build a REAL World snapshot against its two declared resources."""
 
     def __init__(self, watcher, clients, intent_store, gpus, litellm, registry, world,
-                 events_path) -> None:
+                 events_path, node_store) -> None:
         self.watcher = watcher
         self.clients = clients
         self.intent_store = intent_store
@@ -995,10 +1030,25 @@ class _TwoGgufWatcher:
         self._litellm = litellm
         self._registry = registry
         self._world = world
+        self._node_store = node_store  # T13: forget()'s own declaration write
 
     def world_snapshot(self) -> dict:
         return self._world.snapshot(
             self._gpus, _TWO_GGUF_ENGINES, self.clients, self._litellm, self._registry)
+
+    def forget(self, resource: str) -> None:
+        """T13: store-level mirror of app.routers.nodes.forget_engine
+        (app/routers/nodes.py:274-319) — drop the declaration entry AND the
+        intent record (that route's own "declaration first, then intent"
+        ordering, same file, for the same crash-safety reason). No
+        policy_store is wired into this fixture (two_gguf_watcher's watcher
+        gets a bare FakePolicyStore the fixture never returns), so there is
+        no third write to mirror here — bookkeeping-only either way: this
+        never calls the engine, same as the real route."""
+        engines = self._node_store.get("local")["engines"]
+        self._node_store.update(
+            "local", {"engines": [e for e in engines if e["resource"] != resource]})
+        self.intent_store.forget(local_key(resource))
 
 
 @pytest.fixture
@@ -1020,7 +1070,16 @@ def two_gguf_watcher(tmp_path):
     # gguf-a's own footprint is needed even though this fixture's tests
     # never make gguf-a pending: World.snapshot's lemonade-kind observe()
     # always resolves a LOADED resource's footprint from the registry.
-    registry = FakeRegistry(footprints={"a.gguf": 5 * GIB})
+    # "outside.gguf" (T13 review fix, Critical 1): the ODS-native-load
+    # coexistence test loads THIS name onto gguf-a via load_natively(), and
+    # a loaded resource's observe() unconditionally looks its footprint up
+    # (app/engine_kinds.py's _LemonadeAdapter.observe) — FakeRegistry.footprint
+    # raises a bare KeyError for any key not seeded here (only `missing=`
+    # entries raise the FileNotFoundError observe() actually catches), which
+    # used to escape uncaught into Watcher.tick()'s broad supervisor catch
+    # and get swallowed as a `tick-error` — the second, independent vacuity
+    # the review found.
+    registry = FakeRegistry(footprints={"a.gguf": 5 * GIB, "outside.gguf": 3 * GIB})
     # World.snapshot's OWN gpu shape (app.gpu.read_gpus' raw output:
     # vram_total/vram_used/pids) — NOT this file's own `_gpu()` helper,
     # which builds the ALREADY-PROCESSED total/used/free shape decide()
@@ -1046,10 +1105,53 @@ def two_gguf_watcher(tmp_path):
     watcher, events_path = _make_watcher(
         tmp_path, world, registry, _policy(),
         node_store=node_store, local_clients=clients, intent_store=intent_store,
+        # T13 review fix (Critical 1): this fixture drives a REAL
+        # World.snapshot (unlike every FakeWorld-driven test in this file),
+        # which calls litellm.route_table() unconditionally — _make_watcher's
+        # default bare object() has no such method. Pass the fixture's own
+        # working fake so a real tick can actually reach arbitration.
+        litellm=litellm,
     )
 
     return _TwoGgufWatcher(watcher, clients, intent_store, gpus, litellm, registry, world,
-                            events_path)
+                            events_path, node_store)
+
+
+# ===========================================================================
+# T13 — the two binding coexistence tests (spec §6). Both are proofs of
+# ABSENCE (no client call, no intent write), driven through a REAL
+# watcher.tick() rather than the pure decide()/_execute() seams the rest of
+# this section drives directly — coexistence is a property of the WHOLE
+# tick (arbitration finding nothing to do AND reconciliation refusing to
+# adopt an unmanaged observation into a restore), not of either pass alone.
+# ===========================================================================
+
+
+def test_natively_loaded_model_is_left_alone(two_gguf_watcher):
+    """Spec §6.1: observation present, NO intent -> reconciler no-ops.
+    ODS-native loading must keep working with the deck watching."""
+    w = two_gguf_watcher
+    w.clients.fake("gguf-a").load_natively("outside.gguf")
+    assert w.intent_store.get() == {}
+    w.watcher.tick()
+    assert w.clients.fake("gguf-a").calls == []       # nothing actuated
+    assert w.intent_store.get() == {}                  # nothing recorded
+    # T13 review fix (Critical 1): a swallowed tick-error (litellm.route_table()
+    # AttributeError, or a FakeRegistry KeyError on an unseeded footprint) would
+    # make BOTH assertions above pass VACUOUSLY — the tick dies before it ever
+    # reaches arbitration/reconciliation, "nothing actuated" because nothing
+    # ran at all. This guards against that proof-of-absence-by-dead-tick class.
+    assert not any(e["kind"] == "tick-error" for e in tail_events(w.events_path))
+
+
+def test_forget_then_tick_never_calls_the_engine(two_gguf_watcher):
+    w = two_gguf_watcher
+    w.forget("gguf-a")            # helper: DELETE route or store-level
+    w.watcher.tick()
+    assert w.clients.fake("gguf-a").calls == []
+    # T13 review fix (Critical 1): same vacuity guard as the sibling test
+    # above — see its comment.
+    assert not any(e["kind"] == "tick-error" for e in tail_events(w.events_path))
 
 
 def test_pending_from_second_gguf_carries_its_own_gpu(two_gguf_watcher):

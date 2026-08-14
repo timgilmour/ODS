@@ -79,7 +79,16 @@ def adopt(key: str, request: Request) -> dict:
     swap_ids = frozenset(
         n["id"] for n in deck["node_store"].list()
         if n.get("control") == "swap")
-    engine = engine_for(key, swap_ids)
+    # E1 T13 fix: thread the LIVE local declaration through so a resource
+    # not literally named lemonade/comfyui/hipfire can adopt too — mirrors
+    # app.routers.control._declared_kind / app.routers.sets._declared_kinds
+    # (same "read node_store fresh, never a boot-time copy" posture) and
+    # closes the local-side half of the resource==kind-name-coincidence bug
+    # test_adopt_a_swap_nodes_slot (N1 T12) already fixed for swap nodes —
+    # see app.observe._LOCAL_ENGINE_BY_KEY's own docstring.
+    local = deck["node_store"].get("local")
+    local_kinds = {e["resource"]: e["kind"] for e in (local.get("engines", []) if local else [])}
+    engine = engine_for(key, swap_ids, local_kinds)
     if engine is None:
         raise HTTPException(status_code=404, detail=f"no engine owns {key!r}")
 

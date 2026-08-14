@@ -79,3 +79,28 @@ def test_spark_alias_removed(deck):
     from the live deck proves no forwarder was resurrected by a deploy of
     an older image or a stale bundle."""
     assert deck.get("/api/spark/status").status_code == 404
+
+
+def test_local_engines_declared(deck):
+    """E1: the live local entry carries a declaration; every declared
+    resource appears in /api/state tenants and vice versa.
+
+    Deviates from the plan's literal snippet in two ways forced by the
+    ACTUAL route shapes (app/routers/nodes.py has no GET /nodes/{id} —
+    only GET "" (list_nodes) at app/routers/nodes.py:102-106 — and
+    GET /api/state nests tenants under "world", app/routers/status.py:28):
+    fetched via the list route + a match on id, and read through
+    ["world"]["tenants"] like every other /api/state access in this suite
+    (see e.g. test_safe_watcher.py, test_safe_guards.py)."""
+    nodes = deck.get("/api/nodes").json()["nodes"]
+    local = next(n for n in nodes if n["id"] == "local")
+    tenants = deck.get("/api/state").json()["world"]["tenants"]
+    declared = {e["resource"] for e in local.get("engines", [])}
+    assert set(tenants) == declared
+
+
+def test_engine_kinds_served(deck):
+    kinds = deck.get("/api/engine-kinds").json()["kinds"]
+    # app/engine_kinds.py:90-94's KNOWN_KINDS — the live triple, unchanged
+    # by E1 (declared RESOURCES generalize; the set of known KINDS doesn't).
+    assert {k["kind"] for k in kinds} == {"lemonade", "comfyui", "hipfire"}

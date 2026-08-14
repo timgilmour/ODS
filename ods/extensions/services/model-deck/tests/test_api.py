@@ -1818,6 +1818,25 @@ def test_adopt_a_swap_nodes_slot(tmp_path, monkeypatch):
     assert record["engine"] == "spark"
 
 
+def test_adopt_a_non_legacy_local_resource(tmp_path, monkeypatch):
+    """E1 T13 residue fix: the sibling of test_adopt_a_swap_nodes_slot above,
+    for the LOCAL half of engine_for's same resource==kind-name-coincidence
+    bug — the old static _LOCAL_ENGINE_BY_KEY table only ever matched a
+    resource literally named lemonade/comfyui/hipfire, so gguf-a (declared
+    kind "lemonade", not named "lemonade") 404'd with "no engine owns
+    'local/gguf-a'" even though it was declared, reachable, and observed."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    deck["gguf-a"] = FakeLemonade(loaded="a.gguf")
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/local/gguf-a")
+
+    assert resp.status_code == 200
+    record = deck["intent_store"].get()["local/gguf-a"]
+    assert record["state"] == "loaded" and record["engine"] == "lemonade"
+
+
 def test_get_auto_defaults_to_enabled(tmp_path, monkeypatch):
     """Automation is on by default — its absence is what let hipfire stay
     dead for 26 hours."""

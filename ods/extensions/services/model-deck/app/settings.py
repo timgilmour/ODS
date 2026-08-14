@@ -73,10 +73,18 @@ class Settings(BaseSettings):
     dockerctl_url: str = "http://docker-ctl:2375"
 
     # --- Parking / arbitration ---
+    # hipfire_container still feeds the pre-E1 coexistence fallback client
+    # built every boot in app.main (deck["hipfire"], used when nothing
+    # declares a "hipfire"-named resource) as well as the one-time seed
+    # below — NOT seed-only, unlike lemonade_container/*_gpu_index below.
     hipfire_container: str = "ods-hipfire"
-    # Lemonade wrapper container (llama-server) — restarted by the storage
-    # notify hook so a freshly moved-in GGUF registers (lemonade scans its
-    # store only at startup; verified live v10.2.0, no rescan endpoint).
+    # SEED ONLY since E1 (Task 9): fed `seed_engines_if_missing`'s
+    # legacy-triple connection.container field (app/node_store.py:452) at
+    # most once, on an upgrading box's first boot. The storage notify hook
+    # that used to restart THIS specific container name now iterates the
+    # LIVE declaration and reads each resource's OWN connection.container
+    # instead (app/notify.py's own docstring) — this setting has no other
+    # reader.
     lemonade_container: str = "ods-llama-server"
     # Seconds after hipfire's last observed served request during which
     # park/apply refuse to restart it (the single-slot conversation cache
@@ -136,9 +144,17 @@ class Settings(BaseSettings):
     # clears it early. See app.arbiter.HealSuppressor.
     heal_suppress_s: int = 600
 
-    # GPU list indices in read_gpus' filtered order (0-based over qualifying
-    # cards). On this box hipfire owns index 0; lemonade + comfyui share
-    # index 1 (the arbiter only ever contends for VRAM on the lemonade GPU).
+    # SEED ONLY since E1 (Task 3/9): GPU list indices in read_gpus' filtered
+    # order (0-based over qualifying cards) — fed ONLY
+    # `seed_engines_if_missing`'s legacy-triple gpu_index fields
+    # (app/node_store.py:447,453,457) at most once, on an upgrading box's
+    # first boot. The arbiter has read per-resource placement from each
+    # entry's OWN declared `gpu_index` since Task 3/5 (see
+    # Watcher._infer_pending's own docstring: "kills the single global
+    # settings.lemonade_gpu_index"); neither setting has any other reader.
+    # On the seeded box these values still describe the real topology
+    # (hipfire owns index 0; lemonade + comfyui share index 1) — that
+    # placement now lives in nodes.json, not here.
     lemonade_gpu_index: int = 1
     hipfire_gpu_index: int = 0
 

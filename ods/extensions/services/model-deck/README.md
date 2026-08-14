@@ -1,6 +1,6 @@
 # model-deck
 
-Model Deck is the centralized VRAM control plane for ODS, arbitrating GPU memory across multiple engines (lemonade, ComfyUI, hipfire) with a pluggable policy system. It also manages model storage tiers (hot/cold disk moves) and node lifecycle (Spark single-slot GPU scheduling).
+Model Deck is the centralized VRAM control plane for ODS, arbitrating GPU memory across a **declared set of local engines** — the fresh-install default is lemonade, ComfyUI, and hipfire, but any number of local engine instances of a known *kind* (see [Declared Engines](#declared-engines)) can be added or removed live, with no restart — with a pluggable policy system. It also manages model storage tiers (hot/cold disk moves) and node lifecycle (Spark single-slot GPU scheduling).
 
 ## Overview
 
@@ -47,7 +47,7 @@ Settings read from the environment but **not** passed through `compose.yaml`'s
 |----------|---------|---------|
 | `MODEL_DECK_STORAGE_WATCH_INTERVAL` | `60` | Watermark check cadence (seconds) |
 | `MODEL_DECK_STORAGE_SLACK_BYTES` | `2e9` | Headroom to reserve when planning moves (2 GB) |
-| `MODEL_DECK_LEMONADE_CONTAINER` | `ods-llama-server` | Docker container name for lemonade (needed to restart for model registration) |
+| `MODEL_DECK_LEMONADE_CONTAINER` | `ods-llama-server` | **SEED ONLY since E1** — feeds the one-time `engines[]` seed's `lemonade` connection on an upgrading box's first boot; the storage notify hook that restarts a lemonade-kind container for model registration now reads each resource's own declared `connection.container` instead (see [Declared Engines](#declared-engines)) |
 
 ## API Endpoints
 
@@ -61,13 +61,26 @@ Settings read from the environment but **not** passed through `compose.yaml`'s
 
 ### Tenant Control
 
+One generic route dispatches every human-initiated action, by **verb**, over
+whichever resource is named — never a fixed per-engine URL:
+
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/tenants/lemonade/load` | Load a model in lemonade (supports `?pull=true` for cold models, `?force=true` to override host-agent guard) |
-| `POST` | `/api/tenants/lemonade/unload` | Unload current model or a named model |
-| `POST` | `/api/tenants/comfyui/free` | Free ComfyUI VRAM (unload all models) |
-| `POST` | `/api/tenants/hipfire/park` | Park hipfire context (freeze inference, free VRAM) |
-| `POST` | `/api/tenants/hipfire/resume` | Resume hipfire context |
+| `POST` | `/api/tenants/{resource}/load` | Load a model (lemonade-kind only; supports `?pull=true` for cold models, `?force=true` to override the host-agent guard) |
+| `POST` | `/api/tenants/{resource}/unload` | Unload the current model or a named model (lemonade-kind only) |
+| `POST` | `/api/tenants/{resource}/free` | Free VRAM — drop cached state, keep serving (comfyui-kind only) |
+| `POST` | `/api/tenants/{resource}/park` | Park (freeze inference, free VRAM) (hipfire-kind only) |
+| `POST` | `/api/tenants/{resource}/resume` | Resume from park (hipfire-kind only) |
+
+`{resource}` is looked up in the **live declaration** on every request — a
+404 for a resource nobody declared. The verb picks the handler; a verb the
+resource's declared *kind* doesn't support is a 405 naming the kind (e.g.
+`POST /api/tenants/my-comfy/load` on a comfyui-kind resource). On a
+fresh/default install the seeded resource names are literally `lemonade`,
+`comfyui`, and `hipfire`, so the URLs above read exactly as they did before
+this generalized — nothing to migrate for the common case. See [Declared
+Engines](#declared-engines) for how a resource gets declared in the first
+place, and which verbs each *kind* exposes.
 
 ### VRAM Policy
 
@@ -116,6 +129,76 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 | `PUT` | `/api/nodes/{id}` | Partial update — `label` / `address` / `serving_address` / `credential` / `control`. `id` is immutable |
 | `DELETE` | `/api/nodes/{id}` | Remove the entry and its credential. 409 for `local` (undeletable) and for a `control: "swap"` node (demote to `"none"` first) |
 | `POST` | `/api/nodes/test` | Test connection — `{node_id}` (probes with the stored credential) **or** `{address, credential}` (pre-save, e.g. before the first Save). Never both. Returns `{ok, name?, platform?, capabilities?, gpu_count?, error?}`; the credential is never echoed, including on failure |
+
+### Declared Engines
+
+The local node's `engines[]` — what the deck's VRAM arbitration, storage
+notify hooks, and Set Builder actually watch and act on — is a **declared
+list**, not a fixed lemonade/comfyui/hipfire triple. Any number of
+resources of a known *kind* can be added, edited, or removed while the deck
+is running; nothing restarts to pick up the change (the watcher re-reads
+the declaration fresh every ~2 s tick).
+
+**Schema** — one entry per declared resource:
+
+```jsonc
+{
+  "resource": "lemonade",       // unique name, no "/"; keys local/<resource>
+                                 // intent + settings scopes. Immutable once
+                                 // declared — see PUT's 422 below.
+  "kind": "lemonade",           // one of GET /api/engine-kinds' "kinds"
+  "connection": {                // shape is PER-KIND — GET /api/engine-kinds
+    "url": "http://llama-server:8080",
+    "metrics_url": "http://llama-server:8001/metrics",
+    "container": "ods-llama-server"
+  },
+  "gpu_index": 1,                // which read_gpus()-filtered GPU this
+                                  // resource is placed on
+  "policy_defaults": {           // seeds PolicyStore on first declare
+    "priority": 50, "pinned": false, "idle_ttl": 900
+  }
+}
+```
+
+`GET /api/engine-kinds` is the picker source: every known *kind*'s
+connection schema (`{field: {required}}`) and its human-initiated verb
+vocabulary (`human_verbs`, e.g. lemonade-kind's `["load","unload"]`,
+hipfire-kind's `["park","resume"]`) — the UI never bakes a kind name in.
+
+**CRUD** (all under the local node; a resource not literally named
+`lemonade`/`comfyui`/`hipfire` works identically everywhere in the deck —
+control routes, VRAM policy, Set Builder, lifecycle):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/engine-kinds` | Every known kind's connection schema + `human_verbs` |
+| `POST` | `/api/nodes/local/engines` | Declare a new resource. 422 (one-line reason) for a shape/kind defect; 409 if `resource` is already declared |
+| `PUT` | `/api/nodes/local/engines/{resource}` | Full-entry replace. The body's `resource` must equal the path — renaming is refused (422: "rename is refused; forget and re-add instead"), never coerced. 404 if `{resource}` isn't currently declared |
+| `DELETE` | `/api/nodes/local/engines/{resource}` | **Forget** (see below). 404 if unknown |
+
+**Forget semantics (bookkeeping only):** `DELETE
+/api/nodes/local/engines/{resource}` drops the declaration entry, the
+resource's intent record, and its stored policy row — and **nothing
+else** (settings scopes, provenance, and events all survive, same posture
+as node removal). It **never calls the engine** — no client lookup happens
+anywhere in the route. A still-running container or model is left exactly
+as it was; the deck simply stops watching and stops arbitrating it. To
+actually stop the underlying process, do that separately (e.g. `docker
+stop`) before or after forgetting the declaration — the two are
+intentionally decoupled.
+
+**Coexistence (binding invariant):** the deck never actuates anything
+without first recording *intent* for it (see [Lifecycle](#lifecycle-intent-status-and-reconciliation)).
+A model or container that something *else* started — ODS-native, a human
+at the CLI, a script — is observed (it shows up in `/api/state`'s
+`world.tenants`) but is left completely alone: no intent means no restore,
+no eviction candidate consideration beyond the normal VRAM-contention
+rules any loaded resource is subject to, and no assumption that the deck
+did it. Declaring an engine is additive (existing engine state is
+unaffected — nothing loads or restarts just because you added the
+declaration), and forgetting one is subtractive in the same way (nothing
+unloads or stops just because you removed it). The declared set is the
+deck's *scope of attention*, not a lever on the engines themselves.
 
 ### Serving (node-addressed swap control)
 
@@ -1083,6 +1166,12 @@ Model Deck API (:3015, FastAPI)
   │    ├── sets.py ────────────── Set registry
   │    ├── registry.py ────────── Live model scan (lemonade + ComfyUI)
   │    ├── events.py ────────────── Audit trail (events.jsonl)
+  │    ├── engine_kinds.py ────── Declared-engine kind schemas + adapters
+  │    │                             (spec §8: the ONE module allowed to
+  │    │                             know a kind name outside its own
+  │    │                             engines/ client — see Declared Engines)
+  │    ├── local_clients.py ───── Per-resource client resolution, live off
+  │    │                             node_store's local `engines[]`
   │    └── engines/
   │         ├── lemonade.py ───── llama.cpp client
   │         ├── comfyui.py ────── ComfyUI client
@@ -1110,6 +1199,8 @@ Model Deck API (:3015, FastAPI)
 - `app/catalog.py` — Model catalog scanner, unit state
 - `app/mover.py` — Cross-drive file mover (copy, hash-verify, atomic rename)
 - `app/policy.py` — VRAM policy store and validation
+- `app/engine_kinds.py` — Declared-engine kind schemas, adapters (observe/actuate/verbs) — see [Declared Engines](#declared-engines)
+- `app/local_clients.py` — Resolves each declared resource to its client, live off `node_store`
 - `app/sets.py` — Set Builder registry and executor
 - `app/registry.py` — Live model scanner for lemonade and ComfyUI
 - `app/notify.py` — Engine notification hooks (lemonade restart, ComfyUI refresh)

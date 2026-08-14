@@ -310,11 +310,15 @@ def _build_deck(settings: Settings) -> dict:
         "node_clients": node_clients,
         "node_observers": node_observers,
         # Declared local engines' clients (app.local_clients.LocalClients,
-        # Task 3): what World.snapshot reads through for every resource in
-        # node_store's local `engines[]`. Actuation (control.py's routes,
-        # the watcher's self._lemonade/_comfy/_hipfire) is deliberately left
-        # on the pre-E1 shared client instances above — COEXISTENCE:
-        # observation only in this task, nothing actuates through here yet.
+        # Task 3, actuation added Task 6): what World.snapshot reads
+        # through for every resource in node_store's local `engines[]`, AND
+        # (since Task 6) what every actuation/pending/restore path in
+        # _build_watcher's Watcher resolves its per-resource client through
+        # too (see that constructor call's own comment below) — the stale
+        # claim this comment used to make ("observation only... nothing
+        # actuates through here yet") was the sibling of the one T6's
+        # review already fixed at the Watcher(...) call site itself; this
+        # was the one instance of it left standing.
         "local_clients": local_clients,
         # The one place a real node-agent client is minted for probes; the
         # nodes router and the observer both go through it, and tests swap

@@ -35,7 +35,12 @@ def _flip_set(deck, name: str, model_file: str, model_id: str) -> dict:
         "name": name,
         "durable": {"default_route_model": f"{EXTRA}{model_file}",
                     "activate_model_id": model_id},
-        "ephemeral": {"lemonade": {"state": "loaded"}},
+        # E1 (app/sets.py:150-157): Ephemeral is {resources: {resource:
+        # {desired, model?}}} — the pre-Task-8 top-level lemonade/comfyui/
+        # hipfire shape with a "state" field 422s under ConfigSet/Ephemeral
+        # (both extra="forbid", no legacy upgrade on the create_set POST
+        # path — upgrade_legacy_set only runs on LOAD of an old on-disk file).
+        "ephemeral": {"resources": {"lemonade": {"desired": "loaded"}}},
     }).raise_for_status()
     # force=true: the D1 probe warmed hipfire's tracker; the veto is expected
     # and deliberately overridden inside the window.

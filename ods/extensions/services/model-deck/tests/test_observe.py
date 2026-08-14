@@ -429,3 +429,24 @@ def test_engine_for_only_slot0_maps_to_spark():
 def test_engine_for_local_keys_ignore_the_id_set():
     assert engine_for("local/hipfire") == "hipfire"
     assert engine_for("local/lemonade", frozenset({"local"})) == "lemonade"
+
+
+def test_engine_for_local_kinds_resolves_a_non_legacy_resource():
+    """E1 T13 fix: a resource not literally named lemonade/comfyui/hipfire
+    (gguf-a, kind lemonade — deliberately away from the legacy triple, same
+    fixture convention as tests/test_engine_kinds.py) only resolves once the
+    caller threads its live declaration through as `local_kinds` — the
+    static _LOCAL_ENGINE_BY_KEY table alone can never match it."""
+    assert engine_for("local/gguf-a") is None  # no local_kinds: falls to the static table
+    assert engine_for("local/gguf-a", local_kinds={"gguf-a": "lemonade"}) == "lemonade"
+    # A resource present in local_kinds under a DIFFERENT name must not
+    # match — this isn't a prefix scan, it's a plain lookup.
+    assert engine_for("local/gguf-b", local_kinds={"gguf-a": "lemonade"}) is None
+
+
+def test_engine_for_local_kinds_never_shadows_a_swap_key():
+    """local_kinds only ever strips the "local/" prefix — a genuinely
+    swap-shaped key ("boxa/slot0") is untouched by it even when a caller
+    (by mistake) supplies an entry that happens to share the node id."""
+    assert engine_for("boxa/slot0", frozenset({"boxa"}),
+                      local_kinds={"slot0": "lemonade"}) == "spark"
