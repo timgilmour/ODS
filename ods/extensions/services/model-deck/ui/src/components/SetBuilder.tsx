@@ -16,6 +16,7 @@ import {
   type World,
 } from "../api";
 import { labels, messages } from "../model/messages";
+import { sortedResourceEntries } from "../model/nodes";
 import {
   buildDraft,
   derivePlacedModel,
@@ -25,7 +26,9 @@ import {
   EXTRA_PREFIX,
   fieldsFromSet,
   KIND_DRAFT_SPEC,
+  pickLoadResource,
   setResourceChoice,
+  undeclaredResources,
 } from "../model/setDraft";
 import Banner from "../ui/Banner";
 import Meter from "../ui/Meter";
@@ -63,18 +66,6 @@ const DEFAULT_GPU_BYTES = 32_000_000_000;
 // budget. A threshold, not a colour: Meter's own amber/red thresholds say
 // how full the bar looks, this says whether the operator gets a banner.
 const OVER_BUDGET_PCT = 90;
-
-// Button copy for the generic (non-model) desired-choice row — today the
-// only non-model kind offering "loaded" is hipfire-kind (resume), so that
-// entry reads "Running" rather than the generic verb; "unloaded" is
-// unreachable through this row (a load-verb kind takes the model-drop path
-// below instead) but listed for completeness/exhaustiveness.
-const DESIRED_BUTTON_LABEL: Record<ResourceDesired["desired"], string> = {
-  loaded: "Running",
-  unloaded: "Unload",
-  parked: "Parked",
-  freed: "Free",
-};
 
 // Snapshot taken the instant a 409 fires on save: the exact draft + the
 // slug it collided with. Frozen at that moment rather than re-derived from
@@ -250,9 +241,10 @@ export default function SetBuilder({
   // for a load-verb kind, lemonade today). The model-library drop
   // target/picker is keyed to it; with none declared, there is nothing to
   // place a model onto and the library panel does not render (below).
-  const loadResource = Object.entries(world.tenants).find(
-    ([, tenant]) => KIND_DRAFT_SPEC[tenant.engine]?.supportsModel,
-  )?.[0] ?? null;
+  // setDraft.ts's pickLoadResource sorts the same way the cards are ordered
+  // before picking, so a SECOND lemonade-kind resource can never flip which
+  // one gets the model target from one render to the next.
+  const loadResource = pickLoadResource(world.tenants);
 
   function placeModel(file: string) {
     if (!loadResource) return;
@@ -303,11 +295,17 @@ export default function SetBuilder({
     : 0;
 
   // One card per declared resource, ordered the same way the board is
-  // (nodes.ts: gpu_index then resource name) so the draft and the live
-  // board read the same left-to-right.
-  const resourceEntries = Object.entries(world.tenants).sort(
-    ([nameA, a], [nameB, b]) => a.gpu_index - b.gpu_index || nameA.localeCompare(nameB),
-  );
+  // (nodes.ts's sortedResourceEntries — the SAME function, not a second
+  // copy of the sort rule) so the draft and the live board read the same
+  // left-to-right.
+  const resourceEntries = sortedResourceEntries(world.tenants);
+
+  // A saved set can name a resource that is no longer declared (forgotten
+  // via the Nodes screen since the set was saved) — invisible in the card
+  // list above (which only iterates DECLARED resources) and, left alone,
+  // unsavable (app/sets.py:197's Ephemeral validator 422s on it). Rendered
+  // below as its own removable row so the operator can see it and fix it.
+  const undeclared = undeclaredResources(resources, Object.keys(world.tenants));
 
   return (
     <>
@@ -379,6 +377,25 @@ export default function SetBuilder({
               {policyOverrides !== null && (
                 <div className="badge-policy-overrides" title="this set carries per-tenant policy overrides (not editable here in v1; preserved on save)">
                   policy overrides present
+                </div>
+              )}
+
+              {undeclared.length > 0 && (
+                <div
+                  className="badge-policy-overrides"
+                  title="these resources named in the loaded set are no longer declared on this node — remove them or Save will be refused"
+                >
+                  {undeclared.map((resource) => (
+                    <div key={resource} className="tenant-actions">
+                      <span>{resource} — no longer declared</span>
+                      <button
+                        type="button"
+                        onClick={() => setResources((r) => setResourceChoice(r, resource, "none"))}
+                      >
+                        remove
+                      </button>
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -528,7 +545,7 @@ export default function SetBuilder({
                                   className={choice === opt ? "primary" : undefined}
                                   onClick={() => setResources((r) => setResourceChoice(r, resource, opt))}
                                 >
-                                  {DESIRED_BUTTON_LABEL[opt]}
+                                  {spec.optionLabels[opt] ?? opt}
                                 </button>
                               ))}
                             </div>

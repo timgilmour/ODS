@@ -149,8 +149,19 @@ export default function ApplyModal({ slug, cfgset, onClose }: ApplyModalProps) {
           )}
           {report.warnings.length > 0 && (
             <ul className="ui-warnings">
+              {/* report.warnings is ApplyReport's own array of raw reason
+                  CODES (app/sets.py's report["warnings"].append(step["reason"]))
+                  — no "resource" travels with it (that lives on the
+                  per-step event/warn detail, not on this summary list), so
+                  the translation below is necessarily the resource-less
+                  form. Routed through the SAME translator the preview's
+                  StepList uses (applySteps.ts's stepRow -> labels.stepWarnReason)
+                  so the operator reads one sentence for one reason, not a
+                  raw machine token here and a sentence there. A resource-
+                  qualified version of this list is ledgered as a follow-up
+                  (needs a backend payload change, out of scope here). */}
               {report.warnings.map((w, i) => (
-                <li key={i}>{w}</li>
+                <li key={i}>{labels.stepWarnReason(w)}</li>
               ))}
             </ul>
           )}

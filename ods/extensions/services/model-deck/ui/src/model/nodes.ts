@@ -239,15 +239,31 @@ function externalPlacement(e: ExternalProc): Placement {
   };
 }
 
+/** Canonical declared-resource ordering: gpu_index then resource name —
+ * never a fixed triple, never GPU-index alone (two resources sharing a GPU
+ * still need a deterministic tiebreak). This is THE board order (spec §5:
+ * zero, three, or five cards, this sequence) — `setDraft.ts`'s
+ * `pickLoadResource` and `SetBuilder.tsx`'s card list both import this
+ * rather than keeping their own copy, so the draft always lists resources
+ * in the same order the live board does and a future ordering change can't
+ * land in one place and not the others (fix-loop finding: SetBuilder's
+ * model-library target pick used to be plain unsorted `Object.entries`,
+ * nondeterministic whenever two lemonade-kind resources were declared). */
+export function sortedResourceEntries(
+  tenants: Record<string, ResourceTenant>,
+): [string, ResourceTenant][] {
+  return Object.entries(tenants).sort(
+    ([nameA, a], [nameB, b]) => a.gpu_index - b.gpu_index || nameA.localeCompare(nameB),
+  );
+}
+
 function localNode(state: StateResponse): DeckNode {
   const { world, lifecycle, policy } = state;
   // One card per DECLARED resource (spec §5: zero, three, or five), ordered
   // by gpu_index then resource name — never a fixed triple, never one card
   // per physical GPU (two resources may share a GPU; each still gets its
   // own card, the design this task's brief test pins).
-  const sorted = Object.entries(world.tenants).sort(
-    ([nameA, a], [nameB, b]) => a.gpu_index - b.gpu_index || nameA.localeCompare(nameB),
-  );
+  const sorted = sortedResourceEntries(world.tenants);
   // An external process is attributed to the FIRST resource card on its
   // GPU (in the sorted order above) rather than every card sharing that
   // GPU — otherwise two co-located resources would each show the same
@@ -397,6 +413,22 @@ export function findPlacement(nodes: DeckNode[], id: string): PlacementSpot | nu
     }
   }
   return null;
+}
+
+/** Whether a resource currently carries its own (non-external) placement —
+ * one card has at most one, E1's per-resource-card redesign (a shared GPU's
+ * external process is a SEPARATE placement on the same card, never the
+ * resource's own). This is the ONE fact two independent call sites need to
+ * agree on: `ResourcePanel` uses it to decide whether `PlacementActions`'
+ * bare state pill has to name the resource (no chip means the control row
+ * is the only thing saying what it is), and `ModelDetailDrawer` uses the
+ * identical question for the same component's `hasPlacement` prop when
+ * it's reopened over that resource's own model chip. Collapsed to one
+ * function so the two can never independently drift on what "has a
+ * placement" means — the fix-loop finding this replaced was exactly that: a
+ * tautological re-derivation at one call site and a real one at the other. */
+export function resourceHasOwnPlacement(resource: DeckResource): boolean {
+  return resource.placements.some((p) => p.kind !== "external");
 }
 
 /** One swap node's serving-slot resource — buildNodes' registry loop calls

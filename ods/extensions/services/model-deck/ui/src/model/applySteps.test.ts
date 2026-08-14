@@ -21,9 +21,12 @@ describe("stepRow", () => {
     // branch below.
     expect(stepRow({ step: "restore_settings", settings: {} }, 0).label).toBe("Restore settings");
     // "comfyui-busy-skipped" (the pre-Task-8 kind-baked reason) is DEAD —
-    // T8 review I3 renamed it to the resource-tagged "busy-skipped".
-    expect(stepRow({ step: "warn", reason: "busy-skipped", resource: "agent" }, 0))
-      .toMatchObject({ label: "Warning", detail: "agent skipped — busy" });
+    // T8 review I3 renamed it to the resource-tagged "busy-skipped". Only a
+    // comfyui-kind resource can ever pair with it (app/sets.py:695-710's
+    // free-verb branch — hipfire has no free verb, so "agent" would be an
+    // impossible pairing here).
+    expect(stepRow({ step: "warn", reason: "busy-skipped", resource: "img" }, 0))
+      .toMatchObject({ label: "Warning", detail: "img skipped — queue not confirmed empty" });
   });
 
   it("renders a step's label without a resource tag when the step carries none", () => {

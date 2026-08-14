@@ -432,12 +432,19 @@ export const labels = {
    * default step-kind branch follows), so a future backend reason degrades
    * gracefully instead of vanishing.
    *
-   * "busy-skipped" (app/sets.py:709, resource-tagged — T8 review I3 renamed
-   * it from the kind-baked "comfyui-busy-skipped": a park-verb resource's
-   * conversation guard was busy, same refusal class as the live park
-   * route's 409). "no-model-to-load" (app/sets.py:758, resource-tagged): a
-   * "loaded" goal on a load-verb resource named no model, live or in the
-   * set. "durable-revert-unavailable" (app/sets.py:653, no resource — it is
+   * "busy-skipped" (app/sets.py:695-710, resource-tagged, log site :708-710
+   * — T8 review I3 renamed it from the kind-baked "comfyui-busy-skipped"):
+   * the FREE-VERB branch (comfyui-kind is the only kind with "free" in
+   * human_verbs() today) only frees when the resource's queue reading is
+   * CONFIRMED zero (`tenant["queue"] == 0`) — a nonzero (busy) queue AND an
+   * unreadable/unknown one (None) both fold into this ONE reason, on
+   * purpose (the comment at :696-698: "never yank VRAM out from under a
+   * running generation" applies equally to "we don't actually know"). The
+   * copy below must not claim "busy" when the truth might just be
+   * "unconfirmed" — that would be a fact the backend never asserted.
+   * "no-model-to-load" (app/sets.py:758, resource-tagged): a "loaded" goal
+   * on a load-verb resource named no model, live or in the set.
+   * "durable-revert-unavailable" (app/sets.py:653, no resource — it is
    * about the DURABLE route, not a per-resource actuation): the previous-set
    * revert has no catalog id to re-activate the old default route with. */
   stepWarnReason: (reason: string, resource?: string | null): string => {
@@ -445,7 +452,9 @@ export const labels = {
       case "durable-revert-unavailable":
         return "durable revert unavailable — no catalog id to re-activate the previous model";
       case "busy-skipped":
-        return resource ? `${resource} skipped — busy` : "skipped — busy";
+        return resource
+          ? `${resource} skipped — queue not confirmed empty`
+          : "skipped — queue not confirmed empty";
       case "no-model-to-load":
         return resource ? `${resource} has no model to load` : "no model to load";
       default:

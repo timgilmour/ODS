@@ -5,6 +5,7 @@ import type {
   ResourceTenant,
   TenantPolicy,
 } from "../api";
+import { sortedResourceEntries } from "./nodes";
 
 /** The lemonade default-route prefix for library files — mirrors
  * SetBuilder's original constant; app/sets.py stores the route string
@@ -25,17 +26,55 @@ export const EXTRA_PREFIX = "extra.";
  * alone, app/sets.py:203-204) — the one case a "loaded" goal carries a
  * specific file, driven by the Set Builder's model-library drop target
  * rather than the plain choice buttons every other kind/desired
- * combination uses. */
+ * combination uses.
+ *
+ * `optionLabels` is PER KIND, not a single global table keyed on `desired`
+ * alone — "loaded" means a different VERB depending on which kind accepts
+ * it (app/sets.py's `_DESIRED_VERBS`: "loaded" -> {load, resume}), so it
+ * reads "Load" for a load-verb kind but "Running" for a resume-verb one
+ * (hipfire). Fix-loop finding: a single `desired -> label` table read
+ * "Running" for EVERY kind offering "loaded", including a SECOND
+ * lemonade-kind resource that isn't picked as the model-library target
+ * (`pickLoadResource` below) and therefore falls to the generic
+ * choice-button row too — that resource would have misread "Running"
+ * (hipfire's verb) on what is actually a Load button. */
 export interface KindDraftSpec {
   options: readonly ResourceDesired["desired"][];
   supportsModel: boolean;
+  optionLabels: Partial<Record<ResourceDesired["desired"], string>>;
 }
 
 export const KIND_DRAFT_SPEC: Record<string, KindDraftSpec> = {
-  lemonade: { options: ["loaded", "unloaded"], supportsModel: true },
-  hipfire: { options: ["loaded", "parked"], supportsModel: false },
-  comfyui: { options: ["freed"], supportsModel: false },
+  lemonade: {
+    options: ["loaded", "unloaded"], supportsModel: true,
+    optionLabels: { loaded: "Load", unloaded: "Unload" },
+  },
+  hipfire: {
+    options: ["loaded", "parked"], supportsModel: false,
+    optionLabels: { loaded: "Running", parked: "Parked" },
+  },
+  comfyui: {
+    options: ["freed"], supportsModel: false,
+    optionLabels: { freed: "Free" },
+  },
 };
+
+/** The declared resource whose kind carries a model (E1: any number of
+ * declared resources now — `supportsModel` is true only for a load-verb
+ * kind, lemonade today) — the Set Builder's model-library drop
+ * target/picker is keyed to it. Sorted the SAME way the board orders cards
+ * (`sortedResourceEntries`: gpu_index then resource name) before picking,
+ * so the choice is deterministic — a plain unsorted `Object.entries().find`
+ * would pick whichever key JS's engine happened to enumerate first, which
+ * for a non-numeric-string-keyed object is insertion order and therefore
+ * whichever resource the operator (or a loaded set) happened to declare
+ * first, not a stable, predictable one. `null` when nothing declared
+ * supports a model (the library panel then does not render — SetBuilder's
+ * job, not this function's). */
+export function pickLoadResource(tenants: Record<string, ResourceTenant>): string | null {
+  const sorted = sortedResourceEntries(tenants);
+  return sorted.find(([, tenant]) => KIND_DRAFT_SPEC[tenant.engine]?.supportsModel)?.[0] ?? null;
+}
 
 /** The draft's current choice for one resource: "none" (absent — the
  * "don't touch" default every resource starts at) or one of the
@@ -108,6 +147,29 @@ export function fieldsFromSet(cfgset: ConfigSet, clearName: boolean): DraftField
     resources: cfgset.ephemeral?.resources ?? {},
     policyOverrides: cfgset.policy_overrides ?? null,
   };
+}
+
+/** Resource names present in the draft's `resources` map that are NOT among
+ * the CURRENTLY declared engines — e.g. a set saved while "gguf-a" was
+ * declared, loaded again after "gguf-a" was forgotten (DELETE
+ * /api/nodes/local/engines/{resource}, Task 10). `fieldsFromSet` keeps such
+ * an entry verbatim (CRITICAL 2 says an untouched resource must never be
+ * silently dropped either), but `SetBuilder`'s card list only ever iterates
+ * DECLARED resources (`sortedResourceEntries(world.tenants)`), so with
+ * nothing else, the entry would be invisible on screen AND unremovable —
+ * and still ride along on Save, where `app/sets.py:197`'s Ephemeral
+ * validator refuses it ("is not a currently declared engine", 422) with no
+ * hint anywhere in the UI why. This is the pure DETECTION half of that fix;
+ * the component renders one row per name this returns, each with a remove
+ * control that calls `setResourceChoice(resources, name, "none")` — the
+ * same removal primitive every other resource's "don't touch" choice
+ * already uses. Sorted for deterministic rendering. */
+export function undeclaredResources(
+  resources: Record<string, ResourceDesired>,
+  declaredResourceNames: readonly string[],
+): string[] {
+  const declared = new Set(declaredResourceNames);
+  return Object.keys(resources).filter((r) => !declared.has(r)).sort();
 }
 
 /** Best-effort: only durable.default_route_model with the "extra." prefix

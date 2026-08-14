@@ -219,8 +219,14 @@ describe("labels", () => {
   });
 
   it("translates a warn-step reason code into a resource-tagged sentence", () => {
-    // app/sets.py:709 — resource-tagged.
-    expect(labels.stepWarnReason("busy-skipped", "agent")).toBe("agent skipped — busy");
+    // app/sets.py:695-710 — the free-verb branch, so ONLY a comfyui-kind
+    // resource can ever pair with this reason (comfyui is the only kind
+    // with "free" in human_verbs() today) — "img" here, never a
+    // hipfire-kind resource like "agent" (an impossible pairing: hipfire
+    // has no free verb at all).
+    expect(labels.stepWarnReason("busy-skipped", "img")).toBe(
+      "img skipped — queue not confirmed empty",
+    );
     // app/sets.py:758 — resource-tagged.
     expect(labels.stepWarnReason("no-model-to-load", "gguf-a")).toBe(
       "gguf-a has no model to load",

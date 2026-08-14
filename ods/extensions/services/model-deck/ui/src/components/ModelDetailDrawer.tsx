@@ -26,6 +26,7 @@ import { labels, messages } from "../model/messages";
 import {
   isSwapSlotId,
   nodeIdOfPlacement,
+  resourceHasOwnPlacement,
   SPARK_CONTROL,
   type DeckResource,
   type Placement,
@@ -307,13 +308,18 @@ export default function ModelDetailDrawer({
 
   // A local resource control belonging to THIS placement. E1: one card per
   // declared resource now (not per GPU), so `controls` carries at most one
-  // non-spark entry — the resource's own name — and it always IS the
-  // resource that owns this placement (there is no second tenant sharing
-  // the card to disambiguate against anymore, unlike the pre-E1 GPU-card
-  // model this replaced).
-  const tenantControl = placedOn
-    ? (placedOn.resource.controls.find((c) => c !== SPARK_CONTROL) ?? null)
-    : null;
+  // non-spark entry — the resource's own name. That control still belongs
+  // to the RESOURCE, not to any one chip on its card — a card can also
+  // carry EXTERNAL process placements sharing the same GPU (nodes.ts's
+  // externals-claim logic), and this placement might be one of those, not
+  // the resource's own tenant. Offering Load/Unload/Park/etc under an
+  // external PID's drawer would be nonsensical (fix-loop finding: the
+  // `.controls` check alone doesn't know which chip is open), so gate on
+  // `placement.kind !== "external"` too.
+  const tenantControl =
+    placedOn && placement.kind !== "external"
+      ? (placedOn.resource.controls.find((c) => c !== SPARK_CONTROL) ?? null)
+      : null;
   // A swap node's slot key is a fixed convention backend-side
   // (app/observe.py:slot_key, mirrored in nodes.ts's isSwapSlotId).
   const isSparkSlot = isSwapSlotId(placement.id);
@@ -612,7 +618,12 @@ export default function ModelDetailDrawer({
                   resource={tenantControl}
                   world={world}
                   models={models}
-                  hasPlacement={placedOn.resource.placements.some((p) => p.id === placement.id)}
+                  // Shared with ResourcePanel's identical question via
+                  // nodes.ts's resourceHasOwnPlacement — one function, so
+                  // the two call sites can't disagree (fix-loop finding:
+                  // this used to re-derive the same fact a different,
+                  // tautological way).
+                  hasPlacement={resourceHasOwnPlacement(placedOn.resource)}
                   coldGgufs={coldGgufs}
                   onRefresh={onRefresh}
                 />

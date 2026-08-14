@@ -40,7 +40,7 @@ describe("eventSeverity — failure", () => {
 describe("eventSeverity — outcome outranks the suffix", () => {
   it("classifies a FAILED apply-end as a failure, not a success", () => {
     // app/sets.py logs BOTH terminal results under the one kind "apply-end":
-    // :835 {"outcome": "failed", "step", "error"} and :850 {"outcome": "ok"}.
+    // :1111 {"outcome": "failed", "step", "error"} and :1134 {"outcome": "ok"}.
     // The kind alone therefore cannot classify it, and the suffix rule made
     // a failed apply render GREEN [max-review #14].
     expect(eventSeverity("apply-end", { outcome: "failed", step: "load" }))
@@ -79,7 +79,7 @@ describe("eventSeverity — outcome outranks the suffix", () => {
 
 describe("eventSeverity — exact overrides that beat the suffix convention", () => {
   it("classifies notify-restart-failed as attention, not failure, despite the -failed suffix", () => {
-    // app/notify.py:97-99: one resource's restart failure, logged in
+    // app/notify.py:102-104: one resource's restart failure, logged in
     // ISOLATION — every sibling resource sharing that destination still
     // gets its own restart attempt regardless (the module's per-resource
     // Let-It-Crash design), and the eventual raise that fails the calling

@@ -49,7 +49,7 @@ const ATTENTION_EXACT = new Set([
 // deliberately classified against it, so they have to be checked FIRST or
 // the suffix rule would shadow them.
 const OVERRIDE_EXACT: Record<string, Severity> = {
-  // app/notify.py:97-99 logs one resource's restart failure in ISOLATION —
+  // app/notify.py:102-104 logs one resource's restart failure in ISOLATION —
   // the module's docstring design is "Let It Crash: isolate per resource"
   // (every declared resource sharing that destination still gets its OWN
   // restart attempt regardless of an earlier one's failure, no rollback),

@@ -1,6 +1,6 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import { labels, messages } from "../model/messages";
-import { SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
+import { resourceHasOwnPlacement, SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
 import Meter from "../ui/Meter";
 import ModelChip from "../ui/ModelChip";
 import Panel from "../ui/Panel";
@@ -148,9 +148,10 @@ export default function ResourcePanel({
               // Whether this resource already has a chip on this card. A
               // parked hipfire-kind resource deliberately has none, and then
               // the control row is the only thing that can say what state
-              // it is in. One resource, at most one non-external placement
-              // now (E1: one card per resource, not per GPU).
-              hasPlacement={resource.placements.some((p) => p.kind !== "external")}
+              // it is in. Shared with ModelDetailDrawer's identical
+              // question via nodes.ts's resourceHasOwnPlacement — one
+              // function, so the two can't disagree.
+              hasPlacement={resourceHasOwnPlacement(resource)}
               coldGgufs={coldGgufs}
               onRefresh={onRefresh}
             />
