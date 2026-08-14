@@ -67,12 +67,24 @@ distinguishable in the log, not collapse into one anonymous line. When
 more than one entry fails, the FIRST failure encountered is what
 ultimately propagates (deterministic, and every failure — first or not —
 already has its own logged event regardless).
+
+Final-review item 3a (E1): the per-resource catch around `_restart` above
+now names `GuardError` alongside `EngineError` — a container outside
+`settings.park_allowlist` makes `DockerCtl.stop()`/`start()` raise
+`GuardError` (app/docker_ctl.py:198-199), and `GuardError` is deliberately
+NOT an `EngineError` subclass (app/engines/__init__.py:30-38: "Callers that
+want to distinguish 'engine is broken' from 'guard tripped' need these to
+be unrelated exception types"). An `EngineError`-only catch here let that
+refusal escape the loop entirely — aborting every SIBLING's restart attempt
+and skipping its own `notify-restart-failed` event — the exact isolation
+failure this whole fix exists to prevent, just for a different exception
+type than the one it was written against.
 """
 
 import time
 
 from app.engine_kinds import ENGINE_KINDS
-from app.engines import EngineError
+from app.engines import EngineError, GuardError
 from app.events import log_event
 
 
@@ -80,7 +92,7 @@ def notify_engine(location: dict, deck: dict) -> str | None:
     local = deck["node_store"].get("local")
     engines = local.get("engines", []) if local is not None else []
     deferred: list[str] = []
-    failure: EngineError | None = None
+    failure: EngineError | GuardError | None = None
     for entry in engines:
         if entry["kind"] != location["engine"]:
             continue
@@ -98,7 +110,7 @@ def notify_engine(location: dict, deck: dict) -> str | None:
             continue
         try:
             _restart(deck, container)
-        except EngineError as exc:
+        except (EngineError, GuardError) as exc:
             log_event(deck["events_path"], "notify-restart-failed",
                       {"resource": resource, "container": container,
                        "error": str(exc)})

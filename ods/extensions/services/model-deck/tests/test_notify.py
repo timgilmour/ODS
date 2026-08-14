@@ -1,7 +1,7 @@
 """Tests for app.notify.notify_engine — post-move engine registration hooks."""
 import pytest
 
-from app.engines import EngineError
+from app.engines import EngineError, GuardError
 from app.events import tail_events
 from app.notify import notify_engine
 
@@ -273,3 +273,59 @@ def test_first_failure_logs_and_sibling_still_restarts_then_raises(tmp_path):
     assert failures[0]["detail"]["resource"] == "lemonade"
     assert failures[0]["detail"]["container"] == "ods-llama-server"
     assert "start timed out" in failures[0]["detail"]["error"]
+
+
+# ===========================================================================
+# E1 final-review item 3a: GuardError is deliberately NOT an EngineError
+# subclass (app/engines/__init__.py:30-38) — a container outside
+# settings.park_allowlist makes DockerCtl.stop()/start() raise GuardError
+# (app/docker_ctl.py:198-199), not EngineError. Before this fix the
+# per-resource try/except above named EngineError only, so a park-allowlist
+# refusal escaped it entirely: the loop aborted mid-way, every SIBLING's
+# restart was skipped, and no notify-restart-failed event was ever logged
+# for the resource that actually failed.
+# ===========================================================================
+
+
+def test_first_failure_guard_error_isolates_sibling_and_logs(tmp_path):
+    """Mirrors test_first_failure_logs_and_sibling_still_restarts_then_raises
+    above, GuardError substituted for EngineError — same shape, same
+    assertions: the failing resource shows a full stop+start attempt (it
+    failed mid-restart, not before ever trying — DockerCtl's real _guard()
+    fires inside stop()/start() themselves), the SIBLING shows its own
+    complete stop+start pair (not abandoned), the failure still propagates,
+    and the event log names exactly which resource/container was refused.
+    Fixture resources are gguf-a/gguf-b (away from live topology), not the
+    seeded lemonade/hipfire/comfyui triple — the point is general to any
+    declared resource, not specific to one name."""
+    gguf_a = _gguf_b_entry(resource="gguf-a",
+                           connection={**_LEMONADE_ENTRY["connection"],
+                                       "container": "ods-gguf-a"})
+    gguf_b = _gguf_b_entry()
+    dockerctl = _SelectiveDockerCtl(
+        fail_container="ods-gguf-a",
+        exc=GuardError("container 'ods-gguf-a' is not in the park allowlist"),
+    )
+    deck = _deck(
+        tmp_path,
+        engines=[gguf_a, gguf_b],
+        clients={"gguf-a": _Lemonade(None), "gguf-b": _Lemonade(None)},
+        dockerctl=dockerctl,
+    )
+
+    with pytest.raises(GuardError, match="park allowlist"):
+        notify_engine(_loc("lemonade"), deck)
+
+    # The failing resource: attempted mid-restart (stop AND start both ran).
+    assert ("stop", "ods-gguf-a") in dockerctl.calls
+    assert ("start", "ods-gguf-a") in dockerctl.calls
+    # The sibling: NOT abandoned — its own full stop+start pair still ran.
+    assert dockerctl.calls.count(("stop", "ods-gguf-b")) == 1
+    assert dockerctl.calls.count(("start", "ods-gguf-b")) == 1
+
+    events = tail_events(deck["events_path"])
+    failures = [e for e in events if e["kind"] == "notify-restart-failed"]
+    assert len(failures) == 1
+    assert failures[0]["detail"]["resource"] == "gguf-a"
+    assert failures[0]["detail"]["container"] == "ods-gguf-a"
+    assert "park allowlist" in failures[0]["detail"]["error"]

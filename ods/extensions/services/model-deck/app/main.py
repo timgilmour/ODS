@@ -206,16 +206,36 @@ def _build_deck(settings: Settings) -> dict:
     # skip both consult) would have the identical split otherwise.
     #
     # Falls back to the settings-built instance above when the resource
-    # ISN'T declared (a brand-new, empty-declaration install, spec §1) —
-    # every consumer of deck["lemonade"]/deck["comfy"]/deck["hipfire"]
-    # (this file's own _build_watcher below, app.routers.control's routes,
-    # app.routers.sets' apply() call, app.notify) must keep getting a
+    # ISN'T declared (a brand-new, empty-declaration install, spec §1) — a
     # real, always-present client regardless of declaration state; see
     # tests/test_engines.py's
     # test_build_deck_wires_hipfire_stats_url_and_activity_window, which
     # pins exactly that for an undeclared box, and
     # test_local_clients_alias_falls_back_when_nothing_is_declared
     # alongside it, which pins the fallback explicitly.
+    #
+    # STALE CLAIM CORRECTED (E1 final-review item 4): this used to say every
+    # consumer of deck["lemonade"]/deck["comfy"]/deck["hipfire"] — naming
+    # app.routers.control's routes, app.routers.sets' apply(), and
+    # app.notify among them — needed this alias. False since T7/T8/T9: all
+    # three now resolve their client per-request through
+    # deck["local_clients"].client_for(resource) instead (grep confirms zero
+    # deck["lemonade"]/["comfy"]/["hipfire"] reads left in control.py,
+    # sets.py, or notify.py). The ONLY remaining reader is THIS FILE's own
+    # `_build_watcher` below, which still hands `lemonade=`/`comfy=`/
+    # `hipfire=` into the `Watcher(...)` constructor call — and even there
+    # it is production-dead: those three params exist solely to seed
+    # `app.arbiter._LegacyClients`, a fallback `Watcher` only builds when its
+    # `local_clients` constructor argument is `None` (see `Watcher.__init__`
+    # and `_LegacyClients`'s own docstring in app/arbiter.py), and
+    # `_build_watcher` below always passes the real `deck["local_clients"]`.
+    # Kept (not deleted) for that one caller's sake, and because the
+    # dual-instance bug this alias closes (see the paragraph above) is real
+    # regardless of whether anything still reads the aliased variable
+    # afterward — the alias's OTHER job, keeping World.snapshot's and this
+    # constructor's activity trackers on one shared instance, still matters.
+    # Deleting the aliases themselves is parked with c13, not this comment
+    # fix.
     _declared_lemonade = local_clients.client_for("lemonade")
     if _declared_lemonade is not None:
         lemonade = _declared_lemonade

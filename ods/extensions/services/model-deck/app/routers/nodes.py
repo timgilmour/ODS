@@ -249,7 +249,26 @@ def update_engine(resource: str, body: dict, request: Request) -> dict:
     app/node_store.py's `id` docstring states for nodes) — a mismatch is
     refused as a rename attempt (422), never coerced to either side
     ([[literal-declared-inputs]]). 404 when the path resource isn't
-    currently declared."""
+    currently declared.
+
+    E1 final-review item 5 (controller ruling): a KIND change invalidates
+    the OLD kind's intent record. app/state.py's observation half already
+    self-heals a kind mismatch on read (`_KIND_MEM_KEY`, World.snapshot's
+    per-tick comparison); the intent (goal) half has no equivalent lazy
+    check — `app.reconcile.plan_reconcile` copies `intent["engine"]`
+    straight into the restore action, and `app.arbiter` (:1178) resolves
+    the adapter off THAT name, not the live declaration — so a stale
+    old-kind record surviving a kind change can drive `_restore` through
+    the WRONG adapter for this resource. Contained today by the failure
+    budget/quarantine (noisy, not silent), but avoidable outright: forget
+    the intent record here — the exact call `forget_engine` below uses
+    (`IntentStore.forget`) — whenever the incoming `kind` differs from what
+    is currently declared. A same-kind edit (moving `gpu_index`,
+    `policy_defaults`, connection fields) must NOT touch it — only an
+    actual kind change invalidates the record. See the crash-ordering
+    comment at the forget call below for why it runs BEFORE the
+    declaration write, not after (the opposite order from `forget_engine`'s
+    own three-write sequence, and deliberately so)."""
     deck = request.app.state.deck
     store = deck["node_store"]
     if body.get("resource") != resource:
@@ -258,12 +277,36 @@ def update_engine(resource: str, body: dict, request: Request) -> dict:
             f"{resource!r} — rename is refused; forget and re-add instead",
             "resource")
     engines = _local_engines(deck)
-    if not any(e["resource"] == resource for e in engines):
+    existing = next((e for e in engines if e["resource"] == resource), None)
+    if existing is None:
         raise HTTPException(status_code=404, detail=f"unknown engine {resource!r}")
     try:
         validate_engines([body])
     except ValueError as exc:
         raise _shape_error(str(exc)) from exc
+    if body["kind"] != existing["kind"]:
+        # Forget BEFORE the declaration write below, not after — reversed
+        # from forget_engine's own ordering (declaration first, THEN
+        # intent), because the two routes' crash windows have asymmetric
+        # worst cases, not the same one. Declaration-first HERE would mean:
+        # a crash between the two writes leaves this resource declared
+        # under the NEW kind while intent still carries the OLD kind's
+        # `engine` field — exactly the live bug this fix exists to close,
+        # reintroduced for the length of the crash window (a reconciler
+        # tick landing there sees "down" under the new kind's observation
+        # and restores through the old adapter). Intent-first means: a
+        # crash here leaves the OLD kind still declared (the write below
+        # never ran, so nothing actually changed) with no intent record for
+        # it — inert, "the deck has no opinion", the exact safe-by-default
+        # reading `app.reconcile.plan_reconcile` already gives an ABSENT
+        # intent (skip, never invent one — see that module's own comment).
+        # Worst case with this order is silence (no auto-restore until the
+        # operator retries the edit or acts on the resource again), never a
+        # wrong-adapter actuation — strictly safer than the reversed order,
+        # same standard forget_engine's own analysis applies, just landing
+        # on the opposite conclusion because what is at risk differs (there:
+        # an orphaned policy override; here: an actively wrong actuation).
+        deck["intent_store"].forget(local_key(resource))
     new_engines = [body if e["resource"] == resource else e for e in engines]
     entry = store.update("local", {"engines": new_engines})
     log_event(deck["events_path"], "engine-updated", {"resource": resource})

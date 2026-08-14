@@ -805,6 +805,38 @@ def test_unsupported_verb_405s_with_kind_named(tmp_path, monkeypatch):
     assert "comfyui" in r.json()["detail"]
 
 
+def test_load_body_validation_error_never_echoes_payload_and_uses_redacting_handler(
+    tmp_path, monkeypatch
+):
+    """E1 final-review item 1: `LoadBody`/`UnloadBody` are constructed
+    INSIDE control.dispatch(), not via FastAPI's automatic body binding — a
+    pydantic v2 ValidationError from a malformed body subclasses ValueError,
+    so it used to land on the bare ValueError handler (app/main.py:551)
+    instead of the REDACTING RequestValidationError one, echoing the raw
+    request body (`input`) straight into the 422. Mirrors
+    tests/test_sets.py's test_create_set_validation_error_never_echoes_the_
+    payload — same proof (a distinctive marker must never appear anywhere
+    in the full response text), same fix idiom
+    (app.routers.sets.create_set's own ValidationError -> RequestValidation
+    Error re-raise), applied to control.py's hand-rolled body construction.
+    Fixture resource is gguf-a (lemonade-kind, declared away from live
+    topology, not the seeded "lemonade") — the seam being proven is general
+    to the dispatch mechanism, not specific to any one resource name."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    sentinel = "SENTINEL-SECRET"
+
+    resp = TestClient(app).post(
+        "/api/tenants/gguf-a/load", json={"model": {sentinel: 1}}
+    )
+
+    assert resp.status_code == 422
+    assert sentinel not in resp.text
+    detail = resp.json()["detail"]
+    assert isinstance(detail, list)          # RequestValidationError shape,
+    assert all("input" not in err for err in detail)  # never the bare-ValueError one
+
+
 def test_load_on_a_second_declared_lemonade_resource_dispatches_to_its_own_client(
     tmp_path, monkeypatch
 ):
@@ -813,7 +845,15 @@ def test_load_on_a_second_declared_lemonade_resource_dispatches_to_its_own_clien
     deck["local_clients"] off the resource in the URL — never a single
     shared boot-time alias. gguf-b's load must reach gguf-b's fake and
     record local/gguf-b; gguf-a's fake (and its own key) must stay
-    untouched."""
+    untouched.
+
+    The recorded `engine` field (E1 final-review item 2) is gguf_b's
+    DECLARED KIND ("lemonade"), threaded through from control.dispatch()'s
+    own `_declared_kind` lookup — never a literal hardcoded in the load
+    handler, which a resource named anything but "lemonade" would silently
+    mis-satisfy only by coincidence (human_verbs() being kind-disjoint is
+    what made the old hardcoded literal happen to be right for every
+    resource that could ever reach it, this one included)."""
     app, deck = make_app(tmp_path, monkeypatch)
     gguf_b = {**_GGUF_A_ENTRY, "resource": "gguf-b", "gpu_index": 3,
              "connection": {"url": "http://gguf-b:8080",
@@ -833,6 +873,7 @@ def test_load_on_a_second_declared_lemonade_resource_dispatches_to_its_own_clien
     record = deck["intent_store"].get()["local/gguf-b"]
     assert record["state"] == "loaded"
     assert record["model"] == "extra.new.gguf"
+    assert record["engine"] == gguf_b["kind"]
     assert "local/gguf-a" not in deck["intent_store"].get()
 
 
@@ -1414,7 +1455,11 @@ def test_mutating_endpoints_open_without_any_auth(tmp_path, monkeypatch):
 
 def test_lemonade_load_records_loaded_intent(tmp_path, monkeypatch):
     """Every deliberate action must leave a record, or the reconciler has
-    nothing to restore to after a reboot."""
+    nothing to restore to after a reboot. `engine` is asserted against the
+    "lemonade" resource's DECLARED kind (E1 final-review item 2), not a bare
+    literal — see test_load_on_a_second_declared_lemonade_resource_
+    dispatches_to_its_own_client for the sibling case where resource name
+    and kind actually diverge."""
     app, deck = make_app(tmp_path, monkeypatch)
 
     TestClient(app).post(
@@ -1424,7 +1469,8 @@ def test_lemonade_load_records_loaded_intent(tmp_path, monkeypatch):
     record = deck["intent_store"].get()["local/lemonade"]
     assert record["state"] == "loaded"
     assert record["model"] == "extra.qwen.gguf"
-    assert record["engine"] == "lemonade"
+    expected_kind = next(e["kind"] for e in _ENGINES if e["resource"] == "lemonade")
+    assert record["engine"] == expected_kind
 
 
 def test_lemonade_load_records_the_prefixed_name_actually_loaded(tmp_path, monkeypatch):
@@ -1496,13 +1542,16 @@ def test_guard_refused_unload_records_nothing(tmp_path, monkeypatch):
 
 
 def test_hipfire_park_records_unloaded_intent(tmp_path, monkeypatch):
+    """`engine` is asserted against the "hipfire" resource's DECLARED kind
+    (E1 final-review item 2), not a bare literal."""
     app, deck = make_app(tmp_path, monkeypatch)
 
     TestClient(app).post("/api/tenants/hipfire/park")
 
     record = deck["intent_store"].get()["local/hipfire"]
     assert record["state"] == "unloaded"
-    assert record["engine"] == "hipfire"
+    expected_kind = next(e["kind"] for e in _ENGINES if e["resource"] == "hipfire")
+    assert record["engine"] == expected_kind
 
 
 def test_hipfire_resume_records_loaded_intent(tmp_path, monkeypatch):
@@ -3613,6 +3662,54 @@ def test_engine_update_replaces_full_entry(tmp_path, monkeypatch):
 
     assert r.status_code == 200
     assert deck["node_store"].get("local")["engines"] == [moved]
+
+
+def test_engine_update_kind_change_forgets_the_intent_record(tmp_path, monkeypatch):
+    """E1 final-review item 5 (controller ruling): a kind-changed
+    declaration invalidates the OLD kind's intent record — app.state.py's
+    observation half already resets its own per-resource memory on a kind
+    mismatch (`_KIND_MEM_KEY`); the intent (goal) half must do the same, or
+    a stale old-kind record can drive app.arbiter._restore through the
+    WRONG adapter (`app.reconcile.plan_reconcile` copies `intent["engine"]`
+    straight into the restore action, `app.arbiter`:1178 resolves the
+    adapter off it) — contained today only by the failure budget /
+    quarantine, not a correctness guarantee. Fixture is gguf-a (away from
+    live topology), re-declared from lemonade-kind to hipfire-kind (a
+    connection shape that satisfies hipfire's schema, not lemonade's, so
+    this exercises a REAL kind change, not just a relabeling)."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    deck["intent_store"].record("local/gguf-a", state="loaded",
+                                model="a.gguf", engine="lemonade")
+
+    reincarnated = dict(_GGUF_A_ENTRY, kind="hipfire",
+                        connection={"container": "ods-gguf-a"})
+    r = TestClient(app).put("/api/nodes/local/engines/gguf-a", json=reincarnated)
+
+    assert r.status_code == 200
+    assert "local/gguf-a" not in deck["intent_store"].get()
+
+
+def test_engine_update_same_kind_preserves_the_intent_record(tmp_path, monkeypatch):
+    """The guard against over-forgetting (E1 final-review item 5's sibling
+    case): an edit that does NOT change `kind` — here, just moving
+    `gpu_index` and `policy_defaults`, the same edit
+    test_engine_update_replaces_full_entry above makes — must leave the
+    resource's intent record untouched. Only an actual kind change
+    invalidates it."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [_GGUF_A_ENTRY])
+    deck["intent_store"].record("local/gguf-a", state="loaded",
+                                model="a.gguf", engine="lemonade")
+
+    moved = dict(_GGUF_A_ENTRY, gpu_index=5,
+                policy_defaults={"priority": 1, "pinned": True, "idle_ttl": 0})
+    r = TestClient(app).put("/api/nodes/local/engines/gguf-a", json=moved)
+
+    assert r.status_code == 200
+    record = deck["intent_store"].get()["local/gguf-a"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "a.gguf"
 
 
 def test_engine_rename_refused(tmp_path, monkeypatch):

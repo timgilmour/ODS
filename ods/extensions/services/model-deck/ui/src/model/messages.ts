@@ -336,7 +336,7 @@ export const messages = {
   // CRUD (app/routers/nodes.py:200-321). Kind identity and per-kind
   // connection FIELD identity never come from here (spec §5: GET
   // /api/engine-kinds, model/engineForm.ts, is the one source) — these
-  // three cover the section's own load/empty/forget states.
+  // four cover the section's own load/empty/forget/add-prerequisite states.
 
   enginesLoadFailed: (detail: string): Message => ({
     tone: "danger",
@@ -364,6 +364,23 @@ export const messages = {
   forgetEngineConfirm: (): Message => ({
     tone: "neutral",
     title: "removes the declaration only — a running engine keeps running, untouched",
+  }),
+
+  // Shown in the Add flow (README's "Declared Engines" section, Park-
+  // allowlist prerequisite): declaring a resource is enough for the deck
+  // to observe it, policy-manage it, and include it in a Set, but a
+  // container-affecting verb (hipfire-kind park/resume; the storage
+  // pull-through hook's automatic restart of a lemonade-kind resource)
+  // additionally needs the resource's connection.container name in the
+  // HOST's settings.park_allowlist (app/settings.py:95) — DockerCtl
+  // refuses any other name with GuardError, checked before any HTTP call
+  // (app/docker_ctl.py:198-199). Neutral, not a warning: this is not a
+  // defect in what the operator just typed, it's a heads-up about a
+  // SEPARATE, host-level prerequisite the form has no way to check or set.
+  engineParkAllowlistNote: (): Message => ({
+    tone: "neutral",
+    title: "container verbs need the host's park allowlist too",
+    body: "load/unload/free reach the engine directly and work immediately; park, resume, and the storage-move restart hook go through Docker start/stop and refuse (409) until this container name is added to the host's park allowlist.",
   }),
 };
 

@@ -166,8 +166,10 @@ vocabulary (`human_verbs`, e.g. lemonade-kind's `["load","unload"]`,
 hipfire-kind's `["park","resume"]`) — the UI never bakes a kind name in.
 
 **CRUD** (all under the local node; a resource not literally named
-`lemonade`/`comfyui`/`hipfire` works identically everywhere in the deck —
-control routes, VRAM policy, Set Builder, lifecycle):
+`lemonade`/`comfyui`/`hipfire` works identically everywhere in the deck for
+observation, VRAM policy, and Set Builder/lifecycle bookkeeping — see
+**Park-allowlist prerequisite** below for the one place it does NOT: a
+container verb on a newly declared engine):
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -186,6 +188,37 @@ as it was; the deck simply stops watching and stops arbitrating it. To
 actually stop the underlying process, do that separately (e.g. `docker
 stop`) before or after forgetting the declaration — the two are
 intentionally decoupled.
+
+**Park-allowlist prerequisite (container verbs only):** declaring a
+resource is enough for the deck to *observe* it, apply VRAM policy to it,
+and include it in a Set — but a container-affecting verb (hipfire-kind's
+`park`/`resume`; the storage pull-through hook's automatic restart of a
+lemonade-kind resource after a moved-in GGUF) additionally requires the
+resource's declared `connection.container` name to be in
+`settings.park_allowlist` — env `MODEL_DECK_PARK_ALLOWLIST`, default
+`["ods-hipfire", "ods-comfyui", "ods-llama-server"]` (`app/settings.py:95`).
+`DockerCtl` refuses any other name with `GuardError`, checked BEFORE any
+HTTP call is made (`app/docker_ctl.py:198-199`) — so a newly declared
+engine whose container isn't allowlisted 409s on park/resume, and the
+storage notify hook logs (and isolates, never aborting a sibling resource's
+own restart) a `notify-restart-failed` event for it instead of registering
+the moved-in model. `load`/`unload`/`free` are unaffected — they reach the
+engine's own HTTP API directly, never Docker.
+
+There is a SECOND, deploy-level gate behind the one above: the
+`ods-docker-ctl` socket-proxy sidecar only forwards the Docker Engine API
+methods its `compose.yaml` command explicitly allowlists by path regex
+(`-allowGET`/`-allowPOST`). Today `GET .../json` and
+`POST .../{start,stop}` are wildcarded across every container name, so once
+a container clears the app-level allowlist above, start/stop already work
+with no compose edit — but an engine kind that ever needed a *different*
+Docker API verb (`exec`: deliberately absent from the proxy's rules
+entirely today, since C2 removed its only caller — see `compose.yaml`'s
+`ods-docker-ctl` service comment) would need its own compose-level rule
+added too, name-PINNED rather than wildcarded (the same comment's stated
+reasoning: `exec` runs an arbitrary command as root, so a wildcard there
+would make the in-process allowlist the only thing standing between a bug
+and host-wide RCE) — on top of the settings-level allowlist entry above.
 
 **Coexistence (binding invariant):** the deck never actuates anything
 without first recording *intent* for it (see [Lifecycle](#lifecycle-intent-status-and-reconciliation)).

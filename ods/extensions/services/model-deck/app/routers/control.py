@@ -23,7 +23,31 @@ lemonade-kind resource, free only from comfyui, park/resume only from
 hipfire — enforced by the 405 check above before any handler runs), so the
 verb alone is enough to pick the right handler below; no kind-name literal
 is needed in the dispatcher itself (spec §8: engine-kind names live in
-app.engine_kinds, not here).
+app.engine_kinds, not here). ``dispatch`` DOES compute ``kind`` though (the
+404/405 checks above need it), and threads it into every handler below —
+each records its intent with ``engine=kind`` rather than a hardcoded
+``"lemonade"``/``"hipfire"`` literal (final-review item 2). Human_verbs'
+disjointness is exactly why that literal happened to be correct for every
+resource that could ever reach it, kind-name-matching-resource-name
+coincidences of the seeded triple aside — a future non-disjoint kind, or
+simply removing the coincidence, would have silently mis-recorded which
+adapter owns the intent (``app.reconcile.plan_reconcile`` reads
+``intent["engine"]`` straight into the restore action's adapter lookup,
+``app.arbiter``:1178).
+
+``LoadBody``/``UnloadBody`` are constructed HERE, inside ``dispatch``, not
+via FastAPI's automatic body binding (there is no single pydantic model
+that fits every verb's body shape at the route-decorator level, since the
+verb itself decides which body class applies). Hand-rolling the
+construction means a ``ValidationError`` it raises does NOT go through
+FastAPI's normal path — pydantic v2's ``ValidationError`` subclasses
+``ValueError``, so an uncaught one would land on ``app.main``'s bare
+``ValueError`` handler instead of the REDACTING ``RequestValidationError``
+one, echoing the raw request body (``input``) into the 422 (final-review
+item 1). Caught and re-raised as ``RequestValidationError(exc.errors())``
+below, the same idiom ``app.routers.sets.create_set`` and
+``app.routers.nodes``'s ``_shape_error`` already established for the
+identical hand-rolled-validation shape.
 
 Engine exceptions (GuardError, BusyError, EngineError) are deliberately left
 to propagate uncaught — ``app.main`` registers app-wide exception handlers
@@ -68,7 +92,8 @@ either — see ``_pull_through``.
 import time
 
 from fastapi import APIRouter, Body, HTTPException, Request
-from pydantic import BaseModel
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.engine_kinds import ENGINE_KINDS
 from app.observe import local_key
@@ -149,17 +174,25 @@ def dispatch(resource: str, verb: str, request: Request,
         )
 
     if verb == "load":
-        return _lemonade_load(deck, resource, LoadBody(**(body or {})), force, pull)
+        try:
+            load_body = LoadBody(**(body or {}))
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
+        return _lemonade_load(deck, resource, kind, load_body, force, pull)
     if verb == "unload":
-        return _lemonade_unload(deck, resource, UnloadBody(**(body or {})), force)
+        try:
+            unload_body = UnloadBody(**(body or {}))
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
+        return _lemonade_unload(deck, resource, kind, unload_body, force)
     if verb == "free":
         return _comfy_free(deck, resource)
     if verb == "park":
-        return _hipfire_park(deck, resource, force)
-    return _hipfire_resume(deck, resource, force)  # verb == "resume"
+        return _hipfire_park(deck, resource, kind, force)
+    return _hipfire_resume(deck, resource, kind, force)  # verb == "resume"
 
 
-def _lemonade_load(deck, resource: str, body: LoadBody, force: bool, pull: bool) -> dict:
+def _lemonade_load(deck, resource: str, kind: str, body: LoadBody, force: bool, pull: bool) -> dict:
     _ensure_host_agent_idle(deck, force)
     client = deck["local_clients"].client_for(resource)
     model = body.model
@@ -171,7 +204,7 @@ def _lemonade_load(deck, resource: str, body: LoadBody, force: bool, pull: bool)
     if bare not in hot_files:
         cold_unit = _find_cold_gguf(deck, bare)
         if cold_unit is not None:
-            return _pull_through(deck, resource, bare, cold_unit, pull)
+            return _pull_through(deck, resource, kind, bare, cold_unit, pull)
 
     # Hot path — unchanged semantics (see original comments for suppressor
     # rationale), plus last-used bookkeeping for the storage catalog.
@@ -186,7 +219,7 @@ def _lemonade_load(deck, resource: str, body: LoadBody, force: bool, pull: bool)
     # budget, not un-recorded. Record the PREFIXED name — that is what
     # lemonade was told and what the observation will report back.
     deck["intent_store"].record(
-        local_key(resource), state="loaded", model=model, engine="lemonade"
+        local_key(resource), state="loaded", model=model, engine=kind
     )
     client.load(model)
     # Deliberate load succeeded: clear the window (and any prior unload's).
@@ -204,7 +237,7 @@ def _find_cold_gguf(deck, bare: str):
     return None
 
 
-def _pull_through(deck, resource: str, bare: str, unit: dict, pull: bool) -> dict:
+def _pull_through(deck, resource: str, kind: str, bare: str, unit: dict, pull: bool) -> dict:
     from datetime import UTC, datetime
 
     from app.engines import EngineError, GuardError
@@ -295,7 +328,7 @@ def _pull_through(deck, resource: str, bare: str, unit: dict, pull: bool) -> dic
             # being told apart from the arbiter's automatic "deck" records.
             deck["intent_store"].record(
                 local_key(resource), state="loaded", model=f"{_EXTRA_PREFIX}{bare}",
-                engine="lemonade", actor="operator",
+                engine=kind, actor="operator",
             )
             client.load(f"{_EXTRA_PREFIX}{bare}")
             deck["heal_suppressor"].clear()
@@ -317,7 +350,7 @@ def _pull_through(deck, resource: str, bare: str, unit: dict, pull: bool) -> dic
     return {"status": "pulling", "job": job["id"]}
 
 
-def _lemonade_unload(deck, resource: str, body: UnloadBody, force: bool) -> dict:
+def _lemonade_unload(deck, resource: str, kind: str, body: UnloadBody, force: bool) -> dict:
     _ensure_host_agent_idle(deck, force)
     client = deck["local_clients"].client_for(resource)
     model = body.model
@@ -333,7 +366,7 @@ def _lemonade_unload(deck, resource: str, body: UnloadBody, force: bool) -> dict
     # ...and record it as intent, which is the durable half of the same
     # statement: the suppression window expires, this does not.
     deck["intent_store"].record(
-        local_key(resource), state="unloaded", model=None, engine="lemonade"
+        local_key(resource), state="unloaded", model=None, engine=kind
     )
     client.unload(model)
     return {"status": "ok"}
@@ -344,18 +377,18 @@ def _comfy_free(deck, resource: str) -> dict:
     return {"status": "ok"}
 
 
-def _hipfire_park(deck, resource: str, force: bool) -> dict:
+def _hipfire_park(deck, resource: str, kind: str, force: bool) -> dict:
     # ?force=true skips the conversation-guard, never the route guard; the
     # host-agent busy guard below shares the same flag.
     _ensure_host_agent_idle(deck, force)
     deck["local_clients"].client_for(resource).park(force=force)
     deck["intent_store"].record(
-        local_key(resource), state="unloaded", model=None, engine="hipfire"
+        local_key(resource), state="unloaded", model=None, engine=kind
     )
     return {"status": "ok"}
 
 
-def _hipfire_resume(deck, resource: str, force: bool) -> dict:
+def _hipfire_resume(deck, resource: str, kind: str, force: bool) -> dict:
     _ensure_host_agent_idle(deck, force)
     deck["local_clients"].client_for(resource).resume()
     # model=None, not a name: hipfire is single-model and the Deck does not
@@ -363,6 +396,6 @@ def _hipfire_resume(deck, resource: str, force: bool) -> dict:
     # None reads as "loaded, no opinion which model"; recording a name the
     # Deck cannot observe would manufacture permanent drift.
     deck["intent_store"].record(
-        local_key(resource), state="loaded", model=None, engine="hipfire"
+        local_key(resource), state="loaded", model=None, engine=kind
     )
     return {"status": "ok"}

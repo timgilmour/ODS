@@ -647,6 +647,7 @@ function EngineFormPanel({
 
   return (
     <div className="engine-form">
+      {mode === "add" && <Banner message={messages.engineParkAllowlistNote()} />}
       <label>
         {labels.engineResource}
         <input
