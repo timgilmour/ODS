@@ -282,11 +282,39 @@ def forget_engine(resource: str, request: Request) -> dict:
     if not any(e["resource"] == resource for e in engines):
         raise HTTPException(status_code=404, detail=f"unknown engine {resource!r}")
     new_engines = [e for e in engines if e["resource"] != resource]
-    # Declaration first: PolicyStore.forget's row-pop must see the resource
-    # as ALREADY undeclared, or its own boundary gate would just
-    # re-materialize the default row it's about to pop (app/policy.py's
-    # forget docstring).
+    # Declaration first, THEN intent, THEN policy — crash safety across
+    # these three separate writes, NOT a same-call race: PolicyStore.forget
+    # is correct regardless of this ordering by itself (its own docstring)
+    # — its pop runs on the same dict its own heal read, inside the same
+    # lock, so there is nothing here for a still-declared resource to
+    # "re-materialize" between read and pop within ONE call.
+    #
+    # What the ordering actually decides is which PARTIAL state a crash
+    # BETWEEN these three writes leaves behind. Reversed (policy/intent
+    # forgotten first, declaration removed last): a crash after the policy
+    # row is popped but before the declaration write leaves a
+    # STILL-DECLARED — possibly still loaded — resource whose stored
+    # override is gone; PolicyStore's declared-defaults overlay
+    # re-materializes it at DEFAULTS on the very next read, so a pinned
+    # resource silently becomes evictable out from under an operator who
+    # never asked to un-pin it. This order's worst case is strictly safer:
+    # an orphaned, invisible policy row for a resource already gone from
+    # the deck's view (PolicyStore's own documented "undeclared row
+    # survives, invisible" posture) — inert, not a safety regression.
     store.update("local", {"engines": new_engines})
+    # Orphaned-intent window (accepted, not closed): IntentStore keeps no
+    # declared-resource gate of its own, so a crash right here — after the
+    # declaration write above, before the forget below runs — leaves an
+    # intent record for a name nothing declares anymore. Inert today
+    # because the reconciler only ever joins intent against OBSERVED
+    # state, and observation is itself declaration-driven (app.observe) —
+    # an undeclared name is observed nowhere. The one way it stops being
+    # inert: the SAME resource name gets re-declared later (possibly under
+    # a different kind), and the stale record surfaces against the new
+    # resource's observations. Accepted: it takes both a crash at this
+    # exact point AND that name reuse, the redeclare is the operator's own
+    # deliberate act, and derive_status/settings_drift are report-only —
+    # nothing actuates off a stale intent on its own.
     deck["intent_store"].forget(local_key(resource))
     deck["policy_store"].forget(resource)
     log_event(deck["events_path"], "engine-removed", {"resource": resource})

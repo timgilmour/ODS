@@ -233,9 +233,15 @@ class PolicyStore:
         forget is the operator (or this router) saying "erase the row",
         not "stop looking at it". No-op when there is no stored row for
         `resource` (mirrors IntentStore.forget's absent-key no-op) — does
-        NOT require `resource` to be currently undeclared; the caller here
-        removes the declaration entry first, but this method doesn't
-        depend on that ordering to behave correctly."""
+        NOT require `resource` to be currently undeclared: THIS method's
+        own pop-then-save is correct either way — no re-materialize race,
+        because any heal `_load()` performs and the pop below both run on
+        the SAME returned dict, inside the SAME lock, before `_save`. The
+        caller (app.routers.nodes.forget_engine) removes the declaration
+        entry before calling this anyway, but for a different reason —
+        crash safety across the three separate writes a forget spans, not
+        this method's own correctness — documented at that call site, not
+        here."""
         with self._lock:
             data = self._load() or {}
             if data.pop(resource, None) is not None:
