@@ -32,6 +32,7 @@ from app.sets import (
     apply_in_progress,
     plan_apply,
     slugify,
+    upgrade_legacy_set,
 )
 from app.settings_store import SettingsStore
 
@@ -79,6 +80,91 @@ def make_world(
         "externals": [],
         "default_route": default_route,
     }
+
+
+def _G(index, total, used):
+    return {"index": index, "total": total, "used": used, "free": total - used}
+
+
+def _world(tenants: dict, gpus: list[dict]) -> dict:
+    """Declaration-shaped world builder for the E1 generalization tests
+    below (obligation 1, T3 review: plan_apply/apply must tolerate any
+    declared set, not just the fixed lemonade/comfyui/hipfire triple
+    `make_world` builds). MIRRORS test_arbiter.py's `_dworld`/`_dgpu`
+    verbatim (not imported: test_arbiter imports from test_api, which needs
+    `_eph` from THIS file for its own sets payloads — importing across all
+    three would cycle). Same fixture rule: resources gguf-a/gguf-b/img/agent,
+    GPUs 2 and 3 — none of it coincides with lemonade/comfyui/hipfire on
+    GPUs 0/1, so a bug that silently assumes kind-name-as-resource-name
+    can't hide behind an agreeing fixture."""
+    return {
+        "gpus": gpus,
+        "tenants": tenants,
+        "externals": [],
+        "default_route": "default.gguf",
+        "routes_known": True,
+        "placement": {r: t["gpu_index"] for r, t in tenants.items()},
+    }
+
+
+# E1 Task 8: Ephemeral is now {resources: {resource: {"desired", "model"}}}
+# keyed by resource, not the old fixed lemonade/comfyui/hipfire sub-sections
+# each with their own "state" vocabulary. `_eph` builds the new shape from
+# this file's old per-kind kwarg shorthand (resource == kind name for every
+# fixture in this file, same convention as test_arbiter.py's legacy
+# `_world(gpus=None, lemonade=None, ...)`) so the huge pre-existing call-site
+# body below stays almost byte-identical — only the wrapping changed, not
+# each site's own state/model literal.
+_STATE_TO_DESIRED = {
+    "loaded": "loaded", "unloaded": "unloaded",        # lemonade
+    "free": "freed", "leave": None,                     # comfyui ("leave" -> omit)
+    "running": "loaded", "parked": "parked",             # hipfire
+}
+
+
+def _eph(*, lemonade=None, comfyui=None, hipfire=None):
+    resources = {}
+    for resource, spec in (("lemonade", lemonade), ("comfyui", comfyui), ("hipfire", hipfire)):
+        if spec is None:
+            continue
+        spec = dict(spec)
+        state = spec.pop("state")
+        spec.pop("reserve_gb", None)
+        desired = _STATE_TO_DESIRED[state]
+        if desired is None:
+            continue
+        resources[resource] = {"desired": desired, **spec}
+    return {"resources": resources}
+
+
+def _cfgset(*, resources=None, kinds=None, **kwargs):
+    """Build a ConfigSet through ``model_validate`` with an optional kinds
+    context — the one construction path (mirroring
+    ``app.routers.sets.create_set``) that actually exercises Ephemeral's
+    kind-cross-validator. ``kinds=None`` (every other direct ``ConfigSet(...)``
+    construction in this file) skips that validator entirely."""
+    data = {"name": kwargs.pop("name", "x"), **kwargs}
+    if resources is not None:
+        data["ephemeral"] = {"resources": resources}
+    context = {"kinds": kinds} if kinds is not None else None
+    return ConfigSet.model_validate(data, context=context)
+
+
+class RecLocalClients:
+    """Stand-in for app.local_clients.LocalClients: resolves each resource
+    to the fixed recording fake for its (test-fixture) kind name —
+    make_world's tenants are keyed lemonade/comfyui/hipfire, resource ==
+    kind name for every fixture in this file (same convention
+    test_api.py's FakeLocalClients documents). `extra` covers a test that
+    declares an additional/differently-named resource."""
+
+    def __init__(self, lemonade=None, comfy=None, hipfire=None, extra=None):
+        self._map = {"lemonade": lemonade, "comfyui": comfy, "hipfire": hipfire}
+        if extra:
+            self._map.update(extra)
+
+    def client_for(self, resource):
+        return self._map.get(resource)
 
 
 class RecLemonade:
@@ -186,11 +272,25 @@ class RecPolicyStore:
 
 
 def run_apply(cfgset, world, tmp_path, **overrides):
-    """Invoke apply with recording fakes; returns (report, clients-dict)."""
+    """Invoke apply with recording fakes; returns (report, clients-dict).
+
+    E1 Task 8: apply() itself takes ``local_clients`` (per-resource live
+    resolution), not boot-time ``lemonade``/``comfy``/``hipfire`` params —
+    but this helper still intercepts those THREE kwarg names from
+    `overrides` and wraps them into a ``RecLocalClients`` before calling
+    apply(), and still returns them under their old keys in the returned
+    dict. That keeps every one of this file's existing call sites (
+    ``run_apply(cfg, world, tmp_path, hipfire=some_fake)``,
+    ``clients["lemonade"].calls == [...]``) working unchanged.
+    """
+    lemonade = overrides.pop("lemonade", RecLemonade())
+    comfy = overrides.pop("comfy", RecComfy())
+    hipfire = overrides.pop("hipfire", RecHipfire())
+    local_clients = overrides.pop(
+        "local_clients", RecLocalClients(lemonade, comfy, hipfire)
+    )
     clients = {
-        "lemonade": RecLemonade(),
-        "comfy": RecComfy(),
-        "hipfire": RecHipfire(),
+        "local_clients": local_clients,
         "hostagent": RecHostAgent(),
         "policy_store": RecPolicyStore(),
         "store": SetStore(tmp_path / "sets"),
@@ -198,7 +298,9 @@ def run_apply(cfgset, world, tmp_path, **overrides):
     }
     clients.update(overrides)
     report = apply(cfgset, world=world, **clients)
-    return report, clients
+    returned = dict(clients)
+    returned.update(lemonade=lemonade, comfy=comfy, hipfire=hipfire)
+    return report, returned
 
 
 # ===========================================================================
@@ -229,14 +331,24 @@ def test_name_is_trimmed():
     assert ConfigSet(name="  Image session  ").name == "Image session"
 
 
-def test_comfyui_reserve_gb_defaults_to_24():
-    cfg = ConfigSet(name="x", ephemeral={"comfyui": {"state": "free"}})
-    assert cfg.ephemeral.comfyui.reserve_gb == 24
-
-
-def test_ephemeral_rejects_bad_lemonade_state():
+def test_resource_desired_rejects_unknown_field():
+    """E1 Task 8: reserve_gb (comfyui's old informational-only field, never
+    enforced at apply) has no home in the new resource-generic
+    ResourceDesired shape — dropped, not carried forward. extra='forbid'
+    still catches an unknown field on a resource entry (built directly,
+    bypassing ``_eph``'s own reserve_gb-stripping convenience)."""
     with pytest.raises(ValidationError):
-        ConfigSet(name="x", ephemeral={"lemonade": {"state": "sleeping"}})
+        ConfigSet(name="x", ephemeral={
+            "resources": {"comfyui": {"desired": "freed", "reserve_gb": 12}}
+        })
+
+
+def test_ephemeral_rejects_bad_desired_value():
+    """Built directly, not through ``_eph`` (whose old-shape "state"
+    vocabulary has no "sleeping" to translate) — the new schema's
+    ``desired`` Literal is what refuses it."""
+    with pytest.raises(ValidationError):
+        ConfigSet(name="x", ephemeral={"resources": {"lemonade": {"desired": "sleeping"}}})
 
 
 def test_durable_activate_model_id_optional():
@@ -248,6 +360,149 @@ def test_durable_activate_model_id_optional():
 def test_configset_rejects_unknown_top_level_field():
     with pytest.raises(ValidationError):
         ConfigSet(name="x", bogus=1)
+
+
+# ===========================================================================
+# Ephemeral's kind-cross-validator (E1 Task 8) — needs the live declaration
+# as pydantic validation context ({"kinds": {resource: kind}}); `_cfgset`
+# threads it through model_validate the way app.routers.sets.create_set
+# does. No context (every OTHER ConfigSet(...) construction in this file)
+# skips the check entirely — see Ephemeral._validate_against_declared_kinds.
+# ===========================================================================
+
+
+def test_desired_refused_when_kind_cannot():
+    with pytest.raises(ValidationError):
+        _cfgset(resources={"img": {"desired": "parked"}},
+                kinds={"img": "comfyui"})
+
+
+def test_desired_accepted_when_kind_can():
+    """Complement: the same desired value, paired with a kind that DOES
+    support it, validates clean — proves the validator refuses on the
+    mismatch specifically, not on context being present at all."""
+    cfgset = _cfgset(resources={"agent": {"desired": "parked"}},
+                     kinds={"agent": "hipfire"})
+    assert cfgset.ephemeral.resources["agent"].desired == "parked"
+
+
+def test_model_field_refused_for_non_load_kind():
+    """"model only for lemonade-kind" (the brief's rule), expressed
+    verb-generically: a park-verb (hipfire-kind) resource carrying a model
+    is refused even though "loaded" itself is a valid desired for it."""
+    with pytest.raises(ValidationError):
+        _cfgset(resources={"agent": {"desired": "loaded", "model": "extra.x.gguf"}},
+                kinds={"agent": "hipfire"})
+
+
+def test_resource_absent_from_kinds_context_refused():
+    """A resource named in ephemeral.resources but missing from the
+    supplied kinds mapping (undeclared) can't be validated at all — refused
+    rather than silently skipped, per [[literal-declared-inputs]]."""
+    with pytest.raises(ValidationError):
+        _cfgset(resources={"ghost": {"desired": "loaded"}}, kinds={})
+
+
+def test_no_context_skips_kind_validation():
+    """The complement every other test in this file relies on implicitly:
+    a mismatched kind/desired pairing constructs CLEAN when no kinds
+    context is supplied at all (plan_apply/_record_goal_intents/
+    _previous_set's own kind-blind construction, and this file's own pure
+    unit tests)."""
+    cfgset = _cfgset(resources={"img": {"desired": "parked"}})
+    assert cfgset.ephemeral.resources["img"].desired == "parked"
+
+
+# ===========================================================================
+# upgrade_legacy_set (E1 Task 8) — pure, LOAD-time-only shape upgrade
+# ===========================================================================
+
+
+def test_legacy_set_file_upgrades_on_load(tmp_path):
+    raw = {"name": "old", "ephemeral": {
+        "lemonade": {"desired": "loaded", "model": "m.gguf"},
+        "comfyui": {"desired": "freed"},
+        "hipfire": {"desired": "parked"}}}
+    up = upgrade_legacy_set(raw)
+    assert up["ephemeral"]["resources"]["lemonade"] == {
+        "desired": "loaded", "model": "m.gguf"}
+    assert set(up["ephemeral"]["resources"]) == {"lemonade", "comfyui",
+                                                 "hipfire"}
+
+
+def test_upgrade_legacy_set_translates_real_old_shape():
+    """The ACTUAL pre-Task-8 on-disk shape (state/model vocabulary, not
+    desired/model) — the brief's own literal test above already covers the
+    outer restructuring; this one covers the state->desired TRANSLATION
+    upgrade_legacy_set also has to do, which a raw fixture already carrying
+    "desired" (like the brief's) never exercises."""
+    raw = {"name": "Old Chat", "ephemeral": {
+        "lemonade": {"state": "loaded", "model": "extra.m.gguf"},
+        "comfyui": {"state": "leave", "reserve_gb": 12},
+        "hipfire": {"state": "parked"},
+    }}
+    up = upgrade_legacy_set(raw)
+    assert up["ephemeral"]["resources"]["lemonade"] == {
+        "desired": "loaded", "model": "extra.m.gguf"}
+    # comfyui "leave" has no desired-state equivalent — omission IS "leave"
+    # in the new schema, so the whole entry is dropped, not translated.
+    assert "comfyui" not in up["ephemeral"]["resources"]
+    assert up["ephemeral"]["resources"]["hipfire"] == {"desired": "parked"}
+    # Round-trips through the real schema.
+    ConfigSet.model_validate(up)
+
+
+def test_upgrade_legacy_set_running_hipfire_maps_to_loaded():
+    raw = {"name": "x", "ephemeral": {"hipfire": {"state": "running"}}}
+    up = upgrade_legacy_set(raw)
+    assert up["ephemeral"]["resources"]["hipfire"] == {"desired": "loaded"}
+
+
+def test_upgrade_legacy_set_leaves_current_shape_untouched():
+    raw = {"name": "x", "ephemeral": {"resources": {
+        "gguf-a": {"desired": "loaded", "model": "m.gguf"}}}}
+    assert upgrade_legacy_set(raw) == raw
+
+
+def test_upgrade_legacy_set_leaves_no_ephemeral_untouched():
+    raw = {"name": "x", "durable": {"default_route_model": "m.gguf"}}
+    assert upgrade_legacy_set(raw) == raw
+
+
+def test_upgrade_legacy_set_leaves_empty_ephemeral_untouched():
+    raw = {"name": "x", "ephemeral": {}}
+    assert upgrade_legacy_set(raw) == raw
+
+
+def test_legacy_set_file_still_loads_through_setstore(tmp_path):
+    """Integration proof, not just the pure function: a REAL old-shape
+    file on disk keeps loading through SetStore.get()/list() (Key rules:
+    "Legacy sets keep loading — test with a real old-shape file")."""
+    import json
+
+    store = SetStore(tmp_path)
+    (tmp_path / "old-chat.json").write_text(json.dumps({
+        "name": "Old Chat",
+        "ephemeral": {
+            "lemonade": {"state": "loaded", "model": "extra.m.gguf"},
+            "hipfire": {"state": "parked"},
+        },
+    }))
+
+    got = store.get("old-chat")
+    assert got is not None
+    assert got.ephemeral.resources["lemonade"].desired == "loaded"
+    assert got.ephemeral.resources["lemonade"].model == "extra.m.gguf"
+    assert got.ephemeral.resources["hipfire"].desired == "parked"
+    assert [c.name for c in store.list()] == ["Old Chat"]
+    assert store.unreadable() == []
+
+    # save() always writes the NEW shape — the file self-heals on the next
+    # write, exactly as SetStore's own docstring promises.
+    store.save(got)
+    on_disk = json.loads((tmp_path / "old-chat.json").read_text())
+    assert "resources" in on_disk["ephemeral"]
+    assert "lemonade" not in on_disk["ephemeral"]
 
 
 # ===========================================================================
@@ -297,7 +552,7 @@ def test_save_get_roundtrip(tmp_path):
         name="Chat",
         notes="for talking",
         durable={"default_route_model": "extra.m.gguf", "activate_model_id": "cat-1"},
-        ephemeral={"comfyui": {"state": "free", "reserve_gb": 12}},
+        ephemeral=_eph(comfyui={"state": "free"}),
         policy_overrides={"lemonade": {"priority": 5, "pinned": False, "idle_ttl": 10}},
     )
     slug = store.save(cfg)
@@ -375,7 +630,7 @@ def test_save_previous_writes_reserved_file(tmp_path):
 
 def test_one_corrupt_set_file_does_not_down_the_listing(tmp_path):
     store = SetStore(tmp_path)
-    store.save(ConfigSet(name="good", ephemeral={"lemonade": {"state": "loaded"}}))
+    store.save(ConfigSet(name="good", ephemeral=_eph(lemonade={"state": "loaded"})))
     (tmp_path / "bad.json").write_text('{"name": "bad", "unknown_field": 1}')
     names = [s.name for s in store.list()]
     assert names == ["good"]
@@ -468,11 +723,11 @@ def test_empty_plan_when_reality_matches():
     cfg = ConfigSet(
         name="steady",
         durable={"default_route_model": "extra.d.gguf", "activate_model_id": "cat-1"},
-        ephemeral={
-            "lemonade": {"state": "loaded"},
-            "comfyui": {"state": "leave"},
-            "hipfire": {"state": "running"},
-        },
+        ephemeral=_eph(
+            lemonade={"state": "loaded"},
+            comfyui={"state": "leave"},
+            hipfire={"state": "running"},
+        ),
     )
     assert plan_apply(cfg, world) == []
 
@@ -488,18 +743,18 @@ def test_cheap_path_durable_unchanged_no_activate():
     cfg = ConfigSet(
         name="cheap",
         durable={"default_route_model": "extra.d.gguf", "activate_model_id": "cat-1"},
-        ephemeral={"lemonade": {"state": "loaded"}},
+        ephemeral=_eph(lemonade={"state": "loaded"}),
     )
     plan = plan_apply(cfg, world)
-    assert plan == [{"step": "load_lemonade", "model": "extra.d.gguf"}]
+    assert plan == [{"step": "load", "resource": "lemonade", "model": "extra.d.gguf"}]
     assert not any(s["step"] == "activate" for s in plan)
 
 
 def test_load_uses_world_default_route_when_no_durable():
     world = make_world(lemonade=("unloaded", None), default_route="extra.world.gguf")
-    cfg = ConfigSet(name="noload-durable", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="noload-durable", ephemeral=_eph(lemonade={"state": "loaded"}))
     assert plan_apply(cfg, world) == [
-        {"step": "load_lemonade", "model": "extra.world.gguf"}
+        {"step": "load", "resource": "lemonade", "model": "extra.world.gguf"}
     ]
 
 
@@ -511,65 +766,67 @@ def test_load_prefers_ephemeral_explicit_model_over_durable():
     cfg = ConfigSet(
         name="explicit",
         durable={"default_route_model": "extra.durable.gguf", "activate_model_id": "cat-1"},
-        ephemeral={"lemonade": {"state": "loaded", "model": "extra.explicit.gguf"}},
+        ephemeral=_eph(lemonade={"state": "loaded", "model": "extra.explicit.gguf"}),
     )
     plan = plan_apply(cfg, world)
-    load = next(s for s in plan if s["step"] == "load_lemonade")
+    load = next(s for s in plan if s["step"] == "load")
     assert load["model"] == "extra.explicit.gguf"
 
 
 def test_no_model_to_load_warn():
     world = make_world(lemonade=("unloaded", None), default_route=None)
-    cfg = ConfigSet(name="nomodel", ephemeral={"lemonade": {"state": "loaded"}})
-    assert plan_apply(cfg, world) == [{"step": "warn", "reason": "no-model-to-load"}]
+    cfg = ConfigSet(name="nomodel", ephemeral=_eph(lemonade={"state": "loaded"}))
+    assert plan_apply(cfg, world) == [
+        {"step": "warn", "reason": "no-model-to-load", "resource": "lemonade"}
+    ]
 
 
 def test_unload_uses_worlds_loaded_model():
     world = make_world(lemonade=("loaded", "extra.live.gguf"))
-    cfg = ConfigSet(name="unload", ephemeral={"lemonade": {"state": "unloaded"}})
+    cfg = ConfigSet(name="unload", ephemeral=_eph(lemonade={"state": "unloaded"}))
     assert plan_apply(cfg, world) == [
-        {"step": "unload_lemonade", "model": "extra.live.gguf"}
+        {"step": "unload", "resource": "lemonade", "model": "extra.live.gguf"}
     ]
 
 
 def test_comfy_free_only_when_queue_zero():
     world = make_world(comfy=("idle", 0))
-    cfg = ConfigSet(name="free", ephemeral={"comfyui": {"state": "free"}})
-    assert plan_apply(cfg, world) == [{"step": "free_comfyui"}]
+    cfg = ConfigSet(name="free", ephemeral=_eph(comfyui={"state": "free"}))
+    assert plan_apply(cfg, world) == [{"step": "free", "resource": "comfyui"}]
 
 
 def test_comfy_busy_warns_not_frees():
     world = make_world(comfy=("busy", 3))
-    cfg = ConfigSet(name="free", ephemeral={"comfyui": {"state": "free"}})
+    cfg = ConfigSet(name="free", ephemeral=_eph(comfyui={"state": "free"}))
     assert plan_apply(cfg, world) == [
-        {"step": "warn", "reason": "comfyui-busy-skipped"}
+        {"step": "warn", "reason": "comfyui-busy-skipped", "resource": "comfyui"}
     ]
 
 
 def test_comfy_unknown_queue_is_not_freed():
     world = make_world(comfy=("unknown", None))
-    cfg = ConfigSet(name="free", ephemeral={"comfyui": {"state": "free"}})
+    cfg = ConfigSet(name="free", ephemeral=_eph(comfyui={"state": "free"}))
     assert plan_apply(cfg, world) == [
-        {"step": "warn", "reason": "comfyui-busy-skipped"}
+        {"step": "warn", "reason": "comfyui-busy-skipped", "resource": "comfyui"}
     ]
 
 
 def test_hipfire_park_when_running():
     world = make_world(hipfire="running")
-    cfg = ConfigSet(name="park", ephemeral={"hipfire": {"state": "parked"}})
-    assert plan_apply(cfg, world) == [{"step": "park_hipfire"}]
+    cfg = ConfigSet(name="park", ephemeral=_eph(hipfire={"state": "parked"}))
+    assert plan_apply(cfg, world) == [{"step": "park", "resource": "hipfire"}]
 
 
 def test_hipfire_park_when_loading():
     world = make_world(hipfire="loading")
-    cfg = ConfigSet(name="park", ephemeral={"hipfire": {"state": "parked"}})
-    assert plan_apply(cfg, world) == [{"step": "park_hipfire"}]
+    cfg = ConfigSet(name="park", ephemeral=_eph(hipfire={"state": "parked"}))
+    assert plan_apply(cfg, world) == [{"step": "park", "resource": "hipfire"}]
 
 
 def test_hipfire_resume_when_parked():
     world = make_world(hipfire="parked")
-    cfg = ConfigSet(name="resume", ephemeral={"hipfire": {"state": "running"}})
-    assert plan_apply(cfg, world) == [{"step": "resume_hipfire"}]
+    cfg = ConfigSet(name="resume", ephemeral=_eph(hipfire={"state": "running"}))
+    assert plan_apply(cfg, world) == [{"step": "resume", "resource": "hipfire"}]
 
 
 def test_durable_change_with_id_emits_activate():
@@ -611,18 +868,18 @@ def test_full_ordering_park_activate_load_policy():
     cfg = ConfigSet(
         name="big",
         durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
-        ephemeral={
-            "lemonade": {"state": "loaded"},
-            "comfyui": {"state": "free"},
-            "hipfire": {"state": "parked"},
-        },
+        ephemeral=_eph(
+            lemonade={"state": "loaded"},
+            comfyui={"state": "free"},
+            hipfire={"state": "parked"},
+        ),
         policy_overrides=overrides,
     )
     assert plan_apply(cfg, world) == [
-        {"step": "free_comfyui"},
-        {"step": "park_hipfire"},
+        {"step": "free", "resource": "comfyui"},
+        {"step": "park", "resource": "hipfire"},
         {"step": "activate", "model_id": "cat-7"},
-        {"step": "load_lemonade", "model": "extra.new.gguf"},
+        {"step": "load", "resource": "lemonade", "model": "extra.new.gguf"},
         {"step": "policy_patch", "policies": overrides},
     ]
 
@@ -639,20 +896,155 @@ def test_full_ordering_unload_activate_resume():
     cfg = ConfigSet(
         name="big2",
         durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-3"},
-        ephemeral={
-            "lemonade": {"state": "unloaded"},
-            "comfyui": {"state": "free"},
-            "hipfire": {"state": "running"},
-        },
+        ephemeral=_eph(
+            lemonade={"state": "unloaded"},
+            comfyui={"state": "free"},
+            hipfire={"state": "running"},
+        ),
         policy_overrides=overrides,
     )
     assert plan_apply(cfg, world) == [
-        {"step": "unload_lemonade", "model": "extra.live.gguf"},
-        {"step": "free_comfyui"},
+        {"step": "unload", "resource": "lemonade", "model": "extra.live.gguf"},
+        {"step": "free", "resource": "comfyui"},
         {"step": "activate", "model_id": "cat-3"},
-        {"step": "resume_hipfire"},
+        {"step": "resume", "resource": "hipfire"},
         {"step": "policy_patch", "policies": overrides},
     ]
+
+
+# ===========================================================================
+# E1 Task 8 generalization — resource-keyed steps over a genuinely
+# declaration-shaped world (not the fixed lemonade/comfyui/hipfire triple):
+# arbitrary resource names, and obligation 1 (T3 review): an EMPTY or
+# PARTIAL declared world must plan/apply cleanly, never KeyError on
+# world["tenants"]["lemonade"]/["comfyui"]/["hipfire"]. Fixture rule (same
+# convention as test_engine_kinds.py/test_arbiter.py): resources
+# gguf-a/gguf-b/img/agent, GPUs 2 and 3.
+# ===========================================================================
+
+
+def test_plan_apply_emits_resource_tagged_generic_unload_step():
+    """Resource-keyed, verb-generic step shape (E1 Task 8): a declared
+    "unload" against an already-loaded resource plans an "unload" step
+    tagged with ITS resource name, not a kind-name-baked step like the
+    pre-Task-8 "unload_lemonade"."""
+    world = _world({"gguf-a": {"engine": "lemonade", "gpu_index": 2,
+                               "state": "loaded", "model": "old.gguf",
+                               "footprint": 10, "idle_s": 0.0}},
+                   [_G(2, 100, 50)])
+    cfg = _cfgset(resources={"gguf-a": {"desired": "unloaded"}})
+    assert plan_apply(cfg, world) == [
+        {"step": "unload", "resource": "gguf-a", "model": "old.gguf"}
+    ]
+
+
+def test_plan_apply_emits_resource_tagged_generic_load_step():
+    """Complement: a declared "loaded" against an unloaded resource plans a
+    resource-tagged "load" step."""
+    world = _world({"gguf-a": {"engine": "lemonade", "gpu_index": 2,
+                               "state": "unloaded", "model": None,
+                               "footprint": None, "idle_s": None}},
+                   [_G(2, 100, 50)])
+    cfg = _cfgset(resources={"gguf-a": {"desired": "loaded", "model": "new.gguf"}})
+    assert plan_apply(cfg, world) == [
+        {"step": "load", "resource": "gguf-a", "model": "new.gguf"}
+    ]
+
+
+def test_plan_apply_declared_model_over_resident_model_plans_no_swap(tmp_path):
+    """Pins TODAY's semantics in the new resource-keyed vocabulary (ruling,
+    E1 Task 8 review: set-apply does NOT gain model-swap actuation as a
+    side effect of the resource generalization — that's a real design
+    question of its own, gated separately with Tim later). A resource
+    already "loaded" satisfies plan_apply by STATE ALONE — no swap step
+    exists to reconcile model identity, only load/unload state (see
+    ``_record_goal_intents``'s own docstring for the full incident-history
+    rationale, and ``test_declared_model_x_over_resident_y_derives_drifted_
+    not_restore`` above for the reconciler-side half of the same
+    invariant). The DECLARED model still wins the recorded intent, via the
+    goal-intent path, not a planned step."""
+    world = _world({"gguf-a": {"engine": "lemonade", "gpu_index": 2,
+                               "state": "loaded", "model": "old.gguf",
+                               "footprint": 10, "idle_s": 0.0}},
+                   [_G(2, 100, 50)])
+    cfg = _cfgset(resources={"gguf-a": {"desired": "loaded", "model": "new.gguf"}})
+
+    assert plan_apply(cfg, world) == []  # no swap step — state alone satisfies the goal
+
+    intent = IntentStore(tmp_path / "intent.json")
+    from app.sets import _record_goal_intents
+
+    _record_goal_intents(cfg, [], world, intent)
+    record = intent.get()["local/gguf-a"]
+    assert record["state"] == "loaded"
+    assert record["model"] == "new.gguf"  # declared model wins, not "old.gguf"
+
+
+def test_plan_apply_empty_declared_world_plans_cleanly():
+    """Obligation 1: NOTHING declared — the pure diff must produce an empty
+    plan, never KeyError on a fixed tenant key that no longer exists."""
+    world = _world({}, [])
+    cfg = _cfgset(resources={"gguf-a": {"desired": "loaded", "model": "m.gguf"}})
+    assert plan_apply(cfg, world) == []
+
+
+def test_plan_apply_partial_declaration_missing_lemonade():
+    """A set names a lemonade-kind resource the world doesn't currently
+    declare (removed, or never was) ALONGSIDE a comfyui-kind resource that
+    IS declared — the undeclared one is silently skipped, the declared one
+    still plans normally."""
+    world = _world(
+        {"img": {"engine": "comfyui", "gpu_index": 3, "state": "idle",
+                 "queue": 0, "idle_s": 10.0}},
+        [_G(3, 100, 10)],
+    )
+    cfg = _cfgset(resources={
+        "gguf-a": {"desired": "loaded", "model": "m.gguf"},  # not declared
+        "img": {"desired": "freed"},                          # declared
+    })
+    assert plan_apply(cfg, world) == [{"step": "free", "resource": "img"}]
+
+
+def test_record_goal_intents_tolerates_undeclared_resource(tmp_path):
+    """apply()'s intent-recording half of obligation 1: a goal for a
+    resource the world doesn't currently declare records nothing for IT,
+    but a sibling declared resource's goal still records normally — no
+    KeyError, no crash."""
+    world = _world(
+        {"img": {"engine": "comfyui", "gpu_index": 3, "state": "idle",
+                 "queue": 0, "idle_s": 10.0}},
+        [_G(3, 100, 10)],
+    )
+    cfg = _cfgset(resources={
+        "gguf-a": {"desired": "loaded", "model": "m.gguf"},  # not declared
+        "img": {"desired": "freed"},
+    })
+    intent = IntentStore(tmp_path / "intent.json")
+    from app.sets import _record_goal_intents
+
+    _record_goal_intents(cfg, [], world, intent)
+    assert intent.get() == {}  # "freed" never records; "gguf-a" skipped
+
+
+def test_apply_tolerates_empty_declared_world_through_preview_route(tmp_path, monkeypatch):
+    """End-to-end proof (T3 review's original complaint): an EMPTY
+    declaration must not 500 the sets preview/apply routes."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    app = create_app()
+    deck = app.state.deck
+    deck["set_store"] = SetStore(tmp_path / "sets")
+    deck["node_store"].update("local", {"engines": []})
+    client = TestClient(app)
+
+    resp = client.post("/api/sets", json={
+        "name": "whatever",
+        "ephemeral": {"resources": {}},
+    })
+    assert resp.status_code == 200
+
+    resp = client.post("/api/sets/whatever/preview")
+    assert resp.status_code == 200
+    assert resp.json()["steps"] == []
 
 
 # ===========================================================================
@@ -671,11 +1063,11 @@ def test_apply_executes_steps_in_order(tmp_path):
     cfg = ConfigSet(
         name="do-it",
         durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
-        ephemeral={
-            "lemonade": {"state": "loaded"},
-            "comfyui": {"state": "free"},
-            "hipfire": {"state": "parked"},
-        },
+        ephemeral=_eph(
+            lemonade={"state": "loaded"},
+            comfyui={"state": "free"},
+            hipfire={"state": "parked"},
+        ),
         policy_overrides=overrides,
     )
     report, clients = run_apply(cfg, world, tmp_path)
@@ -684,10 +1076,10 @@ def test_apply_executes_steps_in_order(tmp_path):
     assert report["error"] is None
     assert report["warnings"] == []
     assert [s["step"] for s in report["completed"]] == [
-        "free_comfyui",
-        "park_hipfire",
+        "free",
+        "park",
         "activate",
-        "load_lemonade",
+        "load",
         "policy_patch",
     ]
     assert clients["comfy"].calls == ["free"]
@@ -699,7 +1091,7 @@ def test_apply_executes_steps_in_order(tmp_path):
 
 def test_apply_warn_recorded_not_executed(tmp_path):
     world = make_world(comfy=("busy", 2))
-    cfg = ConfigSet(name="skip", ephemeral={"comfyui": {"state": "free"}})
+    cfg = ConfigSet(name="skip", ephemeral=_eph(comfyui={"state": "free"}))
     report, clients = run_apply(cfg, world, tmp_path)
 
     assert report["warnings"] == ["comfyui-busy-skipped"]
@@ -717,14 +1109,14 @@ def test_apply_halts_at_failing_step_with_exact_report(tmp_path):
     cfg = ConfigSet(
         name="halt",
         durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
-        ephemeral={"comfyui": {"state": "free"}, "hipfire": {"state": "parked"}},
+        ephemeral=_eph(comfyui={"state": "free"}, hipfire={"state": "parked"}),
     )
     hipfire = RecHipfire()
     hipfire.fail = {"park": GuardError("default routes to hipfire")}
     report, clients = run_apply(cfg, world, tmp_path, hipfire=hipfire)
 
-    assert report["completed"] == [{"step": "free_comfyui"}]
-    assert report["failed"] == {"step": "park_hipfire"}
+    assert report["completed"] == [{"step": "free", "resource": "comfyui"}]
+    assert report["failed"] == {"step": "park", "resource": "hipfire"}
     assert report["error"] == "default routes to hipfire"
     assert report["warnings"] == []
     # comfy ran, hipfire.park attempted, activate NEVER reached
@@ -744,7 +1136,7 @@ def test_apply_vetoes_before_any_mutation_when_hipfire_busy(tmp_path):
     cfg = ConfigSet(
         name="veto",
         durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-7"},
-        ephemeral={"comfyui": {"state": "free"}, "hipfire": {"state": "parked"}},
+        ephemeral=_eph(comfyui={"state": "free"}, hipfire={"state": "parked"}),
     )
     hipfire = RecHipfire()
     hipfire.fail = {
@@ -769,7 +1161,7 @@ def test_apply_vetoes_before_any_mutation_when_hipfire_busy(tmp_path):
 
 def test_apply_force_skips_veto_and_threads_into_park(tmp_path):
     world = make_world(hipfire="running")
-    cfg = ConfigSet(name="forced", ephemeral={"hipfire": {"state": "parked"}})
+    cfg = ConfigSet(name="forced", ephemeral=_eph(hipfire={"state": "parked"}))
     hipfire = RecHipfire()
     hipfire.fail = {"ensure_not_busy": GuardError("busy")}
 
@@ -783,7 +1175,7 @@ def test_apply_force_skips_veto_and_threads_into_park(tmp_path):
 
 def test_apply_without_hipfire_steps_never_busy_checks(tmp_path):
     world = make_world(lemonade=("loaded", "extra.m.gguf"), hipfire="running")
-    cfg = ConfigSet(name="lem-only", ephemeral={"lemonade": {"state": "unloaded"}})
+    cfg = ConfigSet(name="lem-only", ephemeral=_eph(lemonade={"state": "unloaded"}))
     hipfire = RecHipfire()
 
     report, clients = run_apply(cfg, world, tmp_path, hipfire=hipfire)
@@ -846,7 +1238,7 @@ def test_apply_vetoed_while_host_agent_busy(tmp_path):
     load_lemonade) is refused up front, before any step executes, while the
     host agent owns the box — mirrors the hipfire pre-veto above."""
     world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
-    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="load-it", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     with pytest.raises(BusyError, match="host agent is busy"):
         run_apply(cfg, world, tmp_path, hostagent=_BusyHostAgent())
@@ -863,7 +1255,7 @@ def test_apply_force_bypasses_host_agent_veto(tmp_path):
     busy the whole time (proving it was never consulted), and the plan
     still completes."""
     world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
-    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="load-it", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     report, clients = run_apply(
         cfg, world, tmp_path, hostagent=_BusyHostAgent(), force=True
@@ -875,7 +1267,7 @@ def test_apply_force_bypasses_host_agent_veto(tmp_path):
 
 def test_apply_not_vetoed_when_host_agent_idle(tmp_path):
     world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
-    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="load-it", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     report, clients = run_apply(cfg, world, tmp_path)  # default RecHostAgent is idle
 
@@ -888,7 +1280,7 @@ def test_apply_not_vetoed_when_plan_has_no_guarded_steps(tmp_path):
     agent must not block them, mirroring comfyui/free being unguarded at the
     control route."""
     world = make_world(comfy=("idle", 0))
-    cfg = ConfigSet(name="free-it", ephemeral={"comfyui": {"state": "free"}})
+    cfg = ConfigSet(name="free-it", ephemeral=_eph(comfyui={"state": "free"}))
 
     report, clients = run_apply(cfg, world, tmp_path, hostagent=_BusyHostAgent())
 
@@ -901,7 +1293,7 @@ def test_apply_tolerates_hostagent_none(tmp_path):
     when no host-agent client is wired up (same tolerance heal_suppressor
     already gets)."""
     world = make_world(lemonade=("unloaded", None), default_route="extra.m.gguf")
-    cfg = ConfigSet(name="load-it", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="load-it", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     report, clients = run_apply(cfg, world, tmp_path, hostagent=None)
 
@@ -943,12 +1335,12 @@ def test_apply_logs_each_real_step_by_name(tmp_path):
     world = make_world(comfy=("idle", 0), hipfire="running")
     cfg = ConfigSet(
         name="Two",
-        ephemeral={"comfyui": {"state": "free"}, "hipfire": {"state": "parked"}},
+        ephemeral=_eph(comfyui={"state": "free"}, hipfire={"state": "parked"}),
     )
     _, clients = run_apply(cfg, world, tmp_path)
     kinds = [e["kind"] for e in tail_events(clients["events_path"])]
-    assert "free_comfyui" in kinds
-    assert "park_hipfire" in kinds
+    assert "free" in kinds
+    assert "park" in kinds
 
 
 # --- _previous snapshot ---
@@ -962,18 +1354,20 @@ def test_previous_captures_pre_apply_reality(tmp_path):
         default_route="extra.d.gguf",
     )
     # A no-op-ish set (leave everything) so apply changes nothing but still snapshots.
-    cfg = ConfigSet(name="noop", ephemeral={"comfyui": {"state": "leave"}})
+    cfg = ConfigSet(name="noop", ephemeral=_eph(comfyui={"state": "leave"}))
     _, clients = run_apply(cfg, world, tmp_path)
 
     prev = clients["store"].get(RESERVED_SLUG)
     assert prev.name == PREVIOUS_NAME
-    assert prev.ephemeral.lemonade.state == "loaded"
-    assert prev.ephemeral.comfyui.state == "leave"
-    assert prev.ephemeral.hipfire.state == "running"
+    assert prev.ephemeral.resources["lemonade"].desired == "loaded"
+    # comfyui (free-verb) is OMITTED entirely — a freed VRAM cache can't be
+    # meaningfully un-freed; omission IS "leave" in the new schema.
+    assert "comfyui" not in prev.ephemeral.resources
+    assert prev.ephemeral.resources["hipfire"].desired == "loaded"
     assert prev.durable.default_route_model == "extra.d.gguf"
     assert prev.durable.activate_model_id is None
     assert prev.notes
-    assert prev.ephemeral.lemonade.model == "extra.live.gguf"
+    assert prev.ephemeral.resources["lemonade"].model == "extra.live.gguf"
 
 
 def test_previous_set_records_the_actual_loaded_model():
@@ -985,13 +1379,13 @@ def test_previous_set_records_the_actual_loaded_model():
         default_route="extra.Qwen-default.gguf",
     )
     prev = _previous_set(world)
-    assert prev.ephemeral.lemonade.model == "extra.foo.gguf"
+    assert prev.ephemeral.resources["lemonade"].model == "extra.foo.gguf"
 
 
 def test_previous_set_unloaded_records_no_model():
     world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
     prev = _previous_set(world)
-    assert prev.ephemeral.lemonade.model is None
+    assert prev.ephemeral.resources["lemonade"].model is None
 
 
 def test_previous_apply_plans_the_actual_model_not_the_route_default():
@@ -1004,14 +1398,14 @@ def test_previous_apply_plans_the_actual_model_not_the_route_default():
     )
     prev = ConfigSet(
         name=PREVIOUS_NAME,
-        ephemeral={
-            "lemonade": {"state": "loaded", "model": "extra.foo.gguf"},
-            "comfyui": {"state": "leave"},
-            "hipfire": {"state": "parked"},
-        },
+        ephemeral=_eph(
+            lemonade={"state": "loaded", "model": "extra.foo.gguf"},
+            comfyui={"state": "leave"},
+            hipfire={"state": "parked"},
+        ),
     )
     steps = plan_apply(prev, world)
-    load = next(s for s in steps if s["step"] == "load_lemonade")
+    load = next(s for s in steps if s["step"] == "load")
     assert load["model"] == "extra.foo.gguf"
 
 
@@ -1024,15 +1418,15 @@ def test_previous_durable_none_when_no_default_route(tmp_path):
 
     prev = clients["store"].get(RESERVED_SLUG)
     assert prev.durable is None
-    assert prev.ephemeral.lemonade.state == "unloaded"
-    assert prev.ephemeral.hipfire.state == "parked"
+    assert prev.ephemeral.resources["lemonade"].desired == "unloaded"
+    assert prev.ephemeral.resources["hipfire"].desired == "parked"
 
 
 def test_previous_hipfire_loading_snapshots_as_running(tmp_path):
     world = make_world(hipfire="loading")
     cfg = ConfigSet(name="noop", ephemeral={})
     _, clients = run_apply(cfg, world, tmp_path)
-    assert clients["store"].get(RESERVED_SLUG).ephemeral.hipfire.state == "running"
+    assert clients["store"].get(RESERVED_SLUG).ephemeral.resources["hipfire"].desired == "loaded"
 
 
 def test_previous_captured_before_any_step_runs(tmp_path):
@@ -1040,15 +1434,15 @@ def test_previous_captured_before_any_step_runs(tmp_path):
     world = make_world(
         lemonade=("loaded", "extra.live.gguf"), default_route="extra.d.gguf"
     )
-    cfg = ConfigSet(name="halt-first", ephemeral={"lemonade": {"state": "unloaded"}})
+    cfg = ConfigSet(name="halt-first", ephemeral=_eph(lemonade={"state": "unloaded"}))
     lemonade = RecLemonade()
     lemonade.fail = {"unload": EngineError("nope")}
     report, clients = run_apply(cfg, world, tmp_path, lemonade=lemonade)
 
-    assert report["failed"] == {"step": "unload_lemonade", "model": "extra.live.gguf"}
+    assert report["failed"] == {"step": "unload", "resource": "lemonade", "model": "extra.live.gguf"}
     prev = clients["store"].get(RESERVED_SLUG)
     assert prev is not None
-    assert prev.ephemeral.lemonade.state == "loaded"
+    assert prev.ephemeral.resources["lemonade"].desired == "loaded"
 
 
 # --- serialization under the module lock ---
@@ -1073,8 +1467,8 @@ def test_apply_is_serialized_second_waits_for_first(tmp_path):
             self.calls.append(("unload", model))
 
     world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
-    cfg1 = ConfigSet(name="slow", ephemeral={"lemonade": {"state": "loaded"}})
-    cfg2 = ConfigSet(name="fast", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg1 = ConfigSet(name="slow", ephemeral=_eph(lemonade={"state": "loaded"}))
+    cfg2 = ConfigSet(name="fast", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     store = SetStore(tmp_path / "sets")
     events_path = tmp_path / "events.jsonl"
@@ -1083,9 +1477,7 @@ def test_apply_is_serialized_second_waits_for_first(tmp_path):
 
     def base_clients(lem):
         return {
-            "lemonade": lem,
-            "comfy": RecComfy(),
-            "hipfire": RecHipfire(),
+            "local_clients": RecLocalClients(lem, RecComfy(), RecHipfire()),
             "hostagent": RecHostAgent(),
             "policy_store": RecPolicyStore(),
             "store": store,
@@ -1147,17 +1539,17 @@ def test_park_after_activate_when_route_moves_off_hipfire():
     cfg = ConfigSet(
         name="off-hipfire",
         durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-9"},
-        ephemeral={
-            "lemonade": {"state": "loaded"},
-            "comfyui": {"state": "free"},
-            "hipfire": {"state": "parked"},
-        },
+        ephemeral=_eph(
+            lemonade={"state": "loaded"},
+            comfyui={"state": "free"},
+            hipfire={"state": "parked"},
+        ),
     )
     assert plan_apply(cfg, world) == [
-        {"step": "free_comfyui"},
+        {"step": "free", "resource": "comfyui"},
         {"step": "activate", "model_id": "cat-9"},
-        {"step": "park_hipfire"},
-        {"step": "load_lemonade", "model": "extra.new.gguf"},
+        {"step": "park", "resource": "hipfire"},
+        {"step": "load", "resource": "lemonade", "model": "extra.new.gguf"},
     ]
 
 
@@ -1174,10 +1566,10 @@ def test_park_before_activate_when_route_not_on_hipfire():
     cfg = ConfigSet(
         name="normal",
         durable={"default_route_model": "extra.new.gguf", "activate_model_id": "cat-9"},
-        ephemeral={"hipfire": {"state": "parked"}},
+        ephemeral=_eph(hipfire={"state": "parked"}),
     )
     assert plan_apply(cfg, world) == [
-        {"step": "park_hipfire"},
+        {"step": "park", "resource": "hipfire"},
         {"step": "activate", "model_id": "cat-9"},
     ]
 
@@ -1261,7 +1653,7 @@ def test_apply_in_progress_reflects_lock_state():
 
 def test_apply_unload_step_engages_heal_suppressor(tmp_path):
     world = make_world(lemonade=("loaded", "extra.live.gguf"))
-    cfg = ConfigSet(name="unload", ephemeral={"lemonade": {"state": "unloaded"}})
+    cfg = ConfigSet(name="unload", ephemeral=_eph(lemonade={"state": "unloaded"}))
     suppressor = HealSuppressor(window_s=600, clock=lambda: 0.0)
     run_apply(cfg, world, tmp_path, heal_suppressor=suppressor)
 
@@ -1270,7 +1662,7 @@ def test_apply_unload_step_engages_heal_suppressor(tmp_path):
 
 def test_apply_load_step_clears_heal_suppressor(tmp_path):
     world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
-    cfg = ConfigSet(name="load", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="load", ephemeral=_eph(lemonade={"state": "loaded"}))
     suppressor = HealSuppressor(window_s=600, clock=lambda: 0.0)
     suppressor.note_deck_unload()
     assert suppressor.suppressed() is True
@@ -1284,7 +1676,7 @@ def test_apply_tolerates_no_heal_suppressor(tmp_path):
     """heal_suppressor defaults to None (unit tests without the arbiter) and
     apply must run the unload step without error."""
     world = make_world(lemonade=("loaded", "extra.live.gguf"))
-    cfg = ConfigSet(name="unload", ephemeral={"lemonade": {"state": "unloaded"}})
+    cfg = ConfigSet(name="unload", ephemeral=_eph(lemonade={"state": "unloaded"}))
     report, clients = run_apply(cfg, world, tmp_path)  # no heal_suppressor
 
     assert report["failed"] is None
@@ -1309,7 +1701,7 @@ def test_apply_load_step_notes_last_used(tmp_path):
     it the LRU eviction order treats a model the operator loads via a set as
     never used."""
     world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
-    cfg = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="chat", ephemeral=_eph(lemonade={"state": "loaded"}))
     catalog = _RecCatalog()
 
     report, clients = run_apply(cfg, world, tmp_path, catalog=catalog)
@@ -1323,7 +1715,7 @@ def test_apply_load_step_without_catalog_still_works(tmp_path):
     """catalog is optional — unit tests (and any caller without the deck) must
     keep working."""
     world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
-    cfg = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="chat", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     report, clients = run_apply(cfg, world, tmp_path)
 
@@ -1350,12 +1742,12 @@ def test_apply_records_a_park_goal_even_when_no_step_is_planned(tmp_path):
     intent.record("local/lemonade", state="loaded", model="extra.foo.gguf",
                   engine="lemonade")
     world = make_world(lemonade=("unloaded", None))  # crashed: goal already "met"
-    # hipfire omitted entirely ("don't touch", Ephemeral's own contract) —
-    # HipfireEphemeral's state Literal (sets.py:112) is "running"/"parked"
-    # only, no "leave" member to spell that with.
-    cfgset = ConfigSet(name="quiet", ephemeral={
-        "lemonade": {"state": "unloaded"}, "comfyui": {"state": "leave"},
-    })
+    # hipfire omitted entirely ("don't touch" — an absent resource key,
+    # Ephemeral's own contract) — hipfire's "desired" values are
+    # "loaded"/"parked" only, no "leave" member to spell that with.
+    cfgset = ConfigSet(name="quiet", ephemeral=_eph(
+        lemonade={"state": "unloaded"}, comfyui={"state": "leave"},
+    ))
 
     report, _ = run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1378,7 +1770,7 @@ def test_apply_records_goals_before_the_first_step_actuates(tmp_path):
             super().unload(model)
 
     world = make_world(lemonade=("loaded", "extra.foo.gguf"))
-    cfgset = ConfigSet(name="quiet", ephemeral={"lemonade": {"state": "unloaded"}})
+    cfgset = ConfigSet(name="quiet", ephemeral=_eph(lemonade={"state": "unloaded"}))
 
     run_apply(cfgset, world, tmp_path, lemonade=SnoopingLemonade(), intent_store=intent)
 
@@ -1415,7 +1807,7 @@ def test_loaded_goal_with_no_determinable_model_records_nothing(tmp_path):
     intent = IntentStore(tmp_path / "intent.json")
     intent.record("local/lemonade", state="unloaded", model=None, engine="lemonade")
     world = make_world(lemonade=("unloaded", None), default_route=None)
-    cfgset = ConfigSet(name="no-model", ephemeral={"lemonade": {"state": "loaded"}})
+    cfgset = ConfigSet(name="no-model", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     report, _ = run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1432,7 +1824,7 @@ def test_apply_records_a_loaded_goal_already_met_with_its_actual_model(tmp_path)
     of ``_record_goal_intents`` distinct from the planned-step branch."""
     intent = IntentStore(tmp_path / "intent.json")
     world = make_world(lemonade=("loaded", "extra.resident.gguf"))
-    cfgset = ConfigSet(name="already-loaded", ephemeral={"lemonade": {"state": "loaded"}})
+    cfgset = ConfigSet(name="already-loaded", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     report, _ = run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1450,7 +1842,7 @@ def test_apply_records_a_hipfire_park_goal(tmp_path):
     intent = IntentStore(tmp_path / "intent.json")
     intent.record("local/hipfire", state="loaded", model=None, engine="hipfire")
     world = make_world(hipfire="running")
-    cfgset = ConfigSet(name="quiet-hipfire", ephemeral={"hipfire": {"state": "parked"}})
+    cfgset = ConfigSet(name="quiet-hipfire", ephemeral=_eph(hipfire={"state": "parked"}))
 
     run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1463,7 +1855,7 @@ def test_apply_records_a_hipfire_park_goal(tmp_path):
 def test_apply_records_a_hipfire_running_goal(tmp_path):
     intent = IntentStore(tmp_path / "intent.json")
     world = make_world(hipfire="parked")
-    cfgset = ConfigSet(name="run-hipfire", ephemeral={"hipfire": {"state": "running"}})
+    cfgset = ConfigSet(name="run-hipfire", ephemeral=_eph(hipfire={"state": "running"}))
 
     run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1485,7 +1877,7 @@ def test_apply_comfyui_goal_records_nothing(tmp_path):
     intent.record("local/comfyui", state="loaded", model=None, engine="comfyui")
     before = intent.get()
     world = make_world(comfy=("idle", 0))
-    cfgset = ConfigSet(name="free-comfy", ephemeral={"comfyui": {"state": "free"}})
+    cfgset = ConfigSet(name="free-comfy", ephemeral=_eph(comfyui={"state": "free"}))
 
     run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1497,7 +1889,7 @@ def test_apply_tolerates_no_intent_store(tmp_path):
     in, exactly like every other apply() test in this file) must keep
     working — recording is opt-in, not required."""
     world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
-    cfgset = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+    cfgset = ConfigSet(name="chat", ephemeral=_eph(lemonade={"state": "loaded"}))
 
     report, clients = run_apply(cfgset, world, tmp_path)
 
@@ -1525,7 +1917,7 @@ def test_apply_records_intent_while_the_lock_is_held(tmp_path):
     intent = _LockCheckingIntentStore()
     assert not apply_in_progress()  # sanity: the assertion inside record()
     world = make_world(lemonade=("loaded", None))                 # is meaningful, not vacuous
-    cfgset = ConfigSet(name="quiet", ephemeral={"lemonade": {"state": "unloaded"}})
+    cfgset = ConfigSet(name="quiet", ephemeral=_eph(lemonade={"state": "unloaded"}))
 
     run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1551,9 +1943,9 @@ def test_apply_records_the_declared_model_when_no_step_is_planned(tmp_path):
     intent = IntentStore(tmp_path / "intent.json")
     intent.record("local/lemonade", state="loaded", model="extra.Y.gguf", engine="lemonade")
     world = make_world(lemonade=("loaded", "extra.Y.gguf"))
-    cfgset = ConfigSet(name="declare-x", ephemeral={
-        "lemonade": {"state": "loaded", "model": "extra.X.gguf"},
-    })
+    cfgset = ConfigSet(name="declare-x", ephemeral=_eph(
+        lemonade={"state": "loaded", "model": "extra.X.gguf"},
+    ))
 
     report, _ = run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1573,9 +1965,9 @@ def test_apply_records_the_declared_model_over_a_transitioning_world_read(tmp_pa
     intent = IntentStore(tmp_path / "intent.json")
     intent.record("local/lemonade", state="unloaded", model=None, engine="lemonade")
     world = make_world(lemonade=("unknown", None))
-    cfgset = ConfigSet(name="declare-x", ephemeral={
-        "lemonade": {"state": "loaded", "model": "extra.X.gguf"},
-    })
+    cfgset = ConfigSet(name="declare-x", ephemeral=_eph(
+        lemonade={"state": "loaded", "model": "extra.X.gguf"},
+    ))
 
     report, _ = run_apply(cfgset, world, tmp_path, intent_store=intent)
 
@@ -1599,9 +1991,9 @@ def test_declared_model_x_over_resident_y_derives_drifted_not_restore(tmp_path):
 
     intent = IntentStore(tmp_path / "intent.json")
     world = make_world(lemonade=("loaded", "extra.Y.gguf"))
-    cfgset = ConfigSet(name="declare-x", ephemeral={
-        "lemonade": {"state": "loaded", "model": "extra.X.gguf"},
-    })
+    cfgset = ConfigSet(name="declare-x", ephemeral=_eph(
+        lemonade={"state": "loaded", "model": "extra.X.gguf"},
+    ))
     run_apply(cfgset, world, tmp_path, intent_store=intent)
 
     observed = observe_local(world)["local/lemonade"]
@@ -1674,14 +2066,14 @@ def test_old_sets_without_snapshot_apply_exactly_as_today(tmp_path):
     settings store is wired in and would otherwise differ from... nothing,
     because there is nothing to compare."""
     world = make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
-    cfg = ConfigSet(name="old", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="old", ephemeral=_eph(lemonade={"state": "loaded"}))
     assert cfg.settings_snapshot is None
 
     settings_now = {
         "engines": {"sparky/vllm": {"args": {"x": "1"}}}, "models": {}, "engine_models": {},
     }
     plan = plan_apply(cfg, world, settings_now=settings_now)
-    assert plan == [{"step": "load_lemonade", "model": "extra.d.gguf"}]
+    assert plan == [{"step": "load", "resource": "lemonade", "model": "extra.d.gguf"}]
     assert not any(s["step"] == "restore_settings" for s in plan)
 
     settings_store = SettingsStore(tmp_path / "settings.json")
@@ -1752,7 +2144,7 @@ def test_previous_set_carries_the_pre_apply_store(tmp_path):
     settings_store.put("engines", "sparky/vllm", "args", {"x": "pre-apply"})
     pre_apply_settings = settings_store.get()
 
-    cfg = ConfigSet(name="noop", ephemeral={"comfyui": {"state": "leave"}})
+    cfg = ConfigSet(name="noop", ephemeral=_eph(comfyui={"state": "leave"}))
     _, clients = run_apply(
         cfg, world, tmp_path,
         settings_now=pre_apply_settings, settings_store=settings_store,
@@ -1771,7 +2163,7 @@ def test_previous_set_revert_round_trip_restores_settings(tmp_path):
     settings_store.put("engines", "sparky/vllm", "args", {"x": "pre-apply"})
     pre_apply_settings = settings_store.get()
 
-    cfg = ConfigSet(name="noop", ephemeral={"comfyui": {"state": "leave"}})
+    cfg = ConfigSet(name="noop", ephemeral=_eph(comfyui={"state": "leave"}))
     _, clients = run_apply(
         cfg, world, tmp_path,
         settings_now=pre_apply_settings, settings_store=settings_store,

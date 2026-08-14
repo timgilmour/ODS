@@ -876,7 +876,11 @@ def test_set_apply_load_notes_last_used_through_the_router(tmp_path, monkeypatch
     deck["catalog"].scan()
 
     assert client.post("/api/sets", json={
-        "name": "chat", "ephemeral": {"lemonade": {"state": "loaded"}},
+        "name": "chat",
+        # E1 Task 8: Ephemeral is {resources: {resource: {"desired", ...}}}
+        # keyed by resource, not the old fixed lemonade/comfyui/hipfire
+        # sub-sections.
+        "ephemeral": {"resources": {"lemonade": {"desired": "loaded"}}},
     }).status_code == 200
     resp = client.post("/api/sets/chat/apply")
     assert resp.status_code == 200, resp.text

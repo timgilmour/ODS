@@ -25,6 +25,32 @@ from app.main import create_app
 from app.policy import PolicyStore
 from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
 
+# E1 Task 8: Ephemeral is now {resources: {...}} keyed by resource, not the
+# old fixed lemonade/comfyui/hipfire sub-sections. Mirrors tests/test_sets.py's
+# `_eph` — kept as a local copy rather than imported, same call test_sets.py's
+# own docstring makes for `_BusyHostAgent`: a 3-kwarg translator is more
+# awkward to share across test modules than to just mirror.
+_STATE_TO_DESIRED = {
+    "loaded": "loaded", "unloaded": "unloaded",        # lemonade
+    "free": "freed", "leave": None,                     # comfyui ("leave" -> omit)
+    "running": "loaded", "parked": "parked",             # hipfire
+}
+
+
+def _eph(*, lemonade=None, comfyui=None, hipfire=None):
+    resources = {}
+    for resource, spec in (("lemonade", lemonade), ("comfyui", comfyui), ("hipfire", hipfire)):
+        if spec is None:
+            continue
+        spec = dict(spec)
+        state = spec.pop("state")
+        spec.pop("reserve_gb", None)
+        desired = _STATE_TO_DESIRED[state]
+        if desired is None:
+            continue
+        resources[resource] = {"desired": desired, **spec}
+    return {"resources": resources}
+
 
 # ===========================================================================
 # Fakes
@@ -1014,11 +1040,11 @@ def test_preview_no_exec_and_estimate_arithmetic(tmp_path, monkeypatch):
         json={
             "name": "Full Switch",
             "durable": {"default_route_model": "extra.new.gguf", "activate_model_id": "cat-1"},
-            "ephemeral": {
-                "lemonade": {"state": "loaded"},
-                "comfyui": {"state": "free"},
-                "hipfire": {"state": "running"},
-            },
+            "ephemeral": _eph(
+                lemonade={"state": "loaded"},
+                comfyui={"state": "free"},
+                hipfire={"state": "running"},
+            ),
             "policy_overrides": {"lemonade": {"priority": 10, "pinned": False, "idle_ttl": 60}},
         },
        
@@ -1030,14 +1056,14 @@ def test_preview_no_exec_and_estimate_arithmetic(tmp_path, monkeypatch):
     body = resp.json()
     step_names = [step["step"] for step in body["steps"]]
     assert step_names == [
-        "free_comfyui",
+        "free",
         "activate",
-        "resume_hipfire",
-        "load_lemonade",
+        "resume",
+        "load",
         "policy_patch",
     ]
-    # 5 (free_comfyui, default) + 120 (activate) + 180 (resume_hipfire)
-    # + 5 (load_lemonade, default) + 5 (policy_patch, default) == 315
+    # 5 (free, default) + 120 (activate) + 180 (resume)
+    # + 5 (load, default) + 5 (policy_patch, default) == 315
     assert body["estimate_s"] == 315
 
     # Preview must not execute anything.
@@ -1053,14 +1079,15 @@ def test_preview_warn_step_costs_zero(tmp_path, monkeypatch):
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Free Comfy", "ephemeral": {"comfyui": {"state": "free"}}},
-       
+        json={"name": "Free Comfy", "ephemeral": _eph(comfyui={"state": "free"})},
     )
 
     resp = client.post("/api/sets/free-comfy/preview")
 
     body = resp.json()
-    assert body["steps"] == [{"step": "warn", "reason": "comfyui-busy-skipped"}]
+    assert body["steps"] == [
+        {"step": "warn", "reason": "comfyui-busy-skipped", "resource": "comfyui"}
+    ]
     assert body["estimate_s"] == 0
 
 
@@ -1081,7 +1108,7 @@ def test_apply_executes_and_uses_a_fresh_snapshot(tmp_path, monkeypatch):
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Load It", "ephemeral": {"lemonade": {"state": "loaded"}}},
+        json={"name": "Load It", "ephemeral": _eph(lemonade={"state": "loaded"})},
        
     )
 
@@ -1092,7 +1119,9 @@ def test_apply_executes_and_uses_a_fresh_snapshot(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["completed"] == [{"step": "load_lemonade", "model": "extra.model.gguf"}]
+    assert body["completed"] == [
+        {"step": "load", "resource": "lemonade", "model": "extra.model.gguf"}
+    ]
     assert body["failed"] is None
     assert deck["lemonade"].calls == [("load", "extra.model.gguf")]
 
@@ -1106,7 +1135,7 @@ def test_apply_captures_previous_snapshot(tmp_path, monkeypatch):
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Noop", "ephemeral": {"hipfire": {"state": "running"}}},
+        json={"name": "Noop", "ephemeral": _eph(hipfire={"state": "running"})},
        
     )
 
@@ -1127,7 +1156,7 @@ def test_apply_hipfire_busy_veto_409_and_no_mutation(tmp_path, monkeypatch):
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Park It", "ephemeral": {"hipfire": {"state": "parked"}}},
+        json={"name": "Park It", "ephemeral": _eph(hipfire={"state": "parked"})},
        
     )
 
@@ -1154,7 +1183,7 @@ def test_apply_force_skips_hipfire_busy_veto(tmp_path, monkeypatch):
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Park It", "ephemeral": {"hipfire": {"state": "parked"}}},
+        json={"name": "Park It", "ephemeral": _eph(hipfire={"state": "parked"})},
        
     )
 
@@ -1169,15 +1198,15 @@ def test_apply_force_skips_hipfire_busy_veto(tmp_path, monkeypatch):
 def test_apply_host_agent_busy_veto_409_and_no_mutation(tmp_path, monkeypatch):
     """HTTP-level proof of the routers/sets.py wiring: hostagent=deck["hostagent"]
     passthrough + BusyError -> 409 app handler. Mirrors the hipfire-busy-veto
-    precedent above but for the new host-agent guard (plan contains
-    load_lemonade, a guarded step)."""
+    precedent above but for the new host-agent guard (plan contains a
+    "load" step, a guarded verb)."""
     app, deck = make_app(tmp_path, monkeypatch)
     deck["lemonade"] = FakeLemonade(loaded=None)
     deck["hostagent"] = _BusyHostAgent()
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Load It", "ephemeral": {"lemonade": {"state": "loaded"}}},
+        json={"name": "Load It", "ephemeral": _eph(lemonade={"state": "loaded"})},
     )
 
     resp = client.post("/api/sets/load-it/apply")
@@ -1198,7 +1227,7 @@ def test_apply_force_skips_host_agent_busy_veto(tmp_path, monkeypatch):
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Load It", "ephemeral": {"lemonade": {"state": "loaded"}}},
+        json={"name": "Load It", "ephemeral": _eph(lemonade={"state": "loaded"})},
     )
 
     resp = client.post("/api/sets/load-it/apply?force=true")
@@ -1535,10 +1564,10 @@ def test_apply_records_the_declared_goals_via_the_router(tmp_path, monkeypatch):
         "/api/sets",
         json={
             "name": "Chat",
-            "ephemeral": {
-                "lemonade": {"state": "loaded"},
-                "hipfire": {"state": "running"},
-            },
+            "ephemeral": _eph(
+                lemonade={"state": "loaded"},
+                hipfire={"state": "running"},
+            ),
         },
     )
 
@@ -1565,13 +1594,15 @@ def test_apply_records_the_declared_goal_even_when_the_step_fails(tmp_path, monk
     client = TestClient(app)
     client.post(
         "/api/sets",
-        json={"name": "Chat", "ephemeral": {"lemonade": {"state": "loaded"}}},
+        json={"name": "Chat", "ephemeral": _eph(lemonade={"state": "loaded"})},
     )
 
     resp = client.post("/api/sets/chat/apply")
 
     assert resp.status_code == 200
-    assert resp.json()["failed"] == {"step": "load_lemonade", "model": "extra.model.gguf"}
+    assert resp.json()["failed"] == {
+        "step": "load", "resource": "lemonade", "model": "extra.model.gguf"
+    }
     record = deck["intent_store"].get()["local/lemonade"]
     assert record["state"] == "loaded"
     assert record["model"] == "extra.model.gguf"

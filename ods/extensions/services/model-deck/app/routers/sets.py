@@ -32,6 +32,19 @@ reconcile drift between a saved snapshot and the live store without a full
 re-apply; ``preview``/``apply`` both now read the live store fresh (same
 "never reuse a stale snapshot" posture as ``World`` above) so a
 ``restore_settings`` step shows up wherever it's actually going to fire.
+
+E1 Task 8: ``ConfigSet``'s ``ephemeral.resources`` entries validate against
+the resource's DECLARED kind (model only for a load-verb/lemonade-kind
+resource, etc — see ``app.sets.Ephemeral``'s validator), which needs the
+live declaration pydantic's static schema can't see on its own. ``create_set``
+is the one seam that has it, so it builds the ConfigSet itself via
+``ConfigSet.model_validate(payload, context={"kinds": ...})`` instead of
+FastAPI's usual automatic ``cfgset: ConfigSet`` body binding (which never
+threads a context through) — every other route here reads an
+ALREADY-validated stored set and needs no context. ``apply_set`` passes
+``local_clients=deck["local_clients"]`` (not boot-time ``lemonade``/``comfy``/
+``hipfire`` aliases) so every step resolves its own resource's client live,
+the same conversion Task 7 made for ``app.routers.control``.
 """
 
 from fastapi import APIRouter, HTTPException, Request
@@ -51,6 +64,17 @@ from app.sets import apply as sets_apply
 
 router = APIRouter(prefix="/sets", tags=["sets"])
 
+
+def _declared_kinds(deck: dict) -> dict[str, str]:
+    """resource -> declared kind, read LIVE off node_store (never a
+    boot-time copy) — the context ``ConfigSet.model_validate`` needs to
+    cross-check ``ephemeral.resources`` against (see module docstring).
+    Mirrors ``app.routers.control._declared_kind``, plural."""
+    local = deck["node_store"].get("local")
+    engines = local.get("engines", []) if local is not None else []
+    return {e["resource"]: e["kind"] for e in engines}
+
+
 _ADOPT_MODES = frozenset({"current", "selective"})
 
 
@@ -65,9 +89,10 @@ class AdoptRequest(BaseModel):
     keys: list[dict] = []
 
 # preview()'s duration estimate, seconds per step kind. Unlisted step kinds
-# (unload_lemonade, free_comfyui, park_hipfire, load_lemonade, policy_patch)
-# fall back to _DEFAULT_DURATION.
-_STEP_DURATIONS = {"activate": 120, "resume_hipfire": 180, "warn": 0}
+# (unload, free, park, load, policy_patch, restore_settings) fall back to
+# _DEFAULT_DURATION. Verb-generic since E1 Task 8 (was activate/
+# resume_hipfire/warn — resume_hipfire is now the bare verb "resume").
+_STEP_DURATIONS = {"activate": 120, "resume": 180, "warn": 0}
 _DEFAULT_DURATION = 5
 
 
@@ -84,9 +109,16 @@ def list_sets(request: Request) -> dict:
 
 
 @router.post("")
-def create_set(cfgset: ConfigSet, request: Request, overwrite: bool = False) -> dict:
+def create_set(payload: dict, request: Request, overwrite: bool = False) -> dict:
     deck = request.app.state.deck
     store = deck["set_store"]
+    # Built here, not via automatic FastAPI body binding (see module
+    # docstring): the kind cross-check needs the live declaration as
+    # validation context, which only this route can supply. A
+    # ValidationError from a bad kind/desired pairing propagates straight
+    # through — pydantic.ValidationError subclasses ValueError, so the
+    # app-wide handler already maps it to 422.
+    cfgset = ConfigSet.model_validate(payload, context={"kinds": _declared_kinds(deck)})
     slug = slugify(cfgset.name)
     if not overwrite and store.get(slug) is not None:
         raise HTTPException(status_code=409, detail=f"set {slug!r} already exists")
@@ -211,9 +243,9 @@ def apply_set(slug: str, request: Request, force: bool = False) -> dict:
         cfgset,
         world=world,
         force=force,
-        lemonade=deck["lemonade"],
-        comfy=deck["comfy"],
-        hipfire=deck["hipfire"],
+        # Per-resource live resolution (E1 Task 8), not boot-time
+        # lemonade/comfy/hipfire aliases — see module docstring.
+        local_clients=deck["local_clients"],
         hostagent=deck["hostagent"],
         policy_store=deck["policy_store"],
         store=deck["set_store"],

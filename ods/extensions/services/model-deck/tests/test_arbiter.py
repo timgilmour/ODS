@@ -1874,7 +1874,15 @@ def test_apply_waits_for_an_in_flight_tick_actuation(tmp_path):
     event; a concurrent apply() must not reach its own first engine call
     until the tick releases the lock. Bounded — a deadlock fails the test,
     not the suite."""
-    from tests.test_sets import RecComfy, RecHipfire, RecHostAgent, RecLemonade, RecPolicyStore
+    from tests.test_sets import (
+        RecComfy,
+        RecHipfire,
+        RecHostAgent,
+        RecLemonade,
+        RecLocalClients,
+        RecPolicyStore,
+    )
+    from tests.test_sets import _eph as sets_eph
     from tests.test_sets import make_world as sets_make_world
 
     from app.sets import ConfigSet, SetStore, apply
@@ -1906,12 +1914,10 @@ def test_apply_waits_for_an_in_flight_tick_actuation(tmp_path):
     assert entered.wait(timeout=5), "tick never reached its blocking unload"
 
     apply_world = sets_make_world(lemonade=("unloaded", None), default_route="extra.d.gguf")
-    cfg = ConfigSet(name="chat", ephemeral={"lemonade": {"state": "loaded"}})
+    cfg = ConfigSet(name="chat", ephemeral=sets_eph(lemonade={"state": "loaded"}))
     apply_lemonade = RecLemonade()
     apply_clients = {
-        "lemonade": apply_lemonade,
-        "comfy": RecComfy(),
-        "hipfire": RecHipfire(),
+        "local_clients": RecLocalClients(apply_lemonade, RecComfy(), RecHipfire()),
         "hostagent": RecHostAgent(),
         "policy_store": RecPolicyStore(),
         "store": SetStore(tmp_path / "sets"),

@@ -8,9 +8,10 @@ It has two halves:
 * **durable** — the litellm default route (which model requests go to by
   default). Changing it means asking the ODS host agent to *activate* a model,
   a heavy, exclusive operation.
-* **ephemeral** — per-tenant load/park intent (lemonade loaded/unloaded,
-  comfyui freed or left alone, hipfire running/parked). Omitting a tenant's
-  subsection means "don't touch it".
+* **ephemeral** — per-RESOURCE load/park intent (E1 Task 8: generalized past
+  the old fixed lemonade/comfyui/hipfire triple — any number of any-kind
+  DECLARED resources, keyed by resource name). Omitting a resource's entry
+  means "don't touch it".
 
 plus an optional **policy_overrides** blob handed verbatim to the arbiter's
 ``PolicyStore.put`` (its own validation is the gate).
@@ -23,6 +24,9 @@ Three layers, cleanly separated for testability:
 
 * ``ConfigSet`` + ``SetStore`` — the schema and its on-disk CRUD (slugged
   filenames, atomic writes, same temp+os.replace idiom as registry/policy).
+  ``SetStore`` also upgrades a pre-Task-8 on-disk file to the current shape
+  on LOAD (``upgrade_legacy_set``, pure) — ``save`` always writes the new
+  shape, so a file is upgraded at most once.
 * ``plan_apply(cfgset, world)`` — a PURE diff of a set against one world
   snapshot, emitting only the steps that actually change reality, in a fixed
   safety order (evictions first, loads last). No I/O, no clients.
@@ -34,7 +38,11 @@ Three layers, cleanly separated for testability:
   pre-apply reality as the ``_previous`` revert set, then records the set's
   DECLARED goals as intent (``_record_goal_intents``, before any step
   actuates), then executes the plan step by step, halting on the first
-  failure with an exact report, logging every step.
+  failure with an exact report, logging every step. Actuation resolves each
+  step's client per-resource, live, through ``local_clients.client_for``
+  (E1 Task 8, same conversion Task 7 made for app.routers.control) — never a
+  boot-time per-engine alias, which would silently keep acting on a resource's
+  OLD connection after a live declaration edit (Task 10).
 
 Why _previous is captured first and unconditionally: apply performs real,
 partially-irreversible actions (unloading models, parking containers,
@@ -44,20 +52,37 @@ in the instant before. Its durable half records the old default route but with
 ``activate_model_id=None`` (world snapshots don't carry the catalog id needed to
 re-activate), so a durable revert may warn "unavailable" — the ephemeral revert
 always works.
+
+E1 Task 8 generalization, in one paragraph: the old schema had exactly three
+fixed sub-sections (``lemonade``/``comfyui``/``hipfire``, each with its own
+state vocabulary) and steps named ``<verb>_<kind>`` (``unload_lemonade``,
+``free_comfyui``, ...). Both were kind-name literals baked into the shape
+itself — spec §8 forbids that outside ``app.engine_kinds``. The new schema is
+``Ephemeral = {resources: {resource: ResourceDesired}}`` and steps are
+``{"step": <verb>, "resource": <name>, ...}``: verb-generic, resource-keyed,
+kind-agnostic. Validity (which ``desired`` values and the optional ``model``
+field a resource's declared KIND actually accepts) is checked by VERB
+membership in ``app.engine_kinds.ENGINE_KINDS[kind].human_verbs()`` — never a
+hardcoded kind name — see ``Ephemeral``'s validator below. The three legacy
+field names survive in exactly one place, ``upgrade_legacy_set`` (the
+disclosed residue spec §8's Global Constraints allow), which converts an
+old-shape on-disk file to the new shape on load.
 """
 
 import copy
+import json
 import re
 import threading
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from app import actuation
+from app.engine_kinds import ENGINE_KINDS
 from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
-from app.observe import LOCAL_HIPFIRE_KEY, local_key
+from app.observe import local_key
 from app.settings_store import KINDS, NAMESPACES, empty_store
 from app.store_io import write_atomic
 
@@ -96,32 +121,88 @@ class Durable(BaseModel):
     activate_model_id: str | None = None
 
 
-class LemonadeEphemeral(BaseModel):
+# desired -> the human_verbs() a resource's declared kind must expose at
+# least one of, for that desired value to be meaningful for it. Module-level
+# and VERB-keyed on purpose (spec §8): this is the one place validity is
+# decided, and it never spells a kind name to do it — only the verb tokens
+# app.engine_kinds.ENGINE_KINDS[...].human_verbs() already returns.
+_DESIRED_VERBS: dict[str, frozenset[str]] = {
+    "loaded": frozenset({"load", "resume"}),
+    "unloaded": frozenset({"unload"}),
+    "parked": frozenset({"park"}),
+    "freed": frozenset({"free"}),
+}
+
+
+class ResourceDesired(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    state: Literal["loaded", "unloaded"]
+
+    desired: Literal["loaded", "unloaded", "parked", "freed"]
     # The model a "loaded" goal means, when the set knows it. Stamped by
     # _previous_set (revert must reload what WAS loaded, not the route
     # default); None = pre-existing behavior (durable/default-route pick).
+    # Meaningful only for a load-verb (lemonade-kind) resource — see
+    # Ephemeral's kind validator below for why any other kind carrying one
+    # is refused rather than silently ignored.
     model: str | None = None
-
-
-class ComfyuiEphemeral(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    state: Literal["free", "leave"]
-    reserve_gb: int = 24  # informational (UI budgeting), not enforced at apply
-
-
-class HipfireEphemeral(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    state: Literal["running", "parked"]
 
 
 class Ephemeral(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # An omitted subsection means "don't touch that tenant".
-    lemonade: LemonadeEphemeral | None = None
-    comfyui: ComfyuiEphemeral | None = None
-    hipfire: HipfireEphemeral | None = None
+
+    # resource -> desired state. An ABSENT resource means "don't touch it"
+    # (E1 Task 8: replaces the old fixed lemonade/comfyui/hipfire
+    # sub-sections — any number of any-kind DECLARED resources now, keyed by
+    # name, not by kind).
+    resources: dict[str, ResourceDesired] = {}
+
+    @model_validator(mode="after")
+    def _validate_against_declared_kinds(self, info) -> "Ephemeral":
+        """``desired``/``model`` validity depends on the resource's DECLARED
+        KIND — static pydantic schema alone cannot know that. The live
+        declaration is supplied by the CALLER as validation context
+        (``{"kinds": {resource: kind}}``); today the only caller that has
+        one is ``app.routers.sets.create_set`` (design choice recorded in
+        the E1 Task 8 commit: the kinds DATA comes from the router, which is
+        the one seam holding a real declaration to check against, but the
+        cross-check itself runs HERE, inside pydantic, so a caller with a
+        declaration gets a real ``pydantic.ValidationError`` -> 422 the
+        app-wide ``ValueError`` handler already maps, not a second ad hoc
+        gate).
+
+        No context — every ``plan_apply``/``_record_goal_intents``/pure-diff
+        unit test construction in this file, ``_previous_set`` (built from
+        already-consistent live world state), and every set loaded through
+        ``upgrade_legacy_set`` (predates this check entirely) — skips this
+        validator outright. A resource present in ``resources`` but ABSENT
+        from a SUPPLIED ``kinds`` mapping is refused too: declaring desire
+        for something the caller can't identify the kind of is exactly the
+        ambiguous input ``literal-declared-inputs`` says to refuse, not
+        guess past.
+
+        Kind-agnostic on purpose (spec §8, no engine-kind-name literal
+        outside app.engine_kinds): validity is VERB membership in
+        ``ENGINE_KINDS[kind].human_verbs()`` via the module-level
+        ``_DESIRED_VERBS`` table (verb tokens only) — never a hardcoded kind
+        name. ``model`` is accepted only when the kind supports "load"
+        (today: lemonade-kind alone) — the brief's "model only for
+        lemonade-kind" rule, expressed the same verb-generic way.
+        """
+        kinds = (info.context or {}).get("kinds") if info.context else None
+        if kinds is None:
+            return self
+        for resource, rd in self.resources.items():
+            kind = kinds.get(resource)
+            if kind is None or kind not in ENGINE_KINDS:
+                raise ValueError(f"{resource!r} is not a currently declared engine")
+            verbs = ENGINE_KINDS[kind].human_verbs()
+            if not (_DESIRED_VERBS[rd.desired] & verbs):
+                raise ValueError(
+                    f"{resource!r} ({kind}) cannot be declared {rd.desired!r}"
+                )
+            if rd.model is not None and "load" not in verbs:
+                raise ValueError(f"{resource!r} ({kind}) does not accept a model")
+        return self
 
 
 class ConfigSet(BaseModel):
@@ -149,6 +230,73 @@ class ConfigSet(BaseModel):
         if not value:
             raise ValueError("name must be non-empty")
         return value
+
+
+# ===========================================================================
+# Legacy (pre-Task-8) shape upgrade — pure, LOAD-time only
+# ===========================================================================
+
+# The three legacy field names — every set saved before E1 Task 8 used
+# exactly these three fixed fields, so resource == kind name is a FACT about
+# every old file, not an assumption. This is the ONE allowed engine-kind-name
+# residue outside app.engine_kinds (spec §8's Global Constraints) — it
+# appears nowhere else in this module.
+_LEGACY_KIND_NAMES = ("lemonade", "comfyui", "hipfire")
+
+# (legacy field name, its old "state" value) -> the new "desired" value.
+# ("comfyui", "leave") has no entry: omission itself IS "leave" in the new
+# schema, so that entry is DROPPED, never mapped — see upgrade below.
+_LEGACY_STATE_TO_DESIRED: dict[tuple[str, str], str] = {
+    ("lemonade", "loaded"): "loaded",
+    ("lemonade", "unloaded"): "unloaded",
+    ("comfyui", "free"): "freed",
+    ("hipfire", "running"): "loaded",
+    ("hipfire", "parked"): "parked",
+}
+
+
+def upgrade_legacy_set(raw: dict) -> dict:
+    """Pure function: a stored set's raw dict, upgraded to the current
+    ``ephemeral: {resources: {...}}`` shape if it is still in the pre-Task-8
+    per-kind shape (top-level ``lemonade``/``comfyui``/``hipfire`` keys
+    inside ``ephemeral``). Already-current-shape or ephemeral-absent input
+    passes through UNCHANGED — this function's own job is exactly the outer
+    per-kind -> per-resource restructuring (plus the old ``state`` field's
+    rename to ``desired`` and its per-kind value translation); a raw dict
+    whose per-resource entries already carry ``desired`` has nothing left
+    for it to do to them.
+
+    Called on LOAD only (``SetStore._scan``/``get``); ``SetStore.save``
+    always writes the new shape, so a set is upgraded at most once — the
+    NEXT save silently drops the legacy shape for good.
+    """
+    eph = raw.get("ephemeral")
+    if not isinstance(eph, dict) or "resources" in eph or not (
+        set(eph) & set(_LEGACY_KIND_NAMES)
+    ):
+        return raw
+
+    resources: dict = {}
+    for kind in _LEGACY_KIND_NAMES:
+        entry = eph.get(kind)
+        if entry is None:
+            continue
+        entry = dict(entry)
+        # reserve_gb was comfyui-only, informational (UI budgeting), never
+        # enforced at apply — dropped, not carried into ResourceDesired.
+        entry.pop("reserve_gb", None)
+        state = entry.pop("state", None)
+        if state is not None:
+            desired = _LEGACY_STATE_TO_DESIRED.get((kind, state))
+            if desired is None:
+                # ("comfyui", "leave"): omission IS "leave" now.
+                continue
+            entry["desired"] = desired
+        resources[kind] = entry
+
+    new_eph = {k: v for k, v in eph.items() if k not in _LEGACY_KIND_NAMES}
+    new_eph["resources"] = resources
+    return {**raw, "ephemeral": new_eph}
 
 
 # ===========================================================================
@@ -226,8 +374,9 @@ class SetStore:
             # exception type, but the same named-ValueError contract.
             raise ValueError(f"stored set {slug!r} could not be read: {exc}") from exc
         try:
-            return ConfigSet.model_validate_json(text)
-        except ValidationError as exc:
+            raw = upgrade_legacy_set(json.loads(text))
+            return ConfigSet.model_validate(raw)
+        except (json.JSONDecodeError, ValidationError) as exc:
             # Present-but-invalid ≠ missing: a hand-edited file, or a set
             # saved by a newer build read under a rolled-back image
             # (extra='forbid'). Named so the router's 422 tells the operator
@@ -249,8 +398,9 @@ class SetStore:
         bad: list[str] = []
         for path in sorted(self._dir.glob("*.json")):
             try:
-                good.append(ConfigSet.model_validate_json(path.read_text()))
-            except (ValidationError, OSError, UnicodeDecodeError):
+                raw = upgrade_legacy_set(json.loads(path.read_text()))
+                good.append(ConfigSet.model_validate(raw))
+            except (ValidationError, OSError, UnicodeDecodeError, json.JSONDecodeError):
                 bad.append(path.stem)
         return good, bad
 
@@ -431,15 +581,40 @@ def adopt_selective(snapshot: dict | None, current: dict, keys: list[dict]) -> d
 # ===========================================================================
 
 
+def _park_capable_resources(world: dict) -> list[str]:
+    """Every DECLARED resource whose kind supports the "park" verb (today:
+    hipfire-kind) — the generalization of "the hipfire client" the pre-E1
+    busy-guard checked directly by a fixed boot-time alias. Kind-agnostic
+    (spec §8): membership comes from ``ENGINE_KINDS[...].human_verbs()``,
+    never a hardcoded kind name. An empty/partial world (obligation 1, T3
+    review) simply yields an empty list — nothing to guard, not a crash."""
+    return [resource for resource, tenant in world["tenants"].items()
+            if "park" in ENGINE_KINDS[tenant["engine"]].human_verbs()]
+
+
 def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None) -> list[dict]:
     """Diff ``cfgset`` against ``world`` (and, for a set carrying a
     settings snapshot, against ``settings_now``) -> ordered list of step
-    dicts.
+    dicts, each ``{"step": <verb>, "resource": <name>, ...}`` (``activate``/
+    ``policy_patch``/``restore_settings`` carry no resource — they are
+    box-wide, not per-tenant).
 
     PURE: no I/O, no client calls. Emits only steps that change reality.
-    Order: evictions (unload/free) -> park -> activate -> resume -> load ->
-    restore_settings -> policy_patch, with ``warn`` steps interleaved where
-    they are generated.
+    Order: every eviction verb (unload/park/free) first, then activate, then
+    every load/resume, then restore_settings, then policy_patch, with
+    ``warn`` steps interleaved where they are generated — same ordering
+    rationale as before Task 8 (evictions free VRAM/GPU before anything new
+    claims it; activate flips the route between the eviction and load
+    halves; see the I4 park-after-activate exception below for the one
+    documented reordering).
+
+    A resource named in ``cfgset.ephemeral.resources`` but NOT currently in
+    ``world["tenants"]`` (undeclared, or removed from the declaration since
+    the set was saved) is silently skipped — obligation 1 (T3 review): an
+    empty or partial declared world must plan cleanly, never KeyError. This
+    is the diffing-function half of that contract; ``_record_goal_intents``
+    and ``apply`` (via ``local_clients``) make the same choice for the same
+    reason.
 
     ``settings_now`` (Task 9) is the caller's own snapshot of the live
     settings store — this function does no I/O, so it cannot fetch it
@@ -449,95 +624,124 @@ def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None)
     docstrings (``app.routers.sets``, ``apply`` below) for how it's sourced.
     """
     tenants = world["tenants"]
-    lem_world = tenants["lemonade"]
-    comfy_world = tenants["comfyui"]
-    hip_world = tenants["hipfire"]
-
     eph = cfgset.ephemeral
     durable = cfgset.durable
-
-    lem_desired = eph.lemonade.state if eph and eph.lemonade else None
-    comfy_desired = eph.comfyui.state if eph and eph.comfyui else None
-    hip_desired = eph.hipfire.state if eph and eph.hipfire else None
+    resources = eph.resources if eph is not None else {}
 
     steps: list[dict] = []
 
-    # --- Evictions (unload / free) -----------------------------------------
-    if lem_desired == "unloaded" and lem_world["state"] == "loaded":
-        steps.append({"step": "unload_lemonade", "model": lem_world["model"]})
-
-    if comfy_desired == "free":
-        # Only free when we can confirm the queue is empty (== 0). A busy
-        # queue OR an unknown/None queue -> skip and be honest about it; we
-        # never yank VRAM out from under a running generation.
-        if comfy_world["queue"] == 0:
-            steps.append({"step": "free_comfyui"})
-        else:
-            steps.append({"step": "warn", "reason": "comfyui-busy-skipped"})
-
-    # --- Park + Activate ---------------------------------------------------
-    # Normally park comes BEFORE activate (free the GPU, then re-point the
-    # route). But when the activate MOVES the default route off hipfire and
-    # the route currently targets hipfire, parking first would yank the GPU
-    # out from under the still-default hipfire model — so park AFTER activate
-    # in that one case. (hipfire.park()'s own guard also refuses to park while
-    # it serves the default route; ordering activate first is what lets the
-    # park succeed.)
-    park_step = None
-    if hip_desired == "parked" and hip_world["state"] in ("running", "loading"):
-        park_step = {"step": "park_hipfire"}
-
+    # --- Activate (decided first — the eviction pass needs to know whether
+    # it's happening, for the I4 park-after-activate exception below) ------
     activate_step = None
     if durable is not None and durable.default_route_model != world["default_route"]:
         if durable.activate_model_id is not None:
             activate_step = {"step": "activate", "model_id": durable.activate_model_id}
         else:
             activate_step = {"step": "warn", "reason": "durable-revert-unavailable"}
+    activating = activate_step is not None and activate_step["step"] == "activate"
 
-    route_on_hipfire = (
-        hip_world["model"] is not None and world["default_route"] == hip_world["model"]
-    )
-    park_after_activate = (
-        park_step is not None
-        and activate_step is not None
-        and activate_step["step"] == "activate"
-        and route_on_hipfire
-    )
+    # --- Evictions (unload / free / park) -----------------------------------
+    # Fixed verb priority — unload, then free, then park — same as the pre-
+    # Task-8 code's own fixed block sequence (an unload check, then a free
+    # check, then the park+activate dance), now generalized past one
+    # resource per verb: EVERY unload-verb resource's step (declared order
+    # among ties), THEN every free-verb resource's, THEN every park-verb
+    # resource's. This is NOT simply "declared order" — a set that declares
+    # a park-verb resource before an unload-verb one still emits the unload
+    # first, exactly like the fixed pre-Task-8 blocks did (proven by
+    # test_preview_no_exec_and_estimate_arithmetic's resume-before-load
+    # sibling case below, which pins the same fixed-priority contract for
+    # the load/resume bucket).
+    #
+    # One documented exception, preserved verbatim:
+    #
+    # I4: normally park comes BEFORE activate (free the GPU, then re-point
+    # the route). But when the activate MOVES the default route off a
+    # park-verb resource (hipfire-kind today) and the route currently
+    # targets THAT resource, parking first would yank the GPU out from under
+    # the still-default model — so THAT resource's park runs AFTER activate
+    # instead (its own guard also refuses to park while it serves the
+    # default route; ordering activate first is what lets the park
+    # succeed). Decided per-resource: a park-verb resource NOT currently
+    # serving the default route keeps the normal park-before-activate order
+    # even while another one is deferred.
+    unloads: list[dict] = []
+    frees: list[dict] = []
+    parks: list[dict] = []
+    deferred_parks: list[dict] = []
 
-    if park_after_activate:
-        steps.append(activate_step)
-        steps.append(park_step)
-    else:
-        if park_step is not None:
-            steps.append(park_step)
-        if activate_step is not None:
-            steps.append(activate_step)
+    for resource, rd in resources.items():
+        tenant = tenants.get(resource)
+        if tenant is None:
+            continue  # obligation 1: undeclared/removed — nothing to diff
+        verbs = ENGINE_KINDS[tenant["engine"]].human_verbs()
 
-    # --- Resume ------------------------------------------------------------
-    if hip_desired == "running" and hip_world["state"] == "parked":
-        steps.append({"step": "resume_hipfire"})
+        if rd.desired == "unloaded" and "unload" in verbs and tenant["state"] == "loaded":
+            unloads.append({"step": "unload", "resource": resource, "model": tenant["model"]})
 
-    # --- Load --------------------------------------------------------------
-    # Model precedence: ephemeral-explicit > durable > world default. A set
-    # that names the exact model it wants loaded (stamped by _previous_set,
-    # or authored directly) wins outright — falling through to durable/world
-    # default here is what silently reloaded the wrong model on a "·
-    # previous" revert [c45].
-    if lem_desired == "loaded" and lem_world["state"] == "unloaded":
-        # eph and eph.lemonade are guaranteed truthy here: lem_desired can
-        # only be "loaded" if the ternary above that sets it actually read
-        # eph.lemonade.state, so no re-guard is needed to reach .model.
-        model = eph.lemonade.model
-        if model is None:
-            model = (
-                durable.default_route_model
-                if durable is not None
-                else world["default_route"]
+        elif rd.desired == "freed" and "free" in verbs:
+            # Only free when we can confirm the queue is empty (== 0). A busy
+            # queue OR an unknown/None queue -> skip and be honest about it; we
+            # never yank VRAM out from under a running generation.
+            if tenant["queue"] == 0:
+                frees.append({"step": "free", "resource": resource})
+            else:
+                frees.append(
+                    {"step": "warn", "reason": "comfyui-busy-skipped", "resource": resource}
+                )
+
+        elif rd.desired == "parked" and "park" in verbs and tenant["state"] in ("running", "loading"):
+            park_step = {"step": "park", "resource": resource}
+            route_on_this = (
+                tenant.get("model") is not None and world["default_route"] == tenant["model"]
             )
-        if model is None:
-            steps.append({"step": "warn", "reason": "no-model-to-load"})
-        else:
-            steps.append({"step": "load_lemonade", "model": model})
+            if activating and route_on_this:
+                deferred_parks.append(park_step)
+            else:
+                parks.append(park_step)
+
+    steps.extend(unloads)
+    steps.extend(frees)
+    steps.extend(parks)
+    if activate_step is not None:
+        steps.append(activate_step)
+    steps.extend(deferred_parks)
+
+    # --- Resume / Load -------------------------------------------------------
+    # Fixed verb priority again — every resume-verb resource's step, THEN
+    # every load-verb resource's — mirroring the pre-Task-8 code's own fixed
+    # "Resume" block before its "Load" block.
+    #
+    # Model precedence (lemonade-style, "load" verb): ephemeral-explicit >
+    # durable > world default. A set that names the exact model it wants
+    # loaded (stamped by _previous_set, or authored directly) wins outright
+    # — falling through to durable/world default here is what silently
+    # reloaded the wrong model on a "· previous" revert [c45].
+    resumes: list[dict] = []
+    loads: list[dict] = []
+
+    for resource, rd in resources.items():
+        tenant = tenants.get(resource)
+        if tenant is None:
+            continue  # obligation 1
+        verbs = ENGINE_KINDS[tenant["engine"]].human_verbs()
+
+        if rd.desired == "loaded" and "resume" in verbs and tenant["state"] == "parked":
+            resumes.append({"step": "resume", "resource": resource})
+
+        elif rd.desired == "loaded" and "load" in verbs and tenant["state"] == "unloaded":
+            model = rd.model
+            if model is None:
+                model = (
+                    durable.default_route_model if durable is not None else world["default_route"]
+                )
+            if model is None:
+                loads.append({"step": "warn", "reason": "no-model-to-load", "resource": resource})
+            else:
+                loads.append({"step": "load", "resource": resource, "model": model})
+
+    steps.extend(resumes)
+    steps.extend(loads)
 
     # --- Restore settings (Task 9) ------------------------------------------
     # Independent of engine state: a settings write never itself restarts
@@ -585,11 +789,13 @@ _HALT_EXCEPTIONS = (GuardError, EngineError, BusyError, ValueError)
 
 # Plan steps that touch the surface the ODS host agent's own lifecycle ops
 # (activation snapshots + readiness proofs) assume nobody else is mutating.
-# free_comfyui/policy_patch/warn are deliberately absent — freeing VRAM helps
-# an in-flight activation, and a policy patch never mutates engine state.
-_HOST_AGENT_GUARDED_STEPS = frozenset(
-    {"unload_lemonade", "load_lemonade", "park_hipfire", "activate", "resume_hipfire"}
-)
+# free/policy_patch/warn/restore_settings are deliberately absent — freeing
+# VRAM helps an in-flight activation, and neither a policy patch nor a
+# settings restore mutates engine state. Verb-generic (E1 Task 8: the pre-E1
+# set was {"unload_lemonade","load_lemonade","park_hipfire","activate",
+# "resume_hipfire"} — this is that same set with the kind names stripped,
+# since a resource's kind is no longer spellable in a step name).
+_HOST_AGENT_GUARDED_STEPS = frozenset({"unload", "load", "park", "activate", "resume"})
 
 
 def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
@@ -607,17 +813,18 @@ def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
     * recorded up-front — a step that later fails leaves intent at the
       declared goal and the reconciler converges toward it (the documented
       restore-on-failure path, arbiter.py:746-747);
-    * comfyui records nothing (routers/sets.py's old table documented why:
-      /free leaves the server observing 'loaded'; an 'unloaded' intent
-      would derive permanent 'unexpected');
-    * hipfire records model=None ('loaded, no opinion which model');
-    * a 'loaded' lemonade goal with NO determinable model records nothing —
-      the plan already warned no-model-to-load, and a model-less loaded
-      intent is unrestorable;
+    * a "freed" (comfyui-kind) goal records nothing (routers/sets.py's old
+      table documented why: a free leaves the server observing 'loaded'; an
+      'unloaded' intent would derive permanent 'unexpected');
+    * a "loaded" goal on a resume-verb (hipfire-kind) resource records
+      model=None ('loaded, no opinion which model');
+    * a "loaded" goal on a load-verb (lemonade-kind) resource with NO
+      determinable model records nothing — the plan already warned
+      no-model-to-load, and a model-less loaded intent is unrestorable;
     * model resolution mirrors plan_apply's own documented LOAD precedence
       (ephemeral-explicit > planned step > observed world) — checking the
-      DECLARED ``eph.lemonade.model`` FIRST, not last, matters even when no
-      step plans: if the world already reads "loaded" with some OTHER model
+      DECLARED ``rd.model`` FIRST, not last, matters even when no step
+      plans: if the world already reads "loaded" with some OTHER model
       resident (no swap step exists to reconcile identity, only state), the
       declared model still wins the recorded intent. This is deliberate, not
       a bug: the operator's stated desire is what intent means (this
@@ -628,42 +835,60 @@ def _record_goal_intents(cfgset, steps, world, intent_store) -> None:
       .py:31), so 'drifted' is report-only and never triggers a restore; a
       human decides, exactly like the sibling 'unmanaged'/'unexpected'
       statuses reconcile.py already leaves alone.
+
+    A resource in ``cfgset.ephemeral.resources`` but absent from
+    ``world["tenants"]`` (obligation 1, T3 review — undeclared/removed since
+    the set was saved) is skipped: its KIND can't be determined, and
+    declaring intent for a kind you can't identify is exactly the ambiguous
+    input this codebase refuses rather than guesses past.
+
+    Kind-agnostic on purpose (spec §8): dispatch is VERB membership in
+    ``ENGINE_KINDS[kind].human_verbs()``, never a hardcoded kind name.
     """
     if intent_store is None:
         return
     eph = cfgset.ephemeral
     if eph is None:
         return
-    if eph.lemonade is not None:
-        if eph.lemonade.state == "unloaded":
-            intent_store.record(local_key("lemonade"), state="unloaded",
-                                model=None, engine="lemonade")
-        elif eph.lemonade.state == "loaded":
-            model = eph.lemonade.model
+    tenants = world["tenants"]
+    for resource, rd in eph.resources.items():
+        tenant = tenants.get(resource)
+        if tenant is None:
+            continue
+        kind = tenant["engine"]
+        verbs = ENGINE_KINDS[kind].human_verbs()
+
+        if rd.desired == "unloaded" and "unload" in verbs:
+            intent_store.record(local_key(resource), state="unloaded",
+                                model=None, engine=kind)
+        elif rd.desired == "parked" and "park" in verbs:
+            intent_store.record(local_key(resource), state="unloaded",
+                                model=None, engine=kind)
+        elif rd.desired == "loaded" and "load" in verbs:
+            model = rd.model
             if model is None:
-                model = next((s["model"] for s in steps
-                              if s["step"] == "load_lemonade"), None)
-            if model is None and world["tenants"]["lemonade"]["state"] == "loaded":
-                model = world["tenants"]["lemonade"].get("model")
+                model = next(
+                    (s["model"] for s in steps
+                     if s["step"] == "load" and s.get("resource") == resource),
+                    None,
+                )
+            if model is None and tenant["state"] == "loaded":
+                model = tenant.get("model")
             if model is not None:
-                intent_store.record(local_key("lemonade"), state="loaded",
-                                    model=model, engine="lemonade")
-    if eph.hipfire is not None:
-        if eph.hipfire.state == "parked":
-            intent_store.record(LOCAL_HIPFIRE_KEY, state="unloaded",
-                                model=None, engine="hipfire")
-        elif eph.hipfire.state == "running":
-            intent_store.record(LOCAL_HIPFIRE_KEY, state="loaded",
-                                model=None, engine="hipfire")
+                intent_store.record(local_key(resource), state="loaded",
+                                    model=model, engine=kind)
+        elif rd.desired == "loaded" and "resume" in verbs:
+            intent_store.record(local_key(resource), state="loaded",
+                                model=None, engine=kind)
+        # "freed" (or any other desired/kind combination matching none of
+        # the branches above): never recorded — see docstring.
 
 
 def apply(
     cfgset: ConfigSet,
     *,
     world: dict,
-    lemonade,
-    comfy,
-    hipfire,
+    local_clients,
     hostagent=None,
     policy_store,
     store: SetStore,
@@ -680,19 +905,28 @@ def apply(
     also held by the watcher tick's actuation phase and the pull-through
     completion hook.
 
+    ``local_clients`` (E1 Task 8; same conversion Task 7 made for
+    ``app.routers.control``) is ``app.local_clients.LocalClients`` (or an
+    equivalent ``.client_for(resource)``): every unload/load/free/park/
+    resume step resolves ITS OWN resource's client through it, live, at the
+    moment that step executes — never a boot-time per-engine alias, which
+    would silently keep acting on a resource's OLD connection after a live
+    declaration edit (Task 10). ``apply`` no longer takes ``lemonade``/
+    ``comfy``/``hipfire`` params for this reason.
+
     ``heal_suppressor`` (optional; None tolerated) is the arbiter's shared
-    ``HealSuppressor``: an ``unload_lemonade`` step arms it so contention
-    healing can't revert this deliberate unload, and a ``load_lemonade`` step
-    clears it. None (e.g. in unit tests without the arbiter) simply skips that
+    ``HealSuppressor``: an ``unload`` step arms it so contention healing
+    can't revert this deliberate unload, and a ``load`` step clears it.
+    None (e.g. in unit tests without the arbiter) simply skips that
     coordination.
 
     ``catalog`` (optional; None tolerated) is the storage catalog: a
-    ``load_lemonade`` step records the model as used, so the storage watcher's
-    LRU eviction order sees loads made through a set apply.
+    ``load`` step records the model as used, so the storage watcher's LRU
+    eviction order sees loads made through a set apply.
 
-    ``force=True`` skips the hipfire conversation-guard (both the pre-veto
-    and the per-step rechecks) for an operator overriding an abandoned
-    conversation; it does NOT skip park()'s litellm route guard.
+    ``force=True`` skips the park-capable-resource conversation-guard (both
+    the pre-veto and the per-step rechecks) for an operator overriding an
+    abandoned conversation; it does NOT skip park()'s litellm route guard.
 
     ``settings_now`` (Task 9; optional, None tolerated) is the caller's own
     fresh read of the live settings store — plan_apply's pure input, exactly
@@ -719,9 +953,7 @@ def apply(
         return _run_apply(
             cfgset,
             world=world,
-            lemonade=lemonade,
-            comfy=comfy,
-            hipfire=hipfire,
+            local_clients=local_clients,
             hostagent=hostagent,
             policy_store=policy_store,
             store=store,
@@ -739,9 +971,7 @@ def _run_apply(
     cfgset,
     *,
     world,
-    lemonade,
-    comfy,
-    hipfire,
+    local_clients,
     hostagent=None,
     policy_store,
     store,
@@ -754,20 +984,35 @@ def _run_apply(
     intent_store=None,
 ) -> dict:
     steps = plan_apply(cfgset, world, settings_now=settings_now)
+    park_capable = _park_capable_resources(world)
 
     # Veto BEFORE any mutation (and before the _previous snapshot — a refused
     # apply changes nothing, so there is nothing to revert): a plan that would
-    # park hipfire or flip the durable route (litellm restart severs in-flight
-    # streams; a hipfire-direction activate recreates the container outright)
-    # is refused while a hipfire conversation is live. GuardError propagates
-    # to the route -> 409. The per-step rechecks below cover the gap between
-    # this veto and the step actually running.
-    if not force and any(s["step"] in ("park_hipfire", "activate") for s in steps):
-        try:
-            hipfire.ensure_not_busy(f"apply set {cfgset.name!r}")
-        except _HALT_EXCEPTIONS:
-            log_event(events_path, "apply-vetoed", {"name": cfgset.name})
-            raise
+    # park a park-verb (hipfire-kind) resource or flip the durable route
+    # (litellm restart severs in-flight streams; moving the route recreates
+    # a container outright) is refused while that resource's conversation is
+    # live. GuardError propagates to the route -> 409. The per-step rechecks
+    # below cover the gap between this veto and the step actually running.
+    #
+    # E1 Task 8 generalization: the pre-E1 guard checked exactly ONE fixed
+    # hipfire client. Today's guarded set is every park-capable resource a
+    # "park" step actually targets, PLUS — if an "activate" step is
+    # planned — every DECLARED park-capable resource (moving the default
+    # route can affect any of them, whether or not this set's ephemeral
+    # touches it; that's the pre-E1 behavior too, just never generalized
+    # past a single resource before now).
+    guarded_resources = {s["resource"] for s in steps if s["step"] == "park"}
+    if any(s["step"] == "activate" for s in steps):
+        guarded_resources.update(park_capable)
+    if not force and guarded_resources:
+        for resource in sorted(guarded_resources):
+            try:
+                local_clients.client_for(resource).ensure_not_busy(
+                    f"apply set {cfgset.name!r}"
+                )
+            except _HALT_EXCEPTIONS:
+                log_event(events_path, "apply-vetoed", {"name": cfgset.name})
+                raise
 
     # Pre-veto, not per-step: plan order runs evictions FIRST, so hitting the
     # agent's own 409 at the activate step would leave a half-applied set.
@@ -816,13 +1061,12 @@ def _run_apply(
         try:
             _execute_step(
                 step,
-                lemonade,
-                comfy,
-                hipfire,
+                local_clients,
                 hostagent,
                 policy_store,
-                heal_suppressor,
-                catalog,
+                park_capable,
+                heal_suppressor=heal_suppressor,
+                catalog=catalog,
                 force=force,
                 settings_store=settings_store,
             )
@@ -852,17 +1096,17 @@ def _run_apply(
 
 
 def _execute_step(
-    step, lemonade, comfy, hipfire, hostagent, policy_store, heal_suppressor=None,
-    catalog=None, force=False, settings_store=None,
+    step, local_clients, hostagent, policy_store, park_capable_resources,
+    heal_suppressor=None, catalog=None, force=False, settings_store=None,
 ) -> None:
     name = step["step"]
-    if name == "unload_lemonade":
-        lemonade.unload(step["model"])
+    if name == "unload":
+        local_clients.client_for(step["resource"]).unload(step["model"])
         # Deliberate unload: arm suppression so the arbiter doesn't heal it back.
         if heal_suppressor is not None:
             heal_suppressor.note_deck_unload()
-    elif name == "load_lemonade":
-        lemonade.load(step["model"])
+    elif name == "load":
+        local_clients.client_for(step["resource"]).load(step["model"])
         # Deliberate load: the model is wanted resident, so clear suppression.
         if heal_suppressor is not None:
             heal_suppressor.clear()
@@ -870,18 +1114,24 @@ def _execute_step(
         # bookkeeping (lemonade names GGUFs "extra.<file>"; units are bare).
         if catalog is not None:
             catalog.note_used_gguf(step["model"].removeprefix(_EXTRA_PREFIX))
-    elif name == "free_comfyui":
-        comfy.free()
-    elif name == "park_hipfire":
-        hipfire.park(force=force)
-    elif name == "resume_hipfire":
-        hipfire.resume()
+    elif name == "free":
+        local_clients.client_for(step["resource"]).free()
+    elif name == "park":
+        local_clients.client_for(step["resource"]).park(force=force)
+    elif name == "resume":
+        local_clients.client_for(step["resource"]).resume()
     elif name == "activate":
-        # Recheck at execution time: a request may have landed on hipfire
-        # since the pre-veto (activation restarts litellm, severing in-flight
-        # streams; a hipfire-direction activate recreates the container).
+        # Recheck at execution time: a request may have landed on a
+        # park-capable resource since the pre-veto (activation restarts
+        # litellm, severing in-flight streams; moving the route recreates a
+        # container outright). Same guarded-resource set as the pre-veto
+        # (every DECLARED park-capable resource) — precomputed once in
+        # _run_apply and threaded through, since it doesn't change mid-apply.
         if not force:
-            hipfire.ensure_not_busy(f"activate {step['model_id']!r}")
+            for resource in park_capable_resources:
+                local_clients.client_for(resource).ensure_not_busy(
+                    f"activate {step['model_id']!r}"
+                )
         hostagent.activate(step["model_id"])
     elif name == "policy_patch":
         # Merge each field-partial per-tenant override onto the current stored
@@ -912,14 +1162,20 @@ def _execute_step(
 def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
     """Build the ``· previous`` revert snapshot from pre-apply world reality.
 
-    ephemeral mirrors current load/park state (comfyui is always "leave" — a
-    freed VRAM cache can't be meaningfully un-freed); durable records the old
-    default route with activate_model_id=None (world carries no catalog id).
-    lemonade's ``model`` is stamped with the ACTUAL loaded model (None when
-    unloaded), so reverting reloads what WAS resident rather than falling
-    through plan_apply's durable/world-default fallback — which, on the
-    ``· previous`` set itself (no durable section), meant the default ROUTE
-    model, not necessarily the one that was loaded [c45].
+    Generalized past the old fixed triple (E1 Task 8, obligation 1 T3
+    review): iterates every DECLARED resource in ``world["tenants"]`` and
+    stamps ITS desired state by VERB membership, kind-agnostic. A load-verb
+    (lemonade-kind) resource mirrors its current load/unload state, stamped
+    with the ACTUAL loaded model (None when unloaded) so reverting reloads
+    what WAS resident rather than falling through plan_apply's durable/
+    world-default fallback — which, on the ``· previous`` set itself (no
+    durable section), meant the default ROUTE model, not necessarily the
+    one that was loaded [c45]. A park-verb (hipfire-kind) resource mirrors
+    running/parked. A free-verb (comfyui-kind) resource is OMITTED entirely
+    — a freed VRAM cache can't be meaningfully un-freed, the same as the old
+    fixed shape's unconditional ``"comfyui": {"state": "leave"}``; omission
+    IS "leave" in the new schema. durable records the old default route
+    with activate_model_id=None (world carries no catalog id).
 
     ``settings_now`` (Task 9) is stamped straight into this set's own
     ``settings_snapshot``, so the one-click revert restores settings too:
@@ -943,11 +1199,20 @@ def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
     more apply on the old build self-heals it.
     """
     tenants = world["tenants"]
-    lem_tenant = tenants["lemonade"]
-    lem_state = "loaded" if lem_tenant["state"] == "loaded" else "unloaded"
-    hip_state = (
-        "running" if tenants["hipfire"]["state"] in ("running", "loading") else "parked"
-    )
+    resources: dict = {}
+    for resource, tenant in tenants.items():
+        verbs = ENGINE_KINDS[tenant["engine"]].human_verbs()
+        if "unload" in verbs:
+            loaded = tenant["state"] == "loaded"
+            resources[resource] = {
+                "desired": "loaded" if loaded else "unloaded",
+                "model": tenant["model"] if loaded else None,
+            }
+        elif "park" in verbs:
+            running = tenant["state"] in ("running", "loading")
+            resources[resource] = {"desired": "loaded" if running else "parked"}
+        # else (e.g. free-verb/comfyui-kind): omitted — see docstring.
+
     default_route = world["default_route"]
     durable = (
         {"default_route_model": default_route, "activate_model_id": None}
@@ -958,13 +1223,6 @@ def _previous_set(world: dict, settings_now: dict | None = None) -> ConfigSet:
         name=PREVIOUS_NAME,
         notes=_PREVIOUS_NOTES,
         durable=durable,
-        ephemeral={
-            "lemonade": {
-                "state": lem_state,
-                "model": lem_tenant["model"] if lem_state == "loaded" else None,
-            },
-            "comfyui": {"state": "leave"},
-            "hipfire": {"state": hip_state},
-        },
+        ephemeral={"resources": resources},
         settings_snapshot=settings_now,
     )
