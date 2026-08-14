@@ -446,6 +446,7 @@ function EnginesSection({
     Promise.all([getEngineKinds(), listNodeRegistry()]).then(
       ([k, { nodes: registry }]) => {
         setKinds(k);
+        // app/node_store.py:251,400 — local-kind entry's id is always "local"
         setEngines(registry.find((n) => n.id === "local")?.engines ?? []);
         setLoadError(null);
       },

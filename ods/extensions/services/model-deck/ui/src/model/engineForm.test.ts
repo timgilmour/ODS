@@ -189,7 +189,7 @@ describe("formErrors", () => {
 
   test("is empty once resource, gpu, and every required connection field are filled", () => {
     let form = emptyForm(WIDGET_GADGET, "widget");
-    form = { ...form, resource: "widget-a", gpuIndex: 1 };
+    form = { ...form, resource: "widget-a", gpuIndex: 5 };
     form = setField(form, "host", "http://widget-a:9000");
     expect(formErrors(form)).toEqual([]);
   });
@@ -211,7 +211,7 @@ describe("toPayload", () => {
 
   test("has exactly five top-level keys — matching engine_kinds.py:112-113's extra-field refusal", () => {
     let form = emptyForm(WIDGET_GADGET, "gadget");
-    form = { ...form, resource: "g", gpuIndex: 0 };
+    form = { ...form, resource: "g", gpuIndex: 3 };
     form = setField(form, "path", "/dev/g0");
     expect(Object.keys(toPayload(form)).sort()).toEqual(
       ["connection", "gpu_index", "kind", "policy_defaults", "resource"],
@@ -221,15 +221,15 @@ describe("toPayload", () => {
 
 describe("sortedEngines", () => {
   const a: DeclaredEngine = {
-    resource: "zeta", kind: "widget", connection: {}, gpu_index: 1,
+    resource: "zeta", kind: "widget", connection: {}, gpu_index: 5,
     policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
   };
   const b: DeclaredEngine = {
-    resource: "alpha", kind: "widget", connection: {}, gpu_index: 1,
+    resource: "alpha", kind: "widget", connection: {}, gpu_index: 5,
     policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
   };
   const c: DeclaredEngine = {
-    resource: "middle", kind: "gadget", connection: {}, gpu_index: 0,
+    resource: "middle", kind: "gadget", connection: {}, gpu_index: 3,
     policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
   };
 
