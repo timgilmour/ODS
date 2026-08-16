@@ -12,6 +12,10 @@ repos:
     rev: v5.0.0
     hooks:
       - id: detect-private-key
+        # Two test files carry a deliberate PEM-framed fixture whose "key
+        # body" is literally the string "unit-test-key" — test data, not a
+        # secret. Scoped by exact path so everything else stays covered.
+        exclude: ^(ods/tests/contracts/test-remote-provider-egress-policy\.py|ods/extensions/services/dashboard-api/tests/test_host_agent\.py)$
       - id: check-added-large-files
         args: ['--maxkb=500']
 
