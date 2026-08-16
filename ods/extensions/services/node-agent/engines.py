@@ -1,9 +1,12 @@
 """Declared remote-managed engines (engines.json) + a read-only status probe.
 
 engines.json is host-owned and lives beside profiles.json (see swapctl.py's
-_dirs() -- same NODE_VLLM_DIR). This agent only ever READS it here; T3 adds
-an engine request-file writer on top of these declarations, so nothing in
-this module should assume declarations are the last word on an engine.
+_dirs() -- same NODE_VLLM_DIR). This agent only ever READS engines.json --
+declarations are never written here. Actuation is a separate write:
+request_engine() below drops <ctl>/engine-req.json for the host-side
+swap-helper (Task 2) to execute; the agent has no docker access, so writing
+that file is the entire actuation, and nothing here reads a result back
+(engine-status-<resource>.json is forensics only).
 
 There is no metrics surface on the node today, so "is this engine busy" is
 answered by a declared probe rather than a scrape target. Only
@@ -16,12 +19,15 @@ exposes one.
 """
 
 import json
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
 import nodeconfig
+import swapctl
 
 # Loader is strict: exactly these keys, nothing more, nothing missing.
 _ENTRY_KEYS = frozenset({"compose_file", "health_url", "busy"})
@@ -181,3 +187,37 @@ def engine_status(decl: EngineDecl, *, count_established=count_established,
         ok = False
 
     return {"reachable": ok, "healthy": ok, "busy_requests": busy_requests}
+
+
+class EngineRequestPending(Exception):
+    pass
+
+
+def request_engine(name: str, verb: str) -> None:
+    """Write <ctl>/engine-req.json = {"resource", "verb", "ts"} for the
+    host-side swap-helper to consume (swap-helper.sh's engine up/down
+    protocol comment).
+
+    Mirrors swapctl.request_swap's file-protocol shape and atomicity
+    (tmp file + rename) and reuses swapctl._dirs() to locate the ctl dir --
+    the same NODE_VLLM_DIR/NODE_SWAP_CTL_DIR gate that governs profile
+    swaps governs engine requests too, so an unconfigured node answers the
+    same SwapCtlDisabled either way. The compose file to act on is never
+    part of this payload -- only `resource` (a bare name) and `verb` -- the
+    helper alone resolves `resource` against the host-owned engines.json
+    allowlist, which is the real security boundary (defense in depth: this
+    agent already refused to write for a `name` that isn't a declared
+    engine, at the route layer, before this function is ever called).
+
+    The request file IS the queue and its capacity is one: a pending file
+    raises EngineRequestPending rather than being clobbered, mirroring
+    request_swap's SwapInProgress check on request.json.
+    """
+    _, ctl = swapctl._dirs()
+    req_path = ctl / "engine-req.json"
+    if req_path.exists():
+        raise EngineRequestPending(
+            f"an engine request is already pending, cannot queue {verb!r} for {name!r}")
+    tmp = ctl / f".engine-req.{uuid.uuid4()}.tmp"
+    tmp.write_text(json.dumps({"resource": name, "verb": verb, "ts": time.time()}))
+    tmp.rename(req_path)

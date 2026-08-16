@@ -343,3 +343,127 @@ def test_engine_status_known_returns_probe_result(monkeypatch, tmp_path):
     r = client.get("/v1/node/engine/omni/status", headers=AUTH)
     assert r.status_code == 200
     assert r.json() == {"reachable": True, "healthy": True, "busy_requests": 3}
+
+
+# ---------------------------------------------------------------------------
+# Routes: POST /v1/node/engine/{name}/up, /down -- write engine-req.json for
+# the host-side swap-helper (Task 2) to consume. The agent has no docker
+# access; writing the request file is the entire actuation, and the agent
+# never waits for or reads engine-status-<resource>.json (forensics only).
+# ---------------------------------------------------------------------------
+
+
+def _enable_engine_ctl(monkeypatch, tmp_path, entries=None):
+    """Configure engines.json AND the swap-ctl dirs the writer needs
+    (swapctl._dirs() -- NODE_VLLM_DIR/NODE_SWAP_CTL_DIR), mirroring
+    test_swapctl.py's _enable() alongside this file's _configure()."""
+    vllm = tmp_path / "vllm"
+    ctl = tmp_path / "ctl"
+    vllm.mkdir(exist_ok=True)
+    ctl.mkdir(exist_ok=True)
+    p = vllm / "engines.json"
+    p.write_text(json.dumps(entries if entries is not None else {"omni": _valid_entry()}))
+    monkeypatch.setattr(engines.nodeconfig, "NODE_ENGINES_FILE", "")
+    monkeypatch.setattr(engines.nodeconfig, "NODE_VLLM_DIR", str(vllm))
+    monkeypatch.setattr(engines.swapctl.nodeconfig, "NODE_SWAP_CTL_DIR", str(ctl))
+    return vllm, ctl
+
+
+def test_engine_up_requires_auth():
+    assert client.post("/v1/node/engine/omni/up").status_code == 401
+
+
+def test_engine_down_requires_auth():
+    assert client.post("/v1/node/engine/omni/down").status_code == 401
+
+
+def test_engine_up_writes_request_and_returns_202(monkeypatch, tmp_path):
+    _, ctl = _enable_engine_ctl(monkeypatch, tmp_path)
+    r = client.post("/v1/node/engine/omni/up", headers=AUTH)
+    assert r.status_code == 202
+    assert r.json() == {"accepted": True}
+    req = json.loads((ctl / "engine-req.json").read_text())
+    assert req["resource"] == "omni"
+    assert req["verb"] == "up"
+    assert isinstance(req["ts"], float)
+
+
+def test_engine_down_writes_request_and_returns_202(monkeypatch, tmp_path):
+    _, ctl = _enable_engine_ctl(monkeypatch, tmp_path)
+    r = client.post("/v1/node/engine/omni/down", headers=AUTH)
+    assert r.status_code == 202
+    assert r.json() == {"accepted": True}
+    req = json.loads((ctl / "engine-req.json").read_text())
+    assert req["resource"] == "omni"
+    assert req["verb"] == "down"
+
+
+def test_engine_up_request_written_atomically(monkeypatch, tmp_path):
+    # No stray .tmp files left behind once the request lands.
+    _, ctl = _enable_engine_ctl(monkeypatch, tmp_path)
+    client.post("/v1/node/engine/omni/up", headers=AUTH)
+    leftovers = [p for p in ctl.iterdir() if p.name != "engine-req.json"]
+    assert leftovers == []
+
+
+def test_engine_up_unknown_engine_404(monkeypatch, tmp_path):
+    _, ctl = _enable_engine_ctl(monkeypatch, tmp_path)
+    r = client.post("/v1/node/engine/ghost/up", headers=AUTH)
+    assert r.status_code == 404
+    assert not (ctl / "engine-req.json").exists()
+
+
+def test_engine_down_unknown_engine_404(monkeypatch, tmp_path):
+    _, ctl = _enable_engine_ctl(monkeypatch, tmp_path)
+    r = client.post("/v1/node/engine/ghost/down", headers=AUTH)
+    assert r.status_code == 404
+    assert not (ctl / "engine-req.json").exists()
+
+
+def test_engine_up_unknown_engine_404_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(engines.nodeconfig, "NODE_ENGINES_FILE", "")
+    monkeypatch.setattr(engines.nodeconfig, "NODE_VLLM_DIR", "")
+    r = client.post("/v1/node/engine/omni/up", headers=AUTH)
+    assert r.status_code == 404
+
+
+def test_engine_up_conflicts_with_pending_request(monkeypatch, tmp_path):
+    _, ctl = _enable_engine_ctl(monkeypatch, tmp_path)
+    (ctl / "engine-req.json").write_text(
+        json.dumps({"resource": "omni", "verb": "up", "ts": 1.0}))
+    r = client.post("/v1/node/engine/omni/up", headers=AUTH)
+    assert r.status_code == 409
+
+
+def test_engine_down_conflicts_with_pending_request(monkeypatch, tmp_path):
+    # A pending request of any verb blocks a new one -- the file is a
+    # one-slot queue, not keyed per-resource or per-verb.
+    _, ctl = _enable_engine_ctl(monkeypatch, tmp_path)
+    (ctl / "engine-req.json").write_text(
+        json.dumps({"resource": "omni", "verb": "up", "ts": 1.0}))
+    r = client.post("/v1/node/engine/omni/down", headers=AUTH)
+    assert r.status_code == 409
+
+
+def test_engine_up_disabled_when_swap_ctl_unconfigured(monkeypatch, tmp_path):
+    # engines.json IS configured/declared, but NODE_SWAP_CTL_DIR is not --
+    # the agent has nowhere to write the request file.
+    vllm = tmp_path / "vllm"
+    vllm.mkdir(exist_ok=True)
+    (vllm / "engines.json").write_text(json.dumps({"omni": _valid_entry()}))
+    monkeypatch.setattr(engines.nodeconfig, "NODE_ENGINES_FILE", "")
+    monkeypatch.setattr(engines.nodeconfig, "NODE_VLLM_DIR", str(vllm))
+    monkeypatch.setattr(engines.swapctl.nodeconfig, "NODE_SWAP_CTL_DIR", "")
+    r = client.post("/v1/node/engine/omni/up", headers=AUTH)
+    assert r.status_code == 503
+
+
+def test_engine_down_disabled_when_swap_ctl_unconfigured(monkeypatch, tmp_path):
+    vllm = tmp_path / "vllm"
+    vllm.mkdir(exist_ok=True)
+    (vllm / "engines.json").write_text(json.dumps({"omni": _valid_entry()}))
+    monkeypatch.setattr(engines.nodeconfig, "NODE_ENGINES_FILE", "")
+    monkeypatch.setattr(engines.nodeconfig, "NODE_VLLM_DIR", str(vllm))
+    monkeypatch.setattr(engines.swapctl.nodeconfig, "NODE_SWAP_CTL_DIR", "")
+    r = client.post("/v1/node/engine/omni/down", headers=AUTH)
+    assert r.status_code == 503
