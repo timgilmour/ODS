@@ -750,3 +750,387 @@ def test_settings_status_states_match_todays(tmp_path):
     delegated = _status(ctl)
 
     assert owned["state"] == delegated["state"] == "done"
+
+
+# --- engine up/down request protocol (Task 2) --------------------------------
+#
+# <ctl>/engine-req.json = {"resource": str, "verb": "up"|"down", "ts": float},
+# written by node-agent (a later task). This helper alone has docker rights:
+# it validates `resource` against the host-owned $VLLM/engines.json allowlist
+# (Task 1) -- the compose file to act on is NEVER taken from the request,
+# only from that file -- then runs `docker compose -f <compose_file> up -d`
+# / `down`. Result: <ctl>/engine-status-<resource>.json, written ONLY at
+# completion (tmp + atomic replace). No "in-progress" marker is ever written
+# on disk -- absence of a result file means "unknown".
+
+
+def _mk_engines_json(vllm, entries):
+    (vllm / "engines.json").write_text(json.dumps(entries))
+
+
+def _engine_entry(compose_file):
+    return {"compose_file": str(compose_file),
+            "health_url": "http://127.0.0.1:9/health",
+            "busy": {"kind": "connections", "port": 9}}
+
+
+def _mk_engine_ctl(tmp_path, resource, verb, ts=1.0):
+    ctl = tmp_path / "ctl"
+    ctl.mkdir(exist_ok=True)
+    (ctl / "engine-req.json").write_text(
+        json.dumps({"resource": resource, "verb": verb, "ts": ts}))
+    return ctl
+
+
+def _engine_status(ctl, resource):
+    return json.loads((ctl / f"engine-status-{resource}.json").read_text())
+
+
+def _mk_engine_docker(tmp_path, compose_exit=0):
+    """A minimal fake `docker` on PATH: logs every invocation verbatim and
+    lets the test control the exit code of `docker compose ...`. Separate
+    from `_mk_docker` (which is shaped for the settings/harvest tests above)
+    because these tests only care about the compose subcommand."""
+    bindir = tmp_path / "engine-bin"
+    bindir.mkdir(exist_ok=True)
+    log = tmp_path / "engine-docker.log"
+    docker = bindir / "docker"
+    docker.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" >> {shlex.quote(str(log))}\n'
+        f'[ "$1" = compose ] && exit {compose_exit}\n'
+        'exit 0\n'
+    )
+    docker.chmod(0o755)
+    return bindir, log
+
+
+def test_engine_up_builds_compose_command(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert log.read_text().strip() == f"compose -f {compose} up -d"
+    status = _engine_status(ctl, "omni")
+    assert status == {"resource": "omni", "verb": "up", "ok": True,
+                      "error": None, "ts": status["ts"]}
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", status["ts"])
+
+
+def test_engine_down_builds_compose_command(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "down")
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert log.read_text().strip() == f"compose -f {compose} down"
+    status = _engine_status(ctl, "omni")
+    assert status == {"resource": "omni", "verb": "down", "ok": True,
+                      "error": None, "ts": status["ts"]}
+
+
+def test_engine_undeclared_resource_refused(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    other = tmp_path / "compose-other.yaml"
+    other.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"other": _engine_entry(other)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status == {"resource": "omni", "verb": "up", "ok": False,
+                      "error": "undeclared resource", "ts": status["ts"]}
+    assert not log.exists()   # docker never invoked -- the allowlist refused first
+
+
+@pytest.mark.parametrize("verb", ["sideways", "", "UP", "restart"])
+def test_engine_bad_verb_refused(tmp_path, verb):
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", verb)
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status["ok"] is False
+    assert status["verb"] == verb
+    assert "verb" in status["error"].lower()
+    assert not log.exists()
+
+
+def test_engine_missing_engines_json_refused(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)   # no engines.json at all
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status["ok"] is False
+    assert status["error"]
+    assert not log.exists()
+
+
+def test_engine_malformed_engines_json_refused(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    (vllm / "engines.json").write_text("{not json")
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status["ok"] is False
+    assert status["error"]
+    assert not log.exists()
+
+
+def test_engine_compose_file_missing_refused(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    ghost = tmp_path / "does-not-exist.yaml"
+    _mk_engines_json(vllm, {"omni": _engine_entry(ghost)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status["ok"] is False
+    assert status["error"]
+    assert not log.exists()
+
+
+def test_engine_compose_file_relative_path_refused(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    _mk_engines_json(vllm, {"omni": _engine_entry("relative/compose.yaml")})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status["ok"] is False
+    assert status["error"]
+    assert not log.exists()
+
+
+def test_engine_docker_failure_reported(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "down")
+    bindir, log = _mk_engine_docker(tmp_path, compose_exit=1)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert log.read_text().strip() == f"compose -f {compose} down"
+    status = _engine_status(ctl, "omni")
+    assert status == {"resource": "omni", "verb": "down", "ok": False,
+                      "error": "docker compose down failed (see swap.log)",
+                      "ts": status["ts"]}
+
+
+def test_engine_request_consumed_before_processing(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, _ = _mk_engine_docker(tmp_path)
+
+    _run_once(ctl, vllm, bindir=bindir)
+    assert not (ctl / "engine-req.json").exists()
+
+
+@pytest.mark.parametrize("bad", [
+    "{not json",
+    json.dumps({"verb": "up"}),                  # no resource at all
+    json.dumps({"resource": "", "verb": "up"}),   # empty resource
+    json.dumps({"resource": 5, "verb": "up"}),    # non-string resource
+    json.dumps(["not", "an", "object"]),
+])
+def test_engine_unparseable_request_consumed_and_logged_no_result(tmp_path, bad):
+    """No resource to key a result file by: consume it, log one line, and
+    write nothing -- the same spirit as the swap path's malformed-request
+    handling, minus the status file (there is no safe filename to give it)."""
+    vllm, _ = _mk_vllm(tmp_path)
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    (ctl / "engine-req.json").write_text(bad)
+
+    r = _run_once(ctl, vllm)
+
+    assert r.returncode == 0, r.stderr
+    assert not (ctl / "engine-req.json").exists()
+    assert not list(ctl.glob("engine-status-*.json"))
+    assert (ctl / "swap.log").exists()
+    assert "engine" in (ctl / "swap.log").read_text().lower()
+
+
+@pytest.mark.parametrize("resource", [
+    "../../etc/passwd",
+    "bad name",
+    "res;rm -rf",
+    "res/inner",
+])
+def test_engine_resource_failing_regex_gets_no_result_file(tmp_path, resource):
+    """A resource that fails the same ^[A-Za-z0-9_-]+$ guard the swap path
+    uses on profile names must never reach a filename -- treated like
+    undeclared, but with no result file at all (there is nowhere safe to
+    write one)."""
+    vllm, _ = _mk_vllm(tmp_path)
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    (ctl / "engine-req.json").write_text(
+        json.dumps({"resource": resource, "verb": "up", "ts": 1.0}))
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert not (ctl / "engine-req.json").exists()
+    assert not list(ctl.glob("engine-status-*.json"))
+    assert not log.exists()   # docker never invoked
+    assert (ctl / "swap.log").exists()
+
+
+def test_engine_result_written_only_after_docker_completes(tmp_path):
+    """No file states "in progress": engine-req.json is gone (consumed) but
+    engine-status-omni.json does not exist until docker returns."""
+    import time
+
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir = tmp_path / "engine-bin"
+    bindir.mkdir()
+    started = tmp_path / "docker-started"
+    docker = bindir / "docker"
+    docker.write_text(
+        "#!/bin/bash\n"
+        f'[ "$1" = compose ] && {{ touch {shlex.quote(str(started))}; sleep 2; }}\n'
+        'exit 0\n'
+    )
+    docker.chmod(0o755)
+
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.Popen(["bash", str(HELPER), "--once", str(ctl), str(vllm)], env=env)
+    for _ in range(50):
+        if started.exists():
+            break
+        time.sleep(0.1)
+    assert started.exists(), "docker compose never started"
+    assert not (ctl / "engine-req.json").exists()
+    assert not (ctl / "engine-status-omni.json").exists()
+
+    proc.wait(timeout=10)
+    assert proc.returncode == 0
+    assert _engine_status(ctl, "omni")["ok"] is True
+
+
+def test_engine_helper_killed_midflight_leaves_no_result_file(tmp_path):
+    """The 20-minute stuck-`swapping` lesson: a helper killed mid-verb must
+    leave nothing on disk that says "running". Killing the helper while
+    docker is still mid-flight must leave no engine-status file at all --
+    absence of a result is unknown, not a stuck in-progress marker."""
+    import time
+
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir = tmp_path / "engine-bin"
+    bindir.mkdir()
+    started = tmp_path / "docker-started"
+    docker = bindir / "docker"
+    docker.write_text(
+        "#!/bin/bash\n"
+        f'[ "$1" = compose ] && {{ touch {shlex.quote(str(started))}; sleep 5; }}\n'
+        'exit 0\n'
+    )
+    docker.chmod(0o755)
+
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.Popen(["bash", str(HELPER), "--once", str(ctl), str(vllm)], env=env)
+    for _ in range(50):
+        if started.exists():
+            break
+        time.sleep(0.1)
+    assert started.exists(), "docker compose never started"
+    proc.kill()
+    proc.wait(timeout=10)
+
+    assert not (ctl / "engine-req.json").exists()          # consumed before the crash
+    assert not (ctl / "engine-status-omni.json").exists()  # and no marker was ever written
+    assert not list(ctl.glob("*.tmp"))
+
+
+def test_engine_and_swap_requests_both_processed_in_one_pass(tmp_path):
+    """The engine and swap requests share process_one's loop/lock: both
+    present at once, both get handled in a single --once invocation, and
+    engine handling does not disturb the (byte-identical) swap path."""
+    vllm, calls = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_ctl(tmp_path, "laguna")   # swap request
+    (ctl / "engine-req.json").write_text(
+        json.dumps({"resource": "omni", "verb": "up", "ts": 1.0}))
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert calls.read_text().strip() == "laguna"      # swap.sh ran, untouched
+    assert _status(ctl)["state"] == "done"
+    assert _engine_status(ctl, "omni")["ok"] is True
+    assert log.read_text().strip() == f"compose -f {compose} up -d"
+
+
+def test_pure_swap_run_writes_no_engine_status_file(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    ctl = _mk_ctl(tmp_path, "laguna")
+    r = _run_once(ctl, vllm)
+    assert r.returncode == 0, r.stderr
+    assert not list(ctl.glob("engine-status-*.json"))
+
+
+def test_pure_engine_run_does_not_touch_profile_status_json(tmp_path):
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, _ = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert not (ctl / "status.json").exists()
