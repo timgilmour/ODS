@@ -457,14 +457,20 @@ def forget_engine(node_id: str, resource: str, request: Request) -> dict:
 @kinds_router.get("/engine-kinds")
 def list_engine_kinds() -> dict:
     """The UI's kind picker source (spec §5): every known kind's connection
-    schema (field -> required), its `remote_capable` flag (E1 Task 5 —
-    whether this kind may be declared on a node-agent entry, not just
-    local), and its human-initiated verb vocabulary, served from
+    schema (field -> required), WHERE it may run (`remote_capable` — may it
+    be declared on a node-agent entry; `local_capable` — may it be declared
+    on the local one), and its human-initiated verb vocabulary, served from
     app.engine_kinds — the one module allowed to know engine names (spec
     §8) — so the picker never bakes a kind name into the UI.
+
+    Both run-location flags are served, not just the remote one (Task 7 fix
+    round 1): they are exactly what `validate_engines` enforces, so a picker
+    that filters on them offers only kinds the write gate will accept for
+    the node being edited, rather than surfacing a 422 after the fact.
     `ui/src/model/engineForm.ts` reads only `connection`/`human_verbs` off
-    this payload today, so this new field is additive — no UI change is
-    needed for it to keep working."""
+    this payload today, so both are additive — no UI change is needed for it
+    to keep working, and the filtering is available when the editor gains
+    non-local nodes."""
     kinds = []
     for kind in sorted(KNOWN_KINDS):
         spec = KNOWN_KINDS[kind]
@@ -473,6 +479,7 @@ def list_engine_kinds() -> dict:
             "connection": {field: {"required": required}
                           for field, required in spec["connection"].items()},
             "remote_capable": spec["remote_capable"],
+            "local_capable": spec["local_capable"],
             "human_verbs": sorted(ENGINE_KINDS[kind].human_verbs()),
         })
     return {"kinds": kinds}

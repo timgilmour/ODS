@@ -4304,3 +4304,57 @@ def test_state_paces_the_remote_probes_across_requests(
     assert agent.calls == 1
     for body in bodies:
         assert body["world"]["remote_tenants"]["nimbus/gguf-r"]["state"] == "loaded"
+
+
+# --- fix round 1, finding 2: the local-declaration boundary gate -----------
+
+
+def test_add_engine_sglang_omni_on_the_local_node_is_refused_naming_the_kind(
+        tmp_path, monkeypatch):
+    """A remote-only kind declared on `local` is refused AT THE BOUNDARY,
+    with the redacting handler's shape like every other engine-shape defect.
+
+    Before the fix the declaration was accepted and the refusal landed at
+    client-construction time instead — turning /api/state (and /api/storage,
+    /api/sets, the lifecycle routes) into a 422 and logging a tick-error
+    every ~2 s until an operator found and deleted the entry."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+
+    r = TestClient(app).post("/api/nodes/local/engines", json=_REMOTE_OMNI_BODY)
+
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert isinstance(detail, list)
+    assert "sglang-omni" in detail[0]["msg"]
+    assert "remote-only" in detail[0]["msg"]
+    assert deck["node_store"].get("local")["engines"] == []
+
+
+def test_state_stays_healthy_after_a_refused_local_sglang_omni_declaration(
+        tmp_path, monkeypatch):
+    """The point of moving the refusal to the boundary: the deck keeps
+    working. /api/state answers 200 before AND after the refused write."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    assert client.get("/api/state").status_code == 200
+
+    client.post("/api/nodes/local/engines", json=_REMOTE_OMNI_BODY)
+
+    assert client.get("/api/state").status_code == 200
+
+
+def test_engine_kinds_route_serves_both_run_locations(tmp_path, monkeypatch):
+    """The picker's source now says where each kind may RUN in both
+    directions, so a UI can filter by the node it is editing (T10) instead
+    of offering a kind the write gate will refuse."""
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    kinds = {k["kind"]: k for k in
+             TestClient(app).get("/api/engine-kinds").json()["kinds"]}
+
+    assert kinds["sglang-omni"]["local_capable"] is False
+    assert kinds["sglang-omni"]["remote_capable"] is True
+    for kind in ("lemonade", "comfyui", "hipfire"):
+        assert kinds[kind]["local_capable"] is True
+        assert kinds[kind]["remote_capable"] is False

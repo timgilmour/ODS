@@ -258,6 +258,34 @@ class World:
             client = (clients.client_for(node_id, resource)
                       if gpu_pools.get(node_id) is not None else None)
             if client is None:
+                # Drop this tenant's idle-clock bookkeeping (fix round 1,
+                # review finding 1). The adapter's own observe() — where
+                # every kind's "a non-idle answer re-arms the clock" rule
+                # lives — does NOT run on this path, and this path is
+                # exactly the one a powered-off box takes, for as long as it
+                # stays off (app.node_clients.RemoteObserver's backoff
+                # stretches it to minutes). Left standing, the bookkeeping
+                # from the last time we COULD see this engine survives the
+                # whole dark window, so the FIRST observation after the box
+                # returns reads that window as observed idle time and the
+                # idle rule fires against an engine that may have finished
+                # booting seconds ago (~4 min for sglang-omni, GF4).
+                #
+                # Cleared rather than re-stamped, and kind-agnostically:
+                # only the adapter knows what its own mem holds, and every
+                # one of them treats an EMPTY mem as "first-ever
+                # observation" and establishes a fresh baseline from it
+                # (app.engine_kinds — comfyui/sglang-omni's
+                # `last_activity_time is None` arm, lemonade's `loaded !=
+                # mem.get("last_loaded")` transition check). Per TENANT, not
+                # a blanket wipe: an engine on a node that is still
+                # answering keeps its clock.
+                #
+                # `_KIND_MEM_KEY` is re-stamped because it is this module's
+                # own marker, not the adapter's — dropping it would make the
+                # next snapshot see a kind CHANGE that never happened.
+                mem.clear()
+                mem[_KIND_MEM_KEY] = kind
                 obs = adapter.unknown()
             else:
                 # `routes: None` — the litellm route table is the LOCAL

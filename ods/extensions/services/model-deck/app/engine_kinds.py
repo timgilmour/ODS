@@ -149,26 +149,46 @@ def _within(ts: str | None, now: datetime | None, window_s: float) -> bool:
     return (now or datetime.now(UTC)) - stamped < timedelta(seconds=window_s)
 
 
-# kind -> {"connection": {field -> required?}, "remote_capable": bool}
-# `remote_capable` (E1 Task 5): whether this kind may be declared on a
-# node-agent entry's engines[] (deck's registry write gate, app/node_store.py
-# `_validate`/`_heal_engines`), not just the local entry's. The E1 triple all
-# run in-process with the deck (lemonade/comfyui/hipfire are sibling
-# containers on THIS box) — none of them is a remote-capable kind.
-# "sglang-omni" (Task 7) is the first that is: every probe and every verb
-# rides a node-agent, so it can ONLY run off-box.
+# kind -> {"connection": {field -> required?}, "remote_capable": bool,
+#          "local_capable": bool}
+#
+# WHERE each kind may RUN, declared in BOTH directions and enforced by
+# `validate_engines` below (the deck's registry write gate reaches it
+# through app/node_store.py's `_validate`/`_heal_engines`):
+#
+# * `remote_capable` (E1 Task 5) — may it be declared on a node-agent
+#   entry's engines[]? The E1 triple all run in-process with the deck
+#   (lemonade/comfyui/hipfire are sibling containers on THIS box), so none
+#   of them may. "sglang-omni" (Task 7) is the first that may.
+# * `local_capable` (Task 7 fix round 1, review finding 2) — may it be
+#   declared on the LOCAL entry? Every E1 kind may; sglang-omni may NOT,
+#   because it has no local client to build at all (every probe and every
+#   verb rides a node-agent). One flag described only the remote direction,
+#   so nothing refused the mirror-image mistake, and the refusal landed
+#   instead at `build_client` — i.e. as a 422 on /api/state, /api/storage,
+#   /api/sets and the lifecycle routes, plus a tick-error every ~2 s, until
+#   an operator found and deleted the entry. Guard at the BOUNDARY: the
+#   declaration is refused where it is written.
+#
+# Both flags are served by GET /api/engine-kinds, so a picker can filter by
+# the node it is editing rather than offering a kind the write gate refuses.
+# A kind with both False could be declared nowhere; tests/test_engine_kinds.py
+# pins that as a shape error rather than leaving it representable.
 KNOWN_KINDS: dict[str, dict[str, object]] = {
     "lemonade": {"connection": {"url": True, "metrics_url": True, "container": True},
-                 "remote_capable": False},
-    "comfyui": {"connection": {"url": True}, "remote_capable": False},
-    "hipfire": {"connection": {"container": True}, "remote_capable": False},
+                 "remote_capable": False, "local_capable": True},
+    "comfyui": {"connection": {"url": True},
+                "remote_capable": False, "local_capable": True},
+    "hipfire": {"connection": {"container": True},
+                "remote_capable": False, "local_capable": True},
     # One declared field, deliberately: everything the PROBE needs
     # (health_url, the busy-count port, the compose file) lives in the
     # node's own host-owned engines.json allowlist (ruling A1) — the deck
     # cannot name a compose file to run. `url` is the operator's record of
     # where this engine serves, carried in the declaration so the board can
     # show it; the deck never dials it directly (it talks to the agent).
-    "sglang-omni": {"connection": {"url": True}, "remote_capable": True},
+    "sglang-omni": {"connection": {"url": True},
+                    "remote_capable": True, "local_capable": False},
 }
 
 _POLICY_FIELDS = {"priority": int, "pinned": bool, "idle_ttl": int}
@@ -186,7 +206,11 @@ def validate_engines(engines: object, remote: bool = False) -> None:
     node-agent entry, not the local one — every kind named must then also
     be `remote_capable`, else refused BY NAME (the operator needs to know
     which declared kind can't run off-box, not just that "something" is
-    wrong)."""
+    wrong). False checks the MIRROR of that (Task 7 fix round 1): a
+    remote-only kind is refused on the local entry, equally by name, and
+    the message says where it does belong. One-directional checking is what
+    let a local sglang-omni declaration through to fail later at
+    client-construction time — see KNOWN_KINDS' own comment."""
     if not isinstance(engines, list):
         raise _bad("engines must be a list")
     seen: set[str] = set()
@@ -209,6 +233,9 @@ def validate_engines(engines: object, remote: bool = False) -> None:
             raise _bad(f"unknown kind {kind!r} (known: {sorted(KNOWN_KINDS)})")
         if remote and not KNOWN_KINDS[kind]["remote_capable"]:
             raise _bad(f"{resource}: kind {kind!r} is not remote_capable")
+        if not remote and not KNOWN_KINDS[kind]["local_capable"]:
+            raise _bad(f"{resource}: kind {kind!r} is remote-only — declare it "
+                       f"on a node-agent entry, not on the local node")
         schema = KNOWN_KINDS[kind]["connection"]
         conn = e.get("connection")
         if not isinstance(conn, dict):
@@ -1041,10 +1068,16 @@ class _SglangOmniAdapter:
         Defined rather than omitted so the failure is a one-line refusal
         naming the kind, instead of the bare AttributeError an absent method
         would raise from inside app.local_clients on every world snapshot.
-        Reachable only by declaring sglang-omni on the LOCAL node —
-        `validate_engines` has no "local_capable" gate to refuse that at the
-        boundary (KNOWN_KINDS carries `remote_capable` only), so this is the
-        honest answer until one exists.
+
+        UNREACHABLE since fix round 1: `local_capable: False` makes
+        `validate_engines` refuse a local declaration of this kind at the
+        BOUNDARY — through the write gate (422 on the declaration) and
+        through `_heal_engines` (a hand-edited nodes.json heals to []), so
+        no local entry naming this kind can reach a client build. Kept as
+        the totality floor anyway, the same posture app.arbiter's
+        `_dispatch_verb` raise takes for its own can't-happen branch: a
+        future path that skips the gate must fail loudly and by name, not
+        silently produce a client that cannot work.
         """
         raise ValueError(
             "kind 'sglang-omni' has no local client: it runs through a "

@@ -980,3 +980,126 @@ def test_snapshot_remote_drops_memory_for_an_undeclared_engine():
         client=StubLemonade(loaded=None, activity=1)))
 
     assert remote["nimbus/gguf-r"]["idle_s"] == 0
+
+
+# ===========================================================================
+# sglang-omni Task 7, fix round 1 (review finding 1) — an UNSEEN outage must
+# not accrue idle time.
+#
+# `snapshot_remote` returns the kind's `unknown()` WITHOUT running the
+# adapter's `observe()` when the node's GPU pool is unreadable or no client
+# is operable — so the adapter's own "a non-idle answer re-arms the clock"
+# rule, which lives inside observe(), never runs on exactly the path a
+# powered-off box takes. Left alone, the first observation after the box
+# comes back reads the whole dark window as observed idle time and the deck
+# unloads an engine it just spent ~4 minutes (GF4) booting.
+#
+# Fixture discipline: node "nimbus" (never "sparky"), resource "song-r"
+# (never "omni"), idle_ttl 120 (never the declared default 900), GPU 4.
+# ===========================================================================
+
+_REMOTE_OMNI_ENGINES = [
+    {"resource": "song-r", "kind": "sglang-omni", "node_id": "nimbus",
+     "connection": {"url": "http://127.0.0.1:8008"}, "gpu_index": 4,
+     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120}},
+]
+
+_OMNI_POLICY = {"priority": 5, "pinned": False, "idle_ttl": 120}
+
+
+class StubOmni:
+    """SglangOmniClient-shaped: status() answering the node-agent's wire
+    dict."""
+
+    def __init__(self, healthy: bool = True, busy_requests: int | None = 0) -> None:
+        self._healthy = healthy
+        self._busy = busy_requests
+
+    def status(self) -> dict:
+        return {"reachable": True, "healthy": self._healthy,
+                "busy_requests": self._busy}
+
+
+def _omni_snapshot(world, *, dark=False):
+    """One remote snapshot of the single declared sglang-omni engine —
+    `dark` = the node's agent did not answer (pool None), the path that
+    skips the adapter's observe() entirely."""
+    return world.snapshot_remote(
+        engines=_REMOTE_OMNI_ENGINES,
+        clients=_FakeRemoteClients({("nimbus", "song-r"): StubOmni()}),
+        gpu_pools={"nimbus": None if dark else _NIMBUS_POOL},
+        registry=StubRegistry(),
+    )["nimbus/song-r"]
+
+
+def _omni_idle_action(tenant):
+    from app.engine_kinds import ENGINE_KINDS
+
+    return ENGINE_KINDS["sglang-omni"].idle_action(tenant, _OMNI_POLICY, None, 0)
+
+
+def test_remote_idle_clock_accrues_while_the_node_is_actually_watched():
+    """Positive control for the regression below: a genuinely idle engine
+    DOES pass its TTL and become an idle-release candidate. Without this,
+    the "must not fire" assertion below could pass for the wrong reason."""
+    clock = FakeClock(start=1000.0)
+    world = World(clock=clock)
+    _omni_snapshot(world)
+
+    clock.advance(121.0)
+    tenant = _omni_snapshot(world)
+
+    assert tenant["idle_s"] == 121.0
+    assert _omni_idle_action(tenant) == {"type": "unload", "model": None}
+
+
+def test_remote_idle_clock_restarts_after_an_unseen_outage():
+    """THE regression (fix round 1, finding 1): time the deck could not
+    observe is not time it observed the engine idle.
+
+    Reviewer's reproduction: idle past its TTL, then the node goes dark for
+    several ticks (RemoteObserver's backoff stretches that to minutes), then
+    it answers healthy and idle again. Before the fix the first healthy tick
+    reported idle_s 601.0 and idle_action emitted an unload — against an
+    engine that may have just finished a ~4-minute boot."""
+    clock = FakeClock(start=1000.0)
+    world = World(clock=clock)
+    _omni_snapshot(world)
+    clock.advance(121.0)
+    _omni_idle_action(_omni_snapshot(world))          # (fires — see above)
+
+    for _ in range(5):                                 # the box goes dark
+        clock.advance(96.0)
+        assert _omni_snapshot(world, dark=True)["state"] == "unknown"
+    clock.advance(2.0)
+    tenant = _omni_snapshot(world)                     # ...and comes back
+
+    assert tenant["state"] == "idle"
+    assert tenant["idle_s"] == 0.0
+    assert _omni_idle_action(tenant) is None
+
+
+def test_remote_unknown_does_not_wipe_a_different_engines_idle_clock():
+    """The reset is per TENANT, not a blanket wipe: an engine on a node
+    that is still answering keeps accruing while another one goes dark."""
+    engines = _REMOTE_OMNI_ENGINES + [
+        {**_REMOTE_OMNI_ENGINES[0], "resource": "song-b", "node_id": "cirrus"}]
+    clients = _FakeRemoteClients({("nimbus", "song-r"): StubOmni(),
+                                  ("cirrus", "song-b"): StubOmni()})
+    clock = FakeClock(start=1000.0)
+    world = World(clock=clock)
+
+    def snap(nimbus_pool):
+        return world.snapshot_remote(
+            engines=engines, clients=clients,
+            gpu_pools={"nimbus": nimbus_pool, "cirrus": _NIMBUS_POOL},
+            registry=StubRegistry())
+
+    snap(_NIMBUS_POOL)
+    clock.advance(60.0)
+    snap(None)                                          # only nimbus is dark
+    clock.advance(30.0)
+    tenants = snap(_NIMBUS_POOL)
+
+    assert tenants["nimbus/song-r"]["idle_s"] == 0.0     # restarted
+    assert tenants["cirrus/song-b"]["idle_s"] == 90.0    # untouched

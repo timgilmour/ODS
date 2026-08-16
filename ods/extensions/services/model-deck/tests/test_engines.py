@@ -1710,3 +1710,56 @@ def test_sglang_omni_down_raises_engineerror_naming_resource_on_transport_failur
     with pytest.raises(EngineError) as exc_info:
         _sglang_client(handler, resource="sglang-omni-3").down()
     assert "sglang-omni-3" in str(exc_info.value)
+
+
+# --- SglangOmniClient: the status body is a WIRE boundary ------------------
+#
+# Fix round 1, review finding 3. The deck and the node-agent ship
+# SEPARATELY, so version skew between them is a real transient state, not a
+# hypothetical. A 200 whose body is missing or mistypes a field must heal
+# the way the sibling GPU read already heals a malformed payload (the N1
+# lesson: malformed/unreachable HEALS, it never kills the tick) — as an
+# EngineError, which every caller already turns into "we failed to look".
+# A bare KeyError out of the consumer would 500 /api/state and log a
+# tick-error every ~2 s instead.
+
+
+@pytest.mark.parametrize("body", [
+    {"reachable": True, "healthy": True},                    # busy_requests gone
+    {"reachable": True, "busy_requests": 0},                 # healthy gone
+    {"healthy": True, "busy_requests": 0},                   # reachable gone
+    {"reachable": True, "healthy": "yes", "busy_requests": 0},    # healthy not bool
+    {"reachable": True, "healthy": True, "busy_requests": "2"},   # count not int
+    {"reachable": True, "healthy": True, "busy_requests": 1.5},   # nor a float
+    {"reachable": True, "healthy": True, "busy_requests": True},  # nor a bool
+    ["reachable", "healthy"],                                # not an object at all
+])
+def test_sglang_omni_status_malformed_body_raises_engineerror_naming_resource(body):
+    def handler(request):
+        return httpx.Response(200, json=body, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="mystery-omni").status()
+    assert "mystery-omni" in str(exc_info.value)
+
+
+def test_sglang_omni_status_tolerates_an_unknown_extra_field():
+    """Skew tolerance is ADDITIVE only: a newer agent adding a field must
+    not break an older deck (it reads the three it knows), while a MISSING
+    or mistyped field changes meaning and is refused above."""
+    def handler(request):
+        return httpx.Response(200, json={"reachable": True, "healthy": True,
+                                         "busy_requests": 0,
+                                         "queue_depth": 3}, request=request)
+
+    assert _sglang_client(handler).status()["busy_requests"] == 0
+
+
+def test_sglang_omni_status_accepts_a_null_busy_count():
+    """`None` is the documented "the agent could not take the count" value
+    (GF3), not a malformed body — the deck reads it as busy."""
+    def handler(request):
+        return httpx.Response(200, json={"reachable": False, "healthy": False,
+                                         "busy_requests": None}, request=request)
+
+    assert _sglang_client(handler).status()["busy_requests"] is None

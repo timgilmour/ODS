@@ -773,3 +773,36 @@ def test_seed_engines_runs_once(store, tmp_path):
     store.update("local", {"engines": []})     # operator emptied it
     assert seed_engines_if_missing(store, _settings(), tmp_path) is False
     assert store.get("local")["engines"] == []  # seed did NOT resurrect
+
+
+# --- Task 7 fix round 1: the LOCAL direction of the run-location gate ------
+
+_LOCAL_ONLY_REFUSED_ENGINE = {
+    "resource": "song-r", "kind": "sglang-omni",
+    "connection": {"url": "http://127.0.0.1:8008"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+
+def test_heal_local_entry_with_a_remote_only_kind_heals_to_empty(store, tmp_path):
+    """Fix round 1 (review finding 2), the LOAD side of the same gate: a
+    hand-edited nodes.json declaring a remote-only kind on the LOCAL entry
+    heals to [] instead of surviving to brick every world snapshot. Mirrors
+    test_heal_node_agent_entry_with_non_remote_capable_kind_heals_to_empty,
+    the other direction of the same rule."""
+    _write_nodes(tmp_path, [{"id": "local", "label": "This Box",
+                             "agent_kind": "local",
+                             "engines": [_LOCAL_ONLY_REFUSED_ENGINE]}])
+    reloaded = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+
+    assert reloaded.get("local")["engines"] == []
+
+
+def test_local_entry_refuses_a_remote_only_kind_naming_it(store):
+    """...and the WRITE side: refused by name, before anything lands."""
+    with pytest.raises(ValueError, match="sglang-omni") as exc:
+        store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+                   "engines": [_LOCAL_ONLY_REFUSED_ENGINE]})
+    assert "remote-only" in str(exc.value)
+

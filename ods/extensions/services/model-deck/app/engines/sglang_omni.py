@@ -39,6 +39,11 @@ from app.engines.node_agent import NodeAgentHTTP
 _TIMEOUT = httpx.Timeout(5.0)
 _ACCEPTED = 202
 
+# Distinguishes "the key is absent" from "the key is present and null" in
+# _check_status -- `None` is a DOCUMENTED value for busy_requests, so it
+# cannot double as the missing-key sentinel.
+_MISSING = object()
+
 
 class SglangOmniClient(NodeAgentHTTP):
     def __init__(
@@ -60,12 +65,56 @@ class SglangOmniClient(NodeAgentHTTP):
         "unknown engine" alone doesn't say which one). The concrete
         exception TYPE from _node_get is preserved (NodeAgentUnreachable
         stays NodeAgentUnreachable, a plain EngineError stays a plain
-        EngineError); only the message gains resource context."""
+        EngineError); only the message gains resource context.
+
+        A 200 whose BODY isn't the documented shape is refused here too, as
+        a plain EngineError ("we reached it, it answered badly" -- the
+        taxonomy app/engines/node_agent.py's docstring sets out). The deck
+        and the node-agent are deployed separately, so version skew between
+        them is a real transient state; validating at this wire boundary is
+        what turns it into the deck's existing "we failed to look" path
+        (every caller already handles EngineError) instead of a KeyError out
+        of whatever consumer happened to destructure the dict -- which would
+        500 /api/state and log a tick-error every ~2 s. Same invariant the
+        sibling GPU read already states: malformed HEALS, it never kills the
+        tick."""
         try:
-            return self._node_get(f"/v1/node/engine/{self._resource}/status")
+            body = self._node_get(f"/v1/node/engine/{self._resource}/status")
         except EngineError as exc:
             raise type(exc)(
                 f"sglang-omni engine {self._resource!r} status: {exc}") from exc
+        self._check_status(body)
+        return body
+
+    def _check_status(self, body: object) -> None:
+        """Raise EngineError unless `body` is the documented status shape.
+
+        Presence AND type of the three documented fields, refused one at a
+        time so the message says which one (refuse, never coerce -- a
+        missing `busy_requests` is NOT the same as the documented `None`,
+        which means "the agent could not take the count"; coercing one into
+        the other would silently turn skew into a false idle reading).
+
+        UNKNOWN EXTRA fields are deliberately tolerated: skew is safe in the
+        additive direction (a newer agent gaining a field must not brick an
+        older deck), while a missing or mistyped field changes the meaning
+        of what is read. `bool` is rejected for `busy_requests` explicitly
+        -- it is an int subclass in Python, so `True` would otherwise sail
+        through as "1 request in flight"."""
+        if not isinstance(body, dict):
+            raise EngineError(
+                f"sglang-omni engine {self._resource!r} status: malformed body "
+                f"(expected an object, got {type(body).__name__})")
+        for field in ("reachable", "healthy"):
+            if not isinstance(body.get(field), bool):
+                raise EngineError(
+                    f"sglang-omni engine {self._resource!r} status: malformed "
+                    f"body ({field!r} must be a boolean)")
+        busy = body.get("busy_requests", _MISSING)
+        if busy is not None and (isinstance(busy, bool) or not isinstance(busy, int)):
+            raise EngineError(
+                f"sglang-omni engine {self._resource!r} status: malformed body "
+                f"('busy_requests' must be an integer or null)")
 
     def up(self) -> None:
         """POST .../up. A 202 means the node-agent queued the request for

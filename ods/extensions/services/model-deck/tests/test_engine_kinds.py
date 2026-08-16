@@ -86,21 +86,22 @@ def test_resource_shape_refused_when_slashy():
 # a `remote` argument enforcing it ------------------------------------------
 
 
-def test_known_kinds_declare_connection_and_remote_capable_shape():
-    """Schema is `kind -> {"connection": {...}, "remote_capable": bool}` —
-    every known kind carries both keys.
-
-    RE-EXPRESSED (sglang-omni Task 7): the old blanket
+def test_known_kinds_declare_remote_capability_per_kind():
+    """RE-EXPRESSED (sglang-omni Task 7, was
+    ...declare_connection_and_remote_capable_shape): the old blanket
     `spec["remote_capable"] is False` was true only while no kind could run
     off-box. It is now per-kind — the E1 triple are all sibling containers
     on THIS box and stay False; sglang-omni is the first True — so the
     assertion names which is which rather than asserting one answer for
     everything (a superset check like "at least one is True" would pass
-    even if a local kind silently flipped)."""
+    even if a local kind silently flipped).
+
+    The SHAPE half of the old assertion moved to
+    test_known_kinds_declare_where_each_kind_may_RUN (fix round 1), which
+    owns the key set now that there are two run-location flags."""
     remote_capable = {"lemonade": False, "comfyui": False, "hipfire": False,
                       "sglang-omni": True}
     for kind, spec in KNOWN_KINDS.items():
-        assert set(spec) == {"connection", "remote_capable"}, kind
         assert spec["remote_capable"] is remote_capable[kind], kind
 
 
@@ -484,10 +485,16 @@ def test_sglang_omni_refuses_an_unknown_connection_field():
     """Refuse-never-coerce reaches the new kind too: only `url` is declared,
     so the node-agent-side facts (health_url, busy port, compose file) stay
     where A1 put them — the HOST-owned engines.json allowlist — and cannot
-    be smuggled in through the deck's declaration."""
+    be smuggled in through the deck's declaration.
+
+    `remote=True` (fix round 1): the only place this kind may legally be
+    declared at all, so the connection schema has to be checked there — on
+    a local declaration the remote-only refusal now fires first, which would
+    make this test pass for the wrong reason."""
     with pytest.raises(ValueError, match="extra"):
         validate_engines([_omni_entry(
-            connection={"url": "http://127.0.0.1:8008", "container": "omni"})])
+            connection={"url": "http://127.0.0.1:8008", "container": "omni"})],
+            remote=True)
 
 
 # --- the four busy cases, one test each ------------------------------------
@@ -988,3 +995,79 @@ def test_sglang_omni_is_not_warming_once_it_is_healthy():
 
     assert _omni().warming(intent, _obs("idle", 0), now) is False
     assert _omni().warming(intent, _obs("busy", 1), now) is False
+
+
+# ===========================================================================
+# Fix round 1 — review findings 2 and 3.
+# ===========================================================================
+
+
+def test_sglang_omni_malformed_status_body_observes_unknown():
+    """Finding 3, at the consumer: a 200 the deck cannot read is "we failed
+    to look", never a crash. The client refuses the body (EngineError) and
+    observe's existing narrow catch heals it — the same one arm, so there is
+    no second definition of "malformed" to drift."""
+    class _MalformedOmni:
+        def status(self):
+            raise EngineError("sglang-omni engine 'song-r' status: "
+                              "malformed body (missing 'healthy')")
+
+    obs = _observe(_MalformedOmni())
+
+    assert obs == _omni().unknown()
+
+
+def test_known_kinds_declare_where_each_kind_may_RUN():
+    """Finding 2: `remote_capable` alone described only ONE direction, so
+    nothing refused a remote-only kind on the LOCAL entry. Both directions
+    are declared now, and every kind must be runnable SOMEWHERE (a kind
+    with both False could be declared nowhere and would be dead weight in
+    the picker)."""
+    for kind, spec in KNOWN_KINDS.items():
+        assert set(spec) == {"connection", "remote_capable", "local_capable"}, kind
+        assert isinstance(spec["local_capable"], bool), kind
+        assert spec["remote_capable"] or spec["local_capable"], kind
+
+
+def test_sglang_omni_is_the_only_remote_only_kind():
+    assert [k for k, s in KNOWN_KINDS.items() if not s["local_capable"]] == [
+        "sglang-omni"]
+
+
+def test_validate_engines_refuses_a_remote_only_kind_on_a_local_declaration():
+    """Guard at the BOUNDARY (finding 2): before this, a local sglang-omni
+    declaration was accepted here and only refused later, when
+    `build_client` was asked for a client that cannot exist — which surfaced
+    as a 422 on /api/state (and a tick-error every ~2 s) rather than a 422
+    on the declaration that caused it."""
+    with pytest.raises(ValueError, match="sglang-omni") as exc:
+        validate_engines([_omni_entry()])
+
+    assert "remote-only" in str(exc.value)
+    # ...and it says where it CAN be declared, so the refusal is actionable.
+    assert "node-agent" in str(exc.value)
+
+
+@pytest.mark.parametrize("kind, connection", [
+    ("lemonade", {"url": "http://u", "metrics_url": "http://m",
+                  "container": "c"}),
+    ("comfyui", {"url": "http://u"}),
+    ("hipfire", {"container": "c"}),
+])
+def test_validate_engines_still_accepts_every_local_kind_locally(kind, connection):
+    """The other half of finding 2's fix: the new gate refuses ONE kind, it
+    does not make local declarations stricter in general."""
+    validate_engines([_entry(kind=kind, connection=connection)])
+
+
+def test_validate_engines_local_gate_is_the_mirror_of_the_remote_one():
+    """The two gates are symmetric and independent: the same entry is
+    refused locally and accepted remotely, and a lemonade entry is the
+    reverse. Proven together so a future edit cannot silently collapse them
+    into one flag."""
+    validate_engines([_omni_entry()], remote=True)
+    with pytest.raises(ValueError, match="remote-only"):
+        validate_engines([_omni_entry()], remote=False)
+    validate_engines([_entry()], remote=False)
+    with pytest.raises(ValueError, match="not remote_capable"):
+        validate_engines([_entry()], remote=True)

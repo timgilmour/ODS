@@ -106,8 +106,9 @@ def test_engine_kinds_served(deck):
     # pinned the live triple; Task 7 adds the first genuinely new kind since
     # the deck shipped — the one that runs OFF this box.
     assert set(kinds) == {"lemonade", "comfyui", "hipfire", "sglang-omni"}
-    # ...and it is the only remote-capable one: the flag is what the
+    # ...and WHERE each may run, in both directions — the two flags the
     # registry write gate consults before allowing an engines[] declaration
-    # on a node-agent entry.
-    assert kinds["sglang-omni"]["remote_capable"] is True
+    # (Task 7 fix round 1). sglang-omni is the only remote-capable kind and
+    # the only remote-ONLY one; the E1 triple are local-only.
     assert [k for k, v in kinds.items() if v["remote_capable"]] == ["sglang-omni"]
+    assert [k for k, v in kinds.items() if not v["local_capable"]] == ["sglang-omni"]
