@@ -2870,6 +2870,26 @@ def test_derive_pass_runs_on_first_tick(tmp_path, monkeypatch):
     assert store.get(), "expected at least one derived entry"
 
 
+def test_derive_pass_skips_dot_directories(tmp_path, monkeypatch):
+    """A dot-directory in the gguf store (hf-transfer's `.cache` scratch,
+    live-found 08-06) is tooling residue, not a checkpoint — but
+    derive_checkpoint unconditionally emits an `identity` fact for any
+    directory, so without a scan-side filter the store grows a phantom
+    `model/.cache` key. The real checkpoint beside it must still derive."""
+    gguf_dir = _checkpoint_tree(tmp_path)
+    (gguf_dir / ".cache").mkdir()  # bare, like the live one — no config.json
+
+    store = CharacteristicsStore(tmp_path / "c.json")
+    watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
+                       gguf_dir=gguf_dir)
+
+    watcher.tick()
+
+    keys = set(store.get())
+    assert "model/some-model" in keys
+    assert "model/.cache" not in keys
+
+
 def test_derive_pass_is_throttled(tmp_path, monkeypatch):
     """The watcher ticks every 2 s. Scanning every checkpoint that often is
     pointless I/O, and the reason someone would turn this off."""

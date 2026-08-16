@@ -1233,7 +1233,11 @@ class Watcher:
         # seconds instead of degrading to "no local facts" once, here.
         if self._gguf_dir is not None and Path(self._gguf_dir).is_dir():
             for child in sorted(Path(self._gguf_dir).iterdir()):
-                if not child.is_dir():
+                # Dot-directories are tooling residue (hf-transfer's .cache,
+                # live-found 08-06), not checkpoints — and derive_checkpoint
+                # emits an identity fact for ANY directory, so without this
+                # filter the store grows a phantom "model/.cache" key.
+                if not child.is_dir() or child.name.startswith("."):
                     continue
                 fields = derive_checkpoint(child, now)
                 if fields:
