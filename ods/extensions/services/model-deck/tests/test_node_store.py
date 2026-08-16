@@ -533,12 +533,6 @@ def test_local_entry_accepts_validated_engines(store):
     assert store.get("local")["engines"][0]["resource"] == "gguf-a"
 
 
-def test_engines_refused_on_non_local_entries(store):
-    with pytest.raises(ValueError, match="engines"):
-        store.add({"id": "boxa", "label": "Box A", "agent_kind": "node-agent",
-                   "address": "http://boxa:7720", "engines": []})
-
-
 def test_invalid_engines_refused_at_add(store):
     with pytest.raises(ValueError, match="unknown kind"):
         store.add({"id": "local", "label": "Box L", "agent_kind": "local",
@@ -562,26 +556,128 @@ def test_load_heals_local_entry_with_invalid_engines(store, tmp_path):
     assert loaded["engines"] == []
 
 
-def test_load_strips_engines_from_non_local_entries(store, tmp_path):
-    """Non-local entry with engines list loads with key stripped, entry preserved.
-    A subsequent update() patch on that node must succeed (not bricked)."""
-    _write_nodes(tmp_path, [
-        {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
-         "address": "http://boxa:7720",
-         "engines": [{"resource": "gguf-a", "kind": "lemonade",
-                      "connection": {"url": "http://gguf-a:8080",
-                                     "metrics_url": "http://gguf-a:8001/metrics",
-                                     "container": "ods-gguf-a"},
-                      "gpu_index": 0,
-                      "policy_defaults": {"priority": 10, "pinned": False,
-                                          "idle_ttl": 60}}]}])
-    loaded = store.get("boxa")
+def test_heal_engines_strips_from_unknown_agent_kind():
+    """`_heal_engines` still strips engines from any OTHER/unknown
+    agent_kind (E1 Task 5: only local/node-agent may carry the key now).
+    `NodeStore._load()` can never actually reach this branch today —
+    `_well_formed` (app/node_store.py) drops any entry whose agent_kind
+    isn't already in {"local", "node-agent"} BEFORE `_heal_engines` ever
+    runs on it (see test_load_drops_dict_with_bogus_agent_kind above) — so
+    this pins the function's own documented contract directly, the only
+    way to actually exercise the branch."""
+    from app.node_store import _heal_engines
+    entry = {"id": "ghost", "label": "Ghost", "agent_kind": "vampire",
+             "engines": [{"resource": "x"}]}
+    healed = _heal_engines(entry)
+    assert "engines" not in healed
+
+
+# --- E1 Task 5: engines[] on a node-agent entry (remote_capable gate) ------
+# Fixture rule ([[defaults-that-hide-bugs]]): node id "nimbus" (not the
+# live-seeded "sparky"), resource "gguf-r" (not "omni") — nothing here may
+# pass by coinciding with a live seed.
+
+def _remote_spec(node_id="nimbus", label="Nimbus Box"):
+    return {"id": node_id, "label": label, "agent_kind": "node-agent",
+            "address": f"http://{node_id}:7720"}
+
+
+_REMOTE_ENGINE = {
+    "resource": "gguf-r", "kind": "lemonade",
+    "connection": {"url": "http://gguf-r:8080",
+                   "metrics_url": "http://gguf-r:8001/metrics",
+                   "container": "ods-gguf-r"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 30},
+}
+
+
+def test_node_agent_engines_accepted_with_prereqs(store):
+    """Happy path: engines[] on a node-agent entry is no longer an
+    outright refusal. An EMPTY list is the only shape reachable today — no
+    existing kind is `remote_capable` yet (Task 7 adds the first one), so
+    a populated list always fails the kind-not-remote_capable gate below —
+    but a vacuously-valid empty declaration, with address + credential
+    both present, is accepted."""
+    entry = store.add({**_remote_spec(), "engines": []}, credential="key-nimbus")
+    assert entry["engines"] == []
+    assert store.get("nimbus")["engines"] == []
+
+
+def test_node_agent_engines_refused_without_credential_names_it(store):
+    """422-worthy ValueError naming exactly what's missing (checklist
+    style, mirrors `_require_swap_prereqs`) — address is present, only the
+    credential is absent, isolating this failure mode from the kind gate
+    below (an empty list can never fail that one)."""
+    with pytest.raises(ValueError, match="credential") as exc:
+        store.add({**_remote_spec(), "engines": []})  # no credential
+    assert "engines on a node-agent entry" in str(exc.value)
+
+
+def test_node_agent_engines_kind_not_remote_capable_refused_naming_kind(store):
+    """Every declared kind must be `remote_capable`; none of today's three
+    are, so a populated list is always refused, BY NAME, even with every
+    other prerequisite (address + credential) satisfied."""
+    with pytest.raises(ValueError, match="lemonade"):
+        store.add({**_remote_spec(), "engines": [_REMOTE_ENGINE]},
+                  credential="key-nimbus")
+
+
+def test_node_agent_engines_gate_also_applies_on_update(store):
+    """The same two checks run on update(), not just add() — mirrors the
+    control:"swap" prereq check's own add/update parity."""
+    store.add(_remote_spec(), credential="key-nimbus")  # no engines yet
+    with pytest.raises(ValueError, match="lemonade"):
+        store.update("nimbus", {"engines": [_REMOTE_ENGINE]})
+
+
+def test_node_agent_engines_update_without_stored_credential_refused(store):
+    store.add(_remote_spec())  # no credential stored
+    with pytest.raises(ValueError, match="credential"):
+        store.update("nimbus", {"engines": []})
+
+
+def test_heal_preserves_empty_engines_on_node_agent_entry(store, tmp_path):
+    """The core gate-opening behavior at the LOAD side: `_heal_engines`
+    stops stripping engines from node-agent entries — a hand-written (or
+    previously-written) node-agent row with a valid (empty) engines list
+    survives `_load()` with the key intact, across a fresh `NodeStore`
+    instance (proves it's the file, not in-memory state, that's healed)."""
+    _write_nodes(tmp_path, [{**_remote_spec(), "engines": []}])
+    reloaded = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+    loaded = reloaded.get("nimbus")
     assert loaded is not None
-    assert loaded["id"] == "boxa"
-    assert "engines" not in loaded
-    # Subsequent update() must succeed (not bricked by engines validation)
-    result = store.update("boxa", {"label": "Renamed"})
-    assert result["label"] == "Renamed"
+    assert loaded["engines"] == []
+
+
+def test_heal_node_agent_entry_with_non_remote_capable_kind_heals_to_empty(store, tmp_path):
+    """A hand-edited node-agent entry with a POPULATED engines list — not
+    legally reachable through add()/update() until Task 7 adds a
+    remote_capable kind — heals to [] rather than being dropped or
+    crashing the load, same posture as a local entry's schema-invalid
+    engines (test_load_heals_local_entry_with_invalid_engines above)."""
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                      "address": "http://hera:7720"})
+    _write_nodes(tmp_path, [good, {**_remote_spec(), "engines": [_REMOTE_ENGINE]}])
+    loaded = store.get("nimbus")
+    assert loaded is not None
+    assert loaded["id"] == "nimbus"
+    assert loaded["engines"] == []
+    # The sibling entry is untouched — one bad row heals in place, it
+    # doesn't take the rest of the file down with it.
+    assert store.get("hera")["id"] == "hera"
+
+
+def test_local_engines_behavior_is_unaffected_by_the_node_agent_gate(store):
+    """`local` byte-identical check: the pre-existing local-entry happy
+    path (test_local_entry_accepts_validated_engines above) and this
+    negative one both still hold exactly as before — local never goes
+    through `_require_engine_prereqs` (that only fires for agent_kind ==
+    "node-agent") and its own kind gate stays `remote=False`, so all three
+    of today's (non-remote-capable) kinds remain valid there."""
+    entry = store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+                       "engines": [_REMOTE_ENGINE]})
+    assert entry["engines"][0]["kind"] == "lemonade"
 
 
 # ---- E1 T2: seed_engines_if_missing ----

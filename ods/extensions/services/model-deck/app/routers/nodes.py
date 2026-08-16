@@ -1,6 +1,6 @@
 """Nodes router — the registry's CRUD + the test-connection probe + (E1
-Task 10) the local node's declared-engines CRUD and the engine-kinds
-catalog.
+Task 10, node-scoped since E1 Task 5) the declared-engines CRUD and the
+engine-kinds catalog.
 
 Same conventions as the sibling routers: deps from request.app.state.deck,
 GuardError/ValueError left to the app-wide handlers (409/422), no auth.
@@ -198,16 +198,20 @@ def test_connection(body: NodeTestBody, request: Request) -> dict:
 
 
 # ===========================================================================
-# E1 Task 10 — declared-engines CRUD (local node only, spec §1/§4)
+# E1 Task 10 — declared-engines CRUD (node-scoped since E1 Task 5, spec §1/§4)
 # ===========================================================================
 
 
-def _local_engines(deck: dict) -> list[dict]:
-    """The local node's `engines[]` declaration, read LIVE off node_store —
-    never a boot-time copy (same posture as app.routers.control._declared_kind
-    / app.routers.build_world_snapshot)."""
-    local = deck["node_store"].get("local")
-    return list(local.get("engines", [])) if local is not None else []
+def _node_or_404(deck: dict, node_id: str) -> dict:
+    """The registry entry for `node_id`, or a 404 (E1 Task 5: the
+    declared-engines CRUD below is node-scoped now, not local-only, so an
+    unknown node is a real "not found" here — same status the sibling
+    unknown-engine checks already use for the resource half of this same
+    URL space)."""
+    node = deck["node_store"].get(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"unknown node {node_id!r}")
+    return node
 
 
 def _shape_error(msg: str, *loc: str) -> RequestValidationError:
@@ -218,32 +222,46 @@ def _shape_error(msg: str, *loc: str) -> RequestValidationError:
         [{"type": "value_error", "loc": ("body", *loc), "msg": msg}])
 
 
-@router.post("/local/engines")
-def add_engine(body: dict, request: Request) -> dict:
-    """Declare a new local engine. 422 (validate_engines' own message) for
-    a shape defect; 409 for a resource already declared — checked AFTER
-    shape validation (NodeStore.add's own order: full validate, then
-    duplicate-identity check)."""
+@router.post("/{node_id}/engines")
+def add_engine(node_id: str, body: dict, request: Request) -> dict:
+    """Declare a new engine on `node_id` (E1 Task 5: node-scoped —
+    `/nodes/local/engines` is unchanged behavior, "local" is just an id).
+    404 for an unknown node. 422 for a shape defect — `remote` is passed to
+    `validate_engines` matching the TARGET node's `agent_kind`, so a
+    node-agent target's "kind not remote_capable" refusal is also caught
+    here and goes through the same redacting handler as every other shape
+    defect (see this router's module docstring), rather than falling
+    through to NodeStore.update's own re-validation and its plain-string
+    422. 409 for a resource already declared — checked AFTER shape
+    validation (NodeStore.add's own order: full validate, then
+    duplicate-identity check). A node-agent target additionally needs
+    agent operability (address + credential) — that check has no shape to
+    diagnose here (it depends on the credential sidecar, not the request
+    body) and is left to NodeStore.update's own ValueError, same posture
+    as `create_node`'s control:"swap" prereqs."""
     deck = request.app.state.deck
     store = deck["node_store"]
+    node = _node_or_404(deck, node_id)
     try:
-        validate_engines([body])
+        validate_engines([body], remote=node["agent_kind"] == "node-agent")
     except ValueError as exc:
         raise _shape_error(str(exc)) from exc
     resource = body["resource"]
-    engines = _local_engines(deck)
+    engines = list(node.get("engines", []))
     if any(e["resource"] == resource for e in engines):
         raise HTTPException(status_code=409,
                             detail=f"engine {resource!r} already exists")
-    entry = store.update("local", {"engines": engines + [body]})
+    entry = store.update(node_id, {"engines": engines + [body]})
     log_event(deck["events_path"], "engine-added",
-              {"resource": resource, "kind": body["kind"]})
+              {"node": node_id, "resource": resource, "kind": body["kind"]})
     return next(e for e in entry["engines"] if e["resource"] == resource)
 
 
-@router.put("/local/engines/{resource}")
-def update_engine(resource: str, body: dict, request: Request) -> dict:
-    """Full-entry replace. `resource` in the body must equal the path — a
+@router.put("/{node_id}/engines/{resource}")
+def update_engine(node_id: str, resource: str, body: dict, request: Request) -> dict:
+    """Full-entry replace, node-scoped (E1 Task 5 — see add_engine's
+    docstring for the `remote`/404/409-ordering rationale, identical here).
+    `resource` in the body must equal the path — a
     declared resource's identity is immutable (it keys `local/<resource>`
     intent, policy, and settings scopes, the same rationale
     app/node_store.py's `id` docstring states for nodes) — a mismatch is
@@ -268,23 +286,33 @@ def update_engine(resource: str, body: dict, request: Request) -> dict:
     actual kind change invalidates the record. See the crash-ordering
     comment at the forget call below for why it runs BEFORE the
     declaration write, not after (the opposite order from `forget_engine`'s
-    own three-write sequence, and deliberately so)."""
+    own three-write sequence, and deliberately so).
+
+    E1 Task 5 scope note: the intent-forget below stays keyed through
+    `local_key` — i.e. it only actually forgets anything when `node_id ==
+    "local"`. A generic `<node>/<resource>` key (Task 6's `node_key`) isn't
+    wired yet, and today no node-agent entry can carry a POPULATED engines
+    list anyway (no kind is `remote_capable` until Task 7), so a remote
+    kind-change is a declaration-only edit here for now — reaching this
+    branch is not possible before Task 7 makes a remote kind change
+    possible in the first place."""
     deck = request.app.state.deck
     store = deck["node_store"]
+    node = _node_or_404(deck, node_id)
     if body.get("resource") != resource:
         raise _shape_error(
             f"resource {body.get('resource')!r} must match the path "
             f"{resource!r} — rename is refused; forget and re-add instead",
             "resource")
-    engines = _local_engines(deck)
+    engines = list(node.get("engines", []))
     existing = next((e for e in engines if e["resource"] == resource), None)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"unknown engine {resource!r}")
     try:
-        validate_engines([body])
+        validate_engines([body], remote=node["agent_kind"] == "node-agent")
     except ValueError as exc:
         raise _shape_error(str(exc)) from exc
-    if body["kind"] != existing["kind"]:
+    if body["kind"] != existing["kind"] and node_id == "local":
         # Forget BEFORE the declaration write below, not after — reversed
         # from forget_engine's own ordering (declaration first, THEN
         # intent), because the two routes' crash windows have asymmetric
@@ -308,20 +336,30 @@ def update_engine(resource: str, body: dict, request: Request) -> dict:
         # an orphaned policy override; here: an actively wrong actuation).
         deck["intent_store"].forget(local_key(resource))
     new_engines = [body if e["resource"] == resource else e for e in engines]
-    entry = store.update("local", {"engines": new_engines})
-    log_event(deck["events_path"], "engine-updated", {"resource": resource})
+    entry = store.update(node_id, {"engines": new_engines})
+    log_event(deck["events_path"], "engine-updated",
+              {"node": node_id, "resource": resource})
     return next(e for e in entry["engines"] if e["resource"] == resource)
 
 
-@router.delete("/local/engines/{resource}")
-def forget_engine(resource: str, request: Request) -> dict:
+@router.delete("/{node_id}/engines/{resource}")
+def forget_engine(node_id: str, resource: str, request: Request) -> dict:
     """Forget (spec §6.2 / coexistence ruling — module docstring):
-    bookkeeping only. Drops the declaration entry, the intent record, and
-    the stored policy row — nothing else. Never calls the engine: no
-    client lookup anywhere in this function. 404 when unknown."""
+    bookkeeping only, node-scoped (E1 Task 5). Drops the declaration entry,
+    the intent record, and the stored policy row — nothing else. Never
+    calls the engine: no client lookup anywhere in this function. 404 when
+    the node OR the engine is unknown.
+
+    The intent-forget below is the same `local_key`-only scope note as
+    update_engine's docstring: it only forgets anything for `node_id ==
+    "local"` today, for the same reason (no node-agent entry can carry a
+    populated engines list before Task 7). `policy_store.forget(resource)`
+    needs no such guard — PolicyStore keys purely by resource name, not
+    node, so it is already correct for any node_id."""
     deck = request.app.state.deck
     store = deck["node_store"]
-    engines = _local_engines(deck)
+    node = _node_or_404(deck, node_id)
+    engines = list(node.get("engines", []))
     if not any(e["resource"] == resource for e in engines):
         raise HTTPException(status_code=404, detail=f"unknown engine {resource!r}")
     new_engines = [e for e in engines if e["resource"] != resource]
@@ -344,7 +382,7 @@ def forget_engine(resource: str, request: Request) -> dict:
     # an orphaned, invisible policy row for a resource already gone from
     # the deck's view (PolicyStore's own documented "undeclared row
     # survives, invisible" posture) — inert, not a safety regression.
-    store.update("local", {"engines": new_engines})
+    store.update(node_id, {"engines": new_engines})
     # Orphaned-intent window (accepted, not closed): IntentStore keeps no
     # declared-resource gate of its own, so a crash right here — after the
     # declaration write above, before the forget below runs — leaves an
@@ -358,25 +396,40 @@ def forget_engine(resource: str, request: Request) -> dict:
     # exact point AND that name reuse, the redeclare is the operator's own
     # deliberate act, and derive_status/settings_drift are report-only —
     # nothing actuates off a stale intent on its own.
-    deck["intent_store"].forget(local_key(resource))
+    #
+    # `node_id == "local"` guard: `local_key` always spells "local/<resource>"
+    # (E1 Task 5 scope note — see update_engine's docstring). Without the
+    # guard, forgetting a REMOTE node's resource named e.g. "foo" would
+    # forget the unrelated LOCAL "foo" intent record, if one happened to
+    # exist — a real cross-node collision, not a hypothetical one, since
+    # resource names aren't namespaced by node anywhere today.
+    if node_id == "local":
+        deck["intent_store"].forget(local_key(resource))
     deck["policy_store"].forget(resource)
-    log_event(deck["events_path"], "engine-removed", {"resource": resource})
+    log_event(deck["events_path"], "engine-removed",
+              {"node": node_id, "resource": resource})
     return {"status": "ok"}
 
 
 @kinds_router.get("/engine-kinds")
 def list_engine_kinds() -> dict:
     """The UI's kind picker source (spec §5): every known kind's connection
-    schema (field -> required) and its human-initiated verb vocabulary,
-    served from app.engine_kinds — the one module allowed to know engine
-    names (spec §8) — so the picker never bakes a kind name into the UI."""
+    schema (field -> required), its `remote_capable` flag (E1 Task 5 —
+    whether this kind may be declared on a node-agent entry, not just
+    local), and its human-initiated verb vocabulary, served from
+    app.engine_kinds — the one module allowed to know engine names (spec
+    §8) — so the picker never bakes a kind name into the UI.
+    `ui/src/model/engineForm.ts` reads only `connection`/`human_verbs` off
+    this payload today, so this new field is additive — no UI change is
+    needed for it to keep working."""
     kinds = []
     for kind in sorted(KNOWN_KINDS):
-        schema = KNOWN_KINDS[kind]
+        spec = KNOWN_KINDS[kind]
         kinds.append({
             "kind": kind,
             "connection": {field: {"required": required}
-                          for field, required in schema.items()},
+                          for field, required in spec["connection"].items()},
+            "remote_capable": spec["remote_capable"],
             "human_verbs": sorted(ENGINE_KINDS[kind].human_verbs()),
         })
     return {"kinds": kinds}

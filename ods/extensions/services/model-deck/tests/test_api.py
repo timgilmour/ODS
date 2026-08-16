@@ -3606,6 +3606,11 @@ def test_engine_kinds_route_shape(tmp_path, monkeypatch):
     assert set(kinds["lemonade"]["human_verbs"]) == {"load", "unload"}
     assert set(kinds["comfyui"]["human_verbs"]) == {"free"}
     assert set(kinds["hipfire"]["human_verbs"]) == {"park", "resume"}
+    # E1 Task 5: remote_capable is now part of the served shape — none of
+    # today's three kinds run off-box, so all three read False.
+    assert kinds["lemonade"]["remote_capable"] is False
+    assert kinds["comfyui"]["remote_capable"] is False
+    assert kinds["hipfire"]["remote_capable"] is False
 
 
 def test_engine_add_validates_and_lands(tmp_path, monkeypatch):
@@ -3841,3 +3846,112 @@ def test_api_state_exact_shape_tests_already_match_the_approved_interface(tmp_pa
     assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle",
                                 "provenance", "nodes"}
     assert set(body["provenance"]) == {"drift", "gaps", "updates"}
+
+
+# ===========================================================================
+# E1 Task 5 — declared-engines CRUD routes gain {node_id} scope (the write
+# gate's remote_capable / agent-operability prereqs, exercised at the HTTP
+# layer). `/nodes/local/engines*` staying byte-identical is proven by every
+# test ABOVE this section still passing unchanged — this section covers only
+# what's NEW: a non-local node_id on the same routes.
+#
+# Fixture rule ([[defaults-that-hide-bugs]]): node id "nimbus" (never the
+# live-seeded "sparky"), resource "gguf-r" (never "omni").
+# ===========================================================================
+
+
+def _add_remote_node(deck, node_id="nimbus", *, credential="key-nimbus"):
+    """A bare node-agent registry row — address + (optionally) a stored
+    credential, no swap/serving machinery — enough for the declared-engines
+    CRUD routes below."""
+    deck["node_store"].add(
+        {"id": node_id, "label": f"{node_id.title()} Box", "agent_kind": "node-agent",
+         "address": f"http://{node_id}:7720"},
+        credential=credential)
+
+
+_REMOTE_ENGINE_BODY = {
+    "resource": "gguf-r", "kind": "lemonade",
+    "connection": {"url": "http://gguf-r:8080",
+                   "metrics_url": "http://gguf-r:8001/metrics",
+                   "container": "ods-gguf-r"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 30},
+}
+
+
+def test_get_nodes_surfaces_remote_engines_declaration(tmp_path, monkeypatch):
+    """Remote-accept happy path, at the API layer: an empty engines[]
+    declaration on a node-agent entry (the only shape reachable today — no
+    known kind is remote_capable yet, Task 7 adds the first one) is
+    accepted by the write gate and surfaces through GET /api/nodes exactly
+    like the local entry's own engines[] already does."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": []})
+
+    body = TestClient(app).get("/api/nodes").json()
+    nimbus = next(n for n in body["nodes"] if n["id"] == "nimbus")
+    assert nimbus["engines"] == []
+
+
+def test_add_engine_unknown_node_404(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+    r = TestClient(app).post("/api/nodes/ghost/engines", json=_GGUF_A_ENTRY)
+    assert r.status_code == 404
+    # Not just Starlette's route-not-found catch-all (which would ALSO read
+    # 404 for a stray typo'd URL): our own "unknown node" refusal, naming it.
+    assert "ghost" in r.json()["detail"]
+
+
+def test_update_engine_unknown_node_404(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+    r = TestClient(app).put("/api/nodes/ghost/engines/gguf-a", json=_GGUF_A_ENTRY)
+    assert r.status_code == 404
+    assert "ghost" in r.json()["detail"]
+
+
+def test_forget_engine_unknown_node_404(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+    r = TestClient(app).delete("/api/nodes/ghost/engines/gguf-a")
+    assert r.status_code == 404
+    assert "ghost" in r.json()["detail"]
+
+
+def test_add_engine_on_remote_node_kind_not_remote_capable_422_via_redacting_handler(
+    tmp_path, monkeypatch
+):
+    """422 kind-not-remote-capable, naming the kind: the router's own
+    shape pre-check passes `remote=True` whenever the target node's
+    `agent_kind` is "node-agent", so this refusal goes through the SAME
+    redacting RequestValidationError handler as every other engine-shape
+    defect (list-shaped `detail`, no `input` echoed) — not NodeStore's own
+    bare-ValueError 422 (a plain string `detail`)."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+
+    r = TestClient(app).post("/api/nodes/nimbus/engines", json=_REMOTE_ENGINE_BODY)
+
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert isinstance(detail, list)                       # the redacting handler's shape
+    assert all("input" not in err for err in detail)
+    assert "lemonade" in detail[0]["msg"]
+    assert "not remote_capable" in detail[0]["msg"]
+    # Refused before any write: nothing landed on the entry.
+    assert deck["node_store"].get("nimbus").get("engines", []) == []
+
+
+def test_add_engine_on_local_node_kind_not_remote_capable_gate_does_not_apply(
+    tmp_path, monkeypatch
+):
+    """Sanity check on the `remote` flag's wiring: the SAME body that 422s
+    on a node-agent target (test above) still lands normally on `local` —
+    `remote` is derived from the TARGET node's agent_kind, not hardcoded."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+
+    r = TestClient(app).post("/api/nodes/local/engines", json=_REMOTE_ENGINE_BODY)
+
+    assert r.status_code == 200
+    assert deck["node_store"].get("local")["engines"] == [_REMOTE_ENGINE_BODY]

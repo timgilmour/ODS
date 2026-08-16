@@ -112,22 +112,26 @@ def _heal_control(entry: dict) -> dict:
 def _heal_engines(entry: dict) -> dict:
     """Heal invalid engines (guard-at-the-boundary posture).
 
-    Non-local entries must not carry an engines key at all; if present,
-    strip it (guard-at-boundary: reject at load, don't brick future patches).
-    Local entries with schema-invalid engines heal to [] rather than being
-    dropped, preserving the entry."""
+    E1 Task 5: local AND node-agent entries may carry engines[] now — an
+    entry of EITHER shape with schema-invalid engines (including, for a
+    node-agent entry, a declared kind that isn't `remote_capable`) heals to
+    [] rather than being dropped, preserving the entry. Only an entry of
+    some OTHER/unknown agent_kind has the key stripped outright; today that
+    branch is defensive rather than reachable through NodeStore._load()
+    (`_well_formed` already drops any entry whose `agent_kind` isn't
+    "local"/"node-agent" before `_heal_engines` ever runs) — kept anyway so
+    this function's own contract doesn't quietly depend on being called
+    from exactly one place forever."""
     if "engines" not in entry:
         return entry
 
-    # Non-local entries must never have engines key
-    if entry.get("agent_kind") != "local":
+    if entry.get("agent_kind") not in _AGENT_KINDS:
         return {k: v for k, v in entry.items() if k != "engines"}
 
-    # Local entry: validate schema, heal to [] if invalid
     engines = entry.get("engines")
     try:
         from app.engine_kinds import validate_engines
-        validate_engines(engines)
+        validate_engines(engines, remote=entry["agent_kind"] == "node-agent")
         return entry
     except ValueError:
         # Invalid engines: heal to empty list instead of dropping the entry
@@ -161,10 +165,16 @@ def _validate(spec: dict) -> None:
                 'the local node cannot be control: "swap" — local actuation '
                 "is docker-ctl, not the swap protocol (G1 revisits)")
     if "engines" in spec:
-        if spec["agent_kind"] != "local":
-            raise ValueError("engines is only valid on the local node entry")
+        # spec["agent_kind"] is already known to be in _AGENT_KINDS by this
+        # point (checked above) -- {"local", "node-agent"} is exactly the
+        # set engines[] is valid on (E1 Task 5). A node-agent declaration
+        # additionally needs remote_capable kinds (checked here) AND agent
+        # operability -- address + a stored credential -- which needs the
+        # credential sidecar, not available to this pure function; that
+        # half is `_require_engine_prereqs`, called by add()/update() right
+        # after this, mirroring `_require_swap_prereqs`'s split.
         from app.engine_kinds import validate_engines
-        validate_engines(spec["engines"])
+        validate_engines(spec["engines"], remote=spec["agent_kind"] == "node-agent")
 
 
 class NodeStore:
@@ -239,12 +249,33 @@ class NodeStore:
                 'control: "swap" requires ' + ", ".join(missing)
                 + " to be set first")
 
+    def _require_engine_prereqs(self, entry: dict, credential_present: bool) -> None:
+        """Engines[] on a node-agent entry additionally requires agent
+        OPERABILITY -- address + a credential, present simultaneously (E1
+        Task 5). Mirrors `_require_swap_prereqs`' checklist style: missing
+        fields are NAMED, the 422 is the operator's checklist. `address` is
+        checked here too even though `_validate` already refuses ANY
+        node-agent spec missing it (unconditionally, regardless of
+        engines) -- same redundancy `_require_swap_prereqs` already keeps
+        for the same field, so this checklist is self-contained rather
+        than depending on a caller reading a second error message to learn
+        what else is missing."""
+        missing = [f for f in ("address",) if not entry.get(f)]
+        if not credential_present:
+            missing.append("credential")
+        if missing:
+            raise ValueError(
+                "engines on a node-agent entry requires " + ", ".join(missing)
+                + " to be set first")
+
     def add(self, spec: dict, credential: str | None = None) -> dict:
         spec = dict(spec)
         spec.setdefault("control", "none")
         _validate(spec)
         if spec["control"] == "swap":
             self._require_swap_prereqs(spec, credential_present=bool(credential))
+        if spec["agent_kind"] == "node-agent" and "engines" in spec:
+            self._require_engine_prereqs(spec, credential_present=bool(credential))
         with self._lock:
             if spec["agent_kind"] == "local" and self.get("local") is not None:
                 raise ValueError("the local node is seeded, not added")
@@ -275,6 +306,12 @@ class NodeStore:
                     _validate({k: v for k, v in merged.items() if k != "added_ts"})
                     if merged.get("control") == "swap":
                         self._require_swap_prereqs(
+                            merged,
+                            credential_present=bool(credential)
+                            or self.credential_set(node_id))
+                    if (merged.get("agent_kind") == "node-agent"
+                            and "engines" in merged):
+                        self._require_engine_prereqs(
                             merged,
                             credential_present=bool(credential)
                             or self.credential_set(node_id))

@@ -86,11 +86,18 @@ _SLACK_BYTES = 1024**3  # 1 GiB
 # separate, coexistence-era construction this task doesn't migrate.
 _HIPFIRE_PORT = 11435
 
-# kind -> {connection field -> required?}
-KNOWN_KINDS: dict[str, dict[str, bool]] = {
-    "lemonade": {"url": True, "metrics_url": True, "container": True},
-    "comfyui": {"url": True},
-    "hipfire": {"container": True},
+# kind -> {"connection": {field -> required?}, "remote_capable": bool}
+# `remote_capable` (E1 Task 5): whether this kind may be declared on a
+# node-agent entry's engines[] (deck's registry write gate, app/node_store.py
+# `_validate`/`_heal_engines`), not just the local entry's. All three of
+# today's kinds run in-process with the deck (lemonade/comfyui/hipfire are
+# all sibling containers on THIS box) — none of them is a remote-capable
+# kind. Task 7 adds the first one ("sglang-omni").
+KNOWN_KINDS: dict[str, dict[str, object]] = {
+    "lemonade": {"connection": {"url": True, "metrics_url": True, "container": True},
+                 "remote_capable": False},
+    "comfyui": {"connection": {"url": True}, "remote_capable": False},
+    "hipfire": {"connection": {"container": True}, "remote_capable": False},
 }
 
 _POLICY_FIELDS = {"priority": int, "pinned": bool, "idle_ttl": int}
@@ -100,9 +107,15 @@ def _bad(reason: str) -> ValueError:
     return ValueError(reason)
 
 
-def validate_engines(engines: object) -> None:
+def validate_engines(engines: object, remote: bool = False) -> None:
     """Raise ValueError (one-line reason) unless `engines` is a valid
-    declaration list. Refuse, never coerce ([[literal-declared-inputs]])."""
+    declaration list. Refuse, never coerce ([[literal-declared-inputs]]).
+
+    `remote` (E1 Task 5): True when this list is being declared on a
+    node-agent entry, not the local one — every kind named must then also
+    be `remote_capable`, else refused BY NAME (the operator needs to know
+    which declared kind can't run off-box, not just that "something" is
+    wrong)."""
     if not isinstance(engines, list):
         raise _bad("engines must be a list")
     seen: set[str] = set()
@@ -123,7 +136,9 @@ def validate_engines(engines: object) -> None:
         kind = e.get("kind")
         if kind not in KNOWN_KINDS:
             raise _bad(f"unknown kind {kind!r} (known: {sorted(KNOWN_KINDS)})")
-        schema = KNOWN_KINDS[kind]
+        if remote and not KNOWN_KINDS[kind]["remote_capable"]:
+            raise _bad(f"{resource}: kind {kind!r} is not remote_capable")
+        schema = KNOWN_KINDS[kind]["connection"]
         conn = e.get("connection")
         if not isinstance(conn, dict):
             raise _bad(f"{resource}: connection must be an object")

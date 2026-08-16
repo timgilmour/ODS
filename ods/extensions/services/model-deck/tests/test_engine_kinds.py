@@ -69,6 +69,39 @@ def test_resource_shape_refused_when_slashy():
         validate_engines([_entry(resource="local/evil")])
 
 
+# --- E1 Task 5: KNOWN_KINDS gains remote_capable; validate_engines gains
+# a `remote` argument enforcing it ------------------------------------------
+
+
+def test_known_kinds_declare_connection_and_remote_capable_shape():
+    """Schema is now `kind -> {"connection": {...}, "remote_capable": bool}`
+    — every known kind carries both keys, and (today) none is
+    remote_capable (all three run in-process with the deck; Task 7 adds
+    the first remote-capable kind)."""
+    for kind, spec in KNOWN_KINDS.items():
+        assert set(spec) == {"connection", "remote_capable"}, kind
+        assert spec["remote_capable"] is False, kind
+
+
+def test_validate_engines_default_is_not_remote():
+    """`remote` defaults False — every existing caller (the local entry's
+    own validation, and every test above that calls validate_engines with
+    just one argument) is unaffected by this task."""
+    validate_engines([_entry()])  # no error, same as remote=False
+
+
+def test_validate_engines_remote_refuses_non_remote_capable_kind_naming_it():
+    with pytest.raises(ValueError, match="lemonade") as exc:
+        validate_engines([_entry()], remote=True)
+    assert "not remote_capable" in str(exc.value)
+
+
+def test_validate_engines_remote_accepts_an_empty_list():
+    # Vacuously true: no kind is named, so nothing can fail the
+    # remote_capable check.
+    validate_engines([], remote=True)
+
+
 # ===========================================================================
 # E1 Task 3: adapters (observe/active/arbiter_verbs/human_verbs/demand) +
 # World generalization. Fixture rule: resources gguf-a/gguf-b/img/agent,
