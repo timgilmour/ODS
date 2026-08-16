@@ -6,6 +6,7 @@ import {
   emptyForm,
   formErrors,
   formForEntry,
+  kindsFor,
   setField,
   sortedEngines,
   toPayload,
@@ -14,25 +15,38 @@ import {
 } from "./engineForm";
 
 // Fixture builder mirroring GET /api/engine-kinds's shape
-// ({"kinds": [{kind, connection, human_verbs}, ...]}, app/routers/
-// nodes.py:324-339) — never the live three (lemonade/comfyui/hipfire)
-// except where the brief's own pinned tests name "comfyui" verbatim; every
-// other test below uses invented kinds ("widget"/"gadget") per the fixture
-// rule, since this module treats `kind` as opaque data, not a closed enum.
+// ({"kinds": [{kind, connection, remote_capable, local_capable,
+// human_verbs}, ...]}, app/routers/nodes.py:493-504) — never the live four
+// (lemonade/comfyui/hipfire/sglang-omni) except where a test's own pin
+// names them verbatim (this file's Step 1, and kindsFor's own pinned real-
+// payload test below); every other test uses invented kinds
+// ("widget"/"gadget") per the fixture rule, since this module treats `kind`
+// as opaque data, not a closed enum. `remote_capable`/`local_capable` are
+// spelled out on every fixture kind (never defaulted) so a reader never has
+// to guess which capability a given test kind carries — same posture the
+// WIDGET_GADGET comment below already takes for connection fields.
 function kindsPayload(
   kinds: {
     kind: string;
     connection: Record<string, { required: boolean }>;
+    remote_capable: boolean;
+    local_capable: boolean;
     human_verbs: string[];
   }[],
 ): EngineKindsResponse {
   return { kinds };
 }
 
-// The brief's Step 1 (pinned verbatim).
+// The brief's Step 1 (pinned verbatim); local_capable/remote_capable mirror
+// comfyui's real KNOWN_KINDS entry (app/engine_kinds.py:180-181) — this test
+// isn't about capability, but a pinned real-kind fixture should still carry
+// its real flags rather than an arbitrary placeholder.
 test("fields derive from the kinds payload, not literals", () => {
   const form = emptyForm(
-    kindsPayload([{ kind: "comfyui", connection: { url: { required: true } }, human_verbs: ["free"] }]),
+    kindsPayload([{
+      kind: "comfyui", connection: { url: { required: true } },
+      remote_capable: false, local_capable: true, human_verbs: ["free"],
+    }]),
     "comfyui",
   );
   expect(Object.keys(form.connection)).toEqual(["url"]);
@@ -40,7 +54,10 @@ test("fields derive from the kinds payload, not literals", () => {
 
 test("save is blocked until required fields are filled", () => {
   const form = emptyForm(
-    kindsPayload([{ kind: "comfyui", connection: { url: { required: true } }, human_verbs: ["free"] }]),
+    kindsPayload([{
+      kind: "comfyui", connection: { url: { required: true } },
+      remote_capable: false, local_capable: true, human_verbs: ["free"],
+    }]),
     "comfyui",
   );
   expect(canSave(form)).toBe(false);
@@ -51,9 +68,20 @@ test("save is blocked until required fields are filled", () => {
 // required and one optional connection field; "gadget" has a differently
 // named single required field, so a kind switch has something real to
 // prove it drops (never carries a same-named-by-coincidence value across).
+// Capability flags are deliberately asymmetric (widget local-only, gadget
+// remote-only) rather than both permissive — a stray capability check
+// accidentally added to emptyForm/formForEntry/withKind (none of which take
+// an `isRemote` argument today) would show up as a failure in THIS file's
+// unrelated tests, not just kindsFor's own.
 const WIDGET_GADGET = kindsPayload([
-  { kind: "widget", connection: { host: { required: true }, note: { required: false } }, human_verbs: ["free"] },
-  { kind: "gadget", connection: { path: { required: true } }, human_verbs: ["load", "unload"] },
+  {
+    kind: "widget", connection: { host: { required: true }, note: { required: false } },
+    remote_capable: false, local_capable: true, human_verbs: ["free"],
+  },
+  {
+    kind: "gadget", connection: { path: { required: true } },
+    remote_capable: true, local_capable: false, human_verbs: ["load", "unload"],
+  },
 ]);
 
 describe("emptyForm", () => {
@@ -171,7 +199,10 @@ describe("canSave", () => {
 
   test("a kind with no required connection fields at all is save-able from emptyForm alone", () => {
     const noRequired = kindsPayload([
-      { kind: "gizmo", connection: { note: { required: false } }, human_verbs: [] },
+      {
+        kind: "gizmo", connection: { note: { required: false } },
+        remote_capable: false, local_capable: true, human_verbs: [],
+      },
     ]);
     expect(canSave(emptyForm(noRequired, "gizmo"))).toBe(true);
   });
@@ -209,7 +240,7 @@ describe("toPayload", () => {
     });
   });
 
-  test("has exactly five top-level keys — matching engine_kinds.py:112-113's extra-field refusal", () => {
+  test("has exactly five top-level keys — matching engine_kinds.py:220-223's extra-field refusal", () => {
     let form = emptyForm(WIDGET_GADGET, "gadget");
     form = { ...form, resource: "g", gpuIndex: 3 };
     form = setField(form, "path", "/dev/g0");
@@ -242,5 +273,85 @@ describe("sortedEngines", () => {
     const copy = [...input];
     sortedEngines(input);
     expect(input).toEqual(copy);
+  });
+});
+
+describe("kindsFor", () => {
+  // The real payload GET /api/engine-kinds serves today (app/engine_kinds.py
+  // KNOWN_KINDS, :177-192) — pinned verbatim (sglang-omni Task 10's own
+  // obligation: prove the picker offers sglang-omni on a node-agent target
+  // and withholds it on a local one, against a fixture mirroring the real
+  // serialization, not an invented stand-in).
+  const REAL_KINDS = kindsPayload([
+    {
+      kind: "lemonade",
+      connection: { url: { required: true }, metrics_url: { required: true }, container: { required: true } },
+      remote_capable: false, local_capable: true, human_verbs: ["load", "unload"],
+    },
+    {
+      kind: "comfyui", connection: { url: { required: true } },
+      remote_capable: false, local_capable: true, human_verbs: ["free"],
+    },
+    {
+      kind: "hipfire", connection: { container: { required: true } },
+      remote_capable: false, local_capable: true, human_verbs: ["park", "resume"],
+    },
+    {
+      kind: "sglang-omni", connection: { url: { required: true } },
+      remote_capable: true, local_capable: false, human_verbs: ["load", "unload"],
+    },
+  ]);
+
+  test("a node-agent target is offered sglang-omni and none of the three local-only kinds", () => {
+    expect(kindsFor(REAL_KINDS, true).map((k) => k.kind)).toEqual(["sglang-omni"]);
+  });
+
+  test("a local target is offered the three local-only kinds and NOT sglang-omni", () => {
+    expect(kindsFor(REAL_KINDS, false).map((k) => k.kind)).toEqual(["lemonade", "comfyui", "hipfire"]);
+  });
+
+  // Generic coverage below uses invented kinds (fixture rule, this file's
+  // header comment) so the property is proven independent of any real name.
+  const MIXED = kindsPayload([
+    {
+      kind: "local-only", connection: {},
+      remote_capable: false, local_capable: true, human_verbs: [],
+    },
+    {
+      kind: "remote-only", connection: {},
+      remote_capable: true, local_capable: false, human_verbs: [],
+    },
+    // A kind capable nowhere (the shape KNOWN_KINDS' own comment,
+    // app/engine_kinds.py:175, says a real kind can never be — pinned here
+    // as defensive coverage: this function must not accidentally default a
+    // missing/false capability to "included").
+    {
+      kind: "capable-nowhere", connection: {},
+      remote_capable: false, local_capable: false, human_verbs: [],
+    },
+  ]);
+
+  test("isRemote true keeps only remote_capable kinds", () => {
+    expect(kindsFor(MIXED, true).map((k) => k.kind)).toEqual(["remote-only"]);
+  });
+
+  test("isRemote false keeps only local_capable kinds", () => {
+    expect(kindsFor(MIXED, false).map((k) => k.kind)).toEqual(["local-only"]);
+  });
+
+  test("a kind capable nowhere is excluded from both directions", () => {
+    expect(kindsFor(MIXED, true)).not.toContainEqual(expect.objectContaining({ kind: "capable-nowhere" }));
+    expect(kindsFor(MIXED, false)).not.toContainEqual(expect.objectContaining({ kind: "capable-nowhere" }));
+  });
+
+  test("an empty kinds payload yields an empty list in either direction, not a crash", () => {
+    expect(kindsFor(kindsPayload([]), true)).toEqual([]);
+    expect(kindsFor(kindsPayload([]), false)).toEqual([]);
+  });
+
+  test("does not mutate its input payload", () => {
+    const before = JSON.parse(JSON.stringify(MIXED));
+    kindsFor(MIXED, true);
+    expect(MIXED).toEqual(before);
   });
 });

@@ -21,6 +21,7 @@ import {
   emptyForm as emptyEngineForm,
   formErrors,
   formForEntry as engineFormForEntry,
+  kindsFor,
   setField as setEngineField,
   sortedEngines,
   toPayload as toEnginePayload,
@@ -64,8 +65,16 @@ export default function NodesView({
 }: {
   nodes: DeckNodeEntry[];
   /** The Engines editor's GPU-picker source (spec §5: `/api/state`'s
-   * `world.gpus`, never a UI literal) — threaded down to the local node's
-   * form only; every other node's form ignores it. */
+   * `world.gpus`, never a UI literal) — threaded down to whichever node's
+   * form is open, local or node-agent either one (sglang-omni Task 10; used
+   * to be local-only). NOTE this list is always the LOCAL box's own GPUs —
+   * `world.gpus` has no remote half — so a node-agent target's picker shows
+   * the wrong machine's indices/capacities today. Deliberate: the
+   * sglang-omni design (§4, "Increment-4-minimal") scopes remote
+   * GPU-index semantics beyond a single unified pool as out of scope
+   * "until a real node needs it"; the operator picks the index THEIR node
+   * actually has by its own knowledge, same as declaring any other field
+   * this form cannot independently verify. */
   gpus: Gpu[];
   /** The Engines editor's pinned-badge source. LIVE policy
    * (`/api/state`'s `policy` map, app/policy.py's `PolicyStore.get()`),
@@ -409,30 +418,55 @@ function NodeForm({
         </button>
       </div>
 
-      {/* Declared local engines (E1 Task 12) live only on the LOCAL node's
-          card: `engines[]` is only ever valid on the "local" entry
-          (app/node_store.py's `_validate`, ":engines is only valid on the
-          local node entry"; `_heal_engines` strips it from every other
-          row). */}
-      {mode === "edit" && entry && entry.agent_kind === "local" && (
-        <EnginesSection gpus={gpus} policy={policy} onChanged={onEnginesChanged} />
+      {/* Declared engines (E1 Task 12) live on whichever node's own card is
+          selected — local AND node-agent (sglang-omni Task 10:
+          `app/node_store.py`'s `_validate`, :204-214, and `_heal_engines`,
+          :112-138, relaxed the write gate off "local entry only" in E1
+          Task 5 — a node-agent entry may carry `engines[]` too, gated on
+          each declared kind's own `remote_capable` flag rather than on
+          which node it lives on). */}
+      {mode === "edit" && entry && (entry.agent_kind === "local" || entry.agent_kind === "node-agent") && (
+        <EnginesSection
+          nodeId={entry.id}
+          isRemote={entry.agent_kind === "node-agent"}
+          gpus={gpus}
+          policy={policy}
+          onChanged={onEnginesChanged}
+        />
       )}
     </div>
   );
 }
 
-/** The local node's declared-engine list + add/edit sub-form (E1 Task 12).
- * Reads its own data independently of the outer `nodes` prop: neither
- * `DeckNodeEntry` (this screen's own `nodes` prop, `/api/state`'s
- * `_nodes_block`) nor `world.tenants` (the LIVE observation map) carries the
- * raw declaration's `connection`/`policy_defaults` fields this editor needs
- * to prefill an edit — only `listNodeRegistry()`'s local entry does
+/** One node's declared-engine list + add/edit sub-form (E1 Task 12; opened
+ * up to node-agent entries by sglang-omni Task 10). Reads its own data
+ * independently of the outer `nodes` prop: neither `DeckNodeEntry` (this
+ * screen's own `nodes` prop, `/api/state`'s `_nodes_block`) nor
+ * `world.tenants` (the LIVE observation map, local-only in any case) carries
+ * the raw declaration's `connection`/`policy_defaults` fields this editor
+ * needs to prefill an edit — only `listNodeRegistry()`'s matching entry does
  * (api.ts's `NodeRegistryEntry.engines` doc comment). */
 function EnginesSection({
+  nodeId,
+  isRemote,
   gpus,
   policy,
   onChanged,
 }: {
+  /** Which registry entry this instance edits — "local" or any node-agent
+   * id, the same `id` the outer rail selected (NodesView's own `entry.id`).
+   * Threaded through every CRUD call below instead of a hardcoded "local"
+   * literal (sglang-omni Task 10) — the lookup shape itself
+   * (`registry.find((n) => n.id === X)`) was already generic before this
+   * task; only `X` was ever fixed. */
+  nodeId: string;
+  /** Whether `nodeId` is a node-agent entry — decides which capability
+   * direction the kind picker filters on (`kindsFor`, model/engineForm.ts).
+   * Passed rather than re-derived from the registry fetch below so the
+   * picker's filter is correct from the very first render, before that
+   * fetch resolves — it is exactly `entry.agent_kind === "node-agent"` off
+   * the SAME entry this section was mounted for. */
+  isRemote: boolean;
   gpus: Gpu[];
   policy: PolicyMap;
   onChanged: () => void;
@@ -446,19 +480,20 @@ function EnginesSection({
     Promise.all([getEngineKinds(), listNodeRegistry()]).then(
       ([k, { nodes: registry }]) => {
         setKinds(k);
-        // app/node_store.py:251,400 — local-kind entry's id is always "local"
-        setEngines(registry.find((n) => n.id === "local")?.engines ?? []);
+        setEngines(registry.find((n) => n.id === nodeId)?.engines ?? []);
         setLoadError(null);
       },
       (err) => setLoadError(err instanceof Error ? err.message : String(err)),
     );
   }
 
-  // Fires once per mount — the outer NodeForm only ever mounts an
-  // EnginesSection for the local entry (never re-keyed on anything this
-  // section itself changes), same posture as NodeForm's own "seeded once"
-  // initializer above.
-  useEffect(reload, []);
+  // Fires once per mount, and again if `nodeId` ever changed under an
+  // instance that stayed mounted. Today it never does — the outer NodeForm
+  // is keyed on `entry.id` (NodesView above), so switching rail rows already
+  // remounts NodeForm and, with it, this section — but naming `nodeId` as
+  // the dependency (rather than an empty array) keeps that true by the
+  // effect's OWN contract instead of by a coincidence one level up.
+  useEffect(reload, [nodeId]);
 
   if (loadError) {
     return (
@@ -501,6 +536,7 @@ function EnginesSection({
           {sorted.map((e) => (
             <EngineRow
               key={e.resource}
+              nodeId={nodeId}
               engine={e}
               pinned={policy[e.resource]?.pinned ?? e.policy_defaults.pinned}
               onEdit={() => setEditing(e.resource)}
@@ -522,6 +558,8 @@ function EnginesSection({
           key={editing}
           mode={editing === "add" ? "add" : "edit"}
           entry={editing === "add" ? null : (sorted.find((e) => e.resource === editing) ?? null)}
+          nodeId={nodeId}
+          isRemote={isRemote}
           kinds={kinds}
           gpus={gpus}
           onDone={afterMutate}
@@ -539,11 +577,13 @@ function EnginesSection({
  * park and SparkSwap.tsx's Force swap use, applied per-row here since each
  * row is its own independent guarded action. */
 function EngineRow({
+  nodeId,
   engine,
   pinned,
   onEdit,
   onForgotten,
 }: {
+  nodeId: string;
   engine: DeclaredEngine;
   pinned: boolean;
   onEdit: () => void;
@@ -556,11 +596,11 @@ function EngineRow({
 
   async function doForget() {
     try {
-      // DELETE /api/nodes/local/engines/{resource} = forget_engine
-      // (app/routers/nodes.py:273-321): bookkeeping only, never calls the
+      // DELETE /api/nodes/{node_id}/engines/{resource} = forget_engine
+      // (app/routers/nodes.py:376-473): bookkeeping only, never calls the
       // engine — see messages.ts's forgetEngineConfirm, shown below while
       // armed.
-      await forgetEngine(engine.resource);
+      await forgetEngine(nodeId, engine.resource);
       onForgotten();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -597,16 +637,28 @@ function EngineRow({
   );
 }
 
-/** The Add/Edit sub-form for one declared engine. `entry === null` is Add;
- * otherwise Edit, pre-filled and with `resource` locked (rename is refused
- * server-side — app/routers/nodes.py's `update_engine`, :244-259 — so this
+/** The Add/Edit sub-form for one declared engine, on `nodeId` (local or
+ * node-agent — sglang-omni Task 10). `entry === null` is Add; otherwise
+ * Edit, pre-filled and with `resource` locked (rename is refused
+ * server-side — app/routers/nodes.py's `update_engine`, :332-336 — so this
  * never offers it). `kind` stays editable in BOTH modes: app/state.py's
- * snapshot (:141-150) explicitly accommodates a resource re-declared under
+ * snapshot (:164-174) explicitly accommodates a resource re-declared under
  * a different kind, so an operator fixing a misdeclared kind does not need
- * to forget-and-re-add. */
+ * to forget-and-re-add.
+ *
+ * The kind `<select>` below maps over `kindsFor(kinds, isRemote)`, never
+ * `kinds.kinds` directly — offering a kind this target's write gate would
+ * refuse (a local-only kind on a node-agent entry, or the reverse) is
+ * exactly the 422-after-the-fact `kindsFor`'s own doc describes filtering
+ * out (Task 7's review fallout). Add mode's default kind is that filtered
+ * list's first entry, for the same reason: `kinds.kinds[0]` alone (the
+ * catalog's own alphabetical order — "comfyui" today) could default Add to
+ * a kind this node cannot run. */
 function EngineFormPanel({
   mode,
   entry,
+  nodeId,
+  isRemote,
   kinds,
   gpus,
   onDone,
@@ -614,16 +666,19 @@ function EngineFormPanel({
 }: {
   mode: "add" | "edit";
   entry: DeclaredEngine | null;
+  nodeId: string;
+  isRemote: boolean;
   kinds: EngineKindsResponse;
   gpus: Gpu[];
   onDone: () => void;
   onCancel: () => void;
 }) {
+  const availableKinds = kindsFor(kinds, isRemote);
   // Seeded once per mount, same rationale as NodeForm's own `form` state
   // above — the parent keys this by `editing`, so a different target
   // remounts rather than reusing this instance's buffer.
   const [form, setForm] = useState<EngineFormState>(
-    entry ? engineFormForEntry(entry, kinds) : emptyEngineForm(kinds, kinds.kinds[0]?.kind ?? ""),
+    entry ? engineFormForEntry(entry, kinds) : emptyEngineForm(kinds, availableKinds[0]?.kind ?? ""),
   );
   const [saveError, setSaveError] = useState<string | null>(null);
   const errors = formErrors(form);
@@ -633,9 +688,9 @@ function EngineFormPanel({
     try {
       const payload = toEnginePayload(form);
       if (mode === "add") {
-        await addEngine(payload);
+        await addEngine(nodeId, payload);
       } else if (entry) {
-        await updateEngine(entry.resource, payload);
+        await updateEngine(nodeId, entry.resource, payload);
       }
       onDone();
     } catch (err) {
@@ -665,7 +720,7 @@ function EngineFormPanel({
           value={form.kind}
           onChange={(e) => setForm(withKind(form, kinds, e.target.value))}
         >
-          {kinds.kinds.map((k) => (
+          {availableKinds.map((k) => (
             <option key={k.kind} value={k.kind}>
               {k.kind}
             </option>
