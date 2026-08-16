@@ -1156,3 +1156,106 @@ def test_pure_engine_run_does_not_touch_profile_status_json(tmp_path):
 
     assert r.returncode == 0, r.stderr
     assert not (ctl / "status.json").exists()
+
+
+# --- stale-result invalidation (fix round 1) ----------------------------
+#
+# engine-status-<resource>.json was previously overwritten only at
+# completion, so a request accepted while a PREVIOUS result for the same
+# resource still sat on disk left that stale answer readable for the whole
+# 30-120s a docker compose run takes. There is no request id in the result
+# schema to correlate result -> request, so a poller had no way to tell a
+# fresh in-flight run from an old finished one. These tests pre-seed a
+# stale ok:true result and prove it never survives a new request for the
+# same resource -- absent while genuinely in flight, and never present
+# unchanged after the new request completes (whether accepted or refused).
+
+
+_STALE_ENGINE_RESULT = {"resource": "omni", "verb": "up", "ok": True,
+                        "error": None, "ts": "2020-01-01T00:00:00Z"}
+
+
+def test_engine_stale_result_absent_while_docker_runs(tmp_path):
+    """The core of this fix: a pre-seeded stale result must be gone the
+    moment a new request for the same resource is accepted, and stay gone
+    for the ENTIRE window a slow `docker compose` is running -- not merely
+    get overwritten once docker finally returns. A poller reading mid-flight
+    must see "unknown", never the old answer."""
+    import time
+
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    (ctl / "engine-status-omni.json").write_text(json.dumps(_STALE_ENGINE_RESULT))
+
+    bindir = tmp_path / "engine-bin"
+    bindir.mkdir()
+    started = tmp_path / "docker-started"
+    docker = bindir / "docker"
+    docker.write_text(
+        "#!/bin/bash\n"
+        f'[ "$1" = compose ] && {{ touch {shlex.quote(str(started))}; sleep 2; }}\n'
+        'exit 0\n'
+    )
+    docker.chmod(0o755)
+
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.Popen(["bash", str(HELPER), "--once", str(ctl), str(vllm)], env=env)
+    for _ in range(50):
+        if started.exists():
+            break
+        time.sleep(0.1)
+    assert started.exists(), "docker compose never started"
+    # Mid-flight: the stale result must be GONE, not merely stale-but-present.
+    assert not (ctl / "engine-status-omni.json").exists()
+
+    proc.wait(timeout=10)
+    assert proc.returncode == 0
+    status = _engine_status(ctl, "omni")
+    assert status["ok"] is True
+    assert status["ts"] != _STALE_ENGINE_RESULT["ts"]   # this run's result, not the old one
+
+
+def test_engine_stale_result_overwritten_on_refused_verb(tmp_path):
+    """Simplest variant of the same fix: even a request refused
+    synchronously (bad verb, no docker invocation at all) must not leave a
+    stale PREVIOUS result readable behind it."""
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "sideways")   # bad verb
+    (ctl / "engine-status-omni.json").write_text(json.dumps(_STALE_ENGINE_RESULT))
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status != _STALE_ENGINE_RESULT   # stale content is gone, not still readable
+    assert status["ok"] is False
+    assert status["verb"] == "sideways"
+    assert not log.exists()   # docker never invoked
+
+
+def test_engine_stale_result_replaced_by_fresh_result_on_success(tmp_path):
+    """A successful run following a stale seed ends with exactly the new
+    result -- not the stale one, and not some merge of the two."""
+    vllm, _ = _mk_vllm(tmp_path)
+    compose = tmp_path / "compose-omni.yaml"
+    compose.write_text("services: {}\n")
+    _mk_engines_json(vllm, {"omni": _engine_entry(compose)})
+    ctl = _mk_engine_ctl(tmp_path, "omni", "down")
+    (ctl / "engine-status-omni.json").write_text(json.dumps(_STALE_ENGINE_RESULT))
+    bindir, log = _mk_engine_docker(tmp_path)
+
+    r = _run_once(ctl, vllm, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert log.read_text().strip() == f"compose -f {compose} down"
+    status = _engine_status(ctl, "omni")
+    assert status == {"resource": "omni", "verb": "down", "ok": True,
+                      "error": None, "ts": status["ts"]}
+    assert status["ts"] != _STALE_ENGINE_RESULT["ts"]

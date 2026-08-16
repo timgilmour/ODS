@@ -262,6 +262,16 @@ PYEOF
 # nothing that says "running" -- a stuck `swapping` status once stalled the
 # deck ~20 minutes. Absence of a result file means "unknown"; the deck
 # derives liveness from health probing, never from this file.
+#
+# As soon as a request's resource is confirmed safe to name a file with, any
+# EXISTING result for that resource is removed immediately -- before the
+# verb check, before engines.json is even consulted, and well before a slow
+# `docker compose up/down` runs. Without this, a stale result from a
+# PREVIOUS request (e.g. ok:true from an old `up`) would sit on disk for the
+# entire 30-120s a new run takes, and a poller with no way to correlate
+# result -> request would read that old answer as current. So "absence of a
+# result" now covers two states, both unknown to a reader: "never ran" and
+# "accepted and in flight" -- never "here is what a DIFFERENT request did".
 
 # The result document, JSON-built in python so an arbitrary verb or error
 # string (request-controlled) can never break the file's shape -- same
@@ -365,6 +375,12 @@ EOF
   fi
 
   local result="$CTL/engine-status-${resource}.json"
+  # Invalidate any PREVIOUS result for this resource now, before any
+  # validation/dispatch below that could take 30-120s (docker compose) --
+  # see the protocol comment above _write_engine_status/_engine_compose_file.
+  # Every path from here either writes THIS run's result or, if the helper
+  # dies first, leaves nothing -- never a stale answer from an old request.
+  rm -f "$result"
 
   if [ "$verb" != up ] && [ "$verb" != down ]; then
     _write_engine_status "$resource" "$verb" 0 "invalid verb (want up or down)" "$result"
