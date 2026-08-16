@@ -22,6 +22,11 @@ services:
       # into the same dir (its 4th positional arg names the host path).
       NODE_SETTINGS_DIR: /settings
     volumes:
-      - ${HOST_VLLM_DIR:-/home/tim/vllm}:/vllm:ro
-      - ${HOST_SWAP_CTL_DIR:-/home/tim/vllm/swap-ctl}:/swap-ctl:rw
-      - ${HOST_SETTINGS_DIR:-/home/tim/vllm/settings}:/settings:rw
+      # Required, no defaults (`:?` fails loudly at `docker compose config`
+      # time): these are one specific machine's paths — a baked-in default
+      # is wrong everywhere else, and a wrong-but-plausible mount fails
+      # SILENTLY as "no profiles found". Set them in the node's durable
+      # .env beside this file.
+      - ${HOST_VLLM_DIR:?path to the node's vllm profile dir (e.g. ~/vllm)}:/vllm:ro
+      - ${HOST_SWAP_CTL_DIR:?path to the swap-ctl dir (e.g. ~/vllm/swap-ctl)}:/swap-ctl:rw
+      - ${HOST_SETTINGS_DIR:?path to the settings dir (e.g. ~/vllm/settings)}:/settings:rw
