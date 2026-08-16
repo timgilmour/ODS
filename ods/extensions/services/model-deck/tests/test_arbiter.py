@@ -5294,6 +5294,104 @@ def test_an_unrecognized_action_is_logged_and_the_rest_still_run(tmp_path):
     assert lemonade.unloaded == ["extra.m.gguf"]
 
 
+def test_a_raising_free_still_blocks_the_pending_load_retrigger(tmp_path):
+    """FIX ROUND 1 (I-1): isolation must not INVERT the eviction guard it
+    wrapped.
+
+    `_ComfyAdapter.execute_free` returns True — "an eviction raced" — for
+    every failure it understands, and `_execute` reads that as "the VRAM is
+    NOT confirmed reclaimed, so the pending load must not be re-triggered
+    into a GPU that may still be full". An exception ESCAPING that adapter
+    (exactly what per-action isolation was added to contain) carries the same
+    meaning and must reach the same conclusion: the free did not happen, so
+    the retrigger stays blocked.
+
+    Before the fix the raise left `eviction_raced` False and the retrigger
+    fired — a load pushed at a full GPU, which is strictly worse than the
+    pre-isolation behavior (the tick died and the retrigger never ran).
+
+    A non-EngineError (`RuntimeError`) on purpose: EngineError and GuardError
+    are the two the adapter handles itself, so neither would reach the
+    isolation guard under test."""
+    lemonade = FakeLemonade()
+    comfy = FakeComfy(raise_on_free=RuntimeError("docker proxy returned junk"))
+    snapshot = _world(
+        gpus=[_gpu(index=1, total=34 * GIB, used=22 * GIB)],  # free < footprint
+        lemonade=_lem(state="unloaded"),
+        comfyui=_comfy(state="idle", queue=0, idle_s=400),
+        default_route="extra.model.gguf",
+    )
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(snapshot),
+        FakeRegistry(footprints={"model.gguf": 19 * GIB}),
+        _policy(), lemonade=lemonade, comfy=comfy,
+    )
+
+    watcher.tick()
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert kinds.count("action-failed") == 1     # reported, not swallowed
+    assert comfy.freed == 0                       # the free really did fail
+    assert lemonade.loaded == []                  # ...and nothing was loaded
+
+
+def test_repeated_identical_action_failures_are_deduped(tmp_path):
+    """FIX ROUND 1 (M-1): `action-failed` belongs to the FAILURE memo, not
+    the one-slot `_last_event_key`.
+
+    A structural mis-declaration fails identically on every ~2 s tick, and a
+    contention tick emits a `noop` alongside it — the exact interleaving
+    shape `_FAILURE_DEDUP_KINDS`' own comment records as what defeats a
+    global last-event check (`test_repeated_identical_load_failures_are_deduped`
+    pins the same property for load-failed). Under `_DEDUP_KINDS` the pair
+    alternated and BOTH logged every tick, forever: the events-trim-thrash
+    input [T10 review], from the guard that exists to make failures visible."""
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
+    )
+    actions = [{"type": "noop", "reason": "wont-fit"},
+               {"type": "unload", "resource": "gguf-a", "model": "x.gguf"}]
+
+    watcher._execute(actions, None)
+    watcher._execute(actions, None)
+    settled = len(tail_events(events_path))
+    watcher._execute(actions, None)
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert kinds.count("action-failed") == 1
+    # ...and the pair SETTLES: by the third identical tick nothing is
+    # written at all. The one-slot `_last_event_key` still pays for the
+    # interleaving once (the second tick's `noop` no longer matches its
+    # neighbour, so it logs again) — that is this memo's own documented
+    # weakness, and it is bounded here rather than repeating forever, which
+    # is what it did while `action-failed` shared that slot.
+    assert len(tail_events(events_path)) == settled
+    assert kinds.count("noop") == 2
+
+
+def test_action_failure_after_a_successful_actuation_is_logged_again(tmp_path):
+    """The other half of the failure memo's contract, and the reason it is
+    the right home: fail -> recover -> identical fail must log BOTH. A
+    successful unload re-arms the memo (`_clear_failure_dedup`), so the
+    flap-blindness the T9-fix review forbade cannot creep in behind this
+    move."""
+    lemonade = FakeLemonade()
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
+        lemonade=lemonade,
+    )
+    bad = {"type": "unload", "resource": "gguf-a", "model": "x.gguf"}
+    good = {"type": "unload", "resource": "lemonade", "model": "extra.m.gguf"}
+
+    watcher._execute([bad], None)          # fail #1 -> logged
+    watcher._execute([good], None)         # a real unload succeeds: re-arm
+    watcher._execute([bad], None)          # fail #2, identical -> must log
+
+    kinds = [e["kind"] for e in tail_events(events_path)]
+    assert kinds.count("action-failed") == 2
+    assert lemonade.unloaded == ["extra.m.gguf"]
+
+
 def test_a_signature_mismatched_action_aborts_alone_not_the_whole_tick(
         tmp_path, hand_built_registry):
     """The T7 review's exact case, which is what made per-action isolation

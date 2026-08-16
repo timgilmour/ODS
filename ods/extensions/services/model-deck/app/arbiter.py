@@ -1073,6 +1073,19 @@ class Watcher:
                 if self._perform(action, actuated):
                     eviction_raced = True
             except Exception as exc:  # noqa: BLE001 — per-action isolation, see docstring
+                # NOTHING IS CONFIRMED RECLAIMED (fix round 1, I-1). A `free`
+                # that RAISES means exactly what the two failures
+                # `_ComfyAdapter.execute_free` handles itself mean — it
+                # returns True for both — so it must reach the same
+                # conclusion: the pending load must not be re-triggered into
+                # a GPU that may still be full. Isolating the raise without
+                # this line INVERTED that guard (the tick used to die here,
+                # so the retrigger never ran at all), which is the one way
+                # this containment could be worse than the crash it replaced.
+                # Set for every action type: an unload that raised freed
+                # nothing either, and the retrigger's whole premise is that
+                # the contention was healed.
+                eviction_raced = True
                 self._log("action-failed",
                           {"type": kind_raw, "node": action.get("node"),
                            "resource": action.get("resource"),
@@ -1803,18 +1816,9 @@ class Watcher:
     # tick. A different kind — or the same kind with a different detail — in
     # between resets the suppression. Real one-shot actions (unloads, frees,
     # loads) are NEVER deduped and always logged.
-    # `action-failed` (sglang-omni Task 9) is deduped for the same reason
-    # `tick-error` is: the failures that reach it are structural (a kind
-    # whose actuator signature cannot take the action, a resource whose
-    # client will not resolve), so they repeat identically every ~2 s tick
-    # for as long as the declaration stays that way — the exact trim-thrash
-    # input events' byte-denominated bounds warn about [T10]. A DIFFERENT
-    # action failing in between resets the suppression, since the dedup key
-    # carries the action's own type/node/resource.
     _DEDUP_KINDS = frozenset({"noop", "tick-error", "free-raced", "host-agent-busy",
                           "lifecycle-spark-unreachable", "harvest-empty",
-                          "harvest-failed", "provenance-seed-watch-failed",
-                          "action-failed"})
+                          "harvest-failed", "provenance-seed-watch-failed"})
 
     # load/unload failures get their OWN memo, not the one-slot
     # _last_event_key: a contention tick interleaves free_comfyui with every
@@ -1833,7 +1837,20 @@ class Watcher:
     # source — app.engine_kinds' execute_unload/execute_load now fold
     # "resource" into both failure details — rather than here, since this
     # memo's own job is only to compare whatever detail it's handed.
-    _FAILURE_DEDUP_KINDS = frozenset({"load-failed", "unload-failed"})
+    #
+    # `action-failed` (sglang-omni Task 9, moved here in fix round 1, M-1)
+    # belongs to THIS memo for the reason spelled out just above, not to
+    # `_DEDUP_KINDS`: the failures that reach it are structural (an actuator
+    # signature that cannot take the action, a resource whose client will not
+    # resolve), so they repeat identically every ~2 s tick for as long as the
+    # declaration stays that way — and a contention tick emits a `noop`
+    # alongside them, so the one-slot `_last_event_key` alternates and logs
+    # BOTH forever, exactly the outage shape that check never fires for. Its
+    # detail carries type/node/resource, so two different broken actions stay
+    # distinguishable, and the success arms' `_clear_failure_dedup` re-arms
+    # it so fail→recover→identical-fail still logs both.
+    _FAILURE_DEDUP_KINDS = frozenset({"load-failed", "unload-failed",
+                                      "action-failed"})
 
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))
