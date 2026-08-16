@@ -129,7 +129,6 @@ from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
 from app.intent import FAILURE_BUDGET
 from app.lifecycle import derive_status
-from app.node_clients import remote_world_half
 from app.observe import (
     _LOCAL_NODE,
     merge_observations,
@@ -537,6 +536,7 @@ class Watcher:
         local_clients=None,
         remote_engine_clients=None,
         node_agent_client_factory=None,
+        remote_observer=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -605,6 +605,13 @@ class Watcher:
         # all — the same "no swap nodes" shape the two lines above take.
         self._remote_engine_clients = remote_engine_clients
         self._node_agent_client_factory = node_agent_client_factory
+        # The TTL/backoff pacing for the remote half's probes (sglang-omni
+        # Task 7, app.node_clients.RemoteObserver). Shared with the HTTP
+        # paths — deck["remote_observer"] — so a tick and an /api/state in
+        # the same second cost ONE probe per node, not two. None (a caller
+        # built without it) means no remote half at all, the same posture
+        # remote_world_half itself takes for a missing dependency.
+        self._remote_observer = remote_observer
         self._interval = settings.watch_interval
 
         # Characteristics derive pass: refreshes app.characteristics from
@@ -745,10 +752,16 @@ class Watcher:
             # let them declare different things and thrash each other's
             # clocks. A node whose agent is down costs ONE failed gpu read
             # here and reports its engines unknown; it never raises into
-            # this tick.
-            world.update(remote_world_half(
-                self._node_store, self._node_agent_client_factory,
-                self._remote_engine_clients, self._world, self._registry))
+            # this tick — and, since Task 7, not even one per tick: the
+            # SHARED RemoteObserver (deck["remote_observer"], the same
+            # instance the HTTP paths use) paces that probe behind a short
+            # TTL and a per-node backoff, so a powered-off box cannot
+            # stretch every tick past its 5 s transport timeout. It wraps
+            # the same one assembly function, so "one world" still holds.
+            if self._remote_observer is not None:
+                world.update(self._remote_observer.half(
+                    self._node_store, self._node_agent_client_factory,
+                    self._remote_engine_clients, self._world, self._registry))
             policy = self._policy_store.get()
             # While a deliberate unload's suppression window is active, skip
             # pending-load inference entirely so healing can't revert it. Idle

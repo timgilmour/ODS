@@ -802,7 +802,8 @@ def _make_watcher(
     gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
     configurable_engines=None, provenance_store=None, dockerctl=None,
     node_store=None, local_clients=None, litellm=None,
-    remote_engine_clients=None, node_agent_client_factory=None, **sett,
+    remote_engine_clients=None, node_agent_client_factory=None,
+    remote_observer=None, **sett,
 ):
     # T13 review fix (Critical 1): `litellm` used to be hardcoded to a bare
     # `object()` below with no override — silently correct for every
@@ -849,12 +850,16 @@ def _make_watcher(
         # from the lemonade/comfy/hipfire clients above) instead.
         node_store=node_store,
         local_clients=local_clients,
-        # sglang-omni Task 6: the remote half of the tick's world. Both None
-        # (every caller before that task) means "no remote engines" — the
-        # remote half is skipped entirely, exactly as it is for a deck with
-        # no node-agent entry declaring anything.
+        # sglang-omni Task 6: the remote half of the tick's world. All
+        # three None (every caller before that task) means "no remote
+        # engines" — the remote half is skipped entirely, exactly as it is
+        # for a deck with no node-agent entry declaring anything.
+        # `remote_observer` (Task 7) is what paces those probes; production
+        # always supplies one (app.main), so a test driving the remote half
+        # supplies one too or the half is skipped.
         remote_engine_clients=remote_engine_clients,
         node_agent_client_factory=node_agent_client_factory,
+        remote_observer=remote_observer,
     )
     return watcher, events_path
 
@@ -4564,9 +4569,10 @@ def test_load_failure_detail_is_bounded(tmp_path):
 # sglang-omni Task 6 — remote engine observation inside a real tick.
 #
 # The registry state is HAND-BUILT (conftest's HandBuiltRegistry): the Task 5
-# write gate refuses declaring any kind on a node-agent entry until Task 7
-# flips the first `remote_capable` one, and the gate is deliberately not
-# weakened to make this testable. Fixture discipline: node "nimbus" (NOT
+# write gate refuses a LEMONADE-kind declaration on a node-agent entry (still
+# true after Task 7, which made only sglang-omni remote-capable), and these
+# tests deliberately use one — the remote observation path must work for ANY
+# kind, not just the one it was built alongside. The gate is not weakened. Fixture discipline: node "nimbus" (NOT
 # "sparky"), resource "gguf-r" (NOT "omni"), resource != kind name, GPU 4.
 # ===========================================================================
 
@@ -4624,7 +4630,7 @@ class _RemoteWatcher:
 @pytest.fixture
 def remote_engine_watcher(tmp_path, hand_built_registry):
     from app.intent import IntentStore
-    from app.node_clients import RemoteEngineClients
+    from app.node_clients import RemoteEngineClients, RemoteObserver
     from app.state import World
 
     entries = [
@@ -4662,6 +4668,12 @@ def remote_engine_watcher(tmp_path, hand_built_registry):
         read_gpus=lambda drm, kfd: gpus,
         remote_engine_clients=remote_clients,
         node_agent_client_factory=agent_factory,
+        # RE-EXPRESSED (sglang-omni Task 7): the tick reaches the remote
+        # half THROUGH the shared observer now (app.main wires one), so the
+        # fixture supplies one — a real RemoteObserver on its real default
+        # TTL, not a pass-through, because the pacing is part of what these
+        # tests describe.
+        remote_observer=RemoteObserver(),
     )
     return _RemoteWatcher(watcher, clients, intent_store, events_path, world,
                           registry_store, agent_factory, remote_clients, gpus,
@@ -4730,3 +4742,25 @@ def test_tick_survives_a_down_remote_agent_and_still_reconciles(
         "http://nimbus:7720"]
     assert w.clients.fake("gguf-b").loaded == ["b.gguf"]
     assert not any(e["kind"] == "tick-error" for e in tail_events(w.events_path))
+
+
+def test_ticks_pace_the_remote_gpu_probe(remote_engine_watcher):
+    """sglang-omni Task 7 — the pacing obligation, inside the tick loop.
+
+    A powered-off remote node is the NORMAL state, and its GPU read is a 5 s
+    transport timeout. Unpaced, EVERY ~2 s tick paid it. Two ticks in the
+    same instant now cost one probe (the watcher shares the deck's
+    RemoteObserver with the HTTP paths, so they still describe one world).
+
+    Vacuity guard: the probe must have happened at all, and the tick must
+    still have reached reconciliation past the remote half."""
+    w = remote_engine_watcher
+    w.intent_store.record("local/gguf-b", state="loaded", model="b.gguf",
+                          engine="lemonade", actor="operator")
+
+    w.watcher.tick()
+    w.watcher.tick()
+
+    assert [address for address, _c, _a in w.agent_factory.opened] == [
+        "http://nimbus:7720"]
+    assert w.clients.fake("gguf-b").loaded == ["b.gguf"]

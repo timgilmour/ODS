@@ -247,7 +247,12 @@ def _build_deck(settings: Settings) -> dict:
         hipfire = _declared_hipfire
 
     from app.engines.spark import SparkClient
-    from app.node_clients import NodeClients, NodeObservers, RemoteEngineClients
+    from app.node_clients import (
+        NodeClients,
+        NodeObservers,
+        RemoteEngineClients,
+        RemoteObserver,
+    )
 
     def _swap_client_factory(entry: dict, credential: str):
         return SparkClient(node_url=entry["address"], node_key=credential,
@@ -262,6 +267,12 @@ def _build_deck(settings: Settings) -> dict:
     # delegates to build_client for local ones, so no engine name is
     # spelled here.
     remote_engine_clients = RemoteEngineClients(node_store)
+    # ONE observer for the process (sglang-omni Task 7): the watcher and
+    # every HTTP path share it, so a tick and an /api/state in the same
+    # second cost one probe per remote node rather than two — and a
+    # powered-off node backs off instead of costing a 5 s transport timeout
+    # on every ~2 s tick. Same sharing rationale as node_observers above.
+    remote_observer = RemoteObserver()
 
     location_store = LocationStore(data_dir / "locations.json")
     catalog = Catalog(data_dir / "catalog.json", location_store)
@@ -341,6 +352,9 @@ def _build_deck(settings: Settings) -> dict:
         # half of every world snapshot (app.routers.build_world_snapshot
         # and the arbiter tick, both via node_clients.remote_world_half).
         "remote_engine_clients": remote_engine_clients,
+        # ...and the pacing in front of that assembly (Task 7). Both readers
+        # take it from HERE; a deck without it simply has no remote half.
+        "remote_observer": remote_observer,
         # Declared local engines' clients (app.local_clients.LocalClients,
         # Task 3, actuation added Task 6): what World.snapshot reads
         # through for every resource in node_store's local `engines[]`, AND
@@ -443,6 +457,7 @@ def _build_watcher(settings: Settings):
         # describe one world (node_clients.remote_world_half's docstring).
         remote_engine_clients=deck["remote_engine_clients"],
         node_agent_client_factory=deck["node_agent_client_factory"],
+        remote_observer=deck["remote_observer"],
         policy_store=deck["policy_store"],
         events_path=deck["events_path"],
         read_gpus=deck["read_gpus"],

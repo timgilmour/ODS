@@ -594,11 +594,11 @@ _REMOTE_ENGINE = {
 
 def test_node_agent_engines_accepted_with_prereqs(store):
     """Happy path: engines[] on a node-agent entry is no longer an
-    outright refusal. An EMPTY list is the only shape reachable today — no
-    existing kind is `remote_capable` yet (Task 7 adds the first one), so
-    a populated list always fails the kind-not-remote_capable gate below —
-    a vacuously-valid empty declaration, with address + credential both
-    present, is accepted (address+credential are NOT actually required for
+    outright refusal. An EMPTY list is vacuously valid for ANY kind set —
+    every kind named in THIS module is a non-remote-capable one, so a
+    populated list here always fails the kind-not-remote_capable gate below
+    — and with address + credential both present it is accepted
+    (address+credential are NOT actually required for
     an empty list — see test_node_agent_engines_empty_list_accepted_without_credential
     below — but this pins the case where they happen to be present too)."""
     entry = store.add({**_remote_spec(), "engines": []}, credential="key-nimbus")
@@ -639,12 +639,13 @@ def test_node_agent_with_empty_engines_and_no_credential_is_not_bricked(store, t
 def test_require_engine_prereqs_names_missing_fields(store):
     """Direct unit pin of `_require_engine_prereqs`'s own checklist
     contract. Exercised directly (not through add()/update()) because it
-    is UNREACHABLE through the public API today by construction: the
-    callers now gate it on a NON-EMPTY engines list (see the not-bricked
-    regression above), and any non-empty list on a node-agent spec fails
-    `_validate`'s kind-not-remote_capable check FIRST — no kind is
-    remote_capable until Task 7 (see the ordering test below). The method
-    itself still needs to be correct for when Task 7 makes it reachable."""
+    is UNREACHABLE through the public API for the kinds THIS module
+    declares: the callers gate it on a NON-EMPTY engines list (see the
+    not-bricked regression above), and any non-empty LEMONADE-kind list on
+    a node-agent spec fails `_validate`'s kind-not-remote_capable check
+    FIRST (see the ordering test below). Task 7's remote-capable kind made
+    it reachable in general; it is still exercised directly here because
+    that remains the only way to reach it from this module's fixtures."""
     with pytest.raises(ValueError, match="credential") as exc:
         store._require_engine_prereqs({"address": "http://nimbus:7720"},
                                        credential_present=False)
@@ -652,9 +653,11 @@ def test_require_engine_prereqs_names_missing_fields(store):
 
 
 def test_node_agent_engines_kind_not_remote_capable_refused_naming_kind(store):
-    """Every declared kind must be `remote_capable`; none of today's three
-    are, so a populated list is always refused, BY NAME, even with every
-    other prerequisite (address + credential) satisfied."""
+    """Every declared kind must be `remote_capable`; the E1 triple are not,
+    so a lemonade-kind list is refused BY NAME even with every other
+    prerequisite (address + credential) satisfied. Still exactly the live
+    behavior after Task 7 — that task made ONE kind remote-capable, it did
+    not make the gate permissive."""
     with pytest.raises(ValueError, match="lemonade"):
         store.add({**_remote_spec(), "engines": [_REMOTE_ENGINE]},
                   credential="key-nimbus")
@@ -693,9 +696,9 @@ def test_heal_preserves_empty_engines_on_node_agent_entry(store, tmp_path):
 
 
 def test_heal_node_agent_entry_with_non_remote_capable_kind_heals_to_empty(store, tmp_path):
-    """A hand-edited node-agent entry with a POPULATED engines list — not
-    legally reachable through add()/update() until Task 7 adds a
-    remote_capable kind — heals to [] rather than being dropped or
+    """A hand-edited node-agent entry with a POPULATED engines list of a
+    NON-remote-capable kind — never legally reachable through
+    add()/update() — heals to [] rather than being dropped or
     crashing the load, same posture as a local entry's schema-invalid
     engines (test_load_heals_local_entry_with_invalid_engines above)."""
     good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",

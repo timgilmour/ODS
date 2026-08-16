@@ -38,7 +38,31 @@ resource, never a fixed `world["tenants"]["lemonade"]` index) and
 whether THAT resource's own client currently has something loaded worth
 protecting) both iterate the live declaration and ask the matching
 adapter, rather than assuming a single resource literally named
-"lemonade" is the only GGUF server that could exist."""
+"lemonade" is the only GGUF server that could exist.
+
+Two more methods joined the protocol on the sglang-omni branch, recorded
+HERE so the next reader finds the whole surface in one place:
+
+* `unknown()` (Task 6) — REQUIRED of every kind: that kind's own "we failed
+  to look" record, the exact dict its own `observe` returns on
+  ``EngineError``, callable by a caller holding NO client at all (a
+  DECLARED engine on a node the deck cannot reach must still appear, as
+  unknown). Only this module knows a kind's record SHAPE; a caller
+  synthesizing `{"state": "unknown"}` would be guessing one, and
+  tests/test_engine_kinds.py proves each kind's `unknown()` equals its own
+  `observe()` on an engine failure so the two can never drift.
+* `build_remote_client(address, credential, resource, connection)` (Task 6,
+  first implemented Task 7) — OPTIONAL: the constructor for a kind declared
+  on a node-agent entry, called by `app.node_clients._adapter_remote_client`
+  exactly as `build_client` is called by `app.local_clients` for local ones.
+  A kind that omits it cannot run off-box at all, and
+  `RemoteEngineClients.client_for` answers None ("not operable") for a
+  declaration naming it — never a crash. The three E1 kinds omit it;
+  sglang-omni is the first that has one (and, symmetrically, the first whose
+  `build_client` REFUSES: it speaks the node-agent wire, so there is nothing
+  to build for a local declaration)."""
+
+from datetime import UTC, datetime, timedelta
 
 from app.engines import EngineError, GuardError
 from app.engines.comfyui import ComfyClient
@@ -46,7 +70,8 @@ from app.engines.docker_ctl import DockerCtl
 from app.engines.hipfire import HipfireClient
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
-from app.observe import local_key
+from app.engines.sglang_omni import SglangOmniClient
+from app.observe import local_key, node_key
 from app.registry import HIPFIRE_FOOTPRINT
 
 _OPENAI_PREFIX = "openai/"
@@ -86,18 +111,64 @@ _SLACK_BYTES = 1024**3  # 1 GiB
 # separate, coexistence-era construction this task doesn't migrate.
 _HIPFIRE_PORT = 11435
 
+# What an sglang-omni-kind engine holds while resident, MEASURED (GF5, the
+# 2026-08-16 gate run on sparky): ~62 GiB — weights plus overhead, with the
+# KV ceiling at 36 G under --mem-fraction-static 0.30. Declared rather than
+# inferred from GPU usage (comfyui's approach) because the GPU belongs to
+# another machine: its unexplained usage is that box's arithmetic, not this
+# deck's. One number for the kind, not per resource — a second sglang-omni
+# declaration serving a different checkpoint would need this to become
+# declaration-sourced, which is why `reclaimable` returns it rather than
+# callers reading the constant.
+_SGLANG_OMNI_FOOTPRINT = 62 * 1024**3
+
+# How long after a deliberate load a `down` observation may still be called
+# "booting" (see _SglangOmniAdapter.warming). GF4 measured ~3.5-4.5 min cold
+# container-start to healthy; doubled, the same generosity margin
+# app.engines.spark's _BOOT_WINDOW_MAX_S takes over its own worst observed
+# boot — the cost of being too generous is a delayed restore, the cost of
+# being too tight is restore-storming a booting engine into quarantine.
+_SGLANG_OMNI_WARM_WINDOW_S = 600
+
+
+def _within(ts: str | None, now: datetime | None, window_s: float) -> bool:
+    """Whether ISO timestamp `ts` is less than `window_s` ago.
+
+    Unparseable/absent reads FALSE (not recent) — see
+    `_SglangOmniAdapter.warming` for why this fails the opposite way from
+    app.engines.spark's `_recent`, which shares this shape.
+    """
+    if not isinstance(ts, str) or not ts:
+        return False
+    try:
+        stamped = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) - stamped < timedelta(seconds=window_s)
+
+
 # kind -> {"connection": {field -> required?}, "remote_capable": bool}
 # `remote_capable` (E1 Task 5): whether this kind may be declared on a
 # node-agent entry's engines[] (deck's registry write gate, app/node_store.py
-# `_validate`/`_heal_engines`), not just the local entry's. All three of
-# today's kinds run in-process with the deck (lemonade/comfyui/hipfire are
-# all sibling containers on THIS box) — none of them is a remote-capable
-# kind. Task 7 adds the first one ("sglang-omni").
+# `_validate`/`_heal_engines`), not just the local entry's. The E1 triple all
+# run in-process with the deck (lemonade/comfyui/hipfire are sibling
+# containers on THIS box) — none of them is a remote-capable kind.
+# "sglang-omni" (Task 7) is the first that is: every probe and every verb
+# rides a node-agent, so it can ONLY run off-box.
 KNOWN_KINDS: dict[str, dict[str, object]] = {
     "lemonade": {"connection": {"url": True, "metrics_url": True, "container": True},
                  "remote_capable": False},
     "comfyui": {"connection": {"url": True}, "remote_capable": False},
     "hipfire": {"connection": {"container": True}, "remote_capable": False},
+    # One declared field, deliberately: everything the PROBE needs
+    # (health_url, the busy-count port, the compose file) lives in the
+    # node's own host-owned engines.json allowlist (ruling A1) — the deck
+    # cannot name a compose file to run. `url` is the operator's record of
+    # where this engine serves, carried in the declaration so the board can
+    # show it; the deck never dials it directly (it talks to the agent).
+    "sglang-omni": {"connection": {"url": True}, "remote_capable": True},
 }
 
 _POLICY_FIELDS = {"priority": int, "pinned": bool, "idle_ttl": int}
@@ -742,10 +813,386 @@ class _HipfireAdapter:
         client.resume()
 
 
+class _SglangOmniAdapter:
+    """sglang-omni-kind: a whole ENGINE brought up/down on another box
+    through its node-agent (load/unload = the container's compose lifecycle),
+    idle-clock tracked by the agent's in-flight request count.
+
+    The first kind that does not run beside the deck. Three consequences
+    shape everything below:
+
+    * **Every probe is one node-agent call.** `client` is an
+      app.engines.sglang_omni.SglangOmniClient, and `status()` answers the
+      agent's wire dict verbatim: ``{"reachable", "healthy",
+      "busy_requests"}``. There is no second surface to ask (GF1: the engine
+      serves ``/health`` and ``/v1/*`` and nothing else), so this adapter
+      reads exactly those three fields.
+    * **The busy indicator can be unavailable, and that reads as BUSY.**
+      GF3 closed negative: MiniMax-Music3 has no metrics endpoint at this
+      pin, so "in flight" is an agent-side count of established connections
+      on the serving port. `None` means the agent could not take that count
+      — design §4 binds the unavailable indicator to fail toward ALIVE,
+      because a song render runs for minutes and holds its connection the
+      whole time. Reading `None` as 0 would idle-release a running render.
+      The invariant lives in `reclaimable` (below), not at the call sites.
+    * **A load takes minutes, not seconds.** GF4: ~3.5-4.5 min cold. See
+      `warming` for the window that keeps the reconciler from calling a boot
+      in progress a death.
+    """
+
+    def observe(self, client, mem: dict, now: float, ctx: dict) -> dict:
+        # `ctx` is unused for this kind (no registry footprint to look up —
+        # the footprint is declared, see reclaimable — and no litellm route
+        # table: that one is the LOCAL box's, and World.snapshot_remote
+        # hands remote kinds None for it). Kept in the signature for adapter
+        # -interface uniformity, same as hipfire's unused `mem`.
+        try:
+            status = client.status()
+        except EngineError:
+            # We failed to LOOK. That is not an idle observation, so the
+            # activity clock is re-armed on the way out (see the state arms
+            # below for why every non-idle answer re-arms).
+            mem["last_activity_time"] = now
+            return self.unknown()
+
+        busy = status["busy_requests"]
+        if not status["healthy"]:
+            # Covers both "the agent reached the port but /health is not
+            # 200" and "nothing is listening" (`reachable` False) — the deck
+            # acts on the same fact either way: the engine is not serving.
+            # Distinguishing them would buy nothing an operator can use and
+            # a state the reconciler cannot act on differently.
+            #
+            # Re-armed rather than accrued: an engine that was DOWN for ten
+            # minutes and has only now come up healthy has been idle for
+            # seconds. Accruing across the down window would put it past any
+            # sane idle_ttl on its FIRST healthy tick, i.e. the deck
+            # unloading what it just spent ~4 minutes (GF4) booting.
+            mem["last_activity_time"] = now
+            return {"state": "down", "busy_requests": busy, "model": None,
+                    "idle_s": None}
+
+        if busy is None or busy > 0:
+            # `None` lands here deliberately (design §4, this class's own
+            # docstring): unavailable fails toward alive, clock included —
+            # a run of unavailable indicators must not quietly accrue the
+            # idle time that authorizes an unload.
+            mem["last_activity_time"] = now
+            state = "busy"
+        else:
+            state = "idle"
+            if mem.get("last_activity_time") is None:
+                # First-ever observation: establish a baseline so idle_s is
+                # always computable from here on (the comfyui-kind
+                # precedent), even when the very first look finds it idle.
+                mem["last_activity_time"] = now
+
+        return {
+            "state": state,
+            "busy_requests": busy,
+            # GF2: the engine's own model id is `/model`, the container's
+            # mount path rather than an identity — never trusted. The
+            # declaration carries no model name either (one engine, one
+            # checkpoint, chosen by the node's compose file), so identity is
+            # None exactly as it is for every other single-model engine;
+            # app.lifecycle.derive_status's "loaded, no opinion which model"
+            # branch is what consumes that.
+            "model": None,
+            "idle_s": now - mem["last_activity_time"],
+        }
+
+    def unknown(self) -> dict:
+        """This kind's own "we failed to look" record — the exact dict
+        ``observe`` returns on ``EngineError``, named (sglang-omni Task 6)
+        so a caller holding NO client at all can still report it.
+
+        A DECLARED engine on a node the deck cannot reach — its agent did
+        not answer, its credential vanished, its kind has no remote
+        constructor — must still appear in the world, as unknown. Only this
+        module knows what a record of THIS kind looks like (state/
+        busy_requests/model/idle_s); a caller synthesizing a bare
+        ``{"state": "unknown"}`` would be guessing that shape, and a guess
+        that drifts from the real one is how a downstream KeyError gets in.
+        ``observe``'s own EngineError arm returns THIS, so the two can never
+        disagree.
+        """
+        return {"state": "unknown", "busy_requests": None, "model": None,
+                "idle_s": None}
+
+    def active(self, obs: dict) -> bool:
+        # Idle counts as active: the engine holds ~62 GiB (GF5) between
+        # renders, so "idle" describes its REQUEST queue, not its residency
+        # — the same reading app.observe's module docstring already spells
+        # out for comfyui. `observe` emits only busy/idle/down/unknown, so
+        # these two ARE the resident states; there is no separate "loaded".
+        return obs["state"] in ("busy", "idle")
+
+    def uses_gguf(self, obs: dict) -> str | None:
+        # sglang-omni serves a HF checkpoint mounted into its container on
+        # another box, never a GGUF unit in this box's storage catalog.
+        # Defined for adapter-interface completeness.
+        return None
+
+    def arbiter_verbs(self) -> frozenset:
+        return frozenset({"unload"})
+
+    def human_verbs(self) -> frozenset:
+        # load/unload ONLY — never park/resume. livetests/test_safe_sets.py's
+        # FORBIDDEN_STEPS keeps its meaning because of this line: "park"/
+        # "resume" appearing in a plan still means "touches hipfire".
+        return frozenset({"load", "unload"})
+
+    def demand(self) -> bool:
+        # No pending-load inference: nothing routes chat traffic at this
+        # engine (music generation is not chat-completions-shaped, design
+        # §8), so there is no "someone asked for a model that isn't loaded"
+        # signal to demand one from.
+        return False
+
+    def idle_action(self, obs: dict, policy: dict, gpu: dict | None, co_footprints: int) -> dict | None:
+        # The comfyui-kind shape, with the busy count in place of the queue
+        # depth. `model: None` rides along for the same reason `observe`
+        # reports none (see there).
+        if (
+            obs["state"] == "idle"
+            # Belt AND braces with `reclaimable` below: an idle observation
+            # whose busy count is UNAVAILABLE must never authorize an
+            # unload — a five-minute render is exactly what would be killed.
+            and obs["busy_requests"] == 0
+            and not policy["pinned"]
+            and policy["idle_ttl"] > 0
+            and obs["idle_s"] is not None
+            and obs["idle_s"] >= policy["idle_ttl"]
+            # An unload that can't reclaim anything is a no-op that re-arms
+            # the TTL and re-fires forever (the comfyui free-spam lesson).
+            # Structurally unreachable today — this kind's footprint is a
+            # declared non-zero constant — and kept because the predicate,
+            # not the constant, is the contract: a future declared-footprint
+            # source (per-node, per-model) could answer 0.
+            and self.reclaimable(obs, gpu, co_footprints) != 0
+        ):
+            return {"type": "unload", "model": obs["model"]}
+        return None
+
+    def reclaimable(self, obs: dict, gpu: dict | None, co_footprints: int) -> int | None:
+        """The bytes an unload would return to the node, or None when this
+        resource is not an eviction/idle candidate at all.
+
+        THE busy-signal invariant's home (design §4 / the plan's Global
+        Constraints: "implement in reclaimable, not at call sites"): None
+        unless the engine is observed idle AND its busy count is a real 0.
+        A `None` count — the agent could not take it — is not proof of an
+        idle engine, and a busy one is proof of the opposite.
+
+        `gpu`/`co_footprints` are accepted for interface uniformity and
+        ignored, unlike comfyui's: this kind's footprint is DECLARED (GF5,
+        measured at the 2026-08-16 gate), not inferred from a GPU's
+        unexplained usage — and the GPU in question belongs to another
+        machine, whose co-residency arithmetic is that box's own.
+        """
+        if obs["state"] != "idle" or obs["busy_requests"] != 0:
+            return None
+        return _SGLANG_OMNI_FOOTPRINT
+
+    def warming(self, intent: dict | None, obs: dict, now: datetime | None = None) -> bool:
+        """Whether a `down` observation is really a LOAD STILL IN FLIGHT.
+
+        GF4: a cold start takes ~3.5-4.5 minutes, and for all of it the
+        engine observes exactly like one that died — the deck asked the
+        agent to bring it up, got a 202, and now sees nothing listening.
+        Read as a death, the reconciler restores it every cooldown and
+        quarantines it before it ever finishes booting.
+
+        Both conditions are required, and each drops a different false
+        reading — the same shape as app.engines.spark's `boot_in_flight`,
+        for the same reason:
+
+        * intent must be `loaded` — an engine nobody asked to be up is not
+          booting, it is off;
+        * the record must be RECENT. This is the one that is easy to miss:
+          an intent record persists forever, so "we once asked for this" +
+          "it is down" would shield a model that died hours later from
+          restore permanently — the 26-hour hipfire failure exactly.
+
+        A missing or unparseable `updated_ts` reads as NOT warming here,
+        the opposite of `boot_in_flight`'s "unsure means do not act": what
+        is at stake is inverted. There, guessing wrong interrupts a live
+        multi-minute swap; here, guessing wrong means never restoring a
+        genuinely dead engine, and a redundant restore is cheap (`up()` is
+        `docker compose up -d`, a no-op on a container already running).
+
+        NOT wired into the observation path yet, deliberately: `observe`
+        cannot see intent (app.state/app.observe are intent-blind BY
+        DESIGN — that separation is why app.lifecycle exists), so the join
+        belongs where intent and observation already meet. Task 9 owns that
+        wiring together with the remote reconcile proofs; this is the rule
+        it consumes, proven on its own.
+        """
+        if intent is None or intent.get("state") != "loaded":
+            return False
+        if obs["state"] != "down":
+            return False
+        return _within(intent.get("updated_ts"), now, _SGLANG_OMNI_WARM_WINDOW_S)
+
+    def build_client(self, connection: dict, settings):
+        """REFUSED, by name: this kind speaks the node-agent wire, so there
+        is no local client to build for a declaration on the local entry.
+
+        Defined rather than omitted so the failure is a one-line refusal
+        naming the kind, instead of the bare AttributeError an absent method
+        would raise from inside app.local_clients on every world snapshot.
+        Reachable only by declaring sglang-omni on the LOCAL node —
+        `validate_engines` has no "local_capable" gate to refuse that at the
+        boundary (KNOWN_KINDS carries `remote_capable` only), so this is the
+        honest answer until one exists.
+        """
+        raise ValueError(
+            "kind 'sglang-omni' has no local client: it runs through a "
+            "node-agent — declare it on a node-agent entry, not on 'local'")
+
+    def build_remote_client(self, address: str, credential: str, resource: str,
+                            connection: dict):
+        """This kind's remote constructor, called by
+        app.node_clients._adapter_remote_client (the remote counterpart of
+        `build_client`). `connection` is accepted and unused: the probe's
+        own address is the node's engines.json entry, host-owned per ruling
+        A1, and the declared `url` is the operator's record of where the
+        engine serves (see KNOWN_KINDS' comment)."""
+        return SglangOmniClient(address, credential, resource)
+
+    def restart_container(self, entry: dict) -> str | None:
+        # No GGUF store to register a moved-in file into, and the container
+        # is on another box besides — app.notify walks the LOCAL declaration
+        # only. Defined for adapter-interface completeness.
+        return None
+
+    def execute_unload(self, watcher, resource: str, client, model: str | None,
+                       actuated: set[str], *, node_id: str) -> None:
+        """Bring the engine DOWN on its node, recording intent first.
+
+        `node_id` is keyword-only and REQUIRED — the one signature
+        difference from the lemonade-kind actuator, and deliberate: this
+        kind's intent key is ``<node>/<resource>``, and there is no safe
+        default for the node half. A caller that forgets it gets a TypeError
+        (loud, at the call site) rather than a silently mis-keyed record
+        against the LOCAL node's resource of the same name — the exact
+        cross-node collision `node_key` exists to prevent.
+
+        `model` is accepted for signature parity with the lemonade-kind
+        actuator and is always None for this kind (one engine, one
+        checkpoint — see `observe`).
+        """
+        key = node_key(node_id, resource)
+        # Whoever actuates, records — and records FIRST, so a tick landing
+        # mid-unload derives 'parked', never 'down'. actor="deck": this is
+        # the arbiter's OWN automatic action (idle release), never an
+        # operator's. Prior record snapshotted so a FAILED unload can roll
+        # it back.
+        prior = None
+        if watcher._intent_store is not None:
+            prior = watcher._intent_store.get().get(key)
+            watcher._intent_store.record(
+                key, state="unloaded", model=None, engine="sglang-omni",
+                actor="deck")
+        # Added BEFORE the engine call so the invariant stays structural.
+        actuated.add(key)
+        try:
+            client.down()
+        except EngineError as exc:
+            # Per-action isolation: a raise here must not abort the
+            # remaining actions or the reconcile/derive passes. Logged
+            # BEFORE the rollback — the diagnostic must not be contingent on
+            # the rollback succeeding. `node` rides in the detail alongside
+            # `resource` for the same reason `resource` does on the
+            # lemonade-kind arm: `_log`'s failure-dedup memo keys on the
+            # detail, so two nodes' same-named resources failing identically
+            # must not collapse into one line.
+            watcher._log("unload-failed",
+                         {"node": node_id, "resource": resource,
+                          "error": _error_text(exc)})
+            # A real compare-and-swap (predicate + write in ONE critical
+            # section): an operator can record a deliberate load during the
+            # seconds this call hung, and blindly putting `prior` back would
+            # silently revert THEIR action. Still the speculative record
+            # this arm wrote? It is deck-authored AND unloaded; an
+            # operator's write flips actor to "operator".
+            def _still_ours(current):
+                return (current is not None
+                        and current.get("actor") == "deck"
+                        and current.get("state") == "unloaded")
+
+            if watcher._intent_store is not None and prior is not None:
+                if not watcher._intent_store.put_back_if(key, _still_ours, prior):
+                    watcher._log("unload-rollback-skipped",
+                                 {"node": node_id, "resource": resource,
+                                  "reason": "intent changed during the unload"})
+        else:
+            # A successful unload between two identical failures must not
+            # swallow the second one.
+            watcher._clear_failure_dedup()
+            watcher._log(f"unload_{resource}", {"node": node_id})
+            # NOT armed: watcher._heal_suppressor. That window exists to stop
+            # the LOCAL contention-healing path from re-loading a deliberately
+            # unloaded lemonade model (HealSuppressor's own docstring names
+            # the kind); arming it from a remote node's unload would suppress
+            # this box's healing for another box's action.
+
+    def execute_load(self, watcher, resource: str, client, pending: dict,
+                     actuated: set[str], *, node_id: str) -> None:
+        """Bring the engine UP on its node, recording intent first. See
+        `execute_unload` for what `node_id` is and why it is required.
+
+        `pending` is accepted for signature parity with the lemonade-kind
+        actuator and its `model` is deliberately NOT read: this kind serves
+        one checkpoint, chosen by the node's compose file, so the recorded
+        model is always None (see `observe`). Reading a caller's model here
+        would write an identity the engine can never be compared against,
+        and `derive_status` would then report permanent drift.
+
+        The arbiter never reaches this today (`demand()` is False, so there
+        is no pending-load retrigger for this kind); it is the load half of
+        the same record-first discipline, for the reconcile/heal paths Task
+        9 wires.
+        """
+        key = node_key(node_id, resource)
+        if watcher._intent_store is not None:
+            watcher._intent_store.record(
+                key, state="loaded", model=None, engine="sglang-omni",
+                actor="deck")
+        actuated.add(key)
+        try:
+            client.up()
+        except EngineError as exc:
+            # No rollback here, the same deliberate asymmetry the
+            # lemonade-kind load arm documents: a failed load derives 'down'
+            # and the reconciler retries under the existing failure budget.
+            # Forgetting the intent would make the deck forget it ever
+            # wanted the engine up.
+            watcher._log("load-failed",
+                         {"node": node_id, "resource": resource,
+                          "error": _error_text(exc)})
+        else:
+            watcher._clear_failure_dedup()
+            watcher._log("load-retriggered", {"node": node_id,
+                                              "resource": resource})
+
+    def restore(self, client, model: str | None) -> None:
+        """The REAL restore call for an sglang-omni-kind resource: ask the
+        node to bring the engine up. `model` is unused (this kind's intent
+        always carries model=None) — kept for signature parity with the
+        other kinds' restore. 202-async by contract: the request is queued
+        for the node's swap-helper and this call does not wait for it (see
+        app/engines/sglang_omni.py's module docstring — the deck's own
+        reconciler paces retries, a client that retried here would fight
+        it)."""
+        client.up()
+
+
 # kind -> adapter instance. One instance per kind is enough — adapters carry
 # no per-resource state (that lives in World's `_mem`, keyed by resource).
 ENGINE_KINDS: dict[str, object] = {
     "lemonade": _LemonadeAdapter(),
     "comfyui": _ComfyAdapter(),
     "hipfire": _HipfireAdapter(),
+    "sglang-omni": _SglangOmniAdapter(),
 }

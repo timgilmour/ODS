@@ -210,9 +210,11 @@ def test_invalidate_reaches_the_right_observer(store, clients):
 # Fixture discipline ([[defaults-that-hide-bugs]]): node "nimbus" (NOT
 # "sparky"), resource "gguf-r" (NOT "omni"), resource != kind name,
 # gpu_index 4. The registry states here are HAND-BUILT (conftest's
-# HandBuiltRegistry) because the Task 5 write gate refuses declaring any
-# kind on a node-agent entry until Task 7 flips the first `remote_capable`
-# one — see that class's docstring; the gate is deliberately not weakened.
+# HandBuiltRegistry) because the Task 5 write gate refuses a LEMONADE-kind
+# declaration on a node-agent entry — still true after Task 7, which made
+# only sglang-omni remote-capable — and these tests deliberately use one, so
+# nothing here can pass by riding on the one kind the paths under test were
+# built for. See that class's docstring; the gate is not weakened.
 # ===========================================================================
 
 _R_CONNECTION = {"url": "http://gguf-r:8080",
@@ -487,3 +489,282 @@ def test_remote_world_half_probes_only_nodes_that_declare_engines(registry):
                       World(), object())
 
     assert factory.opened == [("http://nimbus:7720", "key-nimbus")]
+
+
+# ===========================================================================
+# sglang-omni Task 7 — probe pacing (RemoteObserver).
+#
+# With the first `remote_capable` kind live, the remote half's probes are on
+# the hot path: the per-node `GET /v1/node/gpu` and every declared engine's
+# status fire on EVERY ~2 s arbiter tick AND every /api/state, each behind a
+# 5 s transport timeout. One powered-off node would stretch every tick past
+# 5 s — the exact problem SparkObserver already solves for the swap half
+# (app/observe.py's own comments), so this mirrors its shape: a short TTL on
+# success, a growing per-node backoff on failure.
+#
+# Fixture discipline: nodes "nimbus"/"cirrus" (never the live-seeded
+# "sparky"), resource "song-r" (never "omni"), GPU 4, TTL/backoff set to
+# values that are NOT the defaults so nothing passes by coincidence.
+# ===========================================================================
+
+_OMNI_ENGINE = {"resource": "song-r", "kind": "sglang-omni",
+                "connection": {"url": "http://127.0.0.1:8008"}, "gpu_index": 4,
+                "policy_defaults": {"priority": 5, "pinned": False,
+                                    "idle_ttl": 120}}
+
+_PACED_TTL_S = 7.0
+_PACED_BACKOFF_S = 21.0
+
+
+def _paced_entries():
+    return [
+        {"id": "local", "label": "This Box", "agent_kind": "local",
+         "control": "none", "engines": []},
+        {"id": "nimbus", "label": "Nimbus Box", "agent_kind": "node-agent",
+         "address": "http://nimbus:7720", "control": "none",
+         "engines": [dict(_OMNI_ENGINE)]},
+        {"id": "cirrus", "label": "Cirrus Box", "agent_kind": "node-agent",
+         "address": "http://cirrus:7720", "control": "none",
+         "engines": [dict(_OMNI_ENGINE)]},
+    ]
+
+
+class _CountingOmni:
+    """A remote engine client that counts its probes — the per-tenant half
+    of "at most one probe per node per TTL"."""
+
+    def __init__(self) -> None:
+        self.status_calls = 0
+
+    def status(self) -> dict:
+        self.status_calls += 1
+        return {"reachable": True, "healthy": True, "busy_requests": 0}
+
+    def close(self) -> None:
+        pass
+
+
+class _Paced:
+    """One RemoteObserver plus the fakes it paces, on a fake clock."""
+
+    def __init__(self, registry, agents, ttl_s=_PACED_TTL_S,
+                 backoff_base_s=_PACED_BACKOFF_S, backoff_max_s=600.0) -> None:
+        from app.node_clients import RemoteObserver
+
+        self.registry = registry
+        self.agents = agents            # node id -> _FakeAgent
+        self.opened = []
+        self.engines = {}               # (node, resource) -> _CountingOmni
+        self.now = 1000.0
+        self.world = World()
+        self.observer = RemoteObserver(ttl_s=ttl_s, backoff_base_s=backoff_base_s,
+                                       backoff_max_s=backoff_max_s,
+                                       clock=lambda: self.now)
+        self.remote_clients = RemoteEngineClients(registry, self._engine_client)
+
+    def _engine_client(self, entry, credential, engine):
+        key = (entry["id"], engine["resource"])
+        return self.engines.setdefault(key, _CountingOmni())
+
+    def _agent_factory(self, address, credential):
+        self.opened.append(address)
+        for node_id, agent in self.agents.items():
+            if address == f"http://{node_id}:7720":
+                return agent
+        raise AssertionError(f"unexpected address {address!r}")
+
+    def half(self) -> dict:
+        return self.observer.half(self.registry, self._agent_factory,
+                                  self.remote_clients, self.world, object())
+
+    def gpu_probes(self, node_id) -> int:
+        return self.agents[node_id].calls
+
+    def status_probes(self, node_id) -> int:
+        client = self.engines.get((node_id, "song-r"))
+        return 0 if client is None else client.status_calls
+
+
+def _pool(index=4):
+    return {"gpus": [{"index": index, "memory_total_mb": 8, "memory_used_mb": 3}]}
+
+
+@pytest.fixture
+def paced(hand_built_registry):
+    registry = hand_built_registry(
+        _paced_entries(), {"nimbus": "key-nimbus", "cirrus": "key-cirrus"})
+    return _Paced(registry, {"nimbus": _FakeAgent(_pool()),
+                             "cirrus": _FakeAgent(_pool())})
+
+
+def test_remote_observer_probes_each_node_at_most_once_within_the_ttl(paced):
+    """THE pacing property: N ticks inside one TTL cost one probe per node —
+    both halves, the agent's GPU read AND each declared engine's status."""
+    for _ in range(5):
+        paced.now += 1.0            # five ~ticks, all inside the 7 s TTL
+        paced.half()
+
+    assert paced.gpu_probes("nimbus") == 1
+    assert paced.gpu_probes("cirrus") == 1
+    assert paced.status_probes("nimbus") == 1
+    assert paced.status_probes("cirrus") == 1
+
+
+def test_remote_observer_serves_the_same_observation_from_the_cache(paced):
+    """Not merely fewer probes — the same ANSWER, so a tick and an
+    /api/state in the same second can never describe different worlds."""
+    first = paced.half()
+    paced.now += 1.0
+    second = paced.half()
+
+    assert second["remote_tenants"]["nimbus/song-r"]["state"] == "idle"
+    assert second == first
+
+
+def test_remote_observer_reprobes_once_the_ttl_lapses(paced):
+    paced.half()
+
+    paced.now += _PACED_TTL_S
+    paced.half()
+
+    assert paced.gpu_probes("nimbus") == 2
+    assert paced.status_probes("nimbus") == 2
+
+
+def test_remote_observer_serves_the_cached_unknown_after_a_failure(paced):
+    """A powered-off box is the NORMAL state of a remote node. The first
+    probe eats one transport timeout; every tick until the TTL lapses is
+    served from cache — unknown, never "nothing is loaded"."""
+    paced.agents["nimbus"] = _FakeAgent(raises=NodeAgentUnreachable("refused"))
+
+    first = paced.half()
+    for _ in range(4):
+        paced.now += 1.0
+        paced.half()
+
+    assert paced.gpu_probes("nimbus") == 1
+    assert first["remote_gpus"]["nimbus"] is None
+    assert first["remote_tenants"]["nimbus/song-r"]["state"] == "unknown"
+    # The engine itself was never probed: with the node's own liveness read
+    # already failed, N per-engine probes would only buy N more timeouts.
+    assert paced.status_probes("nimbus") == 0
+
+
+def test_remote_observer_backs_a_failed_node_off_past_the_plain_ttl(paced):
+    """A node that did not answer is not retried on the very next TTL — at
+    a 10 s TTL a powered-off box would still cost a 5 s timeout every 10 s,
+    which is the whole problem. Growing backoff, SparkObserver's shape."""
+    paced.agents["nimbus"] = _FakeAgent(raises=NodeAgentUnreachable("refused"))
+    paced.half()
+
+    paced.now += _PACED_TTL_S            # TTL lapsed, backoff has not
+    paced.half()
+
+    assert paced.gpu_probes("nimbus") == 1
+    assert paced.half()["remote_tenants"]["nimbus/song-r"]["state"] == "unknown"
+
+
+def test_remote_observer_retries_a_failed_node_once_its_backoff_lapses(paced):
+    paced.agents["nimbus"] = _FakeAgent(raises=NodeAgentUnreachable("refused"))
+    paced.half()
+
+    paced.now += _PACED_BACKOFF_S
+    paced.half()
+
+    assert paced.gpu_probes("nimbus") == 2
+
+
+def test_remote_observer_backoff_grows_with_repeated_failures(paced):
+    """Two failures must wait longer than one — otherwise a box that has
+    been off for a week is polled as hard as one that blinked."""
+    paced.agents["nimbus"] = _FakeAgent(raises=NodeAgentUnreachable("refused"))
+    paced.half()
+    paced.now += _PACED_BACKOFF_S
+    paced.half()                          # second failure
+
+    paced.now += _PACED_BACKOFF_S         # enough for the FIRST backoff only
+    paced.half()
+
+    assert paced.gpu_probes("nimbus") == 2
+
+
+def test_remote_observer_backoff_is_capped(paced):
+    """Uncapped doubling would eventually mean a node that recovered is
+    never looked at again."""
+    from app.node_clients import RemoteObserver
+
+    paced.observer = RemoteObserver(ttl_s=_PACED_TTL_S, backoff_base_s=_PACED_BACKOFF_S,
+                                    backoff_max_s=_PACED_BACKOFF_S,
+                                    clock=lambda: paced.now)
+    paced.agents["nimbus"] = _FakeAgent(raises=NodeAgentUnreachable("refused"))
+    for _ in range(4):
+        paced.half()
+        paced.now += _PACED_BACKOFF_S
+
+    assert paced.gpu_probes("nimbus") == 4
+
+
+def test_remote_observer_keeps_a_live_node_fresh_while_a_dead_one_backs_off(paced):
+    """The backoff is per NODE, not per half: one powered-off box must not
+    freeze the deck's view of a healthy one for five minutes."""
+    paced.agents["nimbus"] = _FakeAgent(raises=NodeAgentUnreachable("refused"))
+    paced.half()
+
+    paced.now += _PACED_TTL_S
+    paced.half()
+
+    assert paced.gpu_probes("nimbus") == 1
+    assert paced.gpu_probes("cirrus") == 2
+
+
+def test_remote_observer_recovery_resets_the_backoff(paced):
+    """A node that answers again is back on the plain TTL immediately —
+    its failure history described a state it is no longer in."""
+    paced.agents["nimbus"] = _FakeAgent(raises=NodeAgentUnreachable("refused"))
+    paced.half()
+    paced.now += _PACED_BACKOFF_S
+    paced.agents["nimbus"] = _FakeAgent(_pool())
+    paced.half()                                   # recovered
+
+    paced.now += _PACED_TTL_S
+    paced.half()
+
+    assert paced.gpu_probes("nimbus") == 2         # the fresh agent, twice
+    assert paced.half()["remote_tenants"]["nimbus/song-r"]["state"] == "idle"
+
+
+def test_remote_observer_invalidate_forces_a_fresh_probe(paced):
+    """Call it after ACTING on a node (a load/unload), whose whole purpose
+    is to change what this caches — SparkObserver.invalidate's rationale."""
+    paced.half()
+
+    paced.observer.invalidate()
+    paced.half()
+
+    assert paced.gpu_probes("nimbus") == 2
+
+
+def test_remote_observer_default_ttl_paces_a_burst_of_ticks(hand_built_registry):
+    """The DEFAULT constructor (what production uses) paces too — a test
+    that only ever passed explicit TTLs would not catch a default of 0."""
+    from app.node_clients import RemoteObserver
+
+    registry = hand_built_registry(
+        _paced_entries(), {"nimbus": "key-nimbus", "cirrus": "key-cirrus"})
+    paced = _Paced(registry, {"nimbus": _FakeAgent(_pool()),
+                              "cirrus": _FakeAgent(_pool())})
+    paced.observer = RemoteObserver(clock=lambda: paced.now)
+
+    for _ in range(5):
+        paced.now += 2.0                 # five arbiter ticks
+        paced.half()
+
+    assert paced.gpu_probes("nimbus") == 1
+
+
+def test_remote_observer_without_the_wiring_is_an_empty_half(paced):
+    """Same posture as remote_world_half's own: a caller missing a
+    dependency gets no remote engines, never a crash."""
+    assert paced.observer.half(paced.registry, None, None, paced.world,
+                               object()) == {"remote_gpus": {},
+                                             "remote_tenants": {}}

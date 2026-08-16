@@ -48,16 +48,21 @@ def _model_deck_default_data_dir(tmp_path, monkeypatch):
 class HandBuiltRegistry:
     """A registry state built BY HAND, past app.node_store's write gate.
 
-    Task 5 of the sglang-omni plan refuses declaring ANY engine kind on a
-    node-agent entry until that kind is ``remote_capable`` — no kind is,
-    until Task 7 — and ``NodeStore._heal_engines`` strips such a list back
-    to ``[]`` on every load. A REAL ``NodeStore`` therefore CANNOT hold the
-    state the remote-observation paths consume, and weakening that gate to
-    make testing easier is exactly the shortcut this branch forbids. So the
-    remote tests stand the post-Task-7 registry shape up at the store
-    BOUNDARY instead, exposing only the methods those paths actually call
-    (``list``/``get`` + the three credential accessors), plus two
-    test-side mutators for the registry edits the lazy clients must notice.
+    Task 5 of the sglang-omni plan refuses declaring any engine kind on a
+    node-agent entry unless that kind is ``remote_capable``, and
+    ``NodeStore._heal_engines`` strips a refused list back to ``[]`` on
+    every load. Task 7 made ONE kind remote-capable (sglang-omni), so a real
+    ``NodeStore`` can now hold a remote declaration of THAT kind — but the
+    three E1 kinds are still refused there, and most remote tests are
+    deliberately written against a lemonade-kind remote engine (fixture
+    discipline: the kind under test must not be the only kind that could
+    possibly work). Weakening the gate to make testing easier is exactly the
+    shortcut this branch forbids, so those tests stand the registry shape up
+    at the store BOUNDARY instead, exposing only the methods those paths
+    actually call (``list``/``get`` + the three credential accessors), plus
+    two test-side mutators for the registry edits the lazy clients must
+    notice. A test that wants the REAL write gate (tests/test_api.py's
+    remote sglang-omni declarations) simply uses NodeStore directly now.
 
     Lives here rather than in one test module because four modules need it
     (observe/state/node_clients/api wiring); a conftest fixture is

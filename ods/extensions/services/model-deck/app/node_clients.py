@@ -22,6 +22,14 @@ posture throughout: None means "not operable right now", never an
 exception into a tick; no engine kind is named anywhere (per-kind
 constructor knowledge stays on app.engine_kinds' adapters).
 
+`RemoteObserver` (Task 7, at the bottom) is the PACING in front of that
+assembly, and Task 7 is what made it necessary: with a remote-capable kind
+finally declarable, every arbiter tick AND every /api/state paid one
+node-agent round trip per declaring node plus one per declared engine, each
+behind a 5 s timeout — so one powered-off box stretched every 2 s tick past
+five seconds. Deliberately kind-agnostic: pacing is infrastructure, and no
+adapter can see or influence it.
+
 Locking mirrors NodeStore's: one non-reentrant lock around the whole
 check-compare-rebuild body, so two threads racing a rotation cannot both
 build a client (the loser would leak an unclosed transport). Registry reads
@@ -32,6 +40,7 @@ lock-ordering hazard exists.
 from __future__ import annotations
 
 import threading
+import time
 
 import httpx
 
@@ -287,8 +296,8 @@ def _adapter_remote_client(entry: dict, credential: str, engine: dict):
 
     ``build_remote_client`` is OPTIONAL on the adapter protocol. A kind that
     has none cannot run off-box at all — None ("not operable") is the honest
-    answer for a declaration that names it, not a crash. Every kind is in
-    that state today; Task 7 ships the first one that isn't.
+    answer for a declaration that names it, not a crash. The E1 triple are
+    all in that state; sglang-omni (Task 7) is the first that isn't.
     """
     build = getattr(ENGINE_KINDS[engine["kind"]], "build_remote_client", None)
     if build is None:
@@ -372,7 +381,7 @@ class RemoteEngineClients:
 
 
 def remote_world_half(node_store, agent_client_factory, remote_clients,
-                      world, registry) -> dict:
+                      world, registry, gpu_reader=read_remote_gpus) -> dict:
     """The REMOTE half of a world snapshot: ``{"remote_gpus",
     "remote_tenants"}``, ready to merge into what ``World.snapshot``
     returned for the local half.
@@ -389,6 +398,14 @@ def remote_world_half(node_store, agent_client_factory, remote_clients,
     Either dependency absent (every unit test, any caller built before this
     task, a deck with the watcher disabled) means no remote half at all —
     empty, not a crash.
+
+    `gpu_reader` (sglang-omni Task 7) is the per-node GPU read, injectable
+    so `RemoteObserver` below can hand in its PACED version. The default is
+    the unpaced `read_remote_gpus`, which is what every direct caller (unit
+    tests exercising the assembly itself) gets; production reaches this
+    function only THROUGH the observer, so the paced reader is the one on
+    the hot path. Same signature either way — this function does not know
+    which it has.
     """
     if node_store is None or remote_clients is None or agent_client_factory is None:
         return {"remote_gpus": {}, "remote_tenants": {}}
@@ -397,11 +414,133 @@ def remote_world_half(node_store, agent_client_factory, remote_clients,
     # node-agent the deck merely watches is app/node_observer.py's business,
     # and probing it from here would spend a transport timeout per tick for
     # nothing.
-    pools = read_remote_gpus(node_store, agent_client_factory,
-                             {e["node_id"] for e in engines})
+    pools = gpu_reader(node_store, agent_client_factory,
+                       {e["node_id"] for e in engines})
     remote_clients.retire_absent({(e["node_id"], e["resource"]) for e in engines})
     return {
         "remote_gpus": pools,
         "remote_tenants": world.snapshot_remote(engines, remote_clients, pools,
                                                 registry),
     }
+
+
+# ---------------------------------------------------------------------------
+# Probe pacing (sglang-omni Task 7): the remote half on a TTL, per-node
+# backoff underneath it.
+# ---------------------------------------------------------------------------
+
+# Mirrors app/observe.py's SPARK_OBSERVE_TTL_S / SPARK_BACKOFF_* deliberately:
+# the two remote surfaces have the same shape of problem (a probe that costs a
+# 5 s transport timeout when the box is off, on a 2 s watcher cadence shared
+# with every /api/state), so they get the same shape of answer rather than a
+# second set of tuning knobs to reason about.
+REMOTE_OBSERVE_TTL_S = 10.0
+REMOTE_BACKOFF_BASE_S = 15.0
+REMOTE_BACKOFF_MAX_S = 300.0
+
+
+class RemoteObserver:
+    """Cached, backed-off access to the REMOTE half of a world snapshot.
+
+    The SparkObserver idea (app/observe.py) applied to the OTHER remote
+    surface. Once a `remote_capable` kind exists, `remote_world_half` is on
+    the hot path twice over — every ~2 s arbiter tick and every
+    ``GET /api/state`` — and each pass costs one ``GET /v1/node/gpu`` per
+    declaring node plus one status probe per declared engine, each behind a
+    5 s transport timeout. One powered-off node would stretch every tick
+    past 5 s, exactly when nothing is wrong.
+
+    TWO levels, because they answer two different questions:
+
+    * a short TTL on the assembled half, so a tick and an ``/api/state`` in
+      the same second cost one pass, not two (and N ticks inside the window
+      cost one probe per node, not N);
+    * a growing backoff PER NODE on the GPU read, because a plain TTL alone
+      would still spend a 5 s timeout on a powered-off box every TTL. The
+      backoff is per node and not on the half, so one dead box cannot freeze
+      the deck's view of a healthy one for the length of the backoff.
+
+    A node in backoff is not probed at all, and its last-known pool (None —
+    a node only enters backoff by failing) is served instead. That is what
+    silences the per-ENGINE probes too: `World.snapshot_remote` already
+    treats a None pool as "this node's engines are unknown" without probing
+    them one by one, since the GPU read IS the node's liveness probe.
+
+    Kind-agnostic on purpose: pacing is infrastructure. No adapter knows or
+    can influence it, and nothing here names an engine kind.
+
+    One instance per deck, shared by the watcher and the HTTP paths (the
+    same sharing rationale ``remote_world_half``'s docstring gives), so both
+    describe ONE world.
+    """
+
+    def __init__(self, *, ttl_s: float = REMOTE_OBSERVE_TTL_S,
+                 backoff_base_s: float = REMOTE_BACKOFF_BASE_S,
+                 backoff_max_s: float = REMOTE_BACKOFF_MAX_S,
+                 clock=time.monotonic) -> None:
+        self._ttl_s = ttl_s
+        self._backoff_base_s = backoff_base_s
+        self._backoff_max_s = backoff_max_s
+        self._clock = clock
+        self._cached: dict | None = None
+        self._next_assembly_at = 0.0
+        # node id -> last pool read (None = did not answer), when to probe it
+        # again, and how many times in a row it has failed.
+        self._pools: dict[str, list[dict] | None] = {}
+        self._next_probe_at: dict[str, float] = {}
+        self._failures: dict[str, int] = {}
+
+    def half(self, node_store, agent_client_factory, remote_clients, world,
+             registry) -> dict:
+        """``{"remote_gpus", "remote_tenants"}`` — the same shape (and, on a
+        refresh, literally the same call) as ``remote_world_half``."""
+        now = self._clock()
+        if self._cached is not None and now < self._next_assembly_at:
+            return self._cached
+        self._cached = remote_world_half(
+            node_store, agent_client_factory, remote_clients, world, registry,
+            gpu_reader=self._paced_pools)
+        self._next_assembly_at = now + self._ttl_s
+        return self._cached
+
+    def invalidate(self) -> None:
+        """Drop everything cached — call after ACTING on a remote engine (a
+        load/unload), whose whole purpose is to change what this holds. Also
+        clears the backoff: an actuation is a reason to look again now, and
+        a node we just successfully talked to is not a node in backoff."""
+        self._cached = None
+        self._next_assembly_at = 0.0
+        self._pools.clear()
+        self._next_probe_at.clear()
+        self._failures.clear()
+
+    def _paced_pools(self, node_store, agent_client_factory,
+                     node_ids) -> dict[str, list[dict] | None]:
+        """`read_remote_gpus`' contract, with nodes in backoff skipped and
+        served from their last known (failed) read instead."""
+        now = self._clock()
+        due = {node_id for node_id in node_ids
+               if now >= self._next_probe_at.get(node_id, 0.0)}
+        fresh = read_remote_gpus(node_store, agent_client_factory, due)
+        for node_id, pool in fresh.items():
+            self._pools[node_id] = pool
+            if pool is None:
+                self._failures[node_id] = self._failures.get(node_id, 0) + 1
+                self._next_probe_at[node_id] = now + min(
+                    # Exponent capped for the same reason SparkObserver caps
+                    # its own: 2**(failures-1) is a Python bignum and
+                    # overflows float multiplication around failure #1025.
+                    self._backoff_base_s * 2 ** min(self._failures[node_id] - 1, 16),
+                    self._backoff_max_s,
+                )
+            else:
+                # A node that answers again is back on the plain TTL at
+                # once: its failure history described a state it is no
+                # longer in (NodeObservers' retirement rationale).
+                self._failures.pop(node_id, None)
+                self._next_probe_at.pop(node_id, None)
+        # `.get`, not `[...]`: a node still in backoff has no fresh entry,
+        # and a node that has never been probed at all (first pass, already
+        # due) is impossible here — but answering None for one is the same
+        # honest "we could not look" every other absent read gives.
+        return {node_id: self._pools.get(node_id) for node_id in node_ids}

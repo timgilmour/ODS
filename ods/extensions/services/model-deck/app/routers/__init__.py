@@ -24,6 +24,11 @@ remote half arrives as its own two keys (``remote_tenants`` /
 ``remote_gpus``) from ``app.node_clients.remote_world_half``, the same
 function the arbiter tick calls — the local half's shape is untouched.
 
+The LOCAL half is deliberately still re-snapshotted per call while the
+REMOTE half is TTL-paced (Task 7, ``deck["remote_observer"]``): local
+engines are sibling containers answering in milliseconds, remote ones are
+another box behind a 5 s transport timeout that is very often powered off.
+
 ``build_observations`` and ``build_lifecycle_view`` are the same idea for
 lifecycle state: derived on every call from intent x observation, so there
 is no cached status to go stale, and shared so the status block and the
@@ -42,8 +47,6 @@ box.
 
 
 def build_world_snapshot(deck: dict) -> dict:
-    from app.node_clients import remote_world_half
-
     gpus = deck["read_gpus"](deck["drm_root"], deck["kfd_root"])
     # Re-read the declaration fresh on every call (the NodeObservers
     # precedent: a declaration edit applies live, no restart needed) —
@@ -62,12 +65,23 @@ def build_world_snapshot(deck: dict) -> dict:
     # keys, never merged into `tenants`/`gpus` — see World.snapshot_remote's
     # docstring for why (a remote gpu_index addresses another machine's GPU
     # list, and resource names are unique per node, not globally).
-    # ``remote_world_half`` is shared VERBATIM with app.arbiter.Watcher.tick
-    # so the HTTP surface and the arbiter cannot declare different worlds
-    # into the one World instance they share.
-    world.update(remote_world_half(
-        deck["node_store"], deck.get("node_agent_client_factory"),
-        deck.get("remote_engine_clients"), deck["world"], deck["registry"]))
+    #
+    # Through deck["remote_observer"] since Task 7, not the bare
+    # `remote_world_half`: with a `remote_capable` kind live, every call to
+    # this function would otherwise cost one `GET /v1/node/gpu` per
+    # declaring node plus one status probe per declared engine, each behind
+    # a 5 s timeout — on every /api/state AND every ~2 s arbiter tick. The
+    # observer is the SAME instance app.arbiter.Watcher.tick uses (it wraps
+    # the same one assembly function), so the HTTP surface and the arbiter
+    # still cannot declare different worlds into the one World instance they
+    # share — they now also share the probe. Absent (a deck built without
+    # it) means no remote half, the same posture `remote_world_half` itself
+    # takes for a missing dependency.
+    observer = deck.get("remote_observer")
+    if observer is not None:
+        world.update(observer.half(
+            deck["node_store"], deck.get("node_agent_client_factory"),
+            deck.get("remote_engine_clients"), deck["world"], deck["registry"]))
     return world
 
 

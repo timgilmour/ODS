@@ -145,7 +145,8 @@ def _observe_tenant(tenant: dict) -> dict:
     lifted out of ``observe_local``'s loop body VERBATIM (sglang-omni Task
     6) so the local and remote halves share ONE copy. Two copies of a
     per-kind mapping is precisely how the next vocabulary-drift bug gets in,
-    and a fourth kind must be one branch to add here, not two.
+    and a fourth kind must be one branch to add here, not two — which is
+    exactly what sglang-omni (Task 7) turned out to be.
     """
     kind = tenant["engine"]
     state = tenant["state"]
@@ -175,13 +176,35 @@ def _observe_tenant(tenant: dict) -> dict:
             loaded=state in ("busy", "idle"),
             model=None,
         )
+    if kind == "sglang-omni":
+        return _record(
+            unknown=state == "unknown",
+            # Same reading as comfyui's just above, for the same reason:
+            # "idle" describes the engine's REQUEST queue, not its
+            # residency — it holds ~62 GiB of weights between renders.
+            # "down" (the engine is not serving, observed through a node
+            # agent that DID answer) is the one state that is reachable but
+            # not loaded, which is what turns a loaded intent into a
+            # restore.
+            loaded=state in ("busy", "idle"),
+            # GF2: the engine's own model id is its container mount path,
+            # not an identity — app.engine_kinds' adapter deliberately
+            # reports none, and this branch must not invent one.
+            model=None,
+            # No `transitioning` source here yet: this kind's warming rule
+            # (app.engine_kinds' _SglangOmniAdapter.warming, GF4) needs the
+            # INTENT record's timestamp, which the observation path cannot
+            # see by design — app.lifecycle is where intent and observation
+            # meet. Wiring it is Task 9's, with the remote reconcile proofs.
+        )
     # Not reachable from a REAL World.snapshot (NodeStore validates
     # `kind` against engine_kinds.KNOWN_KINDS before an entry can
-    # ever land in the declaration one was built from) nor from any
-    # existing hand-built world dict (every one in this codebase
-    # names its tenants lemonade/comfyui/hipfire) — only a future
-    # fourth kind or a fixture using some other resource name
-    # without an explicit "engine" key would reach this.
+    # ever land in the declaration one was built from) — only a
+    # future FIFTH kind whose author forgot this dispatch, or a
+    # fixture using some other resource name without an explicit
+    # "engine" key, would reach it now. It did its job on the fourth:
+    # sglang-omni (Task 7) added its branch above rather than
+    # discovering the gap live on the next GET /api/state.
     raise ValueError(f"unhandled engine kind {kind!r}")
 
 

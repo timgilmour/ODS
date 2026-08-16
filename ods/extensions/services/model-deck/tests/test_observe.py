@@ -557,3 +557,65 @@ def test_observe_remote_maps_every_kind_the_local_half_maps():
 
     assert result["nimbus/comfy-r"]["loaded"] is True
     assert result["nimbus/hip-r"]["loaded"] is True
+
+
+# ===========================================================================
+# sglang-omni Task 7 — the fourth vocabulary branch.
+#
+# Same fixture discipline as the Task 6 block above: node "nimbus" (NOT
+# "sparky"), resource "song-r" (NOT "omni"), resource != kind name.
+# ===========================================================================
+
+
+def _omni_tenant(state, busy_requests=0, **over):
+    tenant = {"state": state, "busy_requests": busy_requests, "model": None,
+              "idle_s": 0.0, "engine": "sglang-omni", "node_id": "nimbus",
+              "resource": "song-r", "gpu_index": 4}
+    tenant.update(over)
+    return tenant
+
+
+def test_sglang_omni_busy_and_idle_both_count_as_loaded():
+    """Idle describes the REQUEST queue, not residency — the engine holds
+    ~62 GiB between renders (GF5), the same reading comfyui's branch
+    already takes for its queue."""
+    assert observe_remote(_remote_world(_omni_tenant("busy", 2)))[
+        "nimbus/song-r"]["loaded"] is True
+    assert observe_remote(_remote_world(_omni_tenant("idle", 0)))[
+        "nimbus/song-r"]["loaded"] is True
+
+
+def test_sglang_omni_down_is_reachable_but_not_loaded():
+    """`down` is an OBSERVED fact (the agent answered; the engine is not
+    serving), so it must read reachable — otherwise it derives the inert
+    'unreachable' and intent-loaded never turns into a restore."""
+    result = observe_remote(_remote_world(_omni_tenant("down", None)))["nimbus/song-r"]
+
+    assert result == {"reachable": True, "loaded": False, "model": None,
+                      "transitioning": False}
+
+
+def test_sglang_omni_unknown_is_unreachable_not_unloaded():
+    result = observe_remote(_remote_world(_omni_tenant("unknown", None)))["nimbus/song-r"]
+
+    assert result == {"reachable": False, "loaded": False, "model": None,
+                      "transitioning": False}
+
+
+def test_sglang_omni_reports_no_model_name():
+    """GF2: the wire id is the container's mount path, never an identity —
+    the adapter reports None and this branch must not invent one."""
+    assert observe_remote(_remote_world(_omni_tenant("idle", 0)))[
+        "nimbus/song-r"]["model"] is None
+
+
+def test_sglang_omni_is_mapped_by_the_same_dispatch_the_local_half_uses():
+    """One mapping, two callers (the Task 6 binding): a kind reads
+    identically wherever it runs. Proven by feeding the LOCAL half a
+    sglang-omni tenant — a shape only a mis-declaration would produce in
+    production, and exactly why the branch must not live in the remote
+    half alone."""
+    world = _world()
+    world["tenants"] = {"song-l": _omni_tenant("busy", 1)}
+
+    assert observe_local(world)["local/song-l"]["loaded"] is True
