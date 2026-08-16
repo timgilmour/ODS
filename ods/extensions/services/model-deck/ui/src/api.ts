@@ -209,7 +209,13 @@ export type SettingsKind = "engines" | "models" | "engine_models"; // app/settin
 export type Layer = "engine_defaults" | "checkpoint_recommendations"
   | "engine" | "model" | "engine_model"; // app/ladder.py:48
 export type Widget = "toggle" | "list" | "select" | "number" | "text"; // app/harvest.py:widget_for
-export type ArgValue = string | string[] | boolean; // app/argline.py:8-13, bare flags normalize as true end-to-end
+// app/argline.py:8-13, bare flags normalize as true end-to-end. The list arm
+// admits null because a null INSIDE a list survives ladder resolution
+// (app/argline.py:151-154 — legacy poison the wire refuses NEW instances of,
+// but persisted stores may still hold) and GET /settings/effective serves it
+// verbatim; a type that cannot model the wire hides the poison from every
+// consumer instead of surfacing it.
+export type ArgValue = string | (string | null)[] | boolean;
 
 /** app/harvest.py:parse_probe_output options[...] */
 export interface CatalogOption {

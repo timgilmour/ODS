@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { FactsMap, ResolvedEntry } from "../api";
+import type { ArgValue, FactsMap, ResolvedEntry } from "../api";
 import {
   buildChips,
   bufferRemove,
@@ -351,6 +351,19 @@ describe("displayValue / parseValueText", () => {
 
   it("passes a scalar through verbatim", () => {
     expect(displayValue("262144")).toBe("262144");
+  });
+
+  it("ArgValue models the list-null GET /effective can serve", () => {
+    // app/ladder.py pops a bare-None KEY during resolution, but a null
+    // INSIDE a list survives it untouched (app/argline.py:151-154 — legacy
+    // poison the wire now refuses but persisted stores may still hold) and
+    // rides out of GET /settings/effective verbatim. Before ArgValue's list
+    // arm admitted null, tsc -b rejected this assignment — the UI could not
+    // even model the value it receives. Characterization only: join renders
+    // the null as an invisible empty token; whether the editor should
+    // SURFACE it instead is the open preview-poison ruling, not this test.
+    const poisoned: ArgValue = ["--flag-value", null];
+    expect(displayValue(poisoned)).toBe("--flag-value ");
   });
 
   it("splits typed text on any run of whitespace", () => {
