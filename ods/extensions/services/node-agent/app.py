@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from fastapi.responses import Response
 
+import engines
 import nodeconfig
 import serving
 import settings_store
@@ -125,6 +126,22 @@ class SwapBody(BaseModel):
 def node_profiles():
     return {"profiles": swapctl.list_profiles(),
             "swap_status": swapctl.read_status()}
+
+
+@app.get("/v1/node/engines", dependencies=[Depends(verify_key)])
+def node_engines():
+    # A node with no declared engines is normal (mirrors profiles.json):
+    # {"engines": []}, not a 503 -- unlike swap control/settings, this
+    # feature has no "disabled" state, only an empty one.
+    return {"engines": sorted(engines.load_configured_engines())}
+
+
+@app.get("/v1/node/engine/{name}/status", dependencies=[Depends(verify_key)])
+def node_engine_status(name: str):
+    decl = engines.load_configured_engines().get(name)
+    if decl is None:
+        raise HTTPException(status_code=404, detail="unknown engine")
+    return engines.engine_status(decl)
 
 
 @app.post("/v1/node/swap", status_code=202, dependencies=[Depends(verify_key)])
