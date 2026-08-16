@@ -18,6 +18,8 @@ from app.engines.hipfire import HipfireClient
 from app.engines.hostagent import HostAgent
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
+from app.engines.node_agent import NodeAgentUnreachable
+from app.engines.sglang_omni import SglangOmniClient
 
 
 def _transport(handler):
@@ -1591,3 +1593,118 @@ def test_no_watcher_app_state_deck_still_has_engine_exec_when_spark_is_configure
 
     assert app.state.deck["configurable_engines"] == [(LEGACY_SPARK_SEED_ID, "vllm")]
     assert isinstance(app.state.deck["engine_exec"], EngineExecRouter)
+
+
+# --- SglangOmniClient ---
+#
+# Wire shapes come from extensions/services/node-agent/app.py:139-171:
+#   GET  /v1/node/engine/{resource}/status -> 200 {"reachable", "healthy",
+#                                              "busy_requests"}; 404 unknown
+#   POST /v1/node/engine/{resource}/up     -> 202 {"accepted": true}; 404
+#                                              unknown, 409 pending, 503
+#                                              swap-ctl disabled
+#   POST /v1/node/engine/{resource}/down   -> same as up
+
+
+def _sglang_client(handler, resource="sglang-omni-1"):
+    return SglangOmniClient("http://hera:7720", "s3cret", resource,
+                            transport=httpx.MockTransport(handler))
+
+
+def test_sglang_omni_status_returns_wire_dict_verbatim():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers["Authorization"]
+        return httpx.Response(200, json={"reachable": True, "healthy": True,
+                                         "busy_requests": 0}, request=request)
+
+    body = _sglang_client(handler).status()
+    assert seen["path"] == "/v1/node/engine/sglang-omni-1/status"
+    assert seen["auth"] == "Bearer s3cret"
+    assert body == {"reachable": True, "healthy": True, "busy_requests": 0}
+
+
+def test_sglang_omni_status_raises_engineerror_naming_resource_on_404():
+    def handler(request):
+        return httpx.Response(404, json={"detail": "unknown engine"}, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="mystery-omni").status()
+    assert "mystery-omni" in str(exc_info.value)
+
+
+def test_sglang_omni_status_raises_engineerror_on_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler).status()
+    # Never a bare httpx exception, and the concrete NodeAgentUnreachable
+    # type (an EngineError subclass) survives the resource-naming re-wrap.
+    assert isinstance(exc_info.value, NodeAgentUnreachable)
+
+
+def test_sglang_omni_up_posts_to_correct_path_and_returns_none_on_202():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["method"] = request.method
+        seen["auth"] = request.headers["Authorization"]
+        return httpx.Response(202, json={"accepted": True}, request=request)
+
+    assert _sglang_client(handler).up() is None
+    assert seen["path"] == "/v1/node/engine/sglang-omni-1/up"
+    assert seen["method"] == "POST"
+    assert seen["auth"] == "Bearer s3cret"
+
+
+def test_sglang_omni_down_posts_to_correct_path_and_returns_none_on_202():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["method"] = request.method
+        return httpx.Response(202, json={"accepted": True}, request=request)
+
+    assert _sglang_client(handler).down() is None
+    assert seen["path"] == "/v1/node/engine/sglang-omni-1/down"
+    assert seen["method"] == "POST"
+
+
+@pytest.mark.parametrize("status_code", [404, 409, 503])
+def test_sglang_omni_up_raises_engineerror_naming_resource_on_non_202(status_code):
+    def handler(request):
+        return httpx.Response(status_code, json={"detail": "nope"}, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-2").up()
+    assert "sglang-omni-2" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("status_code", [404, 409, 503])
+def test_sglang_omni_down_raises_engineerror_naming_resource_on_non_202(status_code):
+    def handler(request):
+        return httpx.Response(status_code, json={"detail": "nope"}, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-2").down()
+    assert "sglang-omni-2" in str(exc_info.value)
+
+
+def test_sglang_omni_up_raises_engineerror_on_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(EngineError):
+        _sglang_client(handler).up()
+
+
+def test_sglang_omni_down_raises_engineerror_on_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(EngineError):
+        _sglang_client(handler).down()
