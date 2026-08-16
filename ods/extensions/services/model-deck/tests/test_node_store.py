@@ -597,20 +597,57 @@ def test_node_agent_engines_accepted_with_prereqs(store):
     outright refusal. An EMPTY list is the only shape reachable today — no
     existing kind is `remote_capable` yet (Task 7 adds the first one), so
     a populated list always fails the kind-not-remote_capable gate below —
-    but a vacuously-valid empty declaration, with address + credential
-    both present, is accepted."""
+    a vacuously-valid empty declaration, with address + credential both
+    present, is accepted (address+credential are NOT actually required for
+    an empty list — see test_node_agent_engines_empty_list_accepted_without_credential
+    below — but this pins the case where they happen to be present too)."""
     entry = store.add({**_remote_spec(), "engines": []}, credential="key-nimbus")
     assert entry["engines"] == []
     assert store.get("nimbus")["engines"] == []
 
 
-def test_node_agent_engines_refused_without_credential_names_it(store):
-    """422-worthy ValueError naming exactly what's missing (checklist
-    style, mirrors `_require_swap_prereqs`) — address is present, only the
-    credential is absent, isolating this failure mode from the kind gate
-    below (an empty list can never fail that one)."""
+def test_node_agent_engines_empty_list_accepted_without_credential(store):
+    """Fix round 1 (Finding 1): `engines: []` declares nothing operable,
+    so it must NOT require a credential the entry doesn't have —
+    `_require_engine_prereqs` is gated on a NON-EMPTY list (truthiness),
+    matching `validate_engines([], remote=True)`'s own vacuous pass."""
+    entry = store.add({**_remote_spec(), "engines": []})  # no credential
+    assert entry["engines"] == []
+
+
+def test_node_agent_with_empty_engines_and_no_credential_is_not_bricked(store, tmp_path):
+    """Regression (fix round 1, Finding 1 — reviewer-reproduced live bug):
+    before the fix, `_require_engine_prereqs` fired on the mere PRESENCE
+    of the `engines` key, so a node-agent entry with `engines: []` and no
+    stored credential (e.g. a hand-written nodes.json with a lost
+    credential sidecar) became unpatchable in EVERY field — a label-only
+    PATCH 422'd with "requires credential". Combined with `_heal_engines`
+    now PRESERVING (not stripping) the key on node-agent entries, this was
+    reachable through ordinary use, not just a contrived hand-edit. Pins
+    the property the old (now-superseded)
+    test_load_strips_engines_from_non_local_entries used to pin under the
+    old "strip" behavior: the entry stays patchable."""
+    _write_nodes(tmp_path, [{**_remote_spec(), "engines": []}])
+    loaded = store.get("nimbus")
+    assert loaded is not None
+    assert loaded["engines"] == []          # heal preserved it, didn't strip
+    assert store.credential_set("nimbus") is False
+    result = store.update("nimbus", {"label": "Renamed"})
+    assert result["label"] == "Renamed"
+
+
+def test_require_engine_prereqs_names_missing_fields(store):
+    """Direct unit pin of `_require_engine_prereqs`'s own checklist
+    contract. Exercised directly (not through add()/update()) because it
+    is UNREACHABLE through the public API today by construction: the
+    callers now gate it on a NON-EMPTY engines list (see the not-bricked
+    regression above), and any non-empty list on a node-agent spec fails
+    `_validate`'s kind-not-remote_capable check FIRST — no kind is
+    remote_capable until Task 7 (see the ordering test below). The method
+    itself still needs to be correct for when Task 7 makes it reachable."""
     with pytest.raises(ValueError, match="credential") as exc:
-        store.add({**_remote_spec(), "engines": []})  # no credential
+        store._require_engine_prereqs({"address": "http://nimbus:7720"},
+                                       credential_present=False)
     assert "engines on a node-agent entry" in str(exc.value)
 
 
@@ -623,18 +660,23 @@ def test_node_agent_engines_kind_not_remote_capable_refused_naming_kind(store):
                   credential="key-nimbus")
 
 
+def test_node_agent_engines_kind_check_precedes_credential_check(store):
+    """Ordering proof (fix round 1): a node-agent spec with BOTH a
+    non-remote-capable kind AND no stored credential fails on the KIND
+    first — `_validate` (called unconditionally at the top of add()) runs
+    before `_require_engine_prereqs` ever would. The error names
+    "lemonade", never "credential"."""
+    with pytest.raises(ValueError, match="lemonade") as exc:
+        store.add({**_remote_spec(), "engines": [_REMOTE_ENGINE]})  # no credential
+    assert "credential" not in str(exc.value)
+
+
 def test_node_agent_engines_gate_also_applies_on_update(store):
     """The same two checks run on update(), not just add() — mirrors the
     control:"swap" prereq check's own add/update parity."""
     store.add(_remote_spec(), credential="key-nimbus")  # no engines yet
     with pytest.raises(ValueError, match="lemonade"):
         store.update("nimbus", {"engines": [_REMOTE_ENGINE]})
-
-
-def test_node_agent_engines_update_without_stored_credential_refused(store):
-    store.add(_remote_spec())  # no credential stored
-    with pytest.raises(ValueError, match="credential"):
-        store.update("nimbus", {"engines": []})
 
 
 def test_heal_preserves_empty_engines_on_node_agent_entry(store, tmp_path):

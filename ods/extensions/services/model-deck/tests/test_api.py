@@ -3955,3 +3955,25 @@ def test_add_engine_on_local_node_kind_not_remote_capable_gate_does_not_apply(
 
     assert r.status_code == 200
     assert deck["node_store"].get("local")["engines"] == [_REMOTE_ENGINE_BODY]
+
+
+def test_forget_engine_on_node_agent_node_404s_today_tripwire(tmp_path, monkeypatch):
+    """Tripwire (fix round 1, Finding 2): `forget_engine`'s
+    `policy_store.forget(resource)` call carries NO node_id guard,
+    deliberately, because it's UNREACHABLE for a remote node today — every
+    node-agent `engines[]` is `[]` until Task 7 adds the first
+    remote_capable kind, so "unknown engine" 404s BEFORE the policy
+    branch ever runs (app/routers/nodes.py's forget_engine docstring).
+    This pins that today's only reachable outcome for a node-agent target
+    is 404. When Task 7 flips the first remote_capable kind and a real
+    declared resource on a node-agent entry becomes possible, THIS test
+    must fail (a 200 where it expected 404) rather than the cross-node
+    policy-row collision risk opening silently — see that docstring for
+    what has to be resolved before this test can be safely updated."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": []})
+
+    r = TestClient(app).delete("/api/nodes/nimbus/engines/gguf-r")
+
+    assert r.status_code == 404

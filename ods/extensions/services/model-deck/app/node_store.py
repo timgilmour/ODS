@@ -259,7 +259,14 @@ class NodeStore:
         engines) -- same redundancy `_require_swap_prereqs` already keeps
         for the same field, so this checklist is self-contained rather
         than depending on a caller reading a second error message to learn
-        what else is missing."""
+        what else is missing.
+
+        Callers gate this on a NON-EMPTY engines list (fix round 1 — see
+        add()/update()): `engines: []` declares nothing operable, so it
+        must not demand a credential the entry doesn't have. A node-agent
+        entry that lost its credential sidecar (or never had one) must
+        stay patchable in every OTHER field while its engines[] is empty
+        — the mere presence of the key must never brick the row."""
         missing = [f for f in ("address",) if not entry.get(f)]
         if not credential_present:
             missing.append("credential")
@@ -274,7 +281,7 @@ class NodeStore:
         _validate(spec)
         if spec["control"] == "swap":
             self._require_swap_prereqs(spec, credential_present=bool(credential))
-        if spec["agent_kind"] == "node-agent" and "engines" in spec:
+        if spec["agent_kind"] == "node-agent" and spec.get("engines"):
             self._require_engine_prereqs(spec, credential_present=bool(credential))
         with self._lock:
             if spec["agent_kind"] == "local" and self.get("local") is not None:
@@ -310,7 +317,7 @@ class NodeStore:
                             credential_present=bool(credential)
                             or self.credential_set(node_id))
                     if (merged.get("agent_kind") == "node-agent"
-                            and "engines" in merged):
+                            and merged.get("engines")):
                         self._require_engine_prereqs(
                             merged,
                             credential_present=bool(credential)

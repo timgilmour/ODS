@@ -353,9 +353,24 @@ def forget_engine(node_id: str, resource: str, request: Request) -> dict:
     The intent-forget below is the same `local_key`-only scope note as
     update_engine's docstring: it only forgets anything for `node_id ==
     "local"` today, for the same reason (no node-agent entry can carry a
-    populated engines list before Task 7). `policy_store.forget(resource)`
-    needs no such guard — PolicyStore keys purely by resource name, not
-    node, so it is already correct for any node_id."""
+    populated engines list before Task 7).
+
+    `policy_store.forget(resource)` below carries NO such node_id guard,
+    deliberately — not because it's already correct for any node, but
+    because it's UNREACHABLE for a remote node today and the keying
+    decision belongs to whichever later task makes it reachable. This
+    resource-name-only key is a KNOWN cross-node collision risk: a remote
+    node forgetting a resource named e.g. "foo" would pop the unrelated
+    LOCAL "foo" policy row, if one happened to exist — PolicyStore has no
+    node dimension at all (app/policy.py: `{resource: {...}}`, flat). It's
+    safe only because this line can never run for a non-local node_id yet
+    — every engines[] on a node-agent entry is `[]` until Task 7 adds the
+    first remote_capable kind, so the "unknown engine" 404 above always
+    fires first. Tasks 6/9 (remote observation / remote policy) must
+    resolve this keying — node-scope the store, or gate this call — before
+    a remote resource can ever actually reach this line. A guard added
+    HERE now would just be dead code hiding the seam instead of a test
+    catching it; see the tripwire test in tests/test_api.py instead."""
     deck = request.app.state.deck
     store = deck["node_store"]
     node = _node_or_404(deck, node_id)
