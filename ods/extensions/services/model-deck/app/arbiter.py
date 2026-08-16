@@ -1015,11 +1015,29 @@ class Watcher:
             observe_local(world),
             # Remote DECLARED engines (sglang-omni Task 6). Already observed
             # into the snapshot above — this only maps them, so it costs no
-            # probe. No intent can name one of these keys yet (the remote
-            # verb routes are Task 8's), so plan_reconcile finds nothing to
-            # do for them today; including them here rather than later is
-            # what keeps this pass and app.routers.build_observations
-            # describing the same set of resources.
+            # probe; including them here rather than later is what keeps this
+            # pass and app.routers.build_observations describing the same set
+            # of resources.
+            #
+            # SINCE TASK 8 an intent CAN name one of these keys — the remote
+            # verb routes (app.routers.serving.engine_verb) record
+            # `<node>/<resource>` — so plan_reconcile really does emit
+            # restores for them now, and `_restore` cannot serve one yet:
+            # every non-spark key there resolves through
+            # `self._local_clients`, which holds nothing for a remote
+            # resource, so the attempt raises "no restore handler" and
+            # charges the failure budget toward quarantine. That is the
+            # deliberate, transient R9 window between Tasks 8 and 9 — not a
+            # latent bug to work around here. TASK 9 OWES BOTH HALVES: the
+            # remote client path in `_restore` (through
+            # `self._remote_engine_clients`, already held and used today only
+            # by the observation half, keyed by the NODE half of the key the
+            # way the spark branch already resolves its own), AND the still-
+            # unwired `_SglangOmniAdapter.warming` join (app/observe.py's
+            # sglang-omni branch sources no `transitioning`) — without the
+            # second, a ~4-minute cold boot (GF4) observes exactly like a
+            # death and gets restore-stormed into quarantine before it
+            # finishes booting.
             observe_remote(world),
             *self._node_observations(),
         )
