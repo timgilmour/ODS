@@ -1,5 +1,7 @@
 import json
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 import serving
@@ -318,6 +320,79 @@ def test_startup_log_silent_when_configured(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="serving"):
         serving.log_startup_warning()
     assert caplog.text == ""
+
+
+def test_fetch_raw_retries_once_on_a_single_dropped_check(monkeypatch):
+    """C2 defense 2 (2026-08-06 review, model-deck Task 2): a single
+    dropped health check must not read as a dead model downstream (Model
+    Deck's observe_spark now consults endpoint_ok, and this is the ONE
+    un-retried network call that fed that reading). One retry absorbs a
+    transient blip; this is a DIFFERENT deployment target from the
+    model-deck fixes (this file runs on the remote node as the
+    ods-node-agent container, e.g. sparky — not wherever the Deck backend
+    runs)."""
+    calls = []
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectError("blip")
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(serving.httpx, "get", fake_get)
+
+    resp = serving._fetch_raw("http://x/health")
+
+    assert resp.status_code == 200
+    assert len(calls) == 2
+
+
+def test_fetch_raw_raises_after_two_consecutive_failures(monkeypatch):
+    """The retry absorbs ONE blip, not a genuine outage — a second
+    consecutive failure must still surface as ProbeError, and no further
+    retries beyond that: this already runs on the Deck's tick/TTL probing
+    cadence, so a genuinely dead endpoint is caught on the next scheduled
+    probe regardless; retrying more here would just delay every probe of a
+    truly-down endpoint."""
+    calls = []
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        raise httpx.ConnectError("still down")
+
+    monkeypatch.setattr(serving.httpx, "get", fake_get)
+
+    with pytest.raises(serving.ProbeError):
+        serving._fetch_raw("http://x/health")
+
+    assert len(calls) == 2
+
+
+def test_fetch_raw_uses_a_one_second_per_attempt_timeout(monkeypatch):
+    """PINS the per-attempt timeout (2026-08-06 re-review): two attempts at
+    2.0 s each left only ~0.9 s of headroom under the Deck's node-client
+    httpx.Timeout(5.0) (app/engines/spark.py) once _container_status's own
+    budget is counted — and when that budget blows, the Deck reads
+    EngineError -> _UNREACHABLE_SPARK -> 'unreachable', which
+    plan_reconcile treats as inert, so a WEDGED (hung, not dead) model
+    would never be restored: the same failure this whole plan exists to
+    kill, in a different costume. Tim's ruling: keep the retry, shrink the
+    attempt to 1.0 s, so two attempts cost what one used to and the
+    headroom returns to where it was. This test exists so a future edit
+    back toward 2.0 fails loudly here instead of silently eating the
+    budget on the live ds4 path."""
+    timeouts = []
+
+    def fake_get(url, timeout):
+        timeouts.append(timeout)
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(serving.httpx, "get", fake_get)
+
+    with pytest.raises(serving.ProbeError):
+        serving._fetch_raw("http://x/health")
+
+    assert timeouts == [1.0, 1.0]
 
 
 def test_probe_swapctl_disabled_falls_back_to_env(monkeypatch):

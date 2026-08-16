@@ -27,15 +27,48 @@ class ProbeError(RuntimeError):
 def _fetch_raw(url: str) -> httpx.Response:
     """GET url, raising ProbeError unless the response is 2xx.
 
+    Retries ONCE on failure (transport error or a non-2xx status): a single
+    dropped health check must not read as a dead model downstream (Model
+    Deck's observe_spark now derives `loaded` from `endpoint_ok` — see the
+    2026-08-05 spark-ds4 incident and its 2026-08-06 follow-up review — and
+    this is the ONE un-retried network call that fed that reading). No
+    backoff beyond the one retry: this already runs on the Deck's tick/TTL
+    probing cadence, so a genuinely dead endpoint is still caught on the
+    next scheduled probe; retrying further here would just delay every
+    probe of a truly-down endpoint. This is a complementary, independent
+    fix from the Deck-side confirming re-probe (app.observe.SparkObserver)
+    — belt and suspenders, not a substitute for it.
+
+    Each attempt gets 1.0 s, NOT 2.0 (2026-08-06 re-review): two attempts at
+    2.0 s each left only ~0.9 s of headroom under the Deck's node-client
+    httpx.Timeout(5.0) (app/engines/spark.py) once _container_status's own
+    budget is counted, and when that budget blows the Deck reads
+    EngineError -> _UNREACHABLE_SPARK -> 'unreachable', which the
+    reconciler treats as inert — so a WEDGED (hung, not dead) model would
+    never be restored, the same failure this whole plan exists to kill, in
+    a different costume. 1.0 s x 2 costs what one 2.0 s attempt used to, so
+    the headroom returns to where it was. Tim's own honest assessment of
+    the retry, recorded so nobody reads it as redundant and either deletes
+    it or "improves" it back to a longer timeout: on THIS topology it buys
+    little, because there is no delay between attempts, so it cannot absorb
+    a momentary ECONNREFUSED (which refuses again microseconds later), and
+    this hop is container-to-container on one box, already protected by
+    the Deck-side confirming re-probe's real trip across the LAN (defense
+    1). He kept it anyway for the dropped-packet case, which the
+    zero-delay retry CAN absorb.
+
     Shared by `_fetch_models_payload` (which parses the body as OpenAI-shaped
     JSON) and `_probe_health_2xx` (which only cares about the status code).
     """
-    try:
-        resp = httpx.get(url, timeout=2.0)
-        resp.raise_for_status()
-        return resp
-    except httpx.HTTPError as exc:
-        raise ProbeError(str(exc)) from exc
+    last_exc: httpx.HTTPError | None = None
+    for _ in range(2):
+        try:
+            resp = httpx.get(url, timeout=1.0)
+            resp.raise_for_status()
+            return resp
+        except httpx.HTTPError as exc:
+            last_exc = exc
+    raise ProbeError(str(last_exc)) from last_exc
 
 
 def _fetch_models_payload(url: str) -> dict:

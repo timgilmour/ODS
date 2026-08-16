@@ -2312,6 +2312,17 @@ class FakeSpark:
             raise GuardError("previous swap is still booting")
         if self.swap_fail is not None:
             raise self.swap_fail
+        # A successful swap stamps a FRESH swap_status.ts, exactly as the
+        # real node-agent does (swapctl.request_swap writes "swapping" at
+        # request time). Tests that tick more than once depend on this: it
+        # is what makes an invalidated observer see the swap's own effect
+        # instead of the stale pre-swap snapshot (2026-08-06 review, C1).
+        from datetime import UTC, datetime
+        self._payload = {
+            **self._payload,
+            "swap_status": {"state": "done", "profile": profile,
+                            "ts": datetime.now(UTC).isoformat()},
+        }
         return {"id": "u1", "profile": profile}
 
     def models(self):
@@ -2336,7 +2347,15 @@ class FakeObservers:
         return self._observers.get(node_id)
 
     def invalidate(self, node_id):
-        pass
+        # DELEGATES, exactly as the real NodeObservers does
+        # (app/node_clients.py). It used to be a no-op `pass`, which made
+        # this fake structurally unable to observe the 2026-08-06 C1 bug:
+        # a reconciler that never invalidated after a successful swap read
+        # identically here and in production, and only production
+        # quarantined a model that had just come back.
+        observer = self._observers.get(node_id)
+        if observer is not None:
+            observer.invalidate()
 
 
 class FakeSlotObserver:
@@ -2639,6 +2658,38 @@ def test_spark_serving_the_intended_profile_is_left_alone(tmp_path):
 
     assert spark.calls == []
     assert store.get()["sparky/slot0"]["last_healthy_ts"] is not None
+
+
+def test_restore_dispatches_once_for_the_reboot_restore_incident_shape(tmp_path):
+    """THE headline positive at the arbiter level: the 2026-08-05 incident's
+    exact status.json shape — profile echoed as the served model,
+    endpoint_ok False, swap_status hours-old (well past the 20-minute boot
+    window) — must dispatch exactly ONE restore.
+
+    Deliberately TWO ticks, not one (2026-08-06 review, C1): a one-tick
+    version of this test would miss the bug entirely. Tick 1 restores
+    correctly; it is tick 2+ that, without invalidating the node observer's
+    cache after a successful swap, keeps re-deriving 'down' from the SAME
+    stale pre-swap snapshot (its 10 s TTL outlives several 2 s tick
+    intervals) and re-dispatches a SECOND swap for a restore that already
+    worked — which in production hits the live guard's boot-window check,
+    is refused as "still booting", and quarantines the resource within ~4 s
+    of a restore that succeeded. FakeSpark.swap() stamps a fresh
+    swap_status.ts on success (mirroring the real node-agent), so a
+    correctly invalidated cache sees the swap's own effect on tick 2
+    (transitioning, shielded) instead of stale pre-swap data."""
+    from datetime import UTC, datetime, timedelta
+
+    old = (datetime.now(UTC) - timedelta(hours=19)).isoformat()
+    store = _intent(tmp_path, key="sparky/slot0", model="heretic", engine="spark")
+    spark = FakeSpark(profile="heretic", serving_model="heretic", endpoint_ok=False,
+                      swap_state="done", swap_ts=old)
+    watcher, _ = _reconcile_watcher(tmp_path, store, **_sparky_wiring(spark))
+
+    watcher.tick()
+    watcher.tick()
+
+    assert spark.calls == [("swap", "heretic")]
 
 
 def test_no_spark_configured_emits_no_phantom_key(tmp_path):
