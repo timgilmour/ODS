@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type {
   DeckNodeEntry,
+  EngineKindsResponse,
   Gpu,
   LifecycleEntry,
   PolicyMap,
+  RemoteTenant,
   ResourceTenant,
   SettingsDrift,
   SparkStatus,
@@ -60,6 +62,12 @@ function stateWith(
     policy: PolicyMap;
     lifecycle: StateResponse["lifecycle"];
     nodes: DeckNodeEntry[];
+    /** `world.remote_tenants` — the REMOTE half of the world snapshot
+     * (app/state.py's World.snapshot_remote, merged in by
+     * app/routers/__init__.py's build_world_snapshot). OMITTED entirely
+     * unless a test asks for it, so every other test in this file exercises
+     * the absent-key path a deck with no remote observer serves. */
+    remoteTenants: Record<string, RemoteTenant>;
   }> = {},
 ): StateResponse {
   // Shallow copy: tests reassign a whole per-resource entry (never mutate
@@ -77,6 +85,7 @@ function stateWith(
       // Redundant with each tenant's own gpu_index (see api.ts's World.placement
       // doc) — derived here so a fixture never has to state the same fact twice.
       placement: Object.fromEntries(Object.entries(tenants).map(([r, t]) => [r, t.gpu_index])),
+      ...(overrides.remoteTenants ? { remote_tenants: overrides.remoteTenants } : {}),
     },
     // Every declared resource needs a policy row or tenantPlacement's
     // `policy[resource]` throws — known resources get their named default
@@ -874,5 +883,300 @@ describe("buildNodes — registry nodes", () => {
     // Exactly one card for the entry — never a second, separately-built one.
     expect(nodes.filter((n) => n.id === "boxa")).toHaveLength(1);
     expect(nodes.find((n) => n.id === "boxa")?.label).toBe("Box Alpha");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Declared REMOTE engines (Task 10b) — a node-agent entry's own engines[],
+// seen through `world.remote_tenants` (app/state.py's World.snapshot_remote
+// stamps node_id/resource/engine/gpu_index on every record, :300-310) and
+// keyed `<node>/<resource>` (app/observe.py's node_key).
+// ---------------------------------------------------------------------------
+
+// Fixture rule again: node "zeta" (never sparky), resource "song-lab" (never
+// omni), GPUs 4/5 (never 0/1, never the local fixture's 2/3). GPU 5 carries
+// NO declared engine on purpose — the bare-GPU card must survive beside the
+// engine cards.
+const zetaEntry: DeckNodeEntry = {
+  id: "zeta", label: "Zeta Box", agent_kind: "node-agent",
+  address: "http://zeta:7720", serving_address: null, credential_set: true,
+  control: "none",
+  status: "online", last_seen: "2026-08-16T00:00:00+00:00",
+  gpus: [
+    { index: 4, name: "GB10", memory_used_mb: 62_000, memory_total_mb: 122_880,
+      utilization_percent: 41 },
+    { index: 5, name: "GB10", memory_used_mb: 1_024, memory_total_mb: 122_880,
+      utilization_percent: 0 },
+  ],
+  serving: null, error: null,
+};
+
+function remoteTenant(overrides: Partial<RemoteTenant> = {}): RemoteTenant {
+  return {
+    // The kind's own observe() shape (app/engine_kinds.py:917-929) plus the
+    // four fields World.snapshot_remote stamps on every record.
+    engine: "sglang-omni", gpu_index: 4, state: "idle",
+    busy_requests: 0, model: null, idle_s: 42,
+    node_id: "zeta", resource: "song-lab",
+    ...overrides,
+  };
+}
+
+// GET /api/engine-kinds, pinned to the live sglang-omni row
+// (app/engine_kinds.py:190-191 + :966-970's human_verbs).
+const OMNI_KINDS: EngineKindsResponse = {
+  kinds: [{
+    kind: "sglang-omni", connection: { url: { required: true } },
+    remote_capable: true, local_capable: false, human_verbs: ["load", "unload"],
+  }],
+};
+
+function zetaState(
+  overrides: Parameters<typeof stateWith>[0] = {},
+): StateResponse {
+  return stateWith({
+    nodes: [localEntry, zetaEntry],
+    remoteTenants: { "zeta/song-lab": remoteTenant() },
+    ...overrides,
+  });
+}
+
+describe("buildNodes — declared remote engines", () => {
+  it("gives a node-agent entry's declared engine its own card, named by the resource", () => {
+    const zeta = buildNodes(zetaState(), {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+    const card = zeta.resources.find((r) => r.id === "song-lab")!;
+    expect(card.label).toBe("song-lab");
+    // Capacity comes from the node's OWN gpu list (the one observedNode
+    // already meters), matched on the declared gpu_index and converted MB
+    // -> bytes exactly as the bare-GPU cards are.
+    expect(card.capacity).toEqual({
+      used: 62_000 * 1024 * 1024, total: 122_880 * 1024 * 1024 });
+    // The local-world control dispatch must NEVER fire for a remote card
+    // (nodes.ts's header: App.tsx drills the LOCAL box's world down to every
+    // card, so a remote card reading `world.tenants[control]` would describe
+    // the wrong machine).
+    expect(card.controls).toEqual([]);
+    expect(card.remoteEngine).toEqual({
+      nodeId: "zeta", resource: "song-lab", kind: "sglang-omni", state: "idle",
+      verbs: [{ verb: "load", disabled: true }, { verb: "unload", disabled: false }],
+    });
+  });
+
+  it("the engine's card replaces its GPU's bare meter; a GPU with no engine keeps one", () => {
+    const zeta = buildNodes(zetaState(), {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+    expect(zeta.resources.map((r) => r.id)).toEqual(["gpu5", "song-lab"]);
+  });
+
+  it("reports unknown capacity rather than zero when the declared GPU is not in the node's list", () => {
+    const s = zetaState({
+      remoteTenants: { "zeta/song-lab": remoteTenant({ gpu_index: 9 }) },
+    });
+    const card = buildNodes(s, {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.capacity).toBeNull();
+    // ...and no GPU card is suppressed by a declaration that matches none.
+    expect(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!
+      .resources.map((r) => r.id)).toEqual(["gpu4", "gpu5", "song-lab"]);
+  });
+
+  it("renders the lifecycle's word, never a re-derived one", () => {
+    for (const status of ["serving", "warming", "quarantined", "parked", "down"] as const) {
+      const s = zetaState({
+        lifecycle: { "zeta/song-lab": lifecycleEntry({ status }) },
+      });
+      const card = buildNodes(s, {}, OMNI_KINDS)
+        .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+      expect(card.placements[0].status).toBe(status);
+    }
+  });
+
+  it.each([
+    // Only reachable on a deck with NO intent store, where the whole
+    // lifecycle view is `{}` (app/routers/__init__.py:136-137) — so these
+    // are derive_status's own no-intent arms, not a second derivation.
+    ["idle", "unmanaged"],
+    ["busy", "unmanaged"],
+    ["down", "idle"],
+    // The engine we failed to LOOK at observes reachable: False
+    // (app/observe.py:320-321), which is `unreachable`, never `down`.
+    ["unknown", "unreachable"],
+  ])("with an empty lifecycle view, %s falls back to %s", (state, expected) => {
+    const s = zetaState({
+      remoteTenants: { "zeta/song-lab": remoteTenant({ state }) },
+      lifecycle: {},
+    });
+    const card = buildNodes(s, {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.placements[0].status).toBe(expected);
+    // The engine's own word is untouched by that fallback — it is a
+    // different vocabulary, carried for the verbs beside the chip.
+    expect(card.remoteEngine!.state).toBe(state);
+  });
+
+  it("keeps the chip while the engine is not resident — that is where down/parked/quarantined live", () => {
+    // The status vocabulary requirement 1 names is only ever observable on a
+    // NOT-loaded engine (app/lifecycle.py:76-89), so a card that dropped its
+    // chip when the engine went down could never show it.
+    const s = zetaState({
+      remoteTenants: {
+        "zeta/song-lab": remoteTenant({ state: "down", busy_requests: null, idle_s: null }),
+      },
+      lifecycle: { "zeta/song-lab": lifecycleEntry({ status: "parked" }) },
+    });
+    const card = buildNodes(s, {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.placements).toHaveLength(1);
+    expect(card.placements[0].status).toBe("parked");
+    expect(card.placements[0].name).toBe("song-lab");
+    expect(card.placements[0].kind).toBe("engine");
+    // No idle reading at all on this record — absent, never a fabricated 0.
+    expect(card.placements[0].idleSeconds).toBeNull();
+    expect(card.remoteEngine!.verbs).toEqual([
+      { verb: "load", disabled: false }, { verb: "unload", disabled: true },
+    ]);
+  });
+
+  it("an unavailable busy indicator reads BUSY, exactly as the backend already read it", () => {
+    // app/engine_kinds.py:902-908: `busy is None or busy > 0` -> state
+    // "busy". The count itself is NOT re-read here — a UI that branched on
+    // busy_requests === null would be a second, drifting copy of design
+    // §4's fails-toward-alive rule, and there is no distinct "unknown busy"
+    // presentation because the backend vocabulary serves none.
+    const s = zetaState({
+      remoteTenants: {
+        "zeta/song-lab": remoteTenant({ state: "busy", busy_requests: null }),
+      },
+    });
+    const card = buildNodes(s, {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.remoteEngine!.state).toBe("busy");
+    // Neither chip fact is borrowed from a kind that means something else by
+    // it: `busy` carries hipfire's park-refusal copy (labels.inUseTitle) and
+    // this kind has no queue concept at all. Absent renders nothing.
+    expect(card.placements[0].busy).toBeUndefined();
+    expect(card.placements[0].queue).toBeUndefined();
+  });
+
+  it("badges the kind: a remote card has no 'usual engine' for it to be unremarkable against", () => {
+    const card = buildNodes(zetaState(), {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.placements[0].engine).toBe("sglang-omni");
+    expect(card.placements[0].engineBadge).toBe("sglang-omni");
+  });
+
+  it("carries the deck-wide policy row for the resource", () => {
+    // PolicyStore is keyed by BARE resource across the whole deck (ruling
+    // R10, app/policy.py's declared_defaults) — the same map the local cards
+    // read, not a node-scoped one.
+    const s = zetaState({
+      policy: { ...DEFAULT_POLICY, "song-lab": { priority: 7, pinned: true, idle_ttl: 600 } },
+    });
+    const card = buildNodes(s, {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.placements[0].pinned).toBe(true);
+    expect(card.placements[0].priority).toBe(7);
+    expect(card.placements[0].idleSeconds).toBe(42);
+  });
+
+  it("survives a poll where the policy row has not been materialized yet", () => {
+    // The local rows are all there; only the just-declared remote engine's
+    // is missing — the poll that reads policy.json a moment before the
+    // declaration lands. An absent row must not blank the board.
+    const s = zetaState({ policy: { ...DEFAULT_POLICY } });
+    const card = buildNodes(s, {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.placements[0].pinned).toBeUndefined();
+    expect(card.placements[0].priority).toBeUndefined();
+  });
+
+  it("an unreachable node keeps its engine card, marks it stale, and withholds every verb", () => {
+    const s = zetaState({ nodes: [localEntry, { ...zetaEntry, status: "offline" }] });
+    const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+    const card = zeta.resources.find((r) => r.id === "song-lab")!;
+    expect(zeta.status).toBe("unreachable");
+    expect(card.placements[0].stale).toBe(true);
+    expect(card.remoteEngine!.verbs.every((v) => v.disabled)).toBe(true);
+  });
+
+  it("renders the card with no verbs at all until the kinds catalog lands", () => {
+    const card = buildNodes(zetaState(), {}, null)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.placements).toHaveLength(1);
+    expect(card.remoteEngine!.verbs).toEqual([]);
+  });
+
+  it("never carries settings drift on a remote engine placement", () => {
+    // Deliberate omission: DriftCard's Settings target is the NODE's
+    // configurable engine (a swap node's vllm), which is not this engine —
+    // offering it would open a scope key nothing resolves (the D11 defect
+    // ModelDetailDrawer's own comment names). See nodes.ts.
+    const s = zetaState({
+      lifecycle: {
+        "zeta/song-lab": lifecycleEntry({
+          settings_drift: { changed: ["args:x"], entries: [], since: null },
+        }),
+      },
+    });
+    const card = buildNodes(s, {}, OMNI_KINDS)
+      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    expect(card.placements[0].settingsDrift).toBeUndefined();
+  });
+
+  it("another node's remote engines never land on this card", () => {
+    const s = zetaState({
+      nodes: [localEntry, zetaEntry, heraEntry],
+      remoteTenants: {
+        "zeta/song-lab": remoteTenant(),
+        "hera/mixdown": remoteTenant({ node_id: "hera", resource: "mixdown", gpu_index: 0 }),
+      },
+    });
+    const nodes = buildNodes(s, {}, OMNI_KINDS);
+    expect(nodes.find((n) => n.id === "zeta")!.resources.map((r) => r.id))
+      .toEqual(["gpu5", "song-lab"]);
+    expect(nodes.find((n) => n.id === "hera")!.resources.map((r) => r.id))
+      .toEqual(["mixdown"]);
+  });
+
+  it("a swap node's declared engines join its serving slot, which is untouched", () => {
+    // The one live topology: the box that swaps vLLM profiles is also the
+    // box an sglang-omni engine gets declared on, and buildNodes routes a
+    // control:"swap" entry down the swap path — so the engine cards have to
+    // be built there too or the feature is invisible on the only node that
+    // uses it.
+    const s = stateWith({
+      nodes: [localEntry, boxaEntry],
+      remoteTenants: {
+        "boxa/song-lab": remoteTenant({ node_id: "boxa", gpu_index: 0 }),
+      },
+    });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }, OMNI_KINDS)
+      .find((n) => n.id === "boxa")!;
+    expect(boxa.resources.map((r) => r.id)).toEqual(["slot0", "song-lab"]);
+    expect(boxa.resources[0].controls).toEqual(["spark"]);
+    expect(boxa.resources[0].placements[0].id).toBe("boxa/slot0");
+    const card = boxa.resources[1];
+    expect(card.remoteEngine!.nodeId).toBe("boxa");
+    // The swap node's own GPU list is the meter source here too.
+    expect(card.capacity).toEqual({ used: 4096 * 1024 * 1024, total: 49152 * 1024 * 1024 });
+  });
+
+  it("a node-agent entry with no remote tenants renders exactly as before", () => {
+    // The observe-only regression pin: `world.remote_tenants` absent
+    // entirely (every deck built without a remote observer) must change
+    // nothing about the card this file already produced.
+    const s = stateWith({ nodes: [localEntry, zetaEntry] });
+    const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+    expect(zeta.resources.map((r) => r.id)).toEqual(["gpu4", "gpu5"]);
+    expect(zeta.resources.every((r) => r.controls.length === 0)).toBe(true);
+    expect(zeta.resources.every((r) => r.placements.length === 0)).toBe(true);
+    expect(zeta.resources.every((r) => r.remoteEngine === undefined)).toBe(true);
+  });
+
+  it("the placement id is the lifecycle key, so the detail drawer can re-derive it", () => {
+    const nodes = buildNodes(zetaState(), {}, OMNI_KINDS);
+    const spot = findPlacement(nodes, "zeta/song-lab")!;
+    expect(spot.node.id).toBe("zeta");
+    expect(spot.resource.id).toBe("song-lab");
+    expect(spot.placement.name).toBe("song-lab");
   });
 });

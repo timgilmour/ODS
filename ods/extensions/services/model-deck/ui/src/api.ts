@@ -59,6 +59,31 @@ export interface ResourceTenant {
   queue_depth?: number | null;
 }
 
+/** One DECLARED engine on a registry entry OTHER than the local one, as
+ * `World.snapshot_remote` stamps it (app/state.py:300-310): the resource's
+ * own KIND's `observe()` shape — the same union-of-kinds posture
+ * `ResourceTenant` documents — plus four fields stamped uniformly on every
+ * record, `engine` (the kind), `gpu_index`, `node_id` and `resource`. The
+ * last two ride ON the record rather than being parsed back out of the map
+ * key precisely so the two cannot drift (that docstring's own words), and
+ * every downstream key is built from them (app/observe.py's `observe_remote`,
+ * :145-146).
+ *
+ * sglang-omni-kind fields (app/engine_kinds.py's `_SglangOmniAdapter`):
+ * - `state` "busy"|"idle"|"down"|"unknown" (`observe`, :899-929; `unknown()`,
+ *   :931-947 — "we failed to look", which is the record a node whose agent
+ *   did not answer gets).
+ * - `busy_requests` int | null — the agent's count of established
+ *   connections on the serving port. `null` means the agent could not take
+ *   the count, and the ADAPTER already reads that as busy (`busy is None or
+ *   busy > 0` -> state "busy", :902-908, design §4's fails-toward-alive
+ *   rule). Nothing downstream re-reads the count: `state` is the answer. */
+export interface RemoteTenant extends ResourceTenant {
+  node_id: string;
+  resource: string;
+  busy_requests?: number | null;
+}
+
 export interface World {
   gpus: Gpu[];
   /** Keyed by resource name (app/state.py's World.snapshot `tenants[resource]
@@ -72,6 +97,18 @@ export interface World {
    * each tenant's own `gpu_index` field; kept because it is still on the
    * wire, even though `nodes.ts` reads `gpu_index` off the tenant directly. */
   placement: Record<string, number>;
+  /** The REMOTE half of the same snapshot, keyed `<node>/<resource>`
+   * (app/observe.py:31's `node_key`) — every engine DECLARED on a registry
+   * entry other than the local one, merged in by
+   * `build_world_snapshot` (app/routers/__init__.py:81-86) from the
+   * TTL-paced remote observer. Its OWN key, never folded into `tenants`:
+   * a remote `gpu_index` addresses another machine's GPU list
+   * (`World.snapshot_remote`'s docstring, app/state.py:204-238).
+   *
+   * OPTIONAL because a deck built without a remote observer serves no such
+   * key at all (that same merge is conditional) — absence is representable,
+   * and it means "no engines declared off-box", never an error. */
+  remote_tenants?: Record<string, RemoteTenant>;
 }
 
 export interface TenantPolicy {
@@ -1016,6 +1053,37 @@ export function updateEngine(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     },
+  );
+}
+
+/** POST /api/nodes/{node_id}/engines/{resource}/{verb} — act on a DECLARED
+ * REMOTE engine (app/routers/serving.py:247-357's `engine_verb`, sglang-omni
+ * Task 8). The remote counterpart of `/api/tenants/{resource}/{verb}`, which
+ * `postAction` reaches for local ones.
+ *
+ * 202, never 200: the node's agent queues the request for its host-side
+ * swap-helper and this route observes nothing afterwards, and a cold
+ * sglang-omni start takes ~4 minutes (that route's own docstring). So a
+ * resolved promise means ACCEPTED, not done — the caller re-polls
+ * `/api/state` and watches the lifecycle status, exactly as it does for
+ * every other asynchronous verb.
+ *
+ * The refusal contract, each an `ApiError` carrying the route's own
+ * sentence: 404 unknown node / unknown engine (`_declared_engine`, :231-244),
+ * 405 the kind does not declare this verb (:295-296), 501 the kind declares
+ * it but the node-agent engine channel has no call for it (:302-305), 503
+ * the node cannot act on it (not a node-agent entry, no address, no stored
+ * credential, or a kind with no remote constructor — :315-318), 502 for the
+ * agent's own failure (an `EngineError` re-raised into the app-wide
+ * handler). Callers render the detail verbatim; none of these are invented
+ * here. */
+export function postEngineVerb(
+  nodeId: string, resource: string, verb: string,
+): Promise<unknown> {
+  return request<unknown>(
+    `/api/nodes/${encodeURIComponent(nodeId)}/engines/` +
+    `${encodeURIComponent(resource)}/${encodeURIComponent(verb)}`,
+    { method: "POST" },
   );
 }
 

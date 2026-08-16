@@ -323,7 +323,18 @@ export default function ModelDetailDrawer({
   // A swap node's slot key is a fixed convention backend-side
   // (app/observe.py:slot_key, mirrored in nodes.ts's isSwapSlotId).
   const isSparkSlot = isSwapSlotId(placement.id);
-  const settingsEngine = placedOn ? (engineSettingsNodes[placedOn.nodeId] ?? null) : null;
+  // The node's configurable engine — but only for the placement that
+  // actually runs it, which is the swap SLOT (App.tsx's probe builds this
+  // map as one `(node_id, "vllm")` pair per control:"swap" node, so a
+  // non-null value has only ever meant "this node's serving slot runs
+  // vllm"). Narrowed to `isSparkSlot` by Task 10b, which put a SECOND kind
+  // of placement on those same nodes: a declared remote engine's chip would
+  // otherwise offer Settings for the node's vllm under the engine's own
+  // resource name, opening a scope key nothing resolves — the D11 defect the
+  // Settings button's own comment below exists to prevent. A no-op for every
+  // placement that could reach here before.
+  const settingsEngine =
+    placedOn && isSparkSlot ? (engineSettingsNodes[placedOn.nodeId] ?? null) : null;
   // Verbs need a reachable node AND a placement still on the board: a stale
   // reading is a memory, and nothing can act on a memory.
   const showActions =

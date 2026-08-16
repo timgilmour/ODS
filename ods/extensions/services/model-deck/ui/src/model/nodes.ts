@@ -23,19 +23,31 @@
  * will render plausible, wrong numbers with no error anywhere. The fix then
  * is a richer `controls` type carrying its own node's data, decided HERE —
  * not a per-component guard.
+ *
+ * Task 10b is the first surface to need that fix, and takes it as
+ * prescribed: a DECLARED REMOTE engine's card carries `remoteEngine`
+ * (`RemoteEngineControl` below) — its own node id, its own resource name and
+ * its own verbs, decided here — and leaves `controls` EMPTY, so the
+ * local-world dispatch in ResourcePanel/ModelDetailDrawer can never fire for
+ * it. The landmine stays dormant: no remote card reads `world`, `models` or
+ * `coldGgufs` for anything.
  */
 
 import type {
   DeckNodeEntry,
+  EngineKindsResponse,
   ExternalProc,
   LifecycleMap,
   LifecycleStatus,
+  NodeGpu,
   PolicyMap,
+  RemoteTenant,
   ResourceTenant,
   SettingsDrift,
   SparkStatus,
   StateResponse,
 } from "../api";
+import { isResident, remoteEngineVerbs, type EngineVerb } from "./engineVerbs";
 
 /** Node-level rollup. Deliberately NOT LifecycleStatus: that describes one
  * resource's relationship to its recorded intent and stays on the placement.
@@ -108,6 +120,38 @@ export interface Placement {
   settingsDrift?: SettingsDrift;
 }
 
+/** The control surface a DECLARED REMOTE engine's card exposes (Task 10b) —
+ * the "richer controls type carrying its own node's data" this file's header
+ * prescribes, and the reason a remote card's `controls` stays empty.
+ *
+ * Everything a verb click needs is HERE, so no component has to join a
+ * remote card back against the local box's `world`: the node id and resource
+ * that address `POST /api/nodes/{node_id}/engines/{resource}/{verb}`
+ * (app/routers/serving.py:247-357's `engine_verb`), and the verb list itself.
+ */
+export interface RemoteEngineControl {
+  nodeId: string;
+  /** The DECLARED resource name, verbatim — the second path segment of the
+   * verb route and of this engine's lifecycle key. */
+  resource: string;
+  /** The declared KIND (`app.engine_kinds.KNOWN_KINDS`), as the world record
+   * stamps it (`obs["engine"] = kind`, app/state.py:303). What the verb
+   * vocabulary was looked up by; also what the chip badges. */
+  kind: string;
+  /** The ENGINE's own observed state word, verbatim — for sglang-omni
+   * "busy"|"idle"|"down"|"unknown" (app/engine_kinds.py:899-947). A
+   * DIFFERENT fact from the placement's `status`, which is the lifecycle
+   * vocabulary (intent x observation): "serving" covers both busy and idle,
+   * and only this one says a render is in flight RIGHT NOW. Rendered
+   * verbatim — no "unknown busy" presentation is invented here, because the
+   * unavailable-indicator case has already been folded into this word by the
+   * adapter (`busy is None or busy > 0` -> "busy", :902-908). */
+  state: string;
+  /** From the kind's own `human_verbs` (model/engineVerbs.ts). Empty until
+   * `/api/engine-kinds` lands — the card renders regardless. */
+  verbs: EngineVerb[];
+}
+
 export interface DeckResource {
   id: string;
   label: string;
@@ -125,6 +169,11 @@ export interface DeckResource {
    * letting components re-derive it is what keeps node-specific knowledge
    * inside this file. */
   controls: string[];
+  /** Set on (and only on) a DECLARED REMOTE engine's card — see
+   * `RemoteEngineControl`. Absent everywhere else, so
+   * `resource.remoteEngine &&` is a complete check at every call site, and
+   * mutually exclusive with a non-empty `controls` by construction. */
+  remoteEngine?: RemoteEngineControl;
 }
 
 export interface DeckNode {
@@ -308,6 +357,160 @@ function localNode(state: StateResponse): DeckNode {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Declared REMOTE engines (Task 10b) — a node-agent entry's own engines[],
+// seen through `world.remote_tenants` and given a card with verbs.
+// ---------------------------------------------------------------------------
+
+/** node-agent reports MB (its `IndividualGPU`, node-agent/models.py:23-31);
+ * the board's meters speak bytes (World.gpus). ONE conversion, shared by the
+ * bare-GPU cards and the engine cards — two copies of a units conversion is
+ * how the next units bug gets in (app/node_clients.py:54 says the same about
+ * its own). `null` capacity means unknown: a declared gpu_index matching
+ * nothing the node reported renders hatched, never a fabricated 0/0. */
+function gpuCapacity(gpus: NodeGpu[] | null, index: number): DeckResource["capacity"] {
+  const gpu = (gpus ?? []).find((g) => g.index === index);
+  return gpu
+    ? { used: gpu.memory_used_mb * 1024 * 1024, total: gpu.memory_total_mb * 1024 * 1024 }
+    : null;
+}
+
+/** app/observe.py:31's `node_key` — the one backend function that builds
+ * these ids, mirrored here so a remote placement's id IS its lifecycle key.
+ * Built from the tenant's OWN `node_id`/`resource` fields rather than from
+ * the `world.remote_tenants` map key, exactly as `observe_remote`
+ * (app/observe.py:145-146) builds the observation keys it must match: two
+ * derivations of one id is how a board and a lifecycle map come apart. */
+function remoteKey(tenant: RemoteTenant): string {
+  return `${tenant.node_id}/${tenant.resource}`;
+}
+
+/** The status a remote engine shows when the lifecycle view carries no entry
+ * for it at all — reachable ONLY on a deck with no intent store, where
+ * `build_lifecycle_view` returns `{}` wholesale (app/routers/__init__.py:136-137,
+ * mirrored in api.ts's `StateResponse.lifecycle`). No intent store means no
+ * intent by construction, so these are `derive_status`'s own no-intent arms,
+ * not a second status derivation: unreachable when we failed to look
+ * (app/lifecycle.py:45-46 — `unknown()` observes `reachable: False`,
+ * app/observe.py:320-321), `unmanaged` for something loaded nobody asked for
+ * (:57-59), `idle` for nothing loaded and nothing intended (:60). */
+function noIntentStatus(state: string): LifecycleStatus {
+  if (state === "unknown") return "unreachable";
+  return isResident(state) ? "unmanaged" : "idle";
+}
+
+/** One declared remote engine's chip.
+ *
+ * ALWAYS present, unlike the local `tenantPlacement`'s load-verb arms: the
+ * lifecycle words that matter most here — `down`, `parked`, `quarantined`,
+ * `warming` — are all states in which nothing is loaded (app/lifecycle.py:76-89),
+ * so a card that dropped its chip when the engine stopped serving could
+ * never show them. The comfyui-kind arm above takes the same "always an
+ * engine, no model identity of its own" shape for the same reason.
+ *
+ * `settingsDrift` is deliberately NOT carried: DriftCard's Settings target
+ * is the NODE's configurable engine (a swap node's vllm — App.tsx's catalog
+ * probe), which is not this engine, so the card would offer a scope key
+ * nothing resolves — the D11 defect ModelDetailDrawer's own comment names.
+ * Drift for a remote declared engine needs a per-placement settings target
+ * first; until then, showing nothing beats showing a dead end.
+ */
+function remoteEnginePlacement(
+  tenant: RemoteTenant,
+  lifecycle: LifecycleMap,
+  policy: PolicyMap,
+  stale: boolean,
+): Placement {
+  const key = remoteKey(tenant);
+  // PolicyStore rows are keyed by BARE resource across the whole deck
+  // (ruling R10 — app/policy.py's `declared_defaults` walks EVERY registry
+  // entry and the declaration boundary refuses a name another node already
+  // uses), so this is the same map the local cards read. Optional-chained
+  // unlike the local arms': the local declaration and its policy rows are
+  // materialized together, but a remote engine declared seconds ago can be
+  // observed by a poll that read policy.json a moment earlier — an absent
+  // row must not blank the whole board.
+  const row = policy[tenant.resource];
+  return {
+    id: key,
+    // The RESOURCE is the identity: this kind reports no model of its own
+    // (GF2 — its `/model` is the container's mount path, so the adapter
+    // returns None, app/engine_kinds.py:920-927).
+    name: tenant.resource,
+    // No footprint on the wire for a remote engine (the declared constant
+    // lives backend-side, in `reclaimable`) — absent, never invented.
+    bytes: null,
+    engine: tenant.engine,
+    // Unlike a spark chip's badge, this one is unconditional: a remote node
+    // has no "engine it usually runs" for the kind to be unremarkable
+    // against, and the kind is the one thing distinguishing this card from
+    // the local ones.
+    engineBadge: tenant.engine,
+    kind: "engine",
+    stale,
+    status: statusOf(lifecycle, key, noIntentStatus(tenant.state)),
+    pinned: row?.pinned,
+    priority: row?.priority,
+    // NO `busy`, and no `queue`. Not because the fact is unknown — the
+    // engine's own state word carries it, and `RemoteEngineControl.state`
+    // renders it beside the verbs — but because both of those chip fields
+    // come with hipfire's/comfyui's copy attached: `labels.inUseTitle` says
+    // "a conversation turn ... park/apply will refuse without force", which
+    // is that kind's guard and not this one's (its verbs are load/unload,
+    // app/engine_kinds.py:966-970), and this kind has no queue concept at
+    // all (its observe() emits state/busy_requests/model/idle_s, nothing
+    // else). An absent field renders nothing, which is the honest answer
+    // here; the in-flight fact is shown where it can be labelled truthfully.
+    idleSeconds: tenant.idle_s ?? null,
+  };
+}
+
+/** Every engine DECLARED on `nodeId`, in the board's canonical resource
+ * order (gpu_index then resource name — `sortedResourceEntries`' rule,
+ * applied to the remote half).
+ *
+ * `world.remote_tenants` IS the declaration as far as this file is
+ * concerned: `World.snapshot_remote` iterates the registry's declared
+ * engines and emits a record for every one of them, including the
+ * kind's own `unknown()` record for a node it could not reach at all
+ * (app/state.py:248-311). `/api/state`'s `nodes` block carries no
+ * `engines[]` — that is the registry route's shape, not this one's. */
+function remoteTenantsOf(world: StateResponse["world"], nodeId: string): RemoteTenant[] {
+  return Object.values(world.remote_tenants ?? {})
+    .filter((t) => t.node_id === nodeId)
+    .sort((a, b) => a.gpu_index - b.gpu_index || a.resource.localeCompare(b.resource));
+}
+
+/** One card per declared remote engine — the remote counterpart of
+ * `localNode`'s per-resource cards, and the ONLY thing on the board that
+ * carries `remoteEngine`. `controls` stays empty: those dispatch against the
+ * LOCAL box's world (see this file's header). */
+function remoteEngineResources(
+  entry: DeckNodeEntry,
+  tenants: RemoteTenant[],
+  state: StateResponse,
+  kinds: EngineKindsResponse | null,
+  stale: boolean,
+): DeckResource[] {
+  return tenants.map((tenant) => ({
+    id: tenant.resource,
+    label: tenant.resource,
+    // The node's OWN GPU list (the node-observer's, which is what this card
+    // already meters) — never `world.gpus`, which is this box's, and never a
+    // second source for one fact.
+    capacity: gpuCapacity(entry.gpus, tenant.gpu_index),
+    controls: [],
+    remoteEngine: {
+      nodeId: entry.id,
+      resource: tenant.resource,
+      kind: tenant.engine,
+      state: tenant.state,
+      verbs: remoteEngineVerbs(kinds, tenant.engine, tenant.state, stale),
+    },
+    placements: [remoteEnginePlacement(tenant, state.lifecycle, state.policy, stale)],
+  }));
+}
+
 /** app/node_observer.py's status vocabulary -> the board's. `unconfigured`
  * and null both render unreachable; the backend's own sentence (entry.error)
  * carries the difference — never a phrase invented here. */
@@ -318,29 +521,45 @@ const OBSERVED_STATUS: Record<string, NodeStatus> = {
   unconfigured: "unreachable",
 };
 
-/** A registry `node-agent` entry, rendered as an observe-only card: no
- * controls, no placements — this file has no verbs to give a box it only
- * watches. See OBSERVED_STATUS for the status mapping and this file's
- * header for why controls/placements must stay empty (the App.tsx
- * prop-drilling landmine this keeps dormant). */
-function observedNode(entry: DeckNodeEntry): DeckNode {
+/** A registry `node-agent` entry, rendered as its GPU meters plus one card
+ * per engine it DECLARES (Task 10b). A node that declares nothing is
+ * observe-only exactly as before — bare GPU cards, no controls, no
+ * placements: this file has no verbs to give a box it only watches.
+ *
+ * A GPU carrying a declared engine gets no bare card of its own: the
+ * engine's card already meters that GPU, and two meters for one GPU would
+ * report the same fact twice.
+ *
+ * See OBSERVED_STATUS for the status mapping, and this file's header for why
+ * an engine card's `controls` stays empty (the App.tsx prop-drilling
+ * landmine this keeps dormant — a remote card carries `remoteEngine`
+ * instead, with its own node's data). */
+function observedNode(
+  entry: DeckNodeEntry,
+  state: StateResponse,
+  kinds: EngineKindsResponse | null,
+): DeckNode {
+  const status = (entry.status && OBSERVED_STATUS[entry.status]) || "unreachable";
+  const tenants = remoteTenantsOf(state.world, entry.id);
+  const claimed = new Set(tenants.map((t) => t.gpu_index));
   return {
     id: entry.id,
     label: entry.label,
-    status: (entry.status && OBSERVED_STATUS[entry.status]) || "unreachable",
+    status,
     lastSeen: entry.last_seen,
     detail: entry.error ?? undefined,
     servingLine: entry.serving?.model ?? undefined,
-    resources: (entry.gpus ?? []).map((g) => ({
-      id: `gpu${g.index}`,
-      label: `GPU ${g.index}`,
-      // node-agent reports MB; the board's meters speak bytes (World.gpus).
-      capacity: { used: g.memory_used_mb * 1024 * 1024,
-                  total: g.memory_total_mb * 1024 * 1024 },
-      controls: [],     // observe-only: no verbs, no placements (spec §1) —
-      placements: [],   // which is also what keeps the App.tsx prop-drilling
-                        // landmine (this file's header) dormant.
-    })),
+    resources: [
+      ...(entry.gpus ?? []).filter((g) => !claimed.has(g.index)).map((g) => ({
+        id: `gpu${g.index}`,
+        label: `GPU ${g.index}`,
+        capacity: gpuCapacity(entry.gpus, g.index),
+        controls: [],     // observe-only: no verbs, no placements (spec §1) —
+        placements: [],   // which is also what keeps the App.tsx prop-drilling
+                          // landmine (this file's header) dormant.
+      })),
+      ...remoteEngineResources(entry, tenants, state, kinds, status === "unreachable"),
+    ],
   };
 }
 
@@ -363,20 +582,26 @@ export function nodeIdOfPlacement(id: string): string {
   return id.split("/")[0];
 }
 
+/** `kinds` is `GET /api/engine-kinds` (App.tsx fetches it once): the source
+ * of every declared remote engine's verb vocabulary, never a literal here
+ * (spec §5). `null` — not landed yet, or its fetch failed — renders every
+ * remote card with no verbs rather than guessed ones. Defaulted so the many
+ * callers/tests that have no remote engines need not pass it. */
 export function buildNodes(
   state: StateResponse | null,
   servingByNode: Record<string, SparkStatus | null>,
+  kinds: EngineKindsResponse | null = null,
 ): DeckNode[] {
   if (state === null) return [];
   const nodes = [localNode(state)];
   for (const entry of state.nodes ?? []) {
     if (entry.agent_kind !== "node-agent") continue;
     if (entry.control === "swap") {
-      const swapNode = buildSwapNode(entry, state.lifecycle, servingByNode[entry.id] ?? null);
-      nodes.push(swapNode ?? observedNode(entry));
+      const swapNode = buildSwapNode(entry, state, servingByNode[entry.id] ?? null, kinds);
+      nodes.push(swapNode ?? observedNode(entry, state, kinds));
       continue;
     }
-    nodes.push(observedNode(entry));
+    nodes.push(observedNode(entry, state, kinds));
   }
   return nodes;
 }
@@ -432,20 +657,28 @@ export function resourceHasOwnPlacement(resource: DeckResource): boolean {
 }
 
 /** One swap node's serving-slot resource — buildNodes' registry loop calls
- * this once per `control: "swap"` entry.
+ * this once per `control: "swap"` entry — plus a card for each engine that
+ * node DECLARES (Task 10b). Both, because they are the same box: the one
+ * node that swaps vLLM profiles today is also the one an sglang-omni engine
+ * gets declared on, and this path is the only one a `control: "swap"` entry
+ * ever takes.
  *
  * `serving === null` means no landed status yet (the fetch has not resolved,
  * or 503'd), or the backend says the node is not operable — either way there
  * is nothing to synthesize a control surface from, so the caller falls back
- * to the observe-only card rather than rendering a phantom one.
+ * to the observe-only card rather than rendering a phantom one. That
+ * fallback carries the declared engines too: they are not the slot's, and
+ * their verbs do not go through the swap channel.
  */
 function buildSwapNode(
   entry: DeckNodeEntry,
-  lifecycle: LifecycleMap,
+  state: StateResponse,
   serving: SparkStatus | null,
+  kinds: EngineKindsResponse | null,
 ): DeckNode | null {
   if (serving === null) return null;
 
+  const lifecycle = state.lifecycle;
   const slotKey = `${entry.id}/slot0`;
   const lc = lifecycle[slotKey];
   const reachable = lc?.observed.reachable ?? true;
@@ -531,6 +764,18 @@ function buildSwapNode(
             ]
           : [],
       },
+      // The slot is this node's SWAP surface; these are the engines it
+      // DECLARES. Separate cards, separate verbs, separate route. This card
+      // renders no BARE GPU cards at all (only observedNode does), so there
+      // is nothing here to suppress the way that function does — but the
+      // engine card still meters its GPU from this node's own list.
+      //
+      // `stale` is the SLOT's reachability, which is the node-agent's own
+      // (app/observe.py's observe_spark reads the same probe the declared
+      // engines' observations come through), so an engine card on a dark box
+      // withholds its verbs exactly as the slot withholds the profile picker.
+      ...remoteEngineResources(entry, remoteTenantsOf(state.world, entry.id),
+                               state, kinds, stale),
     ],
   };
 }

@@ -8,6 +8,7 @@ import {
   getEngineKinds,
   getNodeServingStatus,
   listNodeRegistry,
+  postEngineVerb,
   postNodeReload,
   postNodeSwap,
   putUnitPinned,
@@ -388,5 +389,38 @@ describe("forgetEngine", () => {
     }));
     await forgetEngine("local", "widget-a");
     expect(calls[0].url).toBe("/api/nodes/local/engines/widget-a");
+  });
+});
+
+describe("postEngineVerb", () => {
+  it("POSTs to the node/resource/verb path, every segment encoded", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return {
+        ok: true, status: 202,
+        json: async () => ({ status: "accepted", node_id: "box a",
+                             resource: "song/lab", verb: "unload" }),
+      } as Response;
+    }));
+    // Ids and resource names that would break an unencoded path — a
+    // registry is hand-editable and a resource name is operator-typed.
+    await postEngineVerb("box a", "song/lab", "unload");
+    expect(calls[0].url).toBe("/api/nodes/box%20a/engines/song%2Flab/unload");
+    expect(calls[0].init?.method).toBe("POST");
+    // No body: the route takes none (app/routers/serving.py's engine_verb —
+    // "No `force`, no body").
+    expect(calls[0].init?.body).toBeUndefined();
+  });
+
+  it("surfaces the route's own refusal sentence, with its status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false, status: 405, statusText: "Method Not Allowed",
+      json: async () => ({ detail: "song-lab (sglang-omni) does not support park" }),
+    } as Response)));
+    await expect(postEngineVerb("zeta", "song-lab", "park")).rejects.toMatchObject({
+      status: 405,
+      message: "song-lab (sglang-omni) does not support park",
+    });
   });
 });
