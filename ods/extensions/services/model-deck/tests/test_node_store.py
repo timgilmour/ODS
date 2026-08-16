@@ -556,6 +556,33 @@ def test_load_heals_local_entry_with_invalid_engines(store, tmp_path):
     assert loaded["engines"] == []
 
 
+def test_load_heals_local_entry_with_a_slot0_resource(store, tmp_path):
+    """A hand-written entry declaring an otherwise-VALID engine whose
+    `resource` is literally "slot0" heals to [] exactly like any other
+    schema-invalid engines list (test_load_heals_local_entry_with_invalid_engines
+    above) — `_heal_engines` needs no separate slot0 guard of its own, it
+    already routes every list through `validate_engines`
+    (app/engine_kinds.py), so that module's reservation of the name lands
+    here automatically. This is the inheritance the single gate depends
+    on: a second guard planted here instead would be exactly the
+    duplicated-site pattern [[guard-at-the-boundary]] warns against."""
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                      "address": "http://hera:7720"})
+    _write_nodes(tmp_path, [good,
+        {"id": "local", "label": "Local Box", "agent_kind": "local",
+         "engines": [{"resource": "slot0", "kind": "lemonade",
+                      "connection": {"url": "http://gguf-a:8080",
+                                    "metrics_url": "http://gguf-a:8001/metrics",
+                                    "container": "ods-gguf-a"},
+                      "gpu_index": 3,
+                      "policy_defaults": {"priority": 10, "pinned": False,
+                                          "idle_ttl": 60}}]}])
+    loaded = store.get("local")
+    assert loaded is not None
+    assert loaded["id"] == "local"
+    assert loaded["engines"] == []
+
+
 def test_heal_engines_strips_from_unknown_agent_kind():
     """`_heal_engines` still strips engines from any OTHER/unknown
     agent_kind (E1 Task 5: only local/node-agent may carry the key now).

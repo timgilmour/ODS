@@ -225,6 +225,34 @@ def validate_engines(engines: object, remote: bool = False) -> None:
         if (not isinstance(resource, str) or not resource
                 or "/" in resource or resource != resource.strip()):
             raise _bad("resource must be a non-empty string without '/'")
+        if resource == "slot0":
+            # "slot0" is the serving slot's OWN reserved observation name
+            # (app.observe.slot_key: "<node>/slot0"), never a name a
+            # DECLARED engine may also claim — a swap-capable node that
+            # both swaps AND declares an engine resource literally called
+            # "slot0" would collide with its own slot at that one
+            # observation key across merge_observations (last-wins: the
+            # engine's own observation silently vanishes), the intent
+            # store (one record per key: an engine load overwrites the
+            # slot's swap intent), and the board (duplicate React keys).
+            # Checked here, in the resource-shape block, before the
+            # kind/remote_capable checks below — the reservation is
+            # kind- and location-independent, so it must not be reachable
+            # by declaring a kind or direction the later checks happen to
+            # allow.
+            #
+            # This is the ONE gate: `app.node_store._heal_engines` and
+            # `_validate` both route every engines[] list through THIS
+            # function before it is ever persisted, so a hand-written
+            # nodes.json carrying a "slot0" resource heals the same way any
+            # other schema-invalid list does (to []) with no second guard
+            # written there — see tests/test_node_store.py's slot0 heal
+            # test. Do not add a duplicate check at another call site.
+            raise _bad(
+                "resource 'slot0' is reserved: it is the serving slot's "
+                "observation key ('<node>/slot0'), and a declared engine "
+                "using it would collide with the slot's own observation, "
+                "intent record, and board placement at that same key")
         if resource in seen:
             raise _bad(f"duplicate resource {resource!r}")
         seen.add(resource)

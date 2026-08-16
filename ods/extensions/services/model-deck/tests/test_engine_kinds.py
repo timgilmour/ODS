@@ -82,6 +82,35 @@ def test_resource_shape_refused_when_slashy():
         validate_engines([_entry(resource="local/evil")])
 
 
+def test_resource_shape_refuses_the_reserved_slot0_name():
+    """'slot0' is the serving slot's own observation key
+    (app.observe.slot_key: '<node>/slot0'), not a name any DECLARED engine
+    may also claim — an engine named 'slot0' on a swap-capable node would
+    collide with the slot at that same key across merge_observations
+    (last-wins, so the engine silently vanishes), the intent store (one
+    record per key, so a load overwrites the slot's swap intent), and the
+    board (duplicate React keys). Checked in the resource-shape block,
+    before the kind/remote_capable checks below it, so the refusal fires
+    regardless of `remote` — this fixture's kind (lemonade) is not even
+    remote_capable, and the point is precisely that the slot0 check never
+    has to reach that gate to refuse it."""
+    with pytest.raises(ValueError, match="slot0"):
+        validate_engines([_entry(resource="slot0")])
+
+
+def test_resource_shape_refuses_slot0_on_a_remote_declaration_too():
+    """Same refusal on `remote=True`, and with a kind that IS remote_capable
+    (sglang-omni, via `_omni_entry` below) — deliberately NOT the lemonade
+    fixture above ([[defaults-that-hide-bugs]]): `_entry(resource="slot0")`
+    under `remote=True` would raise "not remote_capable" first (lemonade
+    isn't), and that message happens to also contain "slot0" (the resource
+    name rides in every error string here), so it would pass this test for
+    the wrong reason. A remote_capable kind removes that confound: the only
+    thing left that can raise is the slot0 reservation itself."""
+    with pytest.raises(ValueError, match="slot0"):
+        validate_engines([_omni_entry(resource="slot0")], remote=True)
+
+
 # --- E1 Task 5: KNOWN_KINDS gains remote_capable; validate_engines gains
 # a `remote` argument enforcing it ------------------------------------------
 

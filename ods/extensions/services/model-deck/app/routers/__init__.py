@@ -100,10 +100,13 @@ def build_observations(deck: dict, world: dict) -> dict[str, dict]:
     ``world["remote_tenants"]``, so this only maps it, exactly as
     ``observe_local`` maps the local tenants of the same snapshot. Keys stay
     disjoint from both siblings — ``<node>/<resource>`` where the node is
-    never "local" (the walk skips the local entry) and, in practice, the
-    resource is never "slot0" (that is the serving slot's reserved name; a
+    never "local" (the walk skips the local entry) and the resource is
+    never "slot0" (that is the serving slot's reserved observation name; a
     node that both swaps AND declares an engine literally called "slot0"
-    would be the one collision, which nothing refuses today).
+    would be the one collision — REFUSED now, at the declaration boundary:
+    ``app.engine_kinds.validate_engines`` rejects the name outright, for
+    every kind and both directions, so no ``engines[]`` list reaching this
+    merge can carry it).
     """
     from app.observe import (
         merge_observations,
