@@ -905,6 +905,28 @@ def test_engine_malformed_engines_json_refused(tmp_path):
     assert not log.exists()
 
 
+def test_engine_unreadable_engines_json_refused(tmp_path):
+    """Permission-denied is a distinct failure mode from missing/malformed
+    -- same OSError family, must land in the same refuse-never-guess path."""
+    vllm, _ = _mk_vllm(tmp_path)
+    engines_json = vllm / "engines.json"
+    engines_json.write_text(json.dumps({"omni": _engine_entry(
+        tmp_path / "compose-omni.yaml")}))
+    engines_json.chmod(0o000)
+    ctl = _mk_engine_ctl(tmp_path, "omni", "up")
+    bindir, log = _mk_engine_docker(tmp_path)
+    try:
+        r = _run_once(ctl, vllm, bindir=bindir)
+    finally:
+        engines_json.chmod(0o644)   # tmp_path cleanup needs this back
+
+    assert r.returncode == 0, r.stderr
+    status = _engine_status(ctl, "omni")
+    assert status["ok"] is False
+    assert status["error"]
+    assert not log.exists()
+
+
 def test_engine_compose_file_missing_refused(tmp_path):
     vllm, _ = _mk_vllm(tmp_path)
     ghost = tmp_path / "does-not-exist.yaml"
