@@ -13,20 +13,17 @@ Guard order in swap(), mirroring hipfire.py's park():
      asked for a spark model by name. EngineError from the route-table
      read propagates unchanged (can't see the table -> don't swap).
      force NEVER skips this guard.
-  2. same-profile-while-live backstop (2026-08-06) — refuse a swap to the
-     profile that is ALREADY the last-swapped one while its endpoint
-     answers live. Restoring a profile that is demonstrably alive right now
-     is never a genuine repair, only a self-inflicted 5-15 min outage — and
-     the busy guard alone does not catch this: an IDLE, healthy
-     same-profile "restore" sails straight through it. This exists because
-     observe_spark's `loaded` consults `endpoint_ok` (the fix for the
-     19-hour-dead spark-ds4 incident, 2026-08-05), which means a single bad
-     reading anywhere upstream of the swap call can manufacture a
-     same-profile restore request; this is the last line of defense against
-     one actually reaching the node, re-checking ground truth at the moment
-     of action rather than trusting the observation. force=True overrides
-     it — the documented escape hatch to reboot a profile in place.
-  3. busy guard — refuse while the live model has running or waiting
+
+     There is deliberately NO same-profile-while-live guard here, and it
+     must not be re-added: `POST /api/nodes/{id}/serving/reload` re-swaps
+     the profile that is currently serving, non-forced, as its whole
+     purpose (app/routers/serving.py, _swap_and_record) — such a guard
+     refuses every settings reload. The false same-profile RESTORE it would
+     have caught (a health blip read as a death) is bounded three other
+     ways: SparkObserver's confirming re-probe, node-agent's own probe
+     retry, and the reconciler's 30 s per-key restore cooldown
+     (app/arbiter.py _RESTORE_COOLDOWN_S).
+  2. busy guard — refuse while the live model has running or waiting
      requests (the serving engine's /metrics). A metrics failure while the
      endpoint is up is EngineError, not "not busy". force=True skips this
      guard. Engine-aware: which metric lines count as "busy" is looked up
@@ -45,7 +42,7 @@ Guard order in swap(), mirroring hipfire.py's park():
      misconfigured scrape or a renamed gauge must not silently read as
      "idle" and let a swap kill an in-flight generation with no signal
      anywhere (Tim's ruling, 2026-08-04).
-  4. boot-window guard — ONE judgement, shared with swap_in_progress() and
+  3. boot-window guard — ONE judgement, shared with swap_in_progress() and
      the observer: boot_in_flight(status) below, which weighs THREE things,
      not just state — endpoint down + last swap "done"/"swapping" + the
      swap being recent (_BOOT_WINDOW_MAX_S). The state check alone would
@@ -308,25 +305,6 @@ class SparkClient(NodeAgentHTTP):
                 return prof.get("engine")
         return None
 
-    def _current_profile(self) -> str | None:
-        """The profile the node last swapped to, or None on any ambiguity
-        (no swap_status recorded, a failed last swap, or a profiles-fetch
-        failure) — used ONLY by the same-profile-while-live backstop below,
-        which must never trust anything but a FRESH, uncached read of
-        "current". A last swap in state "error" never actually landed on
-        that profile (mirrors _current_engine's same judgement), so it
-        returns None rather than a name the backstop could false-positive
-        against.
-        """
-        try:
-            payload = self._node_get("/v1/node/profiles")
-        except EngineError:
-            return None
-        status = payload.get("swap_status") or {}
-        if status.get("state") == "error":
-            return None
-        return status.get("profile")
-
     def swap(self, profile: str, force: bool = False) -> dict:
         if self._default_route_targets_spark():
             raise GuardError(
@@ -335,15 +313,6 @@ class SparkClient(NodeAgentHTTP):
                 "override this)")
 
         serving = self._node_get("/v1/node/serving")
-
-        if serving.get("endpoint_ok") and not force and self._current_profile() == profile:
-            raise GuardError(
-                f"{profile!r} is already serving and the endpoint is live; "
-                "restoring the same profile while it is healthy is never a "
-                "genuine repair, only a self-inflicted outage (a single "
-                "dropped health check upstream can look like 'down' even "
-                "though the model is fine) — use force to reboot it anyway")
-
         if serving.get("endpoint_ok") and not force:
             engine = self._current_engine() or "vllm"
             if engine in _BUSY_METRICS:

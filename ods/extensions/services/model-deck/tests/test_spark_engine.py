@@ -418,62 +418,28 @@ def test_swap_raises_engineerror_on_non_dict_swap_response():
 # --- boot-window guard (found live 2026-07-30: helper "done" != endpoint up;
 # the whole autotune window was swappable with no warning) ---
 
-# --- same-profile-while-live backstop (2026-08-06 review, C2 defense 3) ----
-# observe_spark's `loaded` now consults endpoint_ok, so a single bad reading
-# anywhere upstream can manufacture a same-profile restore request. This is
-# the last line of defense against one reaching the node: a fresh, uncached
-# check of ground truth at the moment of action.
+# --- no same-profile-while-live guard, deliberately ------------------------
 
 
-def _live_same_profile_handler(profile="laguna"):
-    return _node_handler(
-        swap_status={"state": "done", "profile": profile,
-                     "ts": datetime.now(UTC).isoformat()},
-        serving={"model": "aeon", "endpoint_ok": True, "container_status": None})
+def test_swap_allows_the_same_profile_while_its_endpoint_is_live():
+    """PINS THE ABSENCE of a same-profile-while-live guard, because one is
+    the obvious-looking companion to observe_spark's stricter `loaded` and
+    was in fact written once (2026-08-06 review, C2 defense 3) before the
+    reload route existed.
 
+    `POST /api/nodes/{id}/serving/reload` ships new declared settings and
+    then re-swaps the CURRENTLY SERVING profile, non-forced, so the
+    settings actually launch (app/routers/serving.py, _swap_and_record) —
+    a guard here refuses every settings reload. The false same-profile
+    RESTORE such a guard would catch (a health blip read as a death) is
+    bounded three other ways instead: SparkObserver's confirming re-probe,
+    node-agent's own probe retry, and _RESTORE_COOLDOWN_S.
 
-def test_swap_refuses_the_same_profile_while_its_endpoint_is_live():
-    """Restoring a profile that is demonstrably alive right now is never a
-    genuine repair, only a self-inflicted 5-15 minute outage. The busy guard
-    alone does not catch this: an IDLE, healthy same-profile "restore" sails
-    straight through it."""
-    handler = _live_same_profile_handler("laguna")
-    client = _client(handler)
-
-    with pytest.raises(GuardError):
-        client.swap("laguna")
-
-    assert not [r for r in handler.calls if r.url.path == "/v1/node/swap"]
-
-
-def test_force_overrides_the_same_profile_backstop():
-    """The documented escape hatch: rebooting a profile in place."""
-    handler = _live_same_profile_handler("laguna")
-    client = _client(handler, metrics_handler=_metrics_handler())
-
-    out = client.swap("laguna", force=True)
-
-    assert out["id"] == "u1"
-
-
-def test_swap_to_a_different_profile_while_live_is_unaffected():
-    """The backstop is same-profile ONLY — an ordinary swap between two
-    profiles is exactly what a live endpoint is supposed to allow."""
-    handler = _live_same_profile_handler("laguna")
-    client = _client(handler, metrics_handler=_metrics_handler())
-
-    out = client.swap("mm27b")
-
-    assert out["id"] == "u1"
-
-
-def test_same_profile_backstop_ignores_a_failed_last_swap():
-    """A last swap in state "error" never actually landed on that profile,
-    so it is not evidence the profile is the current one — mirroring
-    _current_engine's same judgement. Whatever is answering on the endpoint
-    is something else, and the swap must be allowed."""
+    The route's own tests use a fake client, so ONLY a test at this level
+    can hold the line."""
     handler = _node_handler(
-        swap_status={"state": "error", "profile": "laguna", "ts": None},
+        swap_status={"state": "done", "profile": "laguna",
+                     "ts": datetime.now(UTC).isoformat()},
         serving={"model": "aeon", "endpoint_ok": True, "container_status": None})
     client = _client(handler, metrics_handler=_metrics_handler())
 
