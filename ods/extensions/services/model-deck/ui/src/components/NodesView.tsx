@@ -647,7 +647,9 @@ function EngineFormPanel({
 
   return (
     <div className="engine-form">
-      {mode === "add" && <Banner message={messages.engineParkAllowlistNote()} />}
+      {/* Both modes, not just add: an EDIT can repoint connection.container
+          at a container outside the allowlist just as easily. */}
+      <Banner message={messages.engineParkAllowlistNote()} />
       <label>
         {labels.engineResource}
         <input
