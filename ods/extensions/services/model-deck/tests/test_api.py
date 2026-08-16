@@ -23,7 +23,7 @@ from app.engine_kinds import KNOWN_KINDS
 from app.engines import EngineError, GuardError
 from app.intent import IntentStore
 from app.main import create_app
-from app.policy import PolicyStore
+from app.policy import PolicyStore, declared_defaults
 from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
 
 # E1 Task 8: Ephemeral is now {resources: {...}} keyed by resource, not the
@@ -324,24 +324,24 @@ def make_app(tmp_path, monkeypatch):
     deck = app.state.deck
 
     def _get_declared_policy_defaults():
-        """Provide declared policy defaults LIVE off node_store's local
-        `engines[]` (mirrors app.main._build_deck's own same-named helper)
-        — not a frozen snapshot of the module-level `_ENGINES` fixture, so
-        a test that edits the declaration after construction (`_declare_local`,
-        or — T10 — the engines CRUD routes themselves) sees policy defaults
-        that track the edit, the same as production. `_ENGINES` is still
-        what `make_app` SEEDS node_store with below, so every test that never
-        calls `_declare_local` sees byte-identical behavior to before this
-        fixture fix (disclosed, T10: the static version predates any test
-        combining `_declare_local` with a policy assertion, so this gap was
-        never exercised until T10's forget-deletes-the-policy-row test)."""
-        local = deck["node_store"].get("local")
-        engines = local.get("engines", []) if local is not None else []
-        declared = {}
-        for engine in engines:
-            if "resource" in engine and "policy_defaults" in engine:
-                declared[engine["resource"]] = engine["policy_defaults"]
-        return declared
+        """Provide declared policy defaults LIVE off node_store (mirrors
+        app.main._build_deck's own same-named helper) — not a frozen snapshot
+        of the module-level `_ENGINES` fixture, so a test that edits the
+        declaration after construction (`_declare_local`, or — T10 — the
+        engines CRUD routes themselves) sees policy defaults that track the
+        edit, the same as production. `_ENGINES` is still what `make_app`
+        SEEDS node_store with below, so every test that never calls
+        `_declare_local` sees byte-identical behavior to before this fixture
+        fix (disclosed, T10: the static version predates any test combining
+        `_declare_local` with a policy assertion, so this gap was never
+        exercised until T10's forget-deletes-the-policy-row test).
+
+        Delegates to app.policy.declared_defaults (sglang-omni Task 9), which
+        is what production wires too: this used to be a hand-rolled walk of
+        the LOCAL entry alone, and a mirror that walks a different set from
+        the real one is how a test proves a seeding property production does
+        not have."""
+        return declared_defaults(deck["node_store"])
 
     deck.update(
         {
@@ -3606,6 +3606,30 @@ def test_engine_kinds_route_shape(tmp_path, monkeypatch):
     assert set(kinds["lemonade"]["human_verbs"]) == {"load", "unload"}
     assert set(kinds["comfyui"]["human_verbs"]) == {"free"}
     assert set(kinds["hipfire"]["human_verbs"]) == {"park", "resume"}
+    # E1 Task 5: remote_capable is now part of the served shape — the E1
+    # triple all run as sibling containers on THIS box, so all three read
+    # False.
+    assert kinds["lemonade"]["remote_capable"] is False
+    assert kinds["comfyui"]["remote_capable"] is False
+    assert kinds["hipfire"]["remote_capable"] is False
+    # sglang-omni Task 7 — the picker now serves FOUR kinds, and the UI
+    # needed no change for it: ui/src/model/engineForm.ts builds the whole
+    # form from this payload (connection + human_verbs), never a UI literal.
+    assert kinds["sglang-omni"]["connection"] == {"url": {"required": True}}
+    assert set(kinds["sglang-omni"]["human_verbs"]) == {"load", "unload"}
+    assert kinds["sglang-omni"]["remote_capable"] is True
+
+
+def test_engine_kinds_route_lists_four_kinds(tmp_path, monkeypatch):
+    """The count itself, pinned separately from the per-kind shape above: a
+    kind added to KNOWN_KINDS but missing from ENGINE_KINDS (or vice versa)
+    would 500 this route rather than quietly serving three."""
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    body = TestClient(app).get("/api/engine-kinds").json()
+
+    assert [k["kind"] for k in body["kinds"]] == sorted(
+        ["comfyui", "hipfire", "lemonade", "sglang-omni"])
 
 
 def test_engine_add_validates_and_lands(tmp_path, monkeypatch):
@@ -3841,3 +3865,952 @@ def test_api_state_exact_shape_tests_already_match_the_approved_interface(tmp_pa
     assert set(body.keys()) == {"node", "world", "policy", "models", "lifecycle",
                                 "provenance", "nodes"}
     assert set(body["provenance"]) == {"drift", "gaps", "updates"}
+
+
+# ===========================================================================
+# E1 Task 5 — declared-engines CRUD routes gain {node_id} scope (the write
+# gate's remote_capable / agent-operability prereqs, exercised at the HTTP
+# layer). `/nodes/local/engines*` staying byte-identical is proven by every
+# test ABOVE this section still passing unchanged — this section covers only
+# what's NEW: a non-local node_id on the same routes.
+#
+# Fixture rule ([[defaults-that-hide-bugs]]): node id "nimbus" (never the
+# live-seeded "sparky"), resource "gguf-r" (never "omni").
+# ===========================================================================
+
+
+def _add_remote_node(deck, node_id="nimbus", *, credential="key-nimbus"):
+    """A bare node-agent registry row — address + (optionally) a stored
+    credential, no swap/serving machinery — enough for the declared-engines
+    CRUD routes below."""
+    deck["node_store"].add(
+        {"id": node_id, "label": f"{node_id.title()} Box", "agent_kind": "node-agent",
+         "address": f"http://{node_id}:7720"},
+        credential=credential)
+
+
+_REMOTE_ENGINE_BODY = {
+    "resource": "gguf-r", "kind": "lemonade",
+    "connection": {"url": "http://gguf-r:8080",
+                   "metrics_url": "http://gguf-r:8001/metrics",
+                   "container": "ods-gguf-r"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 30},
+}
+
+
+def test_get_nodes_surfaces_remote_engines_declaration(tmp_path, monkeypatch):
+    """Remote-accept happy path, at the API layer: an empty engines[]
+    declaration on a node-agent entry is accepted by the write gate and
+    surfaces through GET /api/nodes exactly like the local entry's own
+    engines[] already does. (Its POPULATED counterpart is
+    test_declaring_sglang_omni_on_a_node_agent_entry_is_accepted below,
+    which Task 7 made possible by giving the gate a kind to let through.)"""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": []})
+
+    body = TestClient(app).get("/api/nodes").json()
+    nimbus = next(n for n in body["nodes"] if n["id"] == "nimbus")
+    assert nimbus["engines"] == []
+
+
+def test_add_engine_unknown_node_404(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+    r = TestClient(app).post("/api/nodes/ghost/engines", json=_GGUF_A_ENTRY)
+    assert r.status_code == 404
+    # Not just Starlette's route-not-found catch-all (which would ALSO read
+    # 404 for a stray typo'd URL): our own "unknown node" refusal, naming it.
+    assert "ghost" in r.json()["detail"]
+
+
+def test_update_engine_unknown_node_404(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+    r = TestClient(app).put("/api/nodes/ghost/engines/gguf-a", json=_GGUF_A_ENTRY)
+    assert r.status_code == 404
+    assert "ghost" in r.json()["detail"]
+
+
+def test_forget_engine_unknown_node_404(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+    r = TestClient(app).delete("/api/nodes/ghost/engines/gguf-a")
+    assert r.status_code == 404
+    assert "ghost" in r.json()["detail"]
+
+
+def test_add_engine_on_remote_node_kind_not_remote_capable_422_via_redacting_handler(
+    tmp_path, monkeypatch
+):
+    """422 kind-not-remote-capable, naming the kind: the router's own
+    shape pre-check passes `remote=True` whenever the target node's
+    `agent_kind` is "node-agent", so this refusal goes through the SAME
+    redacting RequestValidationError handler as every other engine-shape
+    defect (list-shaped `detail`, no `input` echoed) — not NodeStore's own
+    bare-ValueError 422 (a plain string `detail`)."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+
+    r = TestClient(app).post("/api/nodes/nimbus/engines", json=_REMOTE_ENGINE_BODY)
+
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert isinstance(detail, list)                       # the redacting handler's shape
+    assert all("input" not in err for err in detail)
+    assert "lemonade" in detail[0]["msg"]
+    assert "not remote_capable" in detail[0]["msg"]
+    # Refused before any write: nothing landed on the entry.
+    assert deck["node_store"].get("nimbus").get("engines", []) == []
+
+
+def test_add_engine_on_local_node_kind_not_remote_capable_gate_does_not_apply(
+    tmp_path, monkeypatch
+):
+    """Sanity check on the `remote` flag's wiring: the SAME body that 422s
+    on a node-agent target (test above) still lands normally on `local` —
+    `remote` is derived from the TARGET node's agent_kind, not hardcoded."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+
+    r = TestClient(app).post("/api/nodes/local/engines", json=_REMOTE_ENGINE_BODY)
+
+    assert r.status_code == 200
+    assert deck["node_store"].get("local")["engines"] == [_REMOTE_ENGINE_BODY]
+
+
+def test_forget_engine_on_a_node_agent_node_with_nothing_declared_still_404s(
+        tmp_path, monkeypatch):
+    """RE-EXPRESSED (sglang-omni Task 7, was
+    test_forget_engine_on_node_agent_node_404s_today_tripwire).
+
+    The original was a TRIPWIRE: it pinned "404 is the only reachable
+    outcome for a node-agent target" precisely so it would FAIL the moment
+    Task 7 flipped the first `remote_capable` kind, rather than letting the
+    cross-node policy-row collision open silently. It has now fired — a
+    declared remote resource IS possible — so the intent it was protecting
+    moves to its successor below
+    (test_forget_engine_on_a_node_agent_node_does_not_pop_a_same_named_local_policy_row),
+    which proves the anti-collision PROPERTY directly instead of proving the
+    line is unreachable.
+
+    What survives here is the half that is still exactly true and was never
+    the tripwire: forgetting a resource a node does not declare is a 404,
+    not a silent success — the same refusal the local entry gives."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": []})
+
+    r = TestClient(app).delete("/api/nodes/nimbus/engines/gguf-r")
+
+    assert r.status_code == 404
+
+
+# The first genuinely remote-capable declaration (sglang-omni Task 7): a
+# real one, accepted by the real write gate — no hand-built registry needed
+# anymore for this shape. Fixture rule: resource "song-r" (never "omni"),
+# GPU 4, idle_ttl 120 (never the declared default 900).
+_REMOTE_OMNI_BODY = {
+    "resource": "song-r", "kind": "sglang-omni",
+    "connection": {"url": "http://127.0.0.1:8008"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+
+def test_declaring_sglang_omni_on_a_node_agent_entry_is_accepted(
+        tmp_path, monkeypatch):
+    """The gate T5 built, opened by T7's first remote_capable kind: the
+    same route that 422s a lemonade declaration on this node accepts an
+    sglang-omni one."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+
+    r = TestClient(app).post("/api/nodes/nimbus/engines", json=_REMOTE_OMNI_BODY)
+
+    assert r.status_code == 200
+    assert deck["node_store"].get("nimbus")["engines"] == [_REMOTE_OMNI_BODY]
+
+
+def test_a_remote_engine_gets_its_policy_row_from_its_own_declaration(
+        tmp_path, monkeypatch):
+    """sglang-omni Task 9: policy rows are auto-created from `policy_defaults`
+    at declaration time for a REMOTE engine exactly as E1 does for a local one
+    — the same walk (app.policy.declared_defaults), extended past the local
+    entry rather than forked. The declared values (priority 5 / idle_ttl 120)
+    are away from every legacy default, so a row that appeared by coincidence
+    would not match."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+
+    r = TestClient(app).post("/api/nodes/nimbus/engines", json=_REMOTE_OMNI_BODY)
+
+    assert r.status_code == 200
+    assert TestClient(app).get("/api/policy").json()["song-r"] == (
+        _REMOTE_OMNI_BODY["policy_defaults"])
+
+
+def test_forget_engine_on_a_node_agent_node_pops_its_own_policy_row(
+        tmp_path, monkeypatch):
+    """RE-EXPRESSED (sglang-omni Task 9, ruling R10; was
+    test_forget_engine_on_a_node_agent_node_does_not_pop_a_same_named_local_policy_row).
+
+    That test proved R7's GUARD — `forget_engine` skipping the policy write
+    for any non-local node — and the guard existed for one reason: a remote
+    engine had no policy row of its own to forget (nothing seeded one), so a
+    bare-resource `forget` could only ever hit the unrelated LOCAL row of the
+    same name. Both halves of that premise are gone. This task seeds remote
+    rows, so there IS a row to forget; and R10 makes a resource name unique
+    across the whole deck, so a bare-resource key resolves to exactly one
+    declaration and "the local row of the same name" is no longer a state the
+    registry can even hold (its refusal is the sibling test below).
+
+    So the guard is lifted and this proves the new truth: forget is
+    bookkeeping for the engine actually being forgotten, on whichever node it
+    lives. The stored override (pinned=True, idle_ttl 240, both away from the
+    declared defaults [[defaults-that-hide-bugs]]) is what makes the pop
+    detectable — a row that merely fell back to declared defaults would look
+    different from this one either way."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": [_REMOTE_OMNI_BODY]})
+    deck["policy_store"].put({"song-r": {"priority": 33, "pinned": True,
+                                         "idle_ttl": 240}})
+
+    r = TestClient(app).delete("/api/nodes/nimbus/engines/song-r")
+
+    assert r.status_code == 200
+    assert deck["node_store"].get("nimbus")["engines"] == []
+    # Undeclared now, so invisible on read — and gone from the FILE, which is
+    # what "erase the row" means (a later re-declaration of the same name
+    # must not silently inherit this override).
+    assert "song-r" not in deck["policy_store"].get()
+    assert "song-r" not in json.loads((tmp_path / "policy.json").read_text())
+
+
+def test_declaring_a_resource_another_node_owns_is_refused_naming_the_owner(
+        tmp_path, monkeypatch):
+    """The gate that makes the lifted forget above safe (ruling R10), at the
+    surface an operator meets: a resource name may be declared on exactly ONE
+    node deck-wide, and the 422 names both the resource and the node that
+    already owns it — the operator is editing the local entry and cannot see
+    nimbus's declaration.
+
+    This is the SUCCESSOR to the anti-collision property the R7 tripwire
+    guarded: "forgetting nimbus/song-r must not pop the local song-r row" is
+    now unfalsifiable by construction, because there is no way to declare
+    both."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": [_REMOTE_OMNI_BODY]})
+
+    r = TestClient(app).post("/api/nodes/local/engines",
+                             json={**_GGUF_A_ENTRY, "resource": "song-r"})
+
+    # A plain-string 422 from the store's own gate, not a body-shape error:
+    # the defect is a conflict with state this request cannot see, the same
+    # posture the node-agent operability prereqs already take (this router's
+    # module docstring).
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "song-r" in detail
+    assert "nimbus" in detail
+    # Refused before any write: the local declaration is untouched, and the
+    # remote engine still owns the name.
+    assert [e["resource"] for e in deck["node_store"].get("local")["engines"]] == [
+        e["resource"] for e in _ENGINES]
+    assert deck["node_store"].get("nimbus")["engines"] == [_REMOTE_OMNI_BODY]
+
+
+def test_forget_engine_on_a_node_agent_node_still_forgets_its_own_intent(
+        tmp_path, monkeypatch):
+    """The other half of forget-is-bookkeeping, and the reason R7's guard is
+    scoped to POLICY alone: the intent record is node-keyed since Task 6, so
+    it can be — and is — forgotten for the right node, with the local record
+    of the same name left standing."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": [_REMOTE_OMNI_BODY]})
+    deck["intent_store"].record("nimbus/song-r", state="loaded", model=None,
+                                engine="sglang-omni")
+    deck["intent_store"].record("local/song-r", state="loaded", model="a.gguf",
+                                engine="lemonade")
+
+    TestClient(app).delete("/api/nodes/nimbus/engines/song-r")
+
+    intents = deck["intent_store"].get()
+    assert "nimbus/song-r" not in intents
+    assert intents["local/song-r"]["model"] == "a.gguf"
+
+
+# ===========================================================================
+# sglang-omni Task 6 — node-keyed remote engine observation, at the route.
+#
+# `/api/state` now walks EVERY registry entry's engines[], not just the local
+# one. The registry state below is HAND-BUILT (conftest's HandBuiltRegistry)
+# because the Task 5 write gate refuses a LEMONADE-kind declaration on a
+# node-agent entry (still true after Task 7, which made only sglang-omni
+# remote-capable) and these tests deliberately use one — the remote
+# observation path must work for ANY kind. The gate is not weakened; the
+# tests that want the REAL gate declare sglang-omni through it instead.
+#
+# Fixture rule ([[defaults-that-hide-bugs]]): node "nimbus" (never the
+# live-seeded "sparky"), resource "gguf-r" (never "omni"), GPU 4.
+# ===========================================================================
+
+
+class _StubAgent:
+    """NodeAgentClient-shaped stub: the GPU pool read, and close()."""
+
+    def __init__(self, payload=None, raises=None) -> None:
+        self._payload = payload
+        self._raises = raises
+        self.calls = 0          # probe pacing (Task 7) counts these
+
+    def gpu(self) -> dict:
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        return self._payload
+
+    def close(self) -> None:
+        pass
+
+
+def _wire_remote_engine(deck, hand_built_registry, *, agent, engine_client):
+    """Swap in a registry carrying one remote engine, plus the two deck
+    entries the remote half of the world reads through."""
+    from app.node_clients import RemoteEngineClients
+
+    entries = [
+        {"id": "local", "label": "This Box", "agent_kind": "local",
+         "control": "none", "engines": _ENGINES},
+        {"id": "nimbus", "label": "Nimbus Box", "agent_kind": "node-agent",
+         "address": "http://nimbus:7720", "control": "none",
+         "engines": [dict(_REMOTE_ENGINE_BODY)]},
+    ]
+    store = hand_built_registry(entries, {"nimbus": "key-nimbus"})
+    deck["node_store"] = store
+    deck["node_agent_client_factory"] = lambda address, credential: agent
+    deck["remote_engine_clients"] = RemoteEngineClients(
+        store, lambda entry, credential, declared: engine_client)
+    return store
+
+
+def test_state_reports_a_remote_engine_with_its_node_id(
+        tmp_path, monkeypatch, hand_built_registry):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry,
+        agent=_StubAgent({"gpus": [{"index": 4, "memory_total_mb": 8,
+                                    "memory_used_mb": 3}]}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    body = TestClient(app).get("/api/state").json()
+
+    tenant = body["world"]["remote_tenants"]["nimbus/gguf-r"]
+    assert tenant["node_id"] == "nimbus"
+    assert tenant["resource"] == "gguf-r"
+    assert tenant["state"] == "loaded"
+    assert body["world"]["remote_gpus"]["nimbus"] == [
+        {"index": 4, "total": 8 * 1024**2, "used": 3 * 1024**2,
+         "free": 5 * 1024**2}]
+
+
+def test_state_lifecycle_view_carries_the_node_keyed_remote_engine(
+        tmp_path, monkeypatch, hand_built_registry):
+    """The observation key is `<node>/<resource>` — the same shape intent,
+    policy and the UI already join local placements on."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry,
+        agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    body = TestClient(app).get("/api/state").json()
+
+    assert body["lifecycle"]["nimbus/gguf-r"]["observed"] == {
+        "reachable": True, "loaded": True, "model": "extra.r.gguf",
+        "transitioning": False}
+
+
+def test_state_reports_a_remote_engine_as_unknown_when_its_agent_is_down(
+        tmp_path, monkeypatch, hand_built_registry):
+    """A powered-off box is a NORMAL state: the route still answers, and the
+    engine reads as "we failed to look", never as "nothing is loaded"."""
+    from app.engines.node_agent import NodeAgentUnreachable
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry,
+        agent=_StubAgent(raises=NodeAgentUnreachable("connection refused")),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    r = TestClient(app).get("/api/state")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["world"]["remote_gpus"]["nimbus"] is None
+    assert body["lifecycle"]["nimbus/gguf-r"]["observed"] == {
+        "reachable": False, "loaded": False, "model": None,
+        "transitioning": False}
+
+
+def test_state_local_resources_keep_their_bare_resource_keys(
+        tmp_path, monkeypatch, hand_built_registry):
+    """The local half is UNTOUCHED by the remote walk: `world.tenants` stays
+    keyed by bare resource and the remote engines live in their own half,
+    so a remote engine's gpu_index can never be matched against the LOCAL
+    GPU list by the arbiter's co-residency arithmetic."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry, agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    body = TestClient(app).get("/api/state").json()
+
+    assert "gguf-r" not in body["world"]["tenants"]
+    assert set(body["world"]["tenants"]) == {"lemonade", "comfyui", "hipfire"}
+
+
+def test_remote_engine_drift_is_not_translated_through_its_nodes_slot_map(
+        tmp_path, monkeypatch, hand_built_registry):
+    """A node can be a swap node AND declare its own engines[]. The
+    profile->identity translation `_settings_drift` applies belongs to that
+    node's SERVING SLOT only (resource "slot0"), never to a declared engine
+    that merely happens to sit on the same box: translating there would
+    diff a declared engine's settings against the vLLM/checkpoint scope of
+    an unrelated swap profile.
+
+    `build_lifecycle_view` gates the translation on map PRESENCE (that
+    function's own docstring), so the map has to be keyed by the slot key
+    it belongs to — keying it by node id alone silently handed it to every
+    key on that node the moment a node could own more than one.
+    """
+    from app.intent import IntentStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry, agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="heretic"))
+    deck["node_store"].patch("nimbus", control="swap",
+                             serving_address="http://nimbus:8000")
+    deck["characteristics_store"].put_fields(
+        "engine/nimbus/vllm",
+        {"profile_identities": {
+            "value": {"heretic": {"identity": "her-1", "service": "vllm",
+                                  "container_name": "vllm-her"}},
+            "source": "test", "derived_ts": "2026-08-16T00:00:00+00:00"}})
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("nimbus/gguf-r", state="loaded", model="heretic",
+                  engine="lemonade")
+    deck["intent_store"] = intent
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
+
+    # A write against the SLOT's translated scope must not light up the
+    # declared engine's drift flag.
+    client.put("/api/settings/engines/nimbus/vllm",
+               json={"namespace": "env", "values": {"VLLM_MAX_SEQ": "8"}})
+
+    entry = client.get("/api/state").json()["lifecycle"]["nimbus/gguf-r"]
+    assert entry["settings_drift"] is None
+
+
+def test_adopting_a_remote_engine_404s_with_no_engine_owns(
+        tmp_path, monkeypatch, hand_built_registry):
+    """Disclosed gap, pinned rather than left latent: a remote engine is now
+    OBSERVED (so `/api/lifecycle/adopt` finds a record for its key), but
+    `app.observe.engine_for` still resolves only local resources and swap
+    slots — so adopt refuses with "no engine owns", never a crash and never
+    a wrong-kind intent record. Extending `engine_for` to remote keys
+    belongs with the remote verb/reconcile work (Tasks 8/9), which is what
+    gives an adopted remote record anything to drive."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry, agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    r = TestClient(app).post("/api/lifecycle/adopt/nimbus/gguf-r")
+
+    assert r.status_code == 404
+    assert "no engine owns" in r.json()["detail"]
+
+
+def test_state_paces_the_remote_probes_across_requests(
+        tmp_path, monkeypatch, hand_built_registry):
+    """sglang-omni Task 7 — the pacing obligation at the real surface.
+
+    Every /api/state used to cost one `GET /v1/node/gpu` per declaring node
+    plus one status probe per declared engine, each behind a 5 s transport
+    timeout, and the ~2 s arbiter tick pays the same bill. Three requests
+    inside the TTL now cost ONE probe (deck["remote_observer"], shared with
+    the watcher so both describe one world).
+
+    Vacuity guard: the remote engine must still be REPORTED — pacing that
+    worked by observing nothing would pass a probe-count assertion."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    agent = _StubAgent({"gpus": []})
+    _wire_remote_engine(deck, hand_built_registry, agent=agent,
+                        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+    client = TestClient(app)
+
+    bodies = [client.get("/api/state").json() for _ in range(3)]
+
+    assert agent.calls == 1
+    for body in bodies:
+        assert body["world"]["remote_tenants"]["nimbus/gguf-r"]["state"] == "loaded"
+
+
+# --- fix round 1, finding 2: the local-declaration boundary gate -----------
+
+
+def test_add_engine_sglang_omni_on_the_local_node_is_refused_naming_the_kind(
+        tmp_path, monkeypatch):
+    """A remote-only kind declared on `local` is refused AT THE BOUNDARY,
+    with the redacting handler's shape like every other engine-shape defect.
+
+    Before the fix the declaration was accepted and the refusal landed at
+    client-construction time instead — turning /api/state (and /api/storage,
+    /api/sets, the lifecycle routes) into a 422 and logging a tick-error
+    every ~2 s until an operator found and deleted the entry."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, [])
+
+    r = TestClient(app).post("/api/nodes/local/engines", json=_REMOTE_OMNI_BODY)
+
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert isinstance(detail, list)
+    assert "sglang-omni" in detail[0]["msg"]
+    assert "remote-only" in detail[0]["msg"]
+    assert deck["node_store"].get("local")["engines"] == []
+
+
+def test_state_stays_healthy_after_a_refused_local_sglang_omni_declaration(
+        tmp_path, monkeypatch):
+    """The point of moving the refusal to the boundary: the deck keeps
+    working. /api/state answers 200 before AND after the refused write."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    assert client.get("/api/state").status_code == 200
+
+    client.post("/api/nodes/local/engines", json=_REMOTE_OMNI_BODY)
+
+    assert client.get("/api/state").status_code == 200
+
+
+def test_engine_kinds_route_serves_both_run_locations(tmp_path, monkeypatch):
+    """The picker's source now says where each kind may RUN in both
+    directions, so a UI can filter by the node it is editing (T10) instead
+    of offering a kind the write gate will refuse."""
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    kinds = {k["kind"]: k for k in
+             TestClient(app).get("/api/engine-kinds").json()["kinds"]}
+
+    assert kinds["sglang-omni"]["local_capable"] is False
+    assert kinds["sglang-omni"]["remote_capable"] is True
+    for kind in ("lemonade", "comfyui", "hipfire"):
+        assert kinds[kind]["local_capable"] is True
+        assert kinds[kind]["remote_capable"] is False
+
+
+# ===========================================================================
+# sglang-omni Task 8 — remote engine verb routes
+# (POST /api/nodes/{node_id}/engines/{resource}/{verb}), the declaration
+# routes' observation invalidation, and the local dispatcher's (kind, verb)
+# handler table.
+#
+# Fixture rule ([[defaults-that-hide-bugs]]): node "nimbus" (never the
+# live-seeded "sparky"), resource "song-r" (never "omni"), and every rollback
+# assertion made against a PRIOR record whose values differ from what the
+# route writes.
+#
+# NO ARBITER TICK APPEARS BELOW (controller ruling R9). Recording a remote
+# intent makes the reconcile/restore path SEE remote keys, but
+# `Watcher._restore` still resolves LOCAL clients only — that wiring is Task
+# 9's, and the tree is deliberately, transiently incoherent between the two
+# commits. These tests exercise the routes' recording and rollback directly,
+# exactly as the existing serving-route tests do.
+# ===========================================================================
+
+
+class FakeRemoteEngine:
+    """SglangOmniClient-shaped fake: the node-agent channel's two actuation
+    calls (up/down), recorded, plus the `status()` the observation half reads
+    when a test also hits /api/state.
+
+    `fail` raises from BOTH calls. `on_call` runs INSIDE the call, which is
+    how the record-before-dispatch test looks at the intent store at the
+    exact moment the engine is asked to act.
+    """
+
+    def __init__(self, fail=None, on_call=None, healthy=True):
+        self.calls = []      # mutating only: "up" / "down"
+        self.fail = fail
+        self.on_call = on_call
+        self._healthy = healthy
+
+    def status(self):
+        return {"reachable": self._healthy, "healthy": self._healthy,
+                "busy_requests": 0}
+
+    def up(self):
+        self._act("up")
+
+    def down(self):
+        self._act("down")
+
+    def _act(self, verb):
+        self.calls.append(verb)
+        if self.on_call is not None:
+            self.on_call()
+        if self.fail:
+            raise self.fail
+
+    def close(self):
+        pass
+
+
+def _wire_remote_omni(deck, engine_client=None, *, agent=None, declare=True):
+    """A REAL sglang-omni declaration (through the real write gate's own
+    store) on a real NodeStore row, plus the two deck entries the remote
+    paths read through: the per-(node, resource) client map and the
+    node-agent factory the observation half probes.
+
+    No HandBuiltRegistry here (unlike the Task 6 observation tests above):
+    sglang-omni is remote_capable, so the real store accepts it — and the
+    verb routes read the declaration off that store on every request."""
+    from app.node_clients import RemoteEngineClients
+
+    _add_remote_node(deck)
+    if declare:
+        deck["node_store"].update("nimbus", {"engines": [_REMOTE_OMNI_BODY]})
+    engine_client = engine_client or FakeRemoteEngine()
+    deck["remote_engine_clients"] = RemoteEngineClients(
+        deck["node_store"], lambda entry, credential, declared: engine_client)
+    agent = agent or _StubAgent({"gpus": []})
+    deck["node_agent_client_factory"] = lambda address, credential: agent
+    return engine_client
+
+
+_OMNI_VERB_URL = "/api/nodes/nimbus/engines/song-r"
+
+
+def test_remote_load_dispatches_up_and_records_operator_intent(
+        tmp_path, monkeypatch):
+    """The whole point of the route: a human load of a REMOTE engine brings
+    it up through its node-agent and leaves the deck's stated intent behind,
+    node-keyed. 202, not 200 — `up()` is a queued request the node's
+    swap-helper acts on (GF4: ~4 minutes to serve), so nothing here can
+    honestly claim the engine is loaded."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    engine = _wire_remote_omni(deck)
+
+    r = TestClient(app).post(f"{_OMNI_VERB_URL}/load")
+
+    assert r.status_code == 202
+    assert r.json() == {"status": "accepted", "node_id": "nimbus",
+                        "resource": "song-r", "verb": "load"}
+    assert engine.calls == ["up"]
+    record = deck["intent_store"].get()["nimbus/song-r"]
+    assert record["state"] == "loaded"
+    assert record["model"] is None
+    assert record["engine"] == "sglang-omni"
+    assert record["actor"] == "operator"
+
+
+def test_remote_load_records_the_intent_before_it_dispatches(
+        tmp_path, monkeypatch):
+    """Whoever actuates, records — and records FIRST. A boot takes minutes
+    (GF4), so a reconciler tick landing in that window must see the
+    operator's stated intent, not a stale "nobody asked for this"."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    seen = {}
+
+    def _peek():
+        seen.update(deck["intent_store"].get())
+
+    _wire_remote_omni(deck, FakeRemoteEngine(on_call=_peek))
+
+    TestClient(app).post(f"{_OMNI_VERB_URL}/load")
+
+    assert seen["nimbus/song-r"]["state"] == "loaded"
+    assert seen["nimbus/song-r"]["actor"] == "operator"
+
+
+def test_remote_unload_dispatches_down_and_records_unloaded_intent(
+        tmp_path, monkeypatch):
+    """state="unloaded" is intent, not its absence (app.intent): a deliberate
+    remote park writes a record, it never deletes one."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    engine = _wire_remote_omni(deck)
+
+    r = TestClient(app).post(f"{_OMNI_VERB_URL}/unload")
+
+    assert r.status_code == 202
+    assert r.json()["verb"] == "unload"
+    assert engine.calls == ["down"]
+    record = deck["intent_store"].get()["nimbus/song-r"]
+    assert record["state"] == "unloaded"
+    assert record["engine"] == "sglang-omni"
+    assert record["actor"] == "operator"
+
+
+def test_remote_verb_rolls_the_intent_back_when_the_dispatch_raises(
+        tmp_path, monkeypatch):
+    """The record is speculative until the request is accepted. A POST that
+    raises actuated NOTHING, so the prior record is put back VERBATIM
+    (updated_ts included — it is the settings-drift baseline), and the
+    engine failure still surfaces as the app-wide 502."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_omni(deck, FakeRemoteEngine(fail=EngineError("agent down")))
+    # A prior record whose every field differs from what the unload writes.
+    deck["intent_store"].record("nimbus/song-r", state="loaded",
+                                model="prior-song", engine="sglang-omni")
+    prior = deck["intent_store"].get()["nimbus/song-r"]
+
+    r = TestClient(app).post(f"{_OMNI_VERB_URL}/unload")
+
+    assert r.status_code == 502
+    assert deck["intent_store"].get()["nimbus/song-r"] == prior
+
+
+def test_remote_verb_with_no_prior_intent_leaves_the_speculative_record(
+        tmp_path, monkeypatch):
+    """The documented gap, pinned rather than left latent: with NO prior
+    record there is nothing to put back, and IntentStore has no
+    compare-and-swap forget to undo the speculative write with — so it
+    stands. Identical to the posture app.engine_kinds' own actuator arms
+    already take ("no worse than the behavior this replaces"), and the
+    surviving record is the honest one for a load: the operator did ask for
+    the engine to be up."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_omni(deck, FakeRemoteEngine(fail=EngineError("agent down")))
+
+    r = TestClient(app).post(f"{_OMNI_VERB_URL}/load")
+
+    assert r.status_code == 502
+    assert deck["intent_store"].get()["nimbus/song-r"]["state"] == "loaded"
+
+
+def test_remote_verb_outside_the_kinds_vocabulary_405s_naming_the_kind(
+        tmp_path, monkeypatch):
+    """Same refusal (and same wording) the local dispatcher gives: the KIND's
+    human_verbs() is the vocabulary, so "park" is not a thing an sglang-omni
+    engine can be asked for — never a silent no-op, never a 500."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    engine = _wire_remote_omni(deck)
+
+    r = TestClient(app).post(f"{_OMNI_VERB_URL}/park")
+
+    assert r.status_code == 405
+    assert "sglang-omni" in r.json()["detail"]
+    assert engine.calls == []
+    assert deck["intent_store"].get() == {}
+
+
+def test_remote_verb_on_an_undeclared_resource_404s(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    engine = _wire_remote_omni(deck)
+
+    r = TestClient(app).post("/api/nodes/nimbus/engines/ghost-r/load")
+
+    assert r.status_code == 404
+    # Our own refusal naming the resource, not Starlette's route catch-all
+    # (which would also read 404 for a typo'd URL).
+    assert "ghost-r" in r.json()["detail"]
+    assert engine.calls == []
+
+
+def test_remote_verb_on_an_unknown_node_404s(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    engine = _wire_remote_omni(deck)
+
+    r = TestClient(app).post("/api/nodes/ghost/engines/song-r/load")
+
+    assert r.status_code == 404
+    assert "ghost" in r.json()["detail"]
+    assert engine.calls == []
+
+
+def test_remote_verb_on_the_local_node_is_503_not_an_actuation(
+        tmp_path, monkeypatch):
+    """The local node is a KNOWN node that this route cannot actuate — it is
+    not a node-agent entry, so there is no remote client for its declared
+    engines. 503 mirrors the sibling serving routes' not-operable posture
+    (app.routers.serving._client); /api/tenants/* is the local surface, and
+    it must not be reachable by a second path."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    r = TestClient(app).post("/api/nodes/local/engines/lemonade/load")
+
+    assert r.status_code == 503
+    assert deck["lemonade"].calls == []
+    assert deck["intent_store"].get() == {}
+
+
+def test_remote_verb_url_is_post_only(tmp_path, monkeypatch):
+    """A GET at the verb URL must never actuate. (404 OR 405: the UI's
+    StaticFiles catch-all mount answers 404 for a method Starlette did not
+    match, when ui/dist is present.)"""
+    app, deck = make_app(tmp_path, monkeypatch)
+    engine = _wire_remote_omni(deck)
+
+    r = TestClient(app).get(f"{_OMNI_VERB_URL}/load")
+
+    assert r.status_code in (404, 405)
+    assert engine.calls == []
+
+
+def test_remote_verb_invalidates_the_remote_observation(tmp_path, monkeypatch):
+    """The observation half is TTL-cached 10 s (app.node_clients
+    .RemoteObserver), so a verb that did not invalidate would leave the board
+    describing the world as it was BEFORE the operator acted, for a whole
+    TTL. Same obligation `_swap_and_record` discharges for a node's slot.
+
+    Vacuity guard: the engine must still be reported after the invalidate —
+    an "invalidate" that dropped the declaration would also pass a
+    probe-count assertion."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    agent = _StubAgent({"gpus": []})
+    _wire_remote_omni(deck, agent=agent)
+    client = TestClient(app)
+
+    before = client.get("/api/state").json()
+    assert agent.calls == 1
+    assert before["world"]["remote_tenants"]["nimbus/song-r"]["state"] == "idle"
+
+    client.post(f"{_OMNI_VERB_URL}/load")
+    after = client.get("/api/state").json()
+
+    assert agent.calls == 2
+    assert after["world"]["remote_tenants"]["nimbus/song-r"]["state"] == "idle"
+
+
+def test_declaring_a_remote_engine_puts_it_on_the_board_at_once(
+        tmp_path, monkeypatch):
+    """Task 7 review follow-up: a newly declared remote engine used to lag
+    one TTL — the board answered from a cache assembled before the
+    declaration existed, so an operator saw nothing for up to 10 s after a
+    successful write."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    agent = _StubAgent({"gpus": []})
+    _wire_remote_omni(deck, agent=agent, declare=False)
+    client = TestClient(app)
+    assert client.get("/api/state").json()["world"]["remote_tenants"] == {}
+    assert agent.calls == 0     # nothing declared -> nothing probed
+
+    r = client.post("/api/nodes/nimbus/engines", json=_REMOTE_OMNI_BODY)
+
+    assert r.status_code == 200
+    assert "nimbus/song-r" in client.get("/api/state").json()["world"]["remote_tenants"]
+    assert agent.calls == 1
+
+
+def test_updating_a_remote_engine_declaration_reobserves_it(tmp_path, monkeypatch):
+    """A connection edit rebinds the client (RemoteEngineClients' binding
+    view), so the cached observation describes the OLD connection."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    agent = _StubAgent({"gpus": []})
+    _wire_remote_omni(deck, agent=agent)
+    client = TestClient(app)
+    client.get("/api/state")
+    assert agent.calls == 1
+
+    r = client.put("/api/nodes/nimbus/engines/song-r",
+                   json={**_REMOTE_OMNI_BODY,
+                         "connection": {"url": "http://127.0.0.1:9009"}})
+
+    assert r.status_code == 200
+    client.get("/api/state")
+    assert agent.calls == 2
+
+
+def test_forgetting_a_remote_engine_drops_it_from_the_board_at_once(
+        tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    agent = _StubAgent({"gpus": []})
+    _wire_remote_omni(deck, agent=agent)
+    client = TestClient(app)
+    assert "nimbus/song-r" in client.get("/api/state").json()["world"]["remote_tenants"]
+
+    r = client.delete("/api/nodes/nimbus/engines/song-r")
+
+    assert r.status_code == 200
+    assert client.get("/api/state").json()["world"]["remote_tenants"] == {}
+
+
+def test_a_local_declaration_edit_leaves_the_remote_observation_cached(
+        tmp_path, monkeypatch):
+    """The other side of the invalidation gate: the observer holds the REMOTE
+    half only (app.node_clients.remote_world_half skips agent_kind "local"),
+    and invalidating clears every node's BACKOFF too — so a local engine edit
+    must not force a re-probe of boxes that may be powered off, for a change
+    that cannot affect what the cache holds."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    agent = _StubAgent({"gpus": []})
+    _wire_remote_omni(deck, agent=agent)
+    deck["local_clients"].fake("gguf-a")
+    client = TestClient(app)
+    client.get("/api/state")
+    assert agent.calls == 1
+
+    r = client.post("/api/nodes/local/engines", json=_GGUF_A_ENTRY)
+
+    assert r.status_code == 200
+    body = client.get("/api/state").json()
+    assert agent.calls == 1
+    assert "nimbus/song-r" in body["world"]["remote_tenants"]
+
+
+def test_tenants_park_still_routes_to_the_hipfire_handler(tmp_path, monkeypatch):
+    """The (kind, verb) table's legacy rows return exactly the old handlers:
+    a park on the declared hipfire-kind resource still parks THAT client and
+    records the hipfire-kind intent, unchanged."""
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    r = TestClient(app).post("/api/tenants/hipfire/park")
+
+    assert r.status_code == 200
+    assert deck["hipfire"].calls == ["park"]
+    record = deck["intent_store"].get()["local/hipfire"]
+    assert record["state"] == "unloaded"
+    assert record["engine"] == "hipfire"
+
+
+def test_a_local_kind_sharing_a_verb_is_not_misrouted_by_the_verb_alone(
+        tmp_path, monkeypatch):
+    """WHY the handler table is keyed (kind, verb) and not by verb alone.
+
+    human_verbs() stopped being disjoint across kinds the moment a fourth
+    kind claimed load/unload, so "the verb is enough to pick the handler" is
+    no longer a property anything enforces. A local kind declaring a verb
+    this router has no row for is REFUSED (501 — the kind supports it, this
+    deck has not wired it here), never quietly handed to whichever legacy
+    handler happens to own that verb name: the fake below would have been
+    parked, and an intent recorded against it, under verb-only dispatch."""
+    from app import engine_kinds
+
+    class _SongboxAdapter:
+        def human_verbs(self):
+            return frozenset({"park"})
+
+    monkeypatch.setitem(engine_kinds.KNOWN_KINDS, "songbox",
+                        {"connection": {"url": True}, "remote_capable": False,
+                         "local_capable": True})
+    monkeypatch.setitem(engine_kinds.ENGINE_KINDS, "songbox", _SongboxAdapter())
+    app, deck = make_app(tmp_path, monkeypatch)
+    _declare_local(deck, _ENGINES + [
+        {"resource": "song-l", "kind": "songbox",
+         "connection": {"url": "http://song-l:9000"}, "gpu_index": 3,
+         "policy_defaults": {"priority": 7, "pinned": False, "idle_ttl": 45}}])
+    songbox = FakeHipfire()
+    deck["song-l"] = songbox
+
+    r = TestClient(app).post("/api/tenants/song-l/park")
+
+    assert r.status_code == 501
+    assert songbox.calls == []
+    assert deck["hipfire"].calls == []
+    assert deck["intent_store"].get() == {}

@@ -18,7 +18,16 @@ can swap any entry for a fake after ``create_app()`` returns.
 real-time ``World`` snapshot (status, sets preview/apply): it always
 re-reads GPUs via ``deck["read_gpus"]`` and re-snapshots through the shared
 ``deck["world"]`` instance — never a cached/stale one — so the arbiter's
-idle clocks and the HTTP surface stay in lockstep.
+idle clocks and the HTTP surface stay in lockstep. Since sglang-omni Task 6
+it walks EVERY registry entry's ``engines[]``, not just the local one; the
+remote half arrives as its own two keys (``remote_tenants`` /
+``remote_gpus``) from ``app.node_clients.remote_world_half``, the same
+function the arbiter tick calls — the local half's shape is untouched.
+
+The LOCAL half is deliberately still re-snapshotted per call while the
+REMOTE half is TTL-paced (Task 7, ``deck["remote_observer"]``): local
+engines are sibling containers answering in milliseconds, remote ones are
+another box behind a 5 s transport timeout that is very often powered off.
 
 ``build_observations`` and ``build_lifecycle_view`` are the same idea for
 lifecycle state: derived on every call from intent x observation, so there
@@ -44,13 +53,37 @@ def build_world_snapshot(deck: dict) -> dict:
     # never a boot-time copy.
     local = deck["node_store"].get("local")
     engines = local.get("engines", []) if local is not None else []
-    return deck["world"].snapshot(
+    world = deck["world"].snapshot(
         gpus,
         engines,
         deck["local_clients"],
         deck["litellm"],
         deck["registry"],
     )
+    # The REMOTE half (sglang-omni Task 6): every OTHER registry entry's
+    # engines[], each with its own node's GPU pool. Its own two top-level
+    # keys, never merged into `tenants`/`gpus` — see World.snapshot_remote's
+    # docstring for why (a remote gpu_index addresses another machine's GPU
+    # list, and a hand-edited registry can still hold two nodes' same-named
+    # resources even though the declaration boundary refuses them).
+    #
+    # Through deck["remote_observer"] since Task 7, not the bare
+    # `remote_world_half`: with a `remote_capable` kind live, every call to
+    # this function would otherwise cost one `GET /v1/node/gpu` per
+    # declaring node plus one status probe per declared engine, each behind
+    # a 5 s timeout — on every /api/state AND every ~2 s arbiter tick. The
+    # observer is the SAME instance app.arbiter.Watcher.tick uses (it wraps
+    # the same one assembly function), so the HTTP surface and the arbiter
+    # still cannot declare different worlds into the one World instance they
+    # share — they now also share the probe. Absent (a deck built without
+    # it) means no remote half, the same posture `remote_world_half` itself
+    # takes for a missing dependency.
+    observer = deck.get("remote_observer")
+    if observer is not None:
+        world.update(observer.half(
+            deck["node_store"], deck.get("node_agent_client_factory"),
+            deck.get("remote_engine_clients"), deck["world"], deck["registry"]))
+    return world
 
 
 def build_observations(deck: dict, world: dict) -> dict[str, dict]:
@@ -61,15 +94,34 @@ def build_observations(deck: dict, world: dict) -> dict[str, dict]:
     unreachable node is a normal state and each probe costs two 5 s
     timeouts. Sorted iteration keeps merge order deterministic (keys are
     disjoint by construction — each observer emits only its own node's key).
+
+    The remote DECLARED-engine half (sglang-omni Task 6) needs no probe
+    here: ``build_world_snapshot`` already observed it into
+    ``world["remote_tenants"]``, so this only maps it, exactly as
+    ``observe_local`` maps the local tenants of the same snapshot. Keys stay
+    disjoint from both siblings — ``<node>/<resource>`` where the node is
+    never "local" (the walk skips the local entry) and the resource is
+    never "slot0" (that is the serving slot's reserved observation name; a
+    node that both swaps AND declares an engine literally called "slot0"
+    would be the one collision — REFUSED now, at the declaration boundary:
+    ``app.engine_kinds.validate_engines`` rejects the name outright, for
+    every kind and both directions, so no ``engines[]`` list reaching this
+    merge can carry it).
     """
-    from app.observe import merge_observations, observe_local, observe_spark
+    from app.observe import (
+        merge_observations,
+        observe_local,
+        observe_remote,
+        observe_spark,
+    )
 
     observers = deck.get("node_observers")
     per_node = []
     if observers is not None:
         for node_id, observer in sorted(observers.snapshot().items()):
             per_node.append(observe_spark(observer.status(), node_id))
-    return merge_observations(observe_local(world), *per_node)
+    return merge_observations(observe_local(world), observe_remote(world),
+                              *per_node)
 
 
 def build_lifecycle_view(deck: dict, world: dict) -> dict:
@@ -80,7 +132,8 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
     is what turns "down" into "down since when", which is the difference
     between a glance telling you something and telling you nothing.
     """
-    from app.lifecycle import derive_status
+    from app.lifecycle import derive_status, join_warming
+    from app.observe import slot_key
 
     store = deck.get("intent_store")
     if store is None:
@@ -98,6 +151,15 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
 
     # One load of each swap node's profile->identity map for the whole view
     # build (same hoist rationale as settings_data above, per node now).
+    #
+    # Keyed by that node's SLOT key, not by its bare node id (sglang-omni
+    # Task 6): _settings_drift gates the profile->identity translation on
+    # map PRESENCE alone, and the translation belongs to the SERVING SLOT
+    # ("<node>/slot0"). A node id key handed the map to every lifecycle key
+    # on that node — harmless while a slot was the only thing a node could
+    # own, wrong the moment a node-agent entry can also declare engines[]
+    # of its own, since a declared engine's settings would then be diffed
+    # against an unrelated swap profile's vLLM/checkpoint scope.
     characteristics_store = deck.get("characteristics_store")
     node_store = deck.get("node_store")
     identity_maps: dict[str, dict | None] = {}
@@ -107,10 +169,16 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
                 continue
             field = characteristics_store.entry(
                 f"engine/{entry['id']}/vllm").get("profile_identities")
-            identity_maps[entry["id"]] = (field or {}).get("value")
+            identity_maps[slot_key(entry["id"])] = (field or {}).get("value")
 
     view = {}
-    for key, obs in build_observations(deck, world).items():
+    # The SAME intent x observation join the arbiter's reconcile pass makes
+    # (app.lifecycle.join_warming, sglang-omni Task 9): a kind whose boot
+    # observes identically to its death needs the intent record's timestamp
+    # to tell the two apart, and the board must say the word the reconciler
+    # is acting on — "warming", not "down" — for the ~4 minutes that takes.
+    observed_all = join_warming(build_observations(deck, world), world, intents)
+    for key, obs in observed_all.items():
         intent = intents.get(key)
         view[key] = {
             **derive_status(intent, obs),
@@ -119,7 +187,7 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
             "last_healthy_ts": (intent or {}).get("last_healthy_ts"),
             "settings_drift": _settings_drift(
                 settings_data, key, intent,
-                identity_map=identity_maps.get(key.split("/", 1)[0]),
+                identity_map=identity_maps.get(key),
             ),
         }
     return view
@@ -159,7 +227,7 @@ def _settings_drift(
     ``spark``), so this rebuilds the scope key from ``intent["engine"]``
     rather than assuming `key` itself is the settings key.
 
-    Every swap node additionally speaks TWO vocabularies at once (Task 6,
+    Every swap SLOT additionally speaks TWO vocabularies at once (Task 6,
     5th vocabulary-bug instance caught at plan time, generalized to every
     node by N1): intent records the deck adapter name (``engine: "spark"``)
     and the PROFILE (``routers/serving.py`` deliberately records profiles —
@@ -173,8 +241,10 @@ def _settings_drift(
     the verbatim scope key ``<node>/spark|heretic`` intent builds — settings
     drift silently dead for that node, the exact D11 live-drill flow. So
     when the caller passes an ``identity_map`` (``build_lifecycle_view``
-    passes one only for a swap node's slot key, keyed by that node's id —
-    map presence alone is the gate here, `key` is never compared) that has
+    passes one only for a swap node's SLOT key, keying its maps by that
+    slot key — map presence alone is the gate here, `key` is never compared,
+    so the caller's keying is what confines the translation to slots; see
+    that function's own comment, sglang-omni Task 6) that has
     an entry for the profile intent recorded, the scope list is built from
     the TRANSLATED engine (``vllm``) and identity instead of the verbatim
     adapter/profile. Every other key — every call `build_lifecycle_view`

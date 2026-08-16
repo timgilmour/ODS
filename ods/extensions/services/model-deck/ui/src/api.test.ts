@@ -8,6 +8,7 @@ import {
   getEngineKinds,
   getNodeServingStatus,
   listNodeRegistry,
+  postEngineVerb,
   postNodeReload,
   postNodeSwap,
   putUnitPinned,
@@ -304,7 +305,10 @@ const widgetEngine: DeclaredEngine = {
 describe("getEngineKinds", () => {
   it("resolves the {kinds} body verbatim", async () => {
     const body = {
-      kinds: [{ kind: "widget", connection: { host: { required: true } }, human_verbs: ["free"] }],
+      kinds: [{
+        kind: "widget", connection: { host: { required: true } },
+        remote_capable: false, local_capable: true, human_verbs: ["free"],
+      }],
     };
     mockFetchOnce(body);
     expect(await getEngineKinds()).toEqual(body);
@@ -312,43 +316,111 @@ describe("getEngineKinds", () => {
 });
 
 describe("addEngine", () => {
-  it("POSTs the body verbatim to /api/nodes/local/engines", async () => {
+  it("POSTs the body verbatim to /api/nodes/{node_id}/engines", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
       return { ok: true, status: 200, json: async () => widgetEngine } as Response;
     }));
-    const result = await addEngine(widgetEngine);
-    expect(calls[0].url).toBe("/api/nodes/local/engines");
+    // A non-"local" node id (sglang-omni Task 10) — proves the route is
+    // genuinely parametrized rather than "local" being the only string
+    // this function can ever produce.
+    const result = await addEngine("sparky", widgetEngine);
+    expect(calls[0].url).toBe("/api/nodes/sparky/engines");
     expect(calls[0].init?.method).toBe("POST");
     expect(JSON.parse(calls[0].init?.body as string)).toEqual(widgetEngine);
     expect(result).toEqual(widgetEngine);
   });
+
+  it("'local' is an id like any other — the pre-sglang-omni route, byte for byte", async () => {
+    const calls: { url: string }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      calls.push({ url });
+      return { ok: true, status: 200, json: async () => widgetEngine } as Response;
+    }));
+    await addEngine("local", widgetEngine);
+    expect(calls[0].url).toBe("/api/nodes/local/engines");
+  });
 });
 
 describe("updateEngine", () => {
-  it("PUTs to the resource-encoded path", async () => {
+  it("PUTs to the node- and resource-encoded path", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
       return { ok: true, status: 200, json: async () => widgetEngine } as Response;
     }));
-    await updateEngine("widget a/weird#name", { ...widgetEngine, resource: "widget a/weird#name" });
-    expect(calls[0].url).toBe("/api/nodes/local/engines/widget%20a%2Fweird%23name");
+    await updateEngine(
+      "sparky", "widget a/weird#name", { ...widgetEngine, resource: "widget a/weird#name" },
+    );
+    expect(calls[0].url).toBe("/api/nodes/sparky/engines/widget%20a%2Fweird%23name");
     expect(calls[0].init?.method).toBe("PUT");
+  });
+
+  it("'local' is an id like any other — the pre-sglang-omni route, byte for byte", async () => {
+    const calls: { url: string }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      calls.push({ url });
+      return { ok: true, status: 200, json: async () => widgetEngine } as Response;
+    }));
+    await updateEngine("local", "widget-a", widgetEngine);
+    expect(calls[0].url).toBe("/api/nodes/local/engines/widget-a");
   });
 });
 
 describe("forgetEngine", () => {
-  it("DELETEs the resource-encoded path", async () => {
+  it("DELETEs the node- and resource-encoded path", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
       return { ok: true, status: 200, json: async () => ({ status: "ok" }) } as Response;
     }));
-    const result = await forgetEngine("widget-a");
-    expect(calls[0].url).toBe("/api/nodes/local/engines/widget-a");
+    const result = await forgetEngine("sparky", "widget-a");
+    expect(calls[0].url).toBe("/api/nodes/sparky/engines/widget-a");
     expect(calls[0].init?.method).toBe("DELETE");
     expect(result).toEqual({ status: "ok" });
+  });
+
+  it("'local' is an id like any other — the pre-sglang-omni route, byte for byte", async () => {
+    const calls: { url: string }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      calls.push({ url });
+      return { ok: true, status: 200, json: async () => ({ status: "ok" }) } as Response;
+    }));
+    await forgetEngine("local", "widget-a");
+    expect(calls[0].url).toBe("/api/nodes/local/engines/widget-a");
+  });
+});
+
+describe("postEngineVerb", () => {
+  it("POSTs to the node/resource/verb path, every segment encoded", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return {
+        ok: true, status: 202,
+        json: async () => ({ status: "accepted", node_id: "box a",
+                             resource: "song/lab", verb: "unload" }),
+      } as Response;
+    }));
+    // Ids and resource names that would break an unencoded path — a
+    // registry is hand-editable and a resource name is operator-typed.
+    await postEngineVerb("box a", "song/lab", "unload");
+    expect(calls[0].url).toBe("/api/nodes/box%20a/engines/song%2Flab/unload");
+    expect(calls[0].init?.method).toBe("POST");
+    // No body: the route takes none (app/routers/serving.py's engine_verb —
+    // "No `force`, no body").
+    expect(calls[0].init?.body).toBeUndefined();
+  });
+
+  it("surfaces the route's own refusal sentence, with its status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false, status: 405, statusText: "Method Not Allowed",
+      json: async () => ({ detail: "song-lab (sglang-omni) does not support park" }),
+    } as Response)));
+    await expect(postEngineVerb("zeta", "song-lab", "park")).rejects.toMatchObject({
+      status: 405,
+      message: "song-lab (sglang-omni) does not support park",
+    });
   });
 });

@@ -10,23 +10,9 @@ import {
 } from "../api";
 import { isArmedFor } from "../model/armed";
 import { forceParkCanOverride } from "../model/refusals";
-import { messages, labels } from "../model/messages";
+import { messages, labels, stateTone } from "../model/messages";
 import Banner from "../ui/Banner";
 import ArmedButton from "../ui/ArmedButton";
-
-/** Tenant states are the engine's OWN vocabulary, not LifecycleStatus, so
- * StatePill (typed to the latter) cannot render them — but they take the
- * same four tones, so the two can never disagree about what green means. */
-const STATE_TONE: Record<string, string> = {
-  loaded: "good",
-  running: "good",
-  loading: "busy",
-  busy: "busy",
-  unloaded: "off",
-  parked: "off",
-  idle: "off",
-  unknown: "bad",
-};
 
 /** Controls for one declared LOCAL RESOURCE, plus the guard banners its
  * actions can raise. Keyed by resource (E1: no longer by a fixed tenant
@@ -164,8 +150,12 @@ export default function PlacementActions({
           unloaded lemonade-kind) this is the only thing saying which
           resource it is and what it is doing. */}
       <span className="tenant-name">{resource}</span>
+      {/* Tenant states are the engine's OWN vocabulary, not LifecycleStatus
+          (StatePill's closed enum) — `stateTone` is the shared map, also used
+          by RemoteEngineActions, so the two surfaces can never disagree about
+          what green means. */}
       {!hasPlacement && (
-        <span className={`ui-pill ui-pill-${STATE_TONE[tenant.state] ?? "off"}`}>{tenant.state}</span>
+        <span className={`ui-pill ui-pill-${stateTone(tenant.state)}`}>{tenant.state}</span>
       )}
 
       {error && (

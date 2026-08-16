@@ -6,7 +6,14 @@ on an EngineError). This module is the ONLY place those differences live;
 everything downstream sees {reachable, loaded, model}.
 """
 
-from app.observe import merge_observations, observe_local, observe_spark
+from app.observe import (
+    local_key,
+    merge_observations,
+    node_key,
+    observe_local,
+    observe_remote,
+    observe_spark,
+)
 
 
 def _world(lemonade_state="loaded", hipfire_state="running", comfy_state="idle"):
@@ -450,3 +457,170 @@ def test_engine_for_local_kinds_never_shadows_a_swap_key():
     (by mistake) supplies an entry that happens to share the node id."""
     assert engine_for("boxa/slot0", frozenset({"boxa"}),
                       local_kinds={"slot0": "lemonade"}) == "spark"
+
+
+# ===========================================================================
+# sglang-omni Task 6 — node-keyed observation: node_key() + observe_remote()
+#
+# Fixture discipline ([[defaults-that-hide-bugs]]): node id "nimbus" (NOT
+# "sparky"), resource "gguf-r" (NOT "omni"), and the resource name never
+# equals its kind — nothing here can pass by coinciding with a live seed or
+# with the legacy resource==kind triple.
+# ===========================================================================
+
+
+def _remote_tenant(state="loaded", node_id="nimbus", resource="gguf-r", **over):
+    tenant = {"state": state, "model": "qwen-r.gguf", "footprint": 7, "idle_s": 0,
+              "engine": "lemonade", "node_id": node_id, "resource": resource,
+              "gpu_index": 4}
+    tenant.update(over)
+    return tenant
+
+
+def _remote_world(*tenants, key=None):
+    return {"tenants": {},
+            "remote_tenants": {key or f"{t['node_id']}/{t['resource']}": t
+                               for t in tenants}}
+
+
+def test_node_key_is_node_slash_resource():
+    assert node_key("nimbus", "gguf-r") == "nimbus/gguf-r"
+
+
+def test_local_key_is_node_key_on_the_local_node():
+    """The binding this task rests on: `local_key` is not a second, parallel
+    spelling of the observation key — it IS `node_key` with the node id
+    fixed, so nothing can drift between the local and remote halves."""
+    assert local_key("gguf-a") == node_key("local", "gguf-a")
+
+
+def test_observe_remote_keys_by_node_and_resource():
+    result = observe_remote(_remote_world(_remote_tenant()))
+
+    assert result == {"nimbus/gguf-r": {
+        "reachable": True, "loaded": True, "model": "qwen-r.gguf",
+        "transitioning": False}}
+
+
+def test_observe_remote_unknown_is_unreachable_not_unloaded():
+    """Same rule the local half already follows: 'unknown' means we failed
+    to look, never 'we looked and nothing is loaded' — the difference
+    decides whether the reconciler restores something already running."""
+    result = observe_remote(_remote_world(_remote_tenant(state="unknown")))
+
+    assert result["nimbus/gguf-r"] == {
+        "reachable": False, "loaded": False, "model": None, "transitioning": False}
+
+
+def test_observe_remote_keys_off_the_tenants_own_fields_not_the_dict_key():
+    """The tenant's own node_id/resource are the key source, so a caller's
+    dict key can never silently become the observation key (and a key
+    collision in the world map can never rename an observation)."""
+    world = _remote_world(_remote_tenant(), key="whatever-the-caller-used")
+
+    assert list(observe_remote(world)) == ["nimbus/gguf-r"]
+
+
+def test_observe_remote_on_a_world_with_no_remote_half_is_empty():
+    """Every hand-built world dict in this codebase predates the remote
+    half; absent means "no remote engines", never a crash."""
+    assert observe_remote({"tenants": {}}) == {}
+
+
+def test_local_and_remote_resources_of_the_same_name_do_not_collide():
+    """Node-keying is what keeps two same-named resources two observations
+    instead of one overwriting the other.
+
+    Still worth pinning HERE after Task 9's deck-wide uniqueness gate (ruling
+    R10) refused that declaration at the boundary: this layer is pure mapping
+    over whatever world it is handed, and a hand-edited nodes.json really can
+    hold the collision until `NodeStore._load`'s heal runs. The observation
+    layer must not need the registry to be right."""
+    local = _world()
+    local["tenants"] = {"gguf-r": {"state": "loaded", "model": "local.gguf",
+                                   "footprint": 1, "idle_s": 0,
+                                   "engine": "lemonade"}}
+
+    merged = merge_observations(observe_local(local),
+                                observe_remote(_remote_world(_remote_tenant())))
+
+    assert merged["local/gguf-r"]["model"] == "local.gguf"
+    assert merged["nimbus/gguf-r"]["model"] == "qwen-r.gguf"
+
+
+def test_observe_remote_maps_every_kind_the_local_half_maps():
+    """One mapping, two callers: a kind must read identically wherever it
+    runs, so remote comfyui-kind 'idle' still counts as loaded (it holds
+    VRAM between jobs) exactly as the local half reports it."""
+    world = _remote_world(
+        _remote_tenant(state="idle", resource="comfy-r", engine="comfyui",
+                       queue=0, model=None),
+        _remote_tenant(state="running", resource="hip-r", engine="hipfire",
+                       queue_depth=0))
+
+    result = observe_remote(world)
+
+    assert result["nimbus/comfy-r"]["loaded"] is True
+    assert result["nimbus/hip-r"]["loaded"] is True
+
+
+# ===========================================================================
+# sglang-omni Task 7 — the fourth vocabulary branch.
+#
+# Same fixture discipline as the Task 6 block above: node "nimbus" (NOT
+# "sparky"), resource "song-r" (NOT "omni"), resource != kind name.
+# ===========================================================================
+
+
+def _omni_tenant(state, busy_requests=0, **over):
+    tenant = {"state": state, "busy_requests": busy_requests, "model": None,
+              "idle_s": 0.0, "engine": "sglang-omni", "node_id": "nimbus",
+              "resource": "song-r", "gpu_index": 4}
+    tenant.update(over)
+    return tenant
+
+
+def test_sglang_omni_busy_and_idle_both_count_as_loaded():
+    """Idle describes the REQUEST queue, not residency — the engine holds
+    ~62 GiB between renders (GF5), the same reading comfyui's branch
+    already takes for its queue."""
+    assert observe_remote(_remote_world(_omni_tenant("busy", 2)))[
+        "nimbus/song-r"]["loaded"] is True
+    assert observe_remote(_remote_world(_omni_tenant("idle", 0)))[
+        "nimbus/song-r"]["loaded"] is True
+
+
+def test_sglang_omni_down_is_reachable_but_not_loaded():
+    """`down` is an OBSERVED fact (the agent answered; the engine is not
+    serving), so it must read reachable — otherwise it derives the inert
+    'unreachable' and intent-loaded never turns into a restore."""
+    result = observe_remote(_remote_world(_omni_tenant("down", None)))["nimbus/song-r"]
+
+    assert result == {"reachable": True, "loaded": False, "model": None,
+                      "transitioning": False}
+
+
+def test_sglang_omni_unknown_is_unreachable_not_unloaded():
+    result = observe_remote(_remote_world(_omni_tenant("unknown", None)))["nimbus/song-r"]
+
+    assert result == {"reachable": False, "loaded": False, "model": None,
+                      "transitioning": False}
+
+
+def test_sglang_omni_reports_no_model_name():
+    """GF2: the wire id is the container's mount path, never an identity —
+    the adapter reports None and this branch must not invent one."""
+    assert observe_remote(_remote_world(_omni_tenant("idle", 0)))[
+        "nimbus/song-r"]["model"] is None
+
+
+def test_sglang_omni_is_mapped_by_the_same_dispatch_the_local_half_uses():
+    """One mapping, two callers (the Task 6 binding): a kind reads
+    identically wherever it runs. Proven by feeding the LOCAL half a
+    sglang-omni tenant — a shape only a mis-declaration would produce in
+    production, and exactly why the branch must not live in the remote
+    half alone."""
+    world = _world()
+    world["tenants"] = {"song-l": _omni_tenant("busy", 1)}
+
+    assert observe_local(world)["local/song-l"]["loaded"] is True

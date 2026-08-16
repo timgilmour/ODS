@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { humanizeAge, labels, messages } from "./messages";
+import { humanizeAge, labels, messages, stateTone } from "./messages";
 
 describe("messages", () => {
   it("gives an unreachable node a tone of danger and an age", () => {
@@ -344,5 +344,39 @@ describe("invalidWatermark", () => {
     // Says what to do instead — including that empty is a legal answer,
     // which is the distinction the whole fix rests on.
     expect(m.body).toContain("empty");
+  });
+});
+
+describe("declared remote engine presentation (Task 10b)", () => {
+  it("labels a verb with the same word the local controls use, and passes an unknown one through", () => {
+    // The vocabulary is the KIND's (`human_verbs`), so this formats whatever
+    // it is handed rather than gating on a closed list — a kind whose verb
+    // this UI has no word for still gets a button that says what it does.
+    expect(labels.engineVerb("load")).toBe(labels.load);
+    expect(labels.engineVerb("unload")).toBe(labels.unload);
+    expect(labels.engineVerb("polish")).toBe("polish");
+  });
+
+  it("tones the engine's own state word, sharing one map with the local controls", () => {
+    expect(stateTone("busy")).toBe("busy");
+    expect(stateTone("idle")).toBe("off");
+    expect(stateTone("loaded")).toBe("good");
+    expect(stateTone("running")).toBe("good");
+    // "we failed to look" is a failure to report, not a state to be calm
+    // about (app/engine_kinds.py's unknown()).
+    expect(stateTone("unknown")).toBe("bad");
+    // "down" is grey, not red: the ENGINE's word cannot tell a deliberate
+    // unload from a death — the chip's lifecycle pill (parked vs down) is
+    // what carries that, and two red things saying different reasons is how
+    // a board stops being trusted.
+    expect(stateTone("down")).toBe("off");
+    expect(stateTone("something-new")).toBe("off");
+  });
+
+  it("says the engine catalog failed, with the backend's own detail and a retry", () => {
+    const m = messages.engineKindsFailed("502 Bad Gateway");
+    expect(m.tone).toBe("danger");
+    expect(m.body).toContain("502 Bad Gateway");
+    expect(m.action?.label).toBe("Retry");
   });
 });

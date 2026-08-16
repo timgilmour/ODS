@@ -786,3 +786,320 @@ def test_routes_known_false_on_litellm_engineerror():
 
     assert result["default_route"] is None
     assert result["routes_known"] is False
+
+
+# ===========================================================================
+# sglang-omni Task 6 — World.snapshot_remote: DECLARED engines on registry
+# entries OTHER than the local one.
+#
+# Kept in its OWN half of the World (remote_tenants / a per-node GPU pool),
+# never merged into `tenants`/`gpus`: a remote engine's gpu_index addresses
+# ITS OWN node's GPU list, so folding remote tenants into the local
+# resource-keyed map would make the arbiter's co-residency and eviction
+# arithmetic (which matches `tenant["gpu_index"]` against the LOCAL gpu
+# list) silently compare two different machines' GPU 0.
+#
+# Fixture discipline ([[defaults-that-hide-bugs]]): node id "nimbus" (NOT
+# "sparky"), resource "gguf-r" (NOT "omni"), resource != kind name,
+# gpu_index 4 (past every local fixture's 0/1/2/3).
+# ===========================================================================
+
+_REMOTE_ENGINES = [
+    {"resource": "gguf-r", "kind": "lemonade", "node_id": "nimbus",
+     "connection": {"url": "http://gguf-r:8080",
+                    "metrics_url": "http://gguf-r:8081/metrics",
+                    "container": "gguf-r"},
+     "gpu_index": 4,
+     "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+]
+
+_NIMBUS_POOL = [{"index": 4, "total": 40, "used": 10, "free": 30}]
+
+
+class _FakeRemoteClients:
+    """RemoteEngineClients-shaped fake: `client_for(node_id, resource)`
+    only, answering None for a pair it has no client for (that class's own
+    "not operable is a state, not an error" posture)."""
+
+    def __init__(self, clients: dict) -> None:
+        self._clients = clients
+
+    def client_for(self, node_id: str, resource: str):
+        return self._clients.get((node_id, resource))
+
+
+def _remote_kwargs(client=None, pools=None, engines=None):
+    return dict(
+        engines=_REMOTE_ENGINES if engines is None else engines,
+        clients=_FakeRemoteClients(
+            {} if client is None else {("nimbus", "gguf-r"): client}),
+        gpu_pools={"nimbus": _NIMBUS_POOL} if pools is None else pools,
+        registry=StubRegistry(footprints={"r.gguf": 7}),
+    )
+
+
+def test_snapshot_remote_keys_tenants_by_node_and_resource():
+    world = World(clock=FakeClock())
+
+    tenants = world.snapshot_remote(
+        **_remote_kwargs(client=StubLemonade(loaded="r.gguf")))
+
+    assert list(tenants) == ["nimbus/gguf-r"]
+
+
+def test_snapshot_remote_tenant_carries_its_node_id_and_resource():
+    """The world entry has to say WHICH node it came from: everything
+    downstream builds its observation/intent key from these two fields
+    rather than from the map key."""
+    world = World(clock=FakeClock())
+
+    tenant = world.snapshot_remote(
+        **_remote_kwargs(client=StubLemonade(loaded="r.gguf")))["nimbus/gguf-r"]
+
+    assert tenant["node_id"] == "nimbus"
+    assert tenant["resource"] == "gguf-r"
+    assert tenant["engine"] == "lemonade"
+    assert tenant["gpu_index"] == 4
+    assert tenant["state"] == "loaded"
+
+
+def test_snapshot_remote_unreadable_gpu_pool_makes_that_nodes_engines_unknown():
+    """The node-agent's GPU read IS the node's liveness probe (the
+    node-observer precedent: that probe alone governs). Failing it means we
+    could not look at the node at all — its engines are 'unknown', which is
+    NOT 'nothing is loaded', and the engines are not probed one by one
+    behind an already-dead agent."""
+    client = StubLemonade(loaded="r.gguf")
+    world = World(clock=FakeClock())
+
+    tenants = world.snapshot_remote(
+        **_remote_kwargs(client=client, pools={"nimbus": None}))
+
+    assert tenants["nimbus/gguf-r"]["state"] == "unknown"
+
+
+def test_snapshot_remote_unknown_record_keeps_its_own_kinds_shape():
+    """The unknown record is produced by the KIND's own observe(), never
+    synthesized here — app.state does not know that a lemonade-kind record
+    carries `model`/`footprint` while a comfyui-kind one carries `queue`,
+    and a synthesized guess is how a downstream KeyError gets in."""
+    world = World(clock=FakeClock())
+
+    tenant = world.snapshot_remote(
+        **_remote_kwargs(pools={"nimbus": None}))["nimbus/gguf-r"]
+
+    assert tenant["state"] == "unknown"
+    assert tenant["model"] is None
+    assert tenant["footprint"] is None
+
+
+def test_snapshot_remote_engine_with_no_operable_client_is_unknown():
+    """A declared engine whose client cannot be built (credential gone,
+    kind with no remote constructor) is still DECLARED — it must appear, as
+    unknown, not vanish from the world."""
+    world = World(clock=FakeClock())
+
+    tenants = world.snapshot_remote(**_remote_kwargs(client=None))
+
+    assert tenants["nimbus/gguf-r"]["state"] == "unknown"
+
+
+def test_snapshot_remote_missing_pool_entry_is_unknown_not_a_crash():
+    world = World(clock=FakeClock())
+
+    tenants = world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded="r.gguf"), pools={}))
+
+    assert tenants["nimbus/gguf-r"]["state"] == "unknown"
+
+
+def test_snapshot_remote_idle_memory_is_independent_of_a_same_named_local_one():
+    """A local resource and a remote one may share a name; their idle
+    clocks must not be the same entry."""
+    clock = FakeClock()
+    world = World(clock=clock)
+    local_client = StubLemonade(loaded=None, activity=1)
+    local_engines = [{"resource": "gguf-r", "kind": "lemonade",
+                      "connection": {"url": "u", "metrics_url": "m",
+                                     "container": "c"},
+                      "gpu_index": 1,
+                      "policy_defaults": {"priority": 50, "pinned": False,
+                                          "idle_ttl": 900}}]
+
+    world.snapshot(gpus=[_gpu()], engines=local_engines,
+                   clients=_FakeLocalClients({"gguf-r": local_client}),
+                   litellm=StubLiteLLM(), registry=StubRegistry())
+    clock.advance(60)
+    world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded=None, activity=1)))
+    clock.advance(5)
+
+    local = world.snapshot(gpus=[_gpu()], engines=local_engines,
+                           clients=_FakeLocalClients({"gguf-r": local_client}),
+                           litellm=StubLiteLLM(), registry=StubRegistry())
+    remote = world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded=None, activity=1)))
+
+    assert local["tenants"]["gguf-r"]["idle_s"] == 65
+    assert remote["nimbus/gguf-r"]["idle_s"] == 5
+
+
+def test_local_snapshot_does_not_prune_remote_idle_memory():
+    """ONE World instance is shared by the arbiter tick and the HTTP paths.
+    A caller that snapshots only the local half must not wipe the remote
+    half's idle clocks — that would reset every remote resource's clock on
+    every tick that skipped the remote pass."""
+    clock = FakeClock()
+    world = World(clock=clock)
+
+    world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded=None, activity=1)))
+    clock.advance(30)
+    world.snapshot(**_healthy_kwargs())          # local half only
+    clock.advance(0)
+
+    remote = world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded=None, activity=1)))
+
+    assert remote["nimbus/gguf-r"]["idle_s"] == 30
+
+
+def test_snapshot_remote_drops_memory_for_an_undeclared_engine():
+    """Same rule the local half follows: a resource that left the
+    declaration loses its clock — re-declaring it starts fresh."""
+    clock = FakeClock()
+    world = World(clock=clock)
+
+    world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded=None, activity=1)))
+    clock.advance(30)
+    world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded=None, activity=1), engines=[]))
+    clock.advance(5)
+    remote = world.snapshot_remote(**_remote_kwargs(
+        client=StubLemonade(loaded=None, activity=1)))
+
+    assert remote["nimbus/gguf-r"]["idle_s"] == 0
+
+
+# ===========================================================================
+# sglang-omni Task 7, fix round 1 (review finding 1) — an UNSEEN outage must
+# not accrue idle time.
+#
+# `snapshot_remote` returns the kind's `unknown()` WITHOUT running the
+# adapter's `observe()` when the node's GPU pool is unreadable or no client
+# is operable — so the adapter's own "a non-idle answer re-arms the clock"
+# rule, which lives inside observe(), never runs on exactly the path a
+# powered-off box takes. Left alone, the first observation after the box
+# comes back reads the whole dark window as observed idle time and the deck
+# unloads an engine it just spent ~4 minutes (GF4) booting.
+#
+# Fixture discipline: node "nimbus" (never "sparky"), resource "song-r"
+# (never "omni"), idle_ttl 120 (never the declared default 900), GPU 4.
+# ===========================================================================
+
+_REMOTE_OMNI_ENGINES = [
+    {"resource": "song-r", "kind": "sglang-omni", "node_id": "nimbus",
+     "connection": {"url": "http://127.0.0.1:8008"}, "gpu_index": 4,
+     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120}},
+]
+
+_OMNI_POLICY = {"priority": 5, "pinned": False, "idle_ttl": 120}
+
+
+class StubOmni:
+    """SglangOmniClient-shaped: status() answering the node-agent's wire
+    dict."""
+
+    def __init__(self, healthy: bool = True, busy_requests: int | None = 0) -> None:
+        self._healthy = healthy
+        self._busy = busy_requests
+
+    def status(self) -> dict:
+        return {"reachable": True, "healthy": self._healthy,
+                "busy_requests": self._busy}
+
+
+def _omni_snapshot(world, *, dark=False):
+    """One remote snapshot of the single declared sglang-omni engine —
+    `dark` = the node's agent did not answer (pool None), the path that
+    skips the adapter's observe() entirely."""
+    return world.snapshot_remote(
+        engines=_REMOTE_OMNI_ENGINES,
+        clients=_FakeRemoteClients({("nimbus", "song-r"): StubOmni()}),
+        gpu_pools={"nimbus": None if dark else _NIMBUS_POOL},
+        registry=StubRegistry(),
+    )["nimbus/song-r"]
+
+
+def _omni_idle_action(tenant):
+    from app.engine_kinds import ENGINE_KINDS
+
+    return ENGINE_KINDS["sglang-omni"].idle_action(tenant, _OMNI_POLICY, None, 0)
+
+
+def test_remote_idle_clock_accrues_while_the_node_is_actually_watched():
+    """Positive control for the regression below: a genuinely idle engine
+    DOES pass its TTL and become an idle-release candidate. Without this,
+    the "must not fire" assertion below could pass for the wrong reason."""
+    clock = FakeClock(start=1000.0)
+    world = World(clock=clock)
+    _omni_snapshot(world)
+
+    clock.advance(121.0)
+    tenant = _omni_snapshot(world)
+
+    assert tenant["idle_s"] == 121.0
+    assert _omni_idle_action(tenant) == {"type": "unload", "model": None}
+
+
+def test_remote_idle_clock_restarts_after_an_unseen_outage():
+    """THE regression (fix round 1, finding 1): time the deck could not
+    observe is not time it observed the engine idle.
+
+    Reviewer's reproduction: idle past its TTL, then the node goes dark for
+    several ticks (RemoteObserver's backoff stretches that to minutes), then
+    it answers healthy and idle again. Before the fix the first healthy tick
+    reported idle_s 601.0 and idle_action emitted an unload — against an
+    engine that may have just finished a ~4-minute boot."""
+    clock = FakeClock(start=1000.0)
+    world = World(clock=clock)
+    _omni_snapshot(world)
+    clock.advance(121.0)
+    _omni_idle_action(_omni_snapshot(world))          # (fires — see above)
+
+    for _ in range(5):                                 # the box goes dark
+        clock.advance(96.0)
+        assert _omni_snapshot(world, dark=True)["state"] == "unknown"
+    clock.advance(2.0)
+    tenant = _omni_snapshot(world)                     # ...and comes back
+
+    assert tenant["state"] == "idle"
+    assert tenant["idle_s"] == 0.0
+    assert _omni_idle_action(tenant) is None
+
+
+def test_remote_unknown_does_not_wipe_a_different_engines_idle_clock():
+    """The reset is per TENANT, not a blanket wipe: an engine on a node
+    that is still answering keeps accruing while another one goes dark."""
+    engines = _REMOTE_OMNI_ENGINES + [
+        {**_REMOTE_OMNI_ENGINES[0], "resource": "song-b", "node_id": "cirrus"}]
+    clients = _FakeRemoteClients({("nimbus", "song-r"): StubOmni(),
+                                  ("cirrus", "song-b"): StubOmni()})
+    clock = FakeClock(start=1000.0)
+    world = World(clock=clock)
+
+    def snap(nimbus_pool):
+        return world.snapshot_remote(
+            engines=engines, clients=clients,
+            gpu_pools={"nimbus": nimbus_pool, "cirrus": _NIMBUS_POOL},
+            registry=StubRegistry())
+
+    snap(_NIMBUS_POOL)
+    clock.advance(60.0)
+    snap(None)                                          # only nimbus is dark
+    clock.advance(30.0)
+    tenants = snap(_NIMBUS_POOL)
+
+    assert tenants["nimbus/song-r"]["idle_s"] == 0.0     # restarted
+    assert tenants["cirrus/song-b"]["idle_s"] == 90.0    # untouched

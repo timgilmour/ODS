@@ -124,7 +124,7 @@ def _build_deck(settings: Settings) -> dict:
     from app.intent import IntentStore
     from app.locations import LocationStore
     from app.mover import JobQueue, Mover
-    from app.policy import PolicyStore, StoragePolicyStore
+    from app.policy import PolicyStore, StoragePolicyStore, declared_defaults
     from app.provenance import ProvenanceStore
     from app.registry import Registry
     from app.sets import SetStore
@@ -247,7 +247,12 @@ def _build_deck(settings: Settings) -> dict:
         hipfire = _declared_hipfire
 
     from app.engines.spark import SparkClient
-    from app.node_clients import NodeClients, NodeObservers
+    from app.node_clients import (
+        NodeClients,
+        NodeObservers,
+        RemoteEngineClients,
+        RemoteObserver,
+    )
 
     def _swap_client_factory(entry: dict, credential: str):
         return SparkClient(node_url=entry["address"], node_key=credential,
@@ -255,6 +260,19 @@ def _build_deck(settings: Settings) -> dict:
 
     node_clients = NodeClients(node_store, _swap_client_factory)
     node_observers = NodeObservers(node_store, node_clients)
+    # Per-(node, resource) clients for engines DECLARED on a node-agent
+    # entry (sglang-omni Task 6). No factory argument: the default
+    # delegates to each engine KIND's own remote constructor
+    # (app.node_clients._adapter_remote_client), exactly as LocalClients
+    # delegates to build_client for local ones, so no engine name is
+    # spelled here.
+    remote_engine_clients = RemoteEngineClients(node_store)
+    # ONE observer for the process (sglang-omni Task 7): the watcher and
+    # every HTTP path share it, so a tick and an /api/state in the same
+    # second cost one probe per remote node rather than two — and a
+    # powered-off node backs off instead of costing a 5 s transport timeout
+    # on every ~2 s tick. Same sharing rationale as node_observers above.
+    remote_observer = RemoteObserver()
 
     location_store = LocationStore(data_dir / "locations.json")
     catalog = Catalog(data_dir / "catalog.json", location_store)
@@ -262,16 +280,12 @@ def _build_deck(settings: Settings) -> dict:
     job_queue = JobQueue(mover, catalog, location_store, data_dir / "events.jsonl")
 
     def _get_declared_policy_defaults():
-        """Read policy defaults from the local node's engines[] declaration."""
-        local = node_store.get("local")
-        if not local:
-            return {}
-        engines = local.get("engines", [])
-        declared = {}
-        for engine in engines:
-            if isinstance(engine, dict) and "resource" in engine and "policy_defaults" in engine:
-                declared[engine["resource"]] = engine["policy_defaults"]
-        return declared
+        """Policy defaults from EVERY registry entry's engines[] declaration
+        (app.policy.declared_defaults — one walk, shared with the tests that
+        mirror this wiring, rather than a second copy here). Node-agent
+        entries included since sglang-omni Task 9: a declared remote engine
+        gets its policy row seeded exactly as a local one does."""
+        return declared_defaults(node_store)
 
     deck = {
         "settings": settings,
@@ -329,6 +343,14 @@ def _build_deck(settings: Settings) -> dict:
         # registry edits apply live with no restart [max-review #13 fix].
         "node_clients": node_clients,
         "node_observers": node_observers,
+        # Remote DECLARED engines' clients — the RemoteEngineClients
+        # counterpart of local_clients below, read through by the remote
+        # half of every world snapshot (app.routers.build_world_snapshot
+        # and the arbiter tick, both via node_clients.remote_world_half).
+        "remote_engine_clients": remote_engine_clients,
+        # ...and the pacing in front of that assembly (Task 7). Both readers
+        # take it from HERE; a deck without it simply has no remote half.
+        "remote_observer": remote_observer,
         # Declared local engines' clients (app.local_clients.LocalClients,
         # Task 3, actuation added Task 6): what World.snapshot reads
         # through for every resource in node_store's local `engines[]`, AND
@@ -426,6 +448,12 @@ def _build_watcher(settings: Settings):
         # production).
         node_store=deck["node_store"],
         local_clients=deck["local_clients"],
+        # The remote half of the tick's world: the same shared client map
+        # and node-agent factory the HTTP paths read through, so both
+        # describe one world (node_clients.remote_world_half's docstring).
+        remote_engine_clients=deck["remote_engine_clients"],
+        node_agent_client_factory=deck["node_agent_client_factory"],
+        remote_observer=deck["remote_observer"],
         policy_store=deck["policy_store"],
         events_path=deck["events_path"],
         read_gpus=deck["read_gpus"],
@@ -608,6 +636,13 @@ def create_app() -> FastAPI:
     # registration order, and /api/nodes/{id}/serving/... must never risk
     # falling into a nodes route registered ahead of it.
     app.include_router(serving.router, prefix="/api")
+    # Its sibling in the same module (sglang-omni Task 8): POST
+    # /api/nodes/{id}/engines/{resource}/{verb}, the remote counterpart of
+    # /api/tenants/{resource}/{verb}. Registered here, ahead of
+    # nodes_router, for the same registration-order reason as the line
+    # above — nodes_router owns the rest of the /api/nodes/{id}/engines
+    # space (the declaration CRUD).
+    app.include_router(serving.engines_router, prefix="/api")
     app.include_router(lifecycle.router, prefix="/api")
     app.include_router(storage.router, prefix="/api")
     app.include_router(facts.router, prefix="/api")

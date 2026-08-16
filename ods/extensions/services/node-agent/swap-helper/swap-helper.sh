@@ -26,6 +26,7 @@ HELPER_DIR=$(dirname "$0")   # harvest_probe.py ships next to this script
 REQ="$CTL/request.json"
 STATUS="$CTL/status.json"
 LOCK="$CTL/.lock"
+ENGINE_REQ="$CTL/engine-req.json"   # engine up/down protocol, see below
 
 write_status() { # state profile id message
   local tmp
@@ -246,7 +247,168 @@ except Exception:
 PYEOF
 }
 
+# --- Engine up/down request protocol -----------------------------------
+# <ctl>/engine-req.json = {"resource": str, "verb": "up"|"down", "ts": float},
+# written by node-agent (LAN-facing, no docker rights). This helper alone
+# has docker rights, so it validates `resource` against the host-owned
+# $VLLM/engines.json allowlist (beside profiles.json) -- the compose file
+# to act on is NEVER taken from the request, only looked up here -- and
+# runs `docker compose -f <compose_file> up -d` / `down`, output appended
+# to swap.log like a profile swap.
+#
+# Result: <ctl>/engine-status-<resource>.json, written ONLY at completion
+# (tmp + atomic replace, like _write_catalog below). No "in-progress"
+# marker is ever written to disk: a helper killed mid-verb must leave
+# nothing that says "running" -- a stuck `swapping` status once stalled the
+# deck ~20 minutes. Absence of a result file means "unknown"; the deck
+# derives liveness from health probing, never from this file.
+#
+# As soon as a request's resource is confirmed safe to name a file with, any
+# EXISTING result for that resource is removed immediately -- before the
+# verb check, before engines.json is even consulted, and well before a slow
+# `docker compose up/down` runs. Without this, a stale result from a
+# PREVIOUS request (e.g. ok:true from an old `up`) would sit on disk for the
+# entire 30-120s a new run takes, and a poller with no way to correlate
+# result -> request would read that old answer as current. So "absence of a
+# result" now covers two states, both unknown to a reader: "never ran" and
+# "accepted and in flight" -- never "here is what a DIFFERENT request did".
+
+# The result document, JSON-built in python so an arbitrary verb or error
+# string (request-controlled) can never break the file's shape -- same
+# reasoning as _write_catalog's probe-output handling below.
+_write_engine_status() { # resource verb ok(1|0) error result-path
+  python3 - "$1" "$2" "$3" "$4" "$5" <<'PYEOF'
+import datetime, json, os, sys
+
+resource, verb, ok, error, path = sys.argv[1:6]
+tmp = path + ".tmp"
+with open(tmp, "w") as handle:
+    json.dump({
+        "resource": resource,
+        "verb": verb,
+        "ok": ok == "1",
+        "error": error or None,
+        "ts": datetime.datetime.now(datetime.timezone.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }, handle)
+os.replace(tmp, path)   # atomic: a reader never sees a partial result
+PYEOF
+}
+
+# Resolve resource -> its declared compose_file, or refuse. Prints the
+# compose path and exits 0 on success; prints a human error and exits 1
+# otherwise. This lookup -- never the request -- is the whole security
+# boundary: a compromised node-agent can at worst act on the operator's own
+# declared engines.
+_engine_compose_file() { # resource
+  python3 - "$VLLM/engines.json" "$1" <<'PYEOF'
+import json, os, sys
+
+path, resource = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as handle:
+        data = json.load(handle)
+except OSError:
+    print("engines.json unavailable"); sys.exit(1)
+except ValueError:
+    print("engines.json malformed"); sys.exit(1)
+
+if not isinstance(data, dict):
+    print("engines.json malformed"); sys.exit(1)
+
+entry = data.get(resource)
+compose_file = entry.get("compose_file") if isinstance(entry, dict) else None
+if not isinstance(compose_file, str) or not compose_file:
+    # Never guess a compose path for a resource engines.json doesn't
+    # actually declare -- same outcome whether the key is simply absent or
+    # the entry is present but too broken to name a usable file.
+    print("undeclared resource"); sys.exit(1)
+if not os.path.isabs(compose_file):
+    print("compose_file is not an absolute path"); sys.exit(1)
+if not os.path.isfile(compose_file):
+    print("compose file does not exist"); sys.exit(1)
+
+print(compose_file)
+PYEOF
+}
+
+_process_engine_req() {
+  [ -f "$ENGINE_REQ" ] || return 0
+
+  local parsed rc resource verb
+  parsed=$(python3 - "$ENGINE_REQ" <<'EOF' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+resource = d.get("resource")
+if not isinstance(resource, str) or not resource:
+    sys.exit(1)
+verb = d.get("verb")
+print(resource)
+print(verb if isinstance(verb, str) else "")
+EOF
+  )
+  rc=$?
+  rm -f "$ENGINE_REQ"   # consume first: a crash must not re-run a half-processed request
+
+  if [ $rc -ne 0 ] || [ -z "$parsed" ]; then
+    # No resource to key a result file by -- log and move on, same spirit
+    # as the swap path's malformed-request handling, minus the status file.
+    echo "swap-helper: unparseable engine-req.json, no result written" \
+      >> "$CTL/swap.log"
+    return 0
+  fi
+
+  resource=$(printf '%s' "$parsed" | sed -n 1p)
+  verb=$(printf '%s' "$parsed" | sed -n 2p)
+
+  if ! printf '%s' "$resource" | grep -qE '^[A-Za-z0-9_-]+$'; then
+    # Same regex as the swap path's profile-name guard, checked BEFORE the
+    # resource ever reaches a filename: an unsafe resource is refused like
+    # an undeclared one, but with no result file -- naming one with it is
+    # exactly the injection this guard exists to prevent.
+    echo "swap-helper: engine-req.json resource fails name validation, no result written" \
+      >> "$CTL/swap.log"
+    return 0
+  fi
+
+  local result="$CTL/engine-status-${resource}.json"
+  # Invalidate any PREVIOUS result for this resource now, before any
+  # validation/dispatch below that could take 30-120s (docker compose) --
+  # see the protocol comment above _write_engine_status/_engine_compose_file.
+  # Every path from here either writes THIS run's result or, if the helper
+  # dies first, leaves nothing -- never a stale answer from an old request.
+  rm -f "$result"
+
+  if [ "$verb" != up ] && [ "$verb" != down ]; then
+    _write_engine_status "$resource" "$verb" 0 "invalid verb (want up or down)" "$result"
+    return 0
+  fi
+
+  local compose
+  compose=$(_engine_compose_file "$resource")
+  if [ $? -ne 0 ]; then
+    _write_engine_status "$resource" "$verb" 0 "$compose" "$result"
+    return 0
+  fi
+
+  if [ "$verb" = up ]; then
+    docker compose -f "$compose" up -d >> "$CTL/swap.log" 2>&1
+  else
+    docker compose -f "$compose" down >> "$CTL/swap.log" 2>&1
+  fi
+  if [ $? -eq 0 ]; then
+    _write_engine_status "$resource" "$verb" 1 "" "$result"
+  else
+    _write_engine_status "$resource" "$verb" 0 "docker compose $verb failed (see swap.log)" "$result"
+  fi
+}
+
 process_one() {
+  _process_engine_req   # serialized by the same lock/loop as the swap below
+
   [ -f "$REQ" ] || return 0
 
   local parsed id profile

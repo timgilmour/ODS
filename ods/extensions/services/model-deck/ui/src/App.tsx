@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   getCatalog,
+  getEngineKinds,
   getNodeServingStatus,
   getState,
   getStorageState,
+  type EngineKindsResponse,
   type SparkStatus,
   type StateResponse,
   type StorageState,
@@ -43,6 +45,12 @@ export default function App() {
   // there is no separate "configurable" flag anywhere in the backend, by
   // design — so this is a probe, not a lookup.
   const [engineSettingsNodes, setEngineSettingsNodes] = useState<Record<string, string>>({});
+  // GET /api/engine-kinds — the verb vocabulary for every DECLARED REMOTE
+  // engine on the board (spec §5: never a UI literal). One fetch, not per
+  // poll: it is a static catalog of the backend's own KNOWN_KINDS
+  // (app/routers/nodes.py:476-504), and nothing an operator does changes it.
+  const [engineKinds, setEngineKinds] = useState<EngineKindsResponse | null>(null);
+  const [engineKindsError, setEngineKindsError] = useState<string | null>(null);
   // The placement the detail drawer was opened on. Held as the LAST-KNOWN
   // object only: the drawer's live subject is re-derived from each poll by id
   // (see `detailSpot` below), so this never drives the status pill.
@@ -120,6 +128,24 @@ export default function App() {
     setRefreshTrigger((t) => t + 1);
   }, [refreshState]);
 
+  // Its own fetch, and its own error: a failed catalog leaves every remote
+  // engine card rendering its status with NO verbs (model/engineVerbs.ts
+  // returns none for a null catalog — an invented verb would be worse than
+  // an absent one), which is a thing to say out loud rather than a set of
+  // silently missing buttons. Retried on demand from the banner; never on
+  // the poll.
+  const loadEngineKinds = useCallback(() => {
+    getEngineKinds().then(
+      (k) => {
+        setEngineKinds(k);
+        setEngineKindsError(null);
+      },
+      (err) => setEngineKindsError(err instanceof Error ? err.message : String(err)),
+    );
+  }, []);
+
+  useEffect(loadEngineKinds, [loadEngineKinds]);
+
   const closeDetail = useCallback(() => setDetailPlacement(null), []);
 
   /** Switching tabs closes the drawer. It is a detail OF the board — leaving
@@ -190,7 +216,7 @@ export default function App() {
         storageState.locations.find((l) => l.name === u.location)?.engine !== "lemonade",
     ) ?? [];
 
-  const nodes = buildNodes(state, serving);
+  const nodes = buildNodes(state, serving, engineKinds);
   // Re-derived on EVERY render, i.e. after every poll: the drawer must read
   // its subject out of the freshest board rather than out of the object the
   // chip click captured, or it would keep showing "serving" over a model that
@@ -243,6 +269,12 @@ export default function App() {
       </header>
 
       {loadError && <Banner message={messages.stateRefreshFailed(loadError)} />}
+      {engineKindsError && (
+        <Banner
+          message={messages.engineKindsFailed(engineKindsError)}
+          onAction={loadEngineKinds}
+        />
+      )}
 
       {view === "deck" && (
         <>

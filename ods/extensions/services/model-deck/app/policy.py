@@ -47,6 +47,36 @@ _FIELDS = {"priority": int, "pinned": bool, "idle_ttl": int}
 _AUTO_KEY = "_auto"
 
 
+def declared_defaults(node_store) -> dict[str, TenantPolicy]:
+    """Every DECLARED engine's `policy_defaults`, from EVERY registry entry —
+    the source `PolicyStore(declared_defaults=...)` is wired to.
+
+    Read live off the registry on every call (the NodeObservers precedent: a
+    declaration edit applies with no restart), and walked across the whole
+    registry rather than the local entry alone (sglang-omni Task 9): an
+    engine declared on a node-agent entry must get its policy row seeded from
+    its own declaration exactly as a local one does, or `app.arbiter`'s idle
+    rule skips it forever (a resource with no policy row has "nothing safe to
+    decide", by that rule's own guard).
+
+    Keyed by BARE resource, matching PolicyStore's own rows (ruling R10): the
+    store has no node dimension, and the declaration boundary
+    (`app.node_store`'s write gate) is what makes a bare name unambiguous by
+    refusing a resource another node already declares.
+
+    Lives HERE rather than in app.main so the deck and its tests share ONE
+    walk — a second hand-rolled copy is how the seeder and the reader drift
+    apart about what a row is called.
+    """
+    declared: dict[str, TenantPolicy] = {}
+    for entry in node_store.list():
+        for engine in entry.get("engines") or []:
+            if (isinstance(engine, dict) and "resource" in engine
+                    and "policy_defaults" in engine):
+                declared[engine["resource"]] = engine["policy_defaults"]
+    return declared
+
+
 def _validate_policy(tenant: str, policy: dict) -> None:
     """Raise ValueError if `policy` doesn't have exactly priority/pinned/idle_ttl
     with correct types (bool is not an int for priority/idle_ttl purposes)."""

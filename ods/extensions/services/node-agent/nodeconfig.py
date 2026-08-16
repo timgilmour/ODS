@@ -45,6 +45,11 @@ NODE_SERVING_CONTAINER = _env_str("NODE_SERVING_CONTAINER", "")
 # read-only (profile discovery); only the ctl dir is written (request.json).
 NODE_VLLM_DIR = _env_str("NODE_VLLM_DIR", "")
 NODE_SWAP_CTL_DIR = _env_str("NODE_SWAP_CTL_DIR", "")
+# engines.json is opt-in like swap control: an explicit override, else it is
+# resolved beside profiles.json under NODE_VLLM_DIR (engines.py
+# _configured_path()); both unset means the node has no declared engines,
+# which is normal and not an error.
+NODE_ENGINES_FILE = _env_str("NODE_ENGINES_FILE", "")
 # Settings storage is opt-in like swap control: unset means the Deck-owned
 # settings document, compose-text and catalog routes all answer 503 rather
 # than writing into some implicit default directory.

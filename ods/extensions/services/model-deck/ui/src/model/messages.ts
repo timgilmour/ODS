@@ -86,7 +86,7 @@ export const messages = {
   }),
 
   // "Refused" is deliberately generic — the detail carries the reason.
-  // Two recurring producers, catalogued here so the exact wording stays
+  // Recurring producers, catalogued here so the exact wording stays
   // traceable even though they pass through VERBATIM rather than being
   // re-templated (the backend already names the exact resource/kind/verb
   // the operator needs — see PROBE_URL_WARNING's identical passthrough
@@ -94,10 +94,29 @@ export const messages = {
   // - 404 `unknown resource {resource!r}` (app/routers/control.py:144)
   // - 405 `{resource} ({kind}) does not support {verb}`
   //   (app/routers/control.py:148)
+  // and, for a DECLARED REMOTE engine's verbs (Task 10b), the same family
+  // from app/routers/serving.py's `engine_verb`, deliberately worded to
+  // match its local sibling's:
+  // - 404 `unknown engine {resource!r} on node {node_id!r}` (:243-244)
+  // - 405 `{resource} ({kind}) does not support {verb}` (:295-296)
+  // - 501 `{resource} ({kind}) declares {verb} but the node-agent engine
+  //   channel has no call for it` (:302-305)
+  // - 503 `node {node_id!r} cannot act on engine {resource!r} — ...` (:315-318)
   guardRefused: (detail: string): Message => ({
     tone: "danger",
     title: "Refused",
     body: detail,
+  }),
+
+  // The board's verb buttons for declared remote engines come from
+  // `GET /api/engine-kinds` (app/routers/nodes.py:476-504) — never a UI
+  // literal — so a failed fetch means those cards render status with no
+  // controls. Said out loud rather than left as silently missing buttons.
+  engineKindsFailed: (detail: string): Message => ({
+    tone: "danger",
+    title: "Cannot read the engine catalog",
+    body: `${detail} — remote engine verbs stay unavailable until it loads.`,
+    action: { label: "Retry" },
   }),
 
   // Warning, not danger: this is asking the operator for a decision, which
@@ -438,6 +457,18 @@ export const labels = {
   coldOption: (name: string, sizeGb: string) => `❄ ${name} (${sizeGb} GB)`,
   load: "Load",
   unload: "Unload",
+  /** A DECLARED REMOTE engine's verb button (Task 10b). The vocabulary is
+   * the KIND's own `human_verbs` (model/engineVerbs.ts), so this formats a
+   * verb rather than choosing one: the two the node-agent engine channel
+   * carries today (app/routers/serving.py:228) get the same words the local
+   * controls use, and anything else is shown verbatim rather than hidden —
+   * a button that says what the backend was asked beats no button at all. */
+  engineVerb: (verb: string) => ({ load: "Load", unload: "Unload" })[verb] ?? verb,
+  /** Tooltip for the pill carrying a remote engine's OWN state word. Names
+   * the source, because the pill sits beside a chip whose pill says the
+   * lifecycle status — two different facts, one of which is the node's
+   * live reading. */
+  engineStateTitle: "what the node's agent reports about this engine right now",
   free: "Free",
   comfyuiBlockedTitle: "ComfyUI is busy or has a non-empty queue",
   park: "Park",
@@ -851,6 +882,35 @@ export const labels = {
   engineConnectionFieldRequired: (field: string) =>
     `${field.replace(/_/g, " ")} is required for this kind`,
 };
+
+/** Pill tone for an ENGINE'S OWN state word — a per-kind vocabulary
+ * (`world.tenants[r].state` locally, `world.remote_tenants[k].state` off-box),
+ * NOT `LifecycleStatus`, which is `ui/StatePill`'s closed enum. The two take
+ * the same four tones so they can never disagree about what green means.
+ *
+ * One map, two call sites — `PlacementActions` (local declared resources)
+ * and `RemoteEngineActions` (declared remote engines) — because a state
+ * that is amber on one card and grey on the other is exactly the drift this
+ * module exists to prevent. Anything unlisted is "off": a word this UI has
+ * never seen is not a claim about health.
+ *
+ * "down" is grey deliberately (sglang-omni's not-serving word,
+ * app/engine_kinds.py:899-900): the engine's own vocabulary cannot tell a
+ * deliberate unload from a death, and the chip's lifecycle pill beside it —
+ * `parked` vs `down` — is what carries that difference. */
+export function stateTone(state: string): string {
+  return ({
+    loaded: "good",
+    running: "good",
+    loading: "busy",
+    busy: "busy",
+    unloaded: "off",
+    parked: "off",
+    idle: "off",
+    down: "off",
+    unknown: "bad",
+  })[state] ?? "off";
+}
 
 /** "26h", "4m", "3d" — a compact age for a timestamp, or null when there is
  * no timestamp to age. NodeCard computes this once per node and threads it

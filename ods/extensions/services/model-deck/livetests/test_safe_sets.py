@@ -19,11 +19,18 @@ pytestmark = pytest.mark.safe
 # appears as a bare `s["step"]` value again) — HALF-BLIND, silently always
 # passing regardless of what the plan actually contained. Fixed to the bare
 # VERBS plan_apply can actually emit for park/resume: today those are
-# hipfire-kind's ONLY human_verbs() (app/engine_kinds.py:627-628), so on
-# THIS deployment "park"/"resume" appearing in a plan still means "touches
-# hipfire" exactly as before — just checked as the real string that shows
-# up now, not one that can't. "activate" (app/sets.py:651, box-wide, no
-# resource) is unchanged; it was never a compound name.
+# hipfire-kind's ONLY human_verbs() (app/engine_kinds.py's _HipfireAdapter),
+# so on THIS deployment "park"/"resume" appearing in a plan still means
+# "touches hipfire" exactly as before — just checked as the real string that
+# shows up now, not one that can't. "activate" (app/sets.py:651, box-wide,
+# no resource) is unchanged; it was never a compound name.
+#
+# RE-CHECKED at the fourth kind (sglang-omni Task 7 — the first kind added
+# since this guard was written): it declares human_verbs {"load","unload"}
+# and nothing else, so park/resume are STILL hipfire's alone and this set's
+# meaning is unwidened. A future kind declaring park or resume would
+# silently make this guard mean "touches hipfire OR that kind" — check this
+# comment when adding one.
 FORBIDDEN_STEPS = {"park", "resume", "activate"}
 
 

@@ -1,4 +1,5 @@
-"""Serving routes — per-node single-slot swap control (N1, design §6).
+"""Serving routes — per-node single-slot swap control (N1, design §6), plus
+(sglang-omni Task 8) the per-node DECLARED-ENGINE verb route.
 
 The canonical home of what /api/spark/* did: same handlers, node-addressed.
 No auth, matching the rest of the deck. A successful swap records intent
@@ -9,7 +10,20 @@ propagate to the app-wide handlers (409/409/502).
 _swap_and_record is the tail /swap and /reload share (swap -> intent record
 -> observer invalidate -> response) so the two routes can never drift apart
 on what "a swap happened" means to the rest of the deck.
+
+``engines_router`` (POST /api/nodes/{node_id}/engines/{resource}/{verb}) is
+the same idea for an engine DECLARED on a node-agent entry: the REMOTE
+counterpart of app.routers.control's /tenants/{resource}/{verb}. It is a
+separate router in this file rather than a route on app.routers.nodes'
+because it ACTUATES — nodes.py is the registry's CRUD plus a probe, and its
+own docstring is explicit that forget "never calls the engine: no client
+lookup anywhere". The wire refusals mirror ``_client``'s posture right here
+in this file (404 unknown node, 503 known-but-not-operable), and the
+vocabulary refusal mirrors the local dispatcher's (405 naming the kind), so
+an operator meets one contract on both surfaces.
 """
+
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -17,10 +31,14 @@ from pydantic import BaseModel
 from app.argline import POSITIONAL_KEY, render_argv
 from app.compose_import import import_compose
 from app.configure import apply_settings
-from app.observe import slot_key
+from app.engine_kinds import ENGINE_KINDS
+from app.engines import EngineError
+from app.events import log_event
+from app.observe import node_key, slot_key
 from app.routers.settings import _declared_only, _resolve, _resolve_env
 
 router = APIRouter(prefix="/nodes/{node_id}/serving", tags=["serving"])
+engines_router = APIRouter(prefix="/nodes/{node_id}/engines", tags=["engines"])
 
 
 class SwapBody(BaseModel):
@@ -190,3 +208,150 @@ def serving_reload(node_id: str, body: ReloadBody, request: Request) -> dict:
 
     swap = _swap_and_record(deck, node_id, client, profile, body.force)
     return {"shipped": outcome["applied"], "profile": profile, **swap}
+
+
+# ===========================================================================
+# Declared remote engines (sglang-omni Task 8) — one verb, one node-agent
+# request, one intent record.
+# ===========================================================================
+
+# Human verb -> (the intent state it asserts, the node-agent engine-channel
+# call that performs it).
+#
+# NOT engine-kind knowledge (spec §8 keeps that in app.engine_kinds): these
+# are the CHANNEL's two verbs — extensions/services/node-agent's
+# /v1/node/engine/{resource}/{up,down}, which every remote engine client is
+# built over (app.node_clients._adapter_remote_client). What each KIND is
+# willing to be asked is read from its own `human_verbs()` below, never from
+# this table; a kind whose vocabulary includes a verb this channel has no
+# row for is refused by name (501), never silently mapped onto a neighbour.
+_REMOTE_VERBS = {"load": ("loaded", "up"), "unload": ("unloaded", "down")}
+
+
+def _declared_engine(deck: dict, node_id: str, resource: str) -> dict:
+    """The engine `resource` DECLARED on `node_id` right now, read LIVE off
+    the registry (never a boot-time copy — app.routers.control._declared_kind
+    for the local mirror of this), or the wire refusal: 404 for a node the
+    registry has never heard of, 404 for a resource that node does not
+    declare. Both name what was not found."""
+    entry = deck["node_store"].get(node_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"unknown node {node_id!r}")
+    for engine in entry.get("engines") or []:
+        if engine["resource"] == resource:
+            return engine
+    raise HTTPException(status_code=404,
+                        detail=f"unknown engine {resource!r} on node {node_id!r}")
+
+
+@engines_router.post("/{resource}/{verb}", status_code=202)
+def engine_verb(node_id: str, resource: str, verb: str, request: Request) -> dict:
+    """Act on a declared remote engine: record the intent, then ask the
+    node's agent to bring the engine up or down.
+
+    202, not 200. The agent answers 202 itself — it queues the request for
+    the host-side swap-helper and nothing here observes the result — and a
+    cold sglang-omni start takes ~4 minutes (GF4). Returning 200 with
+    {"status": "ok"} would claim an outcome this route cannot know.
+
+    WHOEVER ACTUATES, RECORDS — AND RECORDS FIRST. Same rule, same reason as
+    app.routers.control's lemonade arms and app.engine_kinds' own actuators:
+    the actuation runs long (minutes here, not seconds), and a reconciler
+    tick landing in that window must see the operator's stated intent rather
+    than deriving a death from an engine that is merely still booting
+    (`_SglangOmniAdapter.warming` is the rule that consumes exactly this
+    record). model=None: this surface takes no model, and a remote engine's
+    declaration names none either — it serves the one checkpoint its node's
+    compose file mounts.
+
+    A POST that RAISES actuated nothing, so the speculative record is rolled
+    back — as a real compare-and-swap (predicate + write in ONE critical
+    section, app.intent.put_back_if), never check-then-act: an operator or
+    the arbiter can record during the seconds a hung transport takes, and
+    blindly putting `prior` back would silently revert THEIR action. The
+    witness is the exact `updated_ts` this call stamped, which is unique to
+    the record it wrote — a stronger predicate than the arbiter arms'
+    actor/state pair, which had no stamp of its own to compare.
+
+    With NO prior record there is nothing to put back and no compare-and-swap
+    forget to undo the write with, so the speculative record stands — the
+    same accepted gap `_LemonadeAdapter.execute_unload` documents, and the
+    honest reading for a load either way: the operator did ask for the engine
+    to be up.
+
+    No `force`, no body, and no host-agent guard: those all describe THIS
+    box (app.routers.control._ensure_host_agent_idle guards the local host
+    agent's own lifecycle ops), and the engine being acted on is on another
+    one. The node's agent runs its own single-flight guard — a request while
+    one is pending is its 409, surfaced here as the EngineError the client
+    raises.
+    """
+    deck = request.app.state.deck
+    engine = _declared_engine(deck, node_id, resource)
+    kind = engine["kind"]
+    if verb not in ENGINE_KINDS[kind].human_verbs():
+        # Same refusal, same wording as the local dispatcher's (both strings
+        # are UI-catalogued verbatim, Task 11).
+        raise HTTPException(status_code=405,
+                            detail=f"{resource} ({kind}) does not support {verb}")
+    if verb not in _REMOTE_VERBS:
+        # The kind says it takes this verb, but the node-agent engine channel
+        # has no call for it — a wiring gap in the deck, not a bad request.
+        # Refused by name (the totality floor app.arbiter._dispatch_verb
+        # takes), never mapped onto whichever channel call looks closest.
+        raise HTTPException(
+            status_code=501,
+            detail=f"{resource} ({kind}) declares {verb} but the node-agent "
+                   f"engine channel has no call for it")
+    state, call = _REMOTE_VERBS[verb]
+
+    client = deck["remote_engine_clients"].client_for(node_id, resource)
+    if client is None:
+        # client_for is repair-shaped, never wire-shaped (app.node_clients):
+        # None is "not operable right now" — not a node-agent entry (the
+        # local node lands here: /api/tenants/* is its surface), no address,
+        # no stored credential, or a declared kind with no remote
+        # constructor. Same 503 family as _client's above.
+        raise HTTPException(status_code=503, detail=(
+            f"node {node_id!r} cannot act on engine {resource!r} — a "
+            "node-agent entry with an address, a stored credential and a "
+            "remote-capable kind is required"))
+
+    key = node_key(node_id, resource)
+    store = deck["intent_store"]
+    prior = store.get().get(key)
+    # Stamped explicitly so the rollback below has an exact witness for the
+    # record THIS call wrote (see the docstring); app.intent.record would
+    # otherwise stamp its own and never tell us what it chose.
+    stamp = datetime.now(UTC).isoformat()
+    store.record(key, state=state, model=None, engine=kind, actor="operator",
+                 now=stamp)
+    try:
+        getattr(client, call)()
+    except EngineError:
+        # The channel's WHOLE failure vocabulary (app.engines' docstring:
+        # a non-2xx — the agent's 404/409/503 included — and any transport
+        # failure both arrive as EngineError). Narrow deliberately: anything
+        # else is a bug in the deck, and crashes with its traceback.
+        if prior is not None and not store.put_back_if(
+                key, lambda current: (current is not None
+                                      and current.get("updated_ts") == stamp),
+                prior):
+            # Someone else's intent is newer. Leave it alone and say so — a
+            # silent skip here would be the same invisibility the rollback
+            # exists to end (app.engine_kinds' arms log the same event).
+            log_event(deck["events_path"], "engine-verb-rollback-skipped",
+                      {"node": node_id, "resource": resource, "verb": verb,
+                       "reason": "intent changed during the request"})
+        # Re-raised, not swallowed: the app-wide handler maps it to 502, and
+        # the operator learns their click did not land.
+        raise
+    # The observation half is TTL-cached (app.node_clients.RemoteObserver,
+    # 10 s), and a verb's whole purpose is to change what it holds — the same
+    # obligation _swap_and_record discharges for a node's serving slot.
+    # Absent (a deck built without one) means nothing is cached to drop.
+    observer = deck.get("remote_observer")
+    if observer is not None:
+        observer.invalidate()
+    return {"status": "accepted", "node_id": node_id, "resource": resource,
+            "verb": verb}

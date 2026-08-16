@@ -18,6 +18,8 @@ from app.engines.hipfire import HipfireClient
 from app.engines.hostagent import HostAgent
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
+from app.engines.node_agent import NodeAgentUnreachable
+from app.engines.sglang_omni import SglangOmniClient
 
 
 def _transport(handler):
@@ -1591,3 +1593,173 @@ def test_no_watcher_app_state_deck_still_has_engine_exec_when_spark_is_configure
 
     assert app.state.deck["configurable_engines"] == [(LEGACY_SPARK_SEED_ID, "vllm")]
     assert isinstance(app.state.deck["engine_exec"], EngineExecRouter)
+
+
+# --- SglangOmniClient ---
+#
+# Wire shapes come from extensions/services/node-agent/app.py:139-171:
+#   GET  /v1/node/engine/{resource}/status -> 200 {"reachable", "healthy",
+#                                              "busy_requests"}; 404 unknown
+#   POST /v1/node/engine/{resource}/up     -> 202 {"accepted": true}; 404
+#                                              unknown, 409 pending, 503
+#                                              swap-ctl disabled
+#   POST /v1/node/engine/{resource}/down   -> same as up
+
+
+def _sglang_client(handler, resource="sglang-omni-1"):
+    return SglangOmniClient("http://hera:7720", "s3cret", resource,
+                            transport=httpx.MockTransport(handler))
+
+
+def test_sglang_omni_status_returns_wire_dict_verbatim():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers["Authorization"]
+        return httpx.Response(200, json={"reachable": True, "healthy": True,
+                                         "busy_requests": 0}, request=request)
+
+    body = _sglang_client(handler).status()
+    assert seen["path"] == "/v1/node/engine/sglang-omni-1/status"
+    assert seen["auth"] == "Bearer s3cret"
+    assert body == {"reachable": True, "healthy": True, "busy_requests": 0}
+
+
+def test_sglang_omni_status_raises_engineerror_naming_resource_on_404():
+    def handler(request):
+        return httpx.Response(404, json={"detail": "unknown engine"}, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="mystery-omni").status()
+    assert "mystery-omni" in str(exc_info.value)
+
+
+def test_sglang_omni_status_raises_engineerror_on_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler).status()
+    # Never a bare httpx exception, and the concrete NodeAgentUnreachable
+    # type (an EngineError subclass) survives the resource-naming re-wrap.
+    assert isinstance(exc_info.value, NodeAgentUnreachable)
+
+
+def test_sglang_omni_up_posts_to_correct_path_and_returns_none_on_202():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["method"] = request.method
+        seen["auth"] = request.headers["Authorization"]
+        return httpx.Response(202, json={"accepted": True}, request=request)
+
+    assert _sglang_client(handler).up() is None
+    assert seen["path"] == "/v1/node/engine/sglang-omni-1/up"
+    assert seen["method"] == "POST"
+    assert seen["auth"] == "Bearer s3cret"
+
+
+def test_sglang_omni_down_posts_to_correct_path_and_returns_none_on_202():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["method"] = request.method
+        return httpx.Response(202, json={"accepted": True}, request=request)
+
+    assert _sglang_client(handler).down() is None
+    assert seen["path"] == "/v1/node/engine/sglang-omni-1/down"
+    assert seen["method"] == "POST"
+
+
+@pytest.mark.parametrize("status_code", [404, 409, 503])
+def test_sglang_omni_up_raises_engineerror_naming_resource_on_non_202(status_code):
+    def handler(request):
+        return httpx.Response(status_code, json={"detail": "nope"}, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-2").up()
+    assert "sglang-omni-2" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("status_code", [404, 409, 503])
+def test_sglang_omni_down_raises_engineerror_naming_resource_on_non_202(status_code):
+    def handler(request):
+        return httpx.Response(status_code, json={"detail": "nope"}, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-2").down()
+    assert "sglang-omni-2" in str(exc_info.value)
+
+
+def test_sglang_omni_up_raises_engineerror_naming_resource_on_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-3").up()
+    assert "sglang-omni-3" in str(exc_info.value)
+
+
+def test_sglang_omni_down_raises_engineerror_naming_resource_on_transport_failure():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-3").down()
+    assert "sglang-omni-3" in str(exc_info.value)
+
+
+# --- SglangOmniClient: the status body is a WIRE boundary ------------------
+#
+# Fix round 1, review finding 3. The deck and the node-agent ship
+# SEPARATELY, so version skew between them is a real transient state, not a
+# hypothetical. A 200 whose body is missing or mistypes a field must heal
+# the way the sibling GPU read already heals a malformed payload (the N1
+# lesson: malformed/unreachable HEALS, it never kills the tick) — as an
+# EngineError, which every caller already turns into "we failed to look".
+# A bare KeyError out of the consumer would 500 /api/state and log a
+# tick-error every ~2 s instead.
+
+
+@pytest.mark.parametrize("body", [
+    {"reachable": True, "healthy": True},                    # busy_requests gone
+    {"reachable": True, "busy_requests": 0},                 # healthy gone
+    {"healthy": True, "busy_requests": 0},                   # reachable gone
+    {"reachable": True, "healthy": "yes", "busy_requests": 0},    # healthy not bool
+    {"reachable": True, "healthy": True, "busy_requests": "2"},   # count not int
+    {"reachable": True, "healthy": True, "busy_requests": 1.5},   # nor a float
+    {"reachable": True, "healthy": True, "busy_requests": True},  # nor a bool
+    ["reachable", "healthy"],                                # not an object at all
+])
+def test_sglang_omni_status_malformed_body_raises_engineerror_naming_resource(body):
+    def handler(request):
+        return httpx.Response(200, json=body, request=request)
+
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="mystery-omni").status()
+    assert "mystery-omni" in str(exc_info.value)
+
+
+def test_sglang_omni_status_tolerates_an_unknown_extra_field():
+    """Skew tolerance is ADDITIVE only: a newer agent adding a field must
+    not break an older deck (it reads the three it knows), while a MISSING
+    or mistyped field changes meaning and is refused above."""
+    def handler(request):
+        return httpx.Response(200, json={"reachable": True, "healthy": True,
+                                         "busy_requests": 0,
+                                         "queue_depth": 3}, request=request)
+
+    assert _sglang_client(handler).status()["busy_requests"] == 0
+
+
+def test_sglang_omni_status_accepts_a_null_busy_count():
+    """`None` is the documented "the agent could not take the count" value
+    (GF3), not a malformed body — the deck reads it as busy."""
+    def handler(request):
+        return httpx.Response(200, json={"reachable": False, "healthy": False,
+                                         "busy_requests": None}, request=request)
+
+    assert _sglang_client(handler).status()["busy_requests"] is None

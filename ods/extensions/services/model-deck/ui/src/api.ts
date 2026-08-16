@@ -33,7 +33,7 @@ export interface ExternalProc {
  * other field is that resource's declared KIND's own
  * `app.engine_kinds.ENGINE_KINDS[kind].observe()` shape — a union of every
  * kind's fields rather than a discriminated one, because `kind` is data
- * (`KNOWN_KINDS`, app/engine_kinds.py:90-94), not a TS literal the compiler
+ * (`KNOWN_KINDS`, app/engine_kinds.py:177-192), not a TS literal the compiler
  * can narrow on. Fields a given kind never sets are simply absent:
  * - lemonade-kind: state "loaded"|"unloaded"|"loading"|"unknown", model,
  *   footprint, idle_s (app/engine_kinds.py `_LemonadeAdapter.observe`,
@@ -59,6 +59,31 @@ export interface ResourceTenant {
   queue_depth?: number | null;
 }
 
+/** One DECLARED engine on a registry entry OTHER than the local one, as
+ * `World.snapshot_remote` stamps it (app/state.py:300-310): the resource's
+ * own KIND's `observe()` shape — the same union-of-kinds posture
+ * `ResourceTenant` documents — plus four fields stamped uniformly on every
+ * record, `engine` (the kind), `gpu_index`, `node_id` and `resource`. The
+ * last two ride ON the record rather than being parsed back out of the map
+ * key precisely so the two cannot drift (that docstring's own words), and
+ * every downstream key is built from them (app/observe.py's `observe_remote`,
+ * :145-146).
+ *
+ * sglang-omni-kind fields (app/engine_kinds.py's `_SglangOmniAdapter`):
+ * - `state` "busy"|"idle"|"down"|"unknown" (`observe`, :899-929; `unknown()`,
+ *   :931-947 — "we failed to look", which is the record a node whose agent
+ *   did not answer gets).
+ * - `busy_requests` int | null — the agent's count of established
+ *   connections on the serving port. `null` means the agent could not take
+ *   the count, and the ADAPTER already reads that as busy (`busy is None or
+ *   busy > 0` -> state "busy", :902-908, design §4's fails-toward-alive
+ *   rule). Nothing downstream re-reads the count: `state` is the answer. */
+export interface RemoteTenant extends ResourceTenant {
+  node_id: string;
+  resource: string;
+  busy_requests?: number | null;
+}
+
 export interface World {
   gpus: Gpu[];
   /** Keyed by resource name (app/state.py's World.snapshot `tenants[resource]
@@ -72,6 +97,18 @@ export interface World {
    * each tenant's own `gpu_index` field; kept because it is still on the
    * wire, even though `nodes.ts` reads `gpu_index` off the tenant directly. */
   placement: Record<string, number>;
+  /** The REMOTE half of the same snapshot, keyed `<node>/<resource>`
+   * (app/observe.py:31's `node_key`) — every engine DECLARED on a registry
+   * entry other than the local one, merged in by
+   * `build_world_snapshot` (app/routers/__init__.py:81-86) from the
+   * TTL-paced remote observer. Its OWN key, never folded into `tenants`:
+   * a remote `gpu_index` addresses another machine's GPU list
+   * (`World.snapshot_remote`'s docstring, app/state.py:204-238).
+   *
+   * OPTIONAL because a deck built without a remote observer serves no such
+   * key at all (that same merge is conditional) — absence is representable,
+   * and it means "no engines declared off-box", never an error. */
+  remote_tenants?: Record<string, RemoteTenant>;
 }
 
 export interface TenantPolicy {
@@ -850,14 +887,15 @@ export interface NodeRegistryEntry {
   // carries `control` (app/node_store.py _CONTROLS, healed by
   // `_heal_control` if ever missing/invalid).
   control: "none" | "swap";
-  // Optional, present ONLY on the local entry (app/node_store.py's
-  // `_heal_engines` strips this key from every non-local row) — the local
-  // node's declared local-engine list, verbatim off NodeStore (E1 Task 10).
-  // `_public` (app/routers/nodes.py:88-89) spreads the stored dict as-is,
-  // so this is the one GET this file exposes that carries `engines[]` —
-  // `/api/state`'s `nodes` block (DeckNodeEntry, status.py's `_nodes_block`)
-  // never does, which is why the Engines editor reads `listNodeRegistry()`
-  // rather than the board's own node list.
+  // Optional: absent when nothing is declared. Present on BOTH agent kinds
+  // (app/node_store.py's `_validate`, :204-214, and `_heal_engines`,
+  // :112-138 — relaxed off "local entry only" by E1 Task 5, so a node-agent
+  // entry's own declared engines ride this field exactly like the local
+  // entry's always have). `_public` (app/routers/nodes.py:91-92) spreads
+  // the stored dict as-is, so this is the one GET this file exposes that
+  // carries `engines[]` — `/api/state`'s `nodes` block (DeckNodeEntry,
+  // status.py's `_nodes_block`) never does, which is why the Engines editor
+  // reads `listNodeRegistry()` rather than the board's own node list.
   engines?: DeclaredEngine[];
 }
 
@@ -906,16 +944,24 @@ export function listNodeRegistry(): Promise<{ nodes: NodeRegistryEntry[] }> {
 }
 
 // ---------------------------------------------------------------------------
-// Declared local engines (/api/nodes/local/engines, /api/engine-kinds — see
-// app/routers/nodes.py's E1 Task 10 section, :200-339) — the local node's
-// declared-engine CRUD, plus the kind catalog that drives the UI's kind
-// picker and per-kind connection fields (spec §5: never a UI literal).
+// Declared engines (/api/nodes/{node_id}/engines, /api/engine-kinds — see
+// app/routers/nodes.py's "E1 Task 10 — declared-engines CRUD" section,
+// :203-504, node-scoped since E1 Task 5 per that section's own docstring)
+// — every node's own declared-engine CRUD (the local node included —
+// "local" is just an id, same as every other node-scoped route), plus the
+// kind catalog that drives the UI's kind picker and per-kind connection
+// fields (spec §5: never a UI literal). sglang-omni Task 10 threads
+// `nodeId` through every CRUD call below (it used to be hardcoded to
+// "local", the one target that existed before a node-agent entry could
+// carry engines[] at all) — `ui/src/components/NodesView.tsx`'s
+// EnginesSection is the one caller, and its own `nodeId` is the entry
+// currently selected in the rail, local or node-agent either one.
 // ---------------------------------------------------------------------------
 
 /** One connection field's requiredness for a given kind — GET
  * /api/engine-kinds's per-kind `connection` map
- * (app/routers/nodes.py:334-336, sourced from `KNOWN_KINDS`,
- * app/engine_kinds.py:90-94). */
+ * (app/routers/nodes.py:498-499, sourced from `KNOWN_KINDS`,
+ * app/engine_kinds.py:177-192). */
 export interface EngineConnectionFieldSchema {
   required: boolean;
 }
@@ -923,10 +969,21 @@ export interface EngineConnectionFieldSchema {
 export interface EngineKindDef {
   kind: string;
   connection: Record<string, EngineConnectionFieldSchema>;
+  /** May this kind be declared on a node-agent entry — the flag
+   * `app.engine_kinds.validate_engines` enforces server-side for a remote
+   * target (app/engine_kinds.py:234-235), served verbatim
+   * (routers/nodes.py:500). The kind picker filters on this (sglang-omni
+   * Task 10, model/engineForm.ts's `kindsFor`) so a node-agent entry is
+   * never offered a kind the write gate would 422. */
+  remote_capable: boolean;
+  /** Mirror for the LOCAL entry (validate_engines' :236-238 refusal,
+   * served at routers/nodes.py:501). Every E1 kind carries this True;
+   * sglang-omni is the first False (it has no local client to build). */
+  local_capable: boolean;
   human_verbs: string[];
 }
 
-/** GET /api/engine-kinds's body (app/routers/nodes.py:324-339's
+/** GET /api/engine-kinds's body (app/routers/nodes.py:476-504's
  * `list_engine_kinds`). */
 export interface EngineKindsResponse {
   kinds: EngineKindDef[];
@@ -938,12 +995,13 @@ export interface EnginePolicyDefaults {
   idle_ttl: number;
 }
 
-/** One declared local engine — the exact shape
- * `app.engine_kinds.validate_engines` accepts (app/engine_kinds.py:103-150:
- * resource, kind, connection, gpu_index, policy_defaults, no other field),
- * what POST/PUT `/api/nodes/local/engines*` both accept and echo back, and
- * what `NodeRegistryEntry.engines[]` carries verbatim off the local
- * NodeStore row. */
+/** One declared engine — the exact shape `app.engine_kinds.validate_engines`
+ * accepts (app/engine_kinds.py:201-263: resource, kind, connection,
+ * gpu_index, policy_defaults, no other field), what POST/PUT
+ * `/api/nodes/{node_id}/engines*` both accept and echo back, and what
+ * `NodeRegistryEntry.engines[]` carries verbatim off its owning NodeStore
+ * row — local or node-agent either one (E1 Task 5 relaxed `engines[]` off
+ * the local-only entry). */
 export interface DeclaredEngine {
   resource: string;
   kind: string;
@@ -952,33 +1010,44 @@ export interface DeclaredEngine {
   policy_defaults: EnginePolicyDefaults;
 }
 
-/** GET /api/engine-kinds (app/routers/nodes.py:324-339) — the UI's kind
- * picker + per-kind connection-field source; never a UI literal (spec §5). */
+/** GET /api/engine-kinds (app/routers/nodes.py:476-504) — the UI's kind
+ * picker + per-kind connection-field source; never a UI literal (spec §5).
+ * Not node-scoped: every kind's schema and BOTH capability flags are the
+ * same catalog regardless of which node the picker is filtering for
+ * (`ui/src/model/engineForm.ts`'s `kindsFor` does the per-target
+ * filtering). */
 export function getEngineKinds(): Promise<EngineKindsResponse> {
   return request<EngineKindsResponse>("/api/engine-kinds");
 }
 
-/** POST /api/nodes/local/engines (app/routers/nodes.py:221-241's
- * `add_engine`). 422 (via the redacting handler — `app.main`'s
- * RequestValidationError handler) for a shape defect, with
- * `app.engine_kinds.validate_engines`' own one-line message as `detail`;
- * 409 when the resource is already declared. */
-export function addEngine(body: DeclaredEngine): Promise<DeclaredEngine> {
-  return request<DeclaredEngine>("/api/nodes/local/engines", {
+/** POST /api/nodes/{node_id}/engines (app/routers/nodes.py:251-284's
+ * `add_engine`) — node-scoped since E1 Task 5; `nodeId` "local" is the
+ * pre-sglang-omni behavior byte-for-byte, any other id is a node-agent
+ * entry's own declaration (sglang-omni Task 10). 404 for an unknown node.
+ * 422 (via the redacting handler — `app.main`'s RequestValidationError
+ * handler) for a shape defect — including a kind that isn't capable of
+ * running on THIS target, `app.engine_kinds.validate_engines`' own
+ * one-line message as `detail` — 409 when the resource is already
+ * declared. */
+export function addEngine(nodeId: string, body: DeclaredEngine): Promise<DeclaredEngine> {
+  return request<DeclaredEngine>(`/api/nodes/${encodeURIComponent(nodeId)}/engines`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
 
-/** PUT /api/nodes/local/engines/{resource} (app/routers/nodes.py:244-270's
- * `update_engine`) — full-entry replace. `resource` in `body` must equal
- * `resource` here or the route 422s the rename ("forget and re-add
+/** PUT /api/nodes/{node_id}/engines/{resource} (app/routers/nodes.py:287-373's
+ * `update_engine`) — full-entry replace, node-scoped since E1 Task 5 (see
+ * `addEngine`'s doc for the `nodeId` posture). `resource` in `body` must
+ * equal `resource` here or the route 422s the rename ("forget and re-add
  * instead") — callers never offer renaming, they keep the path resource and
  * the body resource in lockstep. */
-export function updateEngine(resource: string, body: DeclaredEngine): Promise<DeclaredEngine> {
+export function updateEngine(
+  nodeId: string, resource: string, body: DeclaredEngine,
+): Promise<DeclaredEngine> {
   return request<DeclaredEngine>(
-    `/api/nodes/local/engines/${encodeURIComponent(resource)}`,
+    `/api/nodes/${encodeURIComponent(nodeId)}/engines/${encodeURIComponent(resource)}`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -987,13 +1056,45 @@ export function updateEngine(resource: string, body: DeclaredEngine): Promise<De
   );
 }
 
-/** DELETE /api/nodes/local/engines/{resource} (app/routers/nodes.py:273-321's
- * `forget_engine`) — FORGET, bookkeeping only: drops the declaration plus
- * the deck's own intent record and stored policy row. Never calls the
+/** POST /api/nodes/{node_id}/engines/{resource}/{verb} — act on a DECLARED
+ * REMOTE engine (app/routers/serving.py:247-357's `engine_verb`, sglang-omni
+ * Task 8). The remote counterpart of `/api/tenants/{resource}/{verb}`, which
+ * `postAction` reaches for local ones.
+ *
+ * 202, never 200: the node's agent queues the request for its host-side
+ * swap-helper and this route observes nothing afterwards, and a cold
+ * sglang-omni start takes ~4 minutes (that route's own docstring). So a
+ * resolved promise means ACCEPTED, not done — the caller re-polls
+ * `/api/state` and watches the lifecycle status, exactly as it does for
+ * every other asynchronous verb.
+ *
+ * The refusal contract, each an `ApiError` carrying the route's own
+ * sentence: 404 unknown node / unknown engine (`_declared_engine`, :231-244),
+ * 405 the kind does not declare this verb (:295-296), 501 the kind declares
+ * it but the node-agent engine channel has no call for it (:302-305), 503
+ * the node cannot act on it (not a node-agent entry, no address, no stored
+ * credential, or a kind with no remote constructor — :315-318), 502 for the
+ * agent's own failure (an `EngineError` re-raised into the app-wide
+ * handler). Callers render the detail verbatim; none of these are invented
+ * here. */
+export function postEngineVerb(
+  nodeId: string, resource: string, verb: string,
+): Promise<unknown> {
+  return request<unknown>(
+    `/api/nodes/${encodeURIComponent(nodeId)}/engines/` +
+    `${encodeURIComponent(resource)}/${encodeURIComponent(verb)}`,
+    { method: "POST" },
+  );
+}
+
+/** DELETE /api/nodes/{node_id}/engines/{resource} (app/routers/nodes.py:376-473's
+ * `forget_engine`) — FORGET, bookkeeping only, node-scoped since E1 Task 5
+ * (see `addEngine`'s doc for the `nodeId` posture): drops the declaration
+ * plus the deck's own intent record and stored policy row. Never calls the
  * engine itself — a running process, if any, is left exactly as it is. */
-export function forgetEngine(resource: string): Promise<{ status: string }> {
+export function forgetEngine(nodeId: string, resource: string): Promise<{ status: string }> {
   return request<{ status: string }>(
-    `/api/nodes/local/engines/${encodeURIComponent(resource)}`,
+    `/api/nodes/${encodeURIComponent(nodeId)}/engines/${encodeURIComponent(resource)}`,
     { method: "DELETE" },
   );
 }

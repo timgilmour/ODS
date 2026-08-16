@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from fastapi.responses import Response
 
+import engines
 import nodeconfig
 import serving
 import settings_store
@@ -125,6 +126,49 @@ class SwapBody(BaseModel):
 def node_profiles():
     return {"profiles": swapctl.list_profiles(),
             "swap_status": swapctl.read_status()}
+
+
+@app.get("/v1/node/engines", dependencies=[Depends(verify_key)])
+def node_engines():
+    # A node with no declared engines is normal (mirrors profiles.json):
+    # {"engines": []}, not a 503 -- unlike swap control/settings, this
+    # feature has no "disabled" state, only an empty one.
+    return {"engines": sorted(engines.load_configured_engines())}
+
+
+@app.get("/v1/node/engine/{name}/status", dependencies=[Depends(verify_key)])
+def node_engine_status(name: str):
+    decl = engines.load_configured_engines().get(name)
+    if decl is None:
+        raise HTTPException(status_code=404, detail="unknown engine")
+    return engines.engine_status(decl)
+
+
+def _node_engine_request(name: str, verb: str) -> dict:
+    # Undeclared-resource 404 is checked here, against engines.json, before
+    # request_engine() ever touches the ctl dir: the agent only writes
+    # requests for declared resources (the helper re-validates `resource`
+    # against its own copy of engines.json independently -- defense in
+    # depth, app.py never trusts this check to be the only one).
+    if name not in engines.load_configured_engines():
+        raise HTTPException(status_code=404, detail="unknown engine")
+    try:
+        engines.request_engine(name, verb)
+    except engines.EngineRequestPending as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"accepted": True}
+
+
+@app.post("/v1/node/engine/{name}/up", status_code=202,
+          dependencies=[Depends(verify_key)])
+def node_engine_up(name: str):
+    return _node_engine_request(name, "up")
+
+
+@app.post("/v1/node/engine/{name}/down", status_code=202,
+          dependencies=[Depends(verify_key)])
+def node_engine_down(name: str):
+    return _node_engine_request(name, "down")
 
 
 @app.post("/v1/node/swap", status_code=202, dependencies=[Depends(verify_key)])

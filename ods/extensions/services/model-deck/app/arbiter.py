@@ -22,6 +22,13 @@ every action to carry the RESOURCE it targets, not a kind-baked verb —
     {"type": "free", "resource": <str>}
     {"type": "noop", "reason": <str>}   # reason in {"fits", "wont-fit"}
 
+An action for an engine declared on ANOTHER NODE (sglang-omni Task 9) carries
+one extra key, ``"node": <str>``, and only then: the local half's actions keep
+the exact shape above. ``_execute`` reads ``action.get("node")`` to choose
+which client map resolves it and which actuator signature it needs — a remote
+actuator takes the keyword-only ``node_id`` its ``<node>/<resource>`` intent
+key is built from, and there is deliberately no default for that half.
+
 Design notes that are load-bearing (and tested):
 
 * IDLE RELEASE (rule 1) is allowed on a demand-routing kind's (lemonade)
@@ -31,6 +38,13 @@ Design notes that are load-bearing (and tested):
   exception applies ONLY to idle release, never to contention. E1: this rule
   now runs independently for EVERY declared resource (not a single hardcoded
   "lemonade" tenant) via each kind's own ``idle_action`` (app.engine_kinds).
+  Task 9: including engines declared on OTHER NODES, iterated EXPLICITLY —
+  they live in their own world keys (``remote_tenants``/``remote_gpus``), so
+  this rule inherited no coverage for them, each node's tenants are scored
+  against that node's own GPU pool, and the actuation goes through that
+  node's own client. CONTENTION stays local-only: a pending load is inferred
+  from THIS box's route table and free VRAM, so evicting a remote engine for
+  it would free the wrong machine's memory.
 
 * CONTENTION HEALING (rule 2) NEVER evicts a demand-routing kind's
   default-route model, no matter how much VRAM that would free. It also
@@ -128,11 +142,13 @@ from app.engines import BusyError, EngineError, GuardError
 from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
 from app.intent import FAILURE_BUDGET
-from app.lifecycle import derive_status
+from app.lifecycle import derive_status, join_warming
 from app.observe import (
     _LOCAL_NODE,
     merge_observations,
+    node_key,
     observe_local,
+    observe_remote,
     observe_spark,
 )
 from app.reconcile import plan_reconcile
@@ -234,11 +250,50 @@ def _decide_idle_release(world: dict, policy: dict) -> list[dict]:
     ``world["tenants"]`` sorted by resource (deterministic order) and asks
     that resource's kind adapter (app.engine_kinds) whether it wants to
     idle-release — the two rules' actual guard conditions moved there
-    VERBATIM, comments included (they carry incident history)."""
-    actions: list[dict] = []
-    tenants = world["tenants"]
-    gpus = world["gpus"]
+    VERBATIM, comments included (they carry incident history).
 
+    REMOTE ENGINES ARE ITERATED EXPLICITLY (sglang-omni Task 9). They live in
+    their own world keys (``remote_tenants``/``remote_gpus``, keyed
+    ``<node>/<resource>``) precisely so a remote ``gpu_index`` can never be
+    matched against THIS box's GPU list (app.state.World.snapshot_remote), so
+    this rule inherits no coverage for them at all — an idle remote engine
+    was simply never considered until this loop existed. Each node's tenants
+    are gathered into their own bare-resource map and run through the SAME
+    per-resource body as the local half, against THAT node's own GPU pool: a
+    remote engine's co-residency arithmetic is its own box's, and mixing the
+    two would compare two machines' GPU 0.
+
+    CONTENTION (rule 2) deliberately stays local-only: a pending load is
+    inferred from THIS box's litellm default route and its own free VRAM
+    (``Watcher._infer_pending``), so there is no remote contention to heal —
+    evicting a remote engine for a local load would free the wrong box's
+    VRAM.
+    """
+    actions = _idle_actions(world["tenants"], world["gpus"], policy)
+    remote = world.get("remote_tenants") or {}
+    remote_gpus = world.get("remote_gpus") or {}
+    for node_id in sorted({tenant["node_id"] for tenant in remote.values()}):
+        node_tenants = {tenant["resource"]: tenant for tenant in remote.values()
+                        if tenant["node_id"] == node_id}
+        actions += _idle_actions(node_tenants, remote_gpus.get(node_id) or [],
+                                 policy, node_id=node_id)
+    return actions
+
+
+def _idle_actions(tenants: dict, gpus: list[dict], policy: dict,
+                  node_id: str | None = None) -> list[dict]:
+    """One half's idle-release pass: `tenants` keyed by BARE resource, `gpus`
+    the pool those tenants' `gpu_index` addresses.
+
+    `node_id` rides onto every action it produces (and onto nothing else) —
+    the local half passes None and its actions keep the exact three-key shape
+    ``decide`` has always returned. There is no default node half anywhere
+    downstream: `Watcher._execute` reads ``action.get("node")`` explicitly to
+    choose which client map and which actuator signature the action needs,
+    and a remote action carries its node because the resource name alone
+    cannot say which box it is on.
+    """
+    actions: list[dict] = []
     for resource in sorted(tenants):
         tenant = tenants[resource]
         # Tolerate a policy map missing this resource (partial/legacy
@@ -252,9 +307,12 @@ def _decide_idle_release(world: dict, policy: dict) -> list[dict]:
         gpu = _find_gpu(gpus, gpu_index) if gpu_index is not None else None
         co_footprints = _co_resident_footprints(tenants, resource, gpu_index)
         action = adapter.idle_action(tenant, pol, gpu, co_footprints)
-        if action is not None:
-            actions.append({**action, "resource": resource})
-
+        if action is None:
+            continue
+        action = {**action, "resource": resource}
+        if node_id is not None:
+            action["node"] = node_id
+        actions.append(action)
     return actions
 
 
@@ -533,6 +591,9 @@ class Watcher:
         dockerctl=None,
         node_store=None,
         local_clients=None,
+        remote_engine_clients=None,
+        node_agent_client_factory=None,
+        remote_observer=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -594,6 +655,20 @@ class Watcher:
         # emits no slot keys and the spark restore branch refuses.
         self._node_clients = node_clients
         self._node_observers = node_observers
+        # Remote DECLARED engines (sglang-omni Task 6): the per-(node,
+        # resource) client map and the node-agent client factory the remote
+        # half of the tick's world is assembled through. BOTH None (every
+        # unit test, every caller before that task) means no remote half at
+        # all — the same "no swap nodes" shape the two lines above take.
+        self._remote_engine_clients = remote_engine_clients
+        self._node_agent_client_factory = node_agent_client_factory
+        # The TTL/backoff pacing for the remote half's probes (sglang-omni
+        # Task 7, app.node_clients.RemoteObserver). Shared with the HTTP
+        # paths — deck["remote_observer"] — so a tick and an /api/state in
+        # the same second cost ONE probe per node, not two. None (a caller
+        # built without it) means no remote half at all, the same posture
+        # remote_world_half itself takes for a missing dependency.
+        self._remote_observer = remote_observer
         self._interval = settings.watch_interval
 
         # Characteristics derive pass: refreshes app.characteristics from
@@ -677,6 +752,12 @@ class Watcher:
         # None (the default, and every state outside that window) means
         # "no cache", so _kind_for falls back to its own fresh read.
         self._tick_engines: list[dict] | None = None
+        # The same one-tick cache for the REMOTE half's tenants (sglang-omni
+        # Task 9), read by _remote_kind_for: this tick's own
+        # `world["remote_tenants"]`, i.e. the exact records `decide` chose
+        # its remote actions from. Same lifetime and same fallback posture as
+        # _tick_engines above.
+        self._tick_remote_tenants: dict[str, dict] | None = None
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -726,6 +807,24 @@ class Watcher:
             world = self._world.snapshot(
                 gpus, engines, self._local_clients, self._litellm, self._registry
             )
+            # The REMOTE half, assembled by the SAME function
+            # app.routers.build_world_snapshot uses (sglang-omni Task 6):
+            # this tick and the HTTP surface share one World instance, whose
+            # idle-clock memory is pruned against whatever declaration each
+            # call hands it — two hand-rolled copies of this assembly would
+            # let them declare different things and thrash each other's
+            # clocks. A node whose agent is down costs ONE failed gpu read
+            # here and reports its engines unknown; it never raises into
+            # this tick — and, since Task 7, not even one per tick: the
+            # SHARED RemoteObserver (deck["remote_observer"], the same
+            # instance the HTTP paths use) paces that probe behind a short
+            # TTL and a per-node backoff, so a powered-off box cannot
+            # stretch every tick past its 5 s transport timeout. It wraps
+            # the same one assembly function, so "one world" still holds.
+            if self._remote_observer is not None:
+                world.update(self._remote_observer.half(
+                    self._node_store, self._node_agent_client_factory,
+                    self._remote_engine_clients, self._world, self._registry))
             policy = self._policy_store.get()
             # While a deliberate unload's suppression window is active, skip
             # pending-load inference entirely so healing can't revert it. Idle
@@ -778,10 +877,15 @@ class Watcher:
                 # tick (every test that drives them without .tick()) keeps
                 # getting a fresh per-call read, unaffected.
                 self._tick_engines = engines
+                # ...and the remote half's own tenants, for the same reason
+                # (see _remote_kind_for): the records this tick's `decide`
+                # read are the ones its actions must be dispatched from.
+                self._tick_remote_tenants = world.get("remote_tenants") or {}
                 actuated_keys = self._execute(actions, pending)
                 self._reconcile_pass(world, actuated_keys)
             finally:
                 self._tick_engines = None
+                self._tick_remote_tenants = None
                 actuation.LOCK.release()
             self._derive_pass()
             self._provenance_pass()
@@ -863,7 +967,30 @@ class Watcher:
                 return entry["kind"]
         return None
 
-    def _dispatch_verb(self, resource: str, verb: str):
+    def _remote_kind_for(self, node: str, resource: str) -> str | None:
+        """The declared kind for `resource` ON `node` — `_kind_for`'s remote
+        counterpart, and the same tick-cache-first shape.
+
+        `self._tick_remote_tenants` is the ONE remote half tick() assembled
+        for this actuation phase, and its tenants each carry their own
+        `engine` (app.state.World.snapshot_remote stamps it). Reading the
+        kind from THERE rather than re-reading the registry is what keeps
+        `decide` and `_execute` on one declaration: `decide` chose this
+        action from that exact tenant record, so a fresh read landing between
+        the two could dispatch through a different adapter than the one that
+        decided. Outside a tick (a direct `_execute` call) it falls back to
+        the registry, same as `_kind_for` does."""
+        tenants = self._tick_remote_tenants
+        if tenants is not None:
+            tenant = tenants.get(node_key(node, resource))
+            return None if tenant is None else tenant["engine"]
+        if self._node_store is None:
+            return None
+        entry = self._node_store.get(node)
+        engines = (entry or {}).get("engines") or []
+        return next((e["kind"] for e in engines if e["resource"] == resource), None)
+
+    def _dispatch_verb(self, resource: str, verb: str, node: str | None = None):
         """The (adapter, client) pair for actuating `verb` against
         `resource`, or raises: the resource isn't declared/resolvable
         (self._local_clients has no client for it — covers a genuinely
@@ -872,17 +999,31 @@ class Watcher:
         `verb` as an arbiter verb at all. decide() only ever asks for a
         verb the resource's OWN kind actually has (app.engine_kinds), so
         reaching here with either false is a real bug — never vanish
-        silently (no actuation, no log): raise so tick()'s own broad
-        supervisor catch logs it as a tick-error instead, "let it crash"
-        the tick, not the process, the same posture as observe.py's
-        `unhandled engine kind` raise for an analogous gap [T5 review,
-        totality floor; Task 6 replaces that hardcoded raise with this
-        real per-kind dispatch]."""
-        client = self._local_clients.client_for(resource)
-        kind = self._kind_for(resource)
+        silently (no actuation, no log): raise, so `_execute`'s per-action
+        isolation logs it as an `action-failed` event, "let it crash" the
+        ACTION, not the tick and not the process — the same posture as
+        observe.py's `unhandled engine kind` raise for an analogous gap [T5
+        review, totality floor; Task 6 replaces that hardcoded raise with
+        this real per-kind dispatch].
+
+        `node` (sglang-omni Task 9) selects WHICH client map answers: None —
+        every action `decide` emits for the local half — resolves through
+        `self._local_clients` exactly as before; a node id resolves through
+        `self._remote_engine_clients`, the same per-(node, resource) map the
+        observation half reads, whose `client_for` answers None (never
+        raises) for a pair that is not operable right now."""
+        if node is None:
+            client = self._local_clients.client_for(resource)
+            kind = self._kind_for(resource)
+        else:
+            client = (self._remote_engine_clients.client_for(node, resource)
+                      if self._remote_engine_clients is not None else None)
+            kind = self._remote_kind_for(node, resource)
         adapter = ENGINE_KINDS.get(kind) if kind is not None else None
         if client is None or adapter is None or verb not in adapter.arbiter_verbs():
-            raise ValueError(f"_execute: no {verb!r} dispatch for resource {resource!r}")
+            where = "" if node is None else f" on node {node!r}"
+            raise ValueError(
+                f"_execute: no {verb!r} dispatch for resource {resource!r}{where}")
         return adapter, client
 
     def _execute(self, actions: list[dict], pending: dict | None) -> set[str]:
@@ -898,6 +1039,22 @@ class Watcher:
         ordering, actor="deck", the `_still_ours` compare-and-swap, the
         actuated-key set, HealSuppressor arming) moved onto the adapter
         methods intact, comments included — see their own docstrings.
+
+        PER-ACTION ISOLATION (sglang-omni Task 9, T7 review): each action is
+        dispatched inside its own guard, so one that cannot be performed
+        aborts LOUDLY but ALONE. Dispatch here is positional, and an
+        actuator whose signature does not match — the concrete case: a kind
+        declared on a node-agent entry whose `execute_unload` takes no
+        keyword-only `node_id` — raises TypeError, which no adapter's own
+        narrow `except EngineError` catches. Unisolated that escaped into
+        `tick()`'s broad supervisor catch and took the REST of this tick with
+        it: the remaining actions, the pending-load retrigger, and the whole
+        reconcile/derive/provenance tail. Nothing is swallowed — every
+        failure is logged as an `action-failed` event naming the action, the
+        same posture `_execute_restore` already took for its own half (and
+        the adapters' EngineError arms keep their own richer, per-verb events
+        for the failures they DO understand; only what escapes them lands
+        here).
         """
         wont_fit = False
         eviction_raced = False
@@ -912,20 +1069,27 @@ class Watcher:
                 self._log("noop", {"reason": action["reason"]})
                 continue
 
-            resource = action["resource"]
-            if kind_raw == "unload":
-                adapter, client = self._dispatch_verb(resource, "unload")
-                adapter.execute_unload(self, resource, client, action["model"], actuated)
-            elif kind_raw == "free":
-                adapter, client = self._dispatch_verb(resource, "free")
-                if adapter.execute_free(self, resource, client):
+            try:
+                if self._perform(action, actuated):
                     eviction_raced = True
-            else:
-                # decide() only ever emits "unload"/"free"/"noop" — an
-                # action of any other shape must not vanish silently (no
-                # actuation, no log), the same totality floor as
-                # _dispatch_verb's own raise above.
-                raise ValueError(f"_execute: no dispatch for action {action!r}")
+            except Exception as exc:  # noqa: BLE001 — per-action isolation, see docstring
+                # NOTHING IS CONFIRMED RECLAIMED (fix round 1, I-1). A `free`
+                # that RAISES means exactly what the two failures
+                # `_ComfyAdapter.execute_free` handles itself mean — it
+                # returns True for both — so it must reach the same
+                # conclusion: the pending load must not be re-triggered into
+                # a GPU that may still be full. Isolating the raise without
+                # this line INVERTED that guard (the tick used to die here,
+                # so the retrigger never ran at all), which is the one way
+                # this containment could be worse than the crash it replaced.
+                # Set for every action type: an unload that raised freed
+                # nothing either, and the retrigger's whole premise is that
+                # the contention was healed.
+                eviction_raced = True
+                self._log("action-failed",
+                          {"type": kind_raw, "node": action.get("node"),
+                           "resource": action.get("resource"),
+                           "error": str(exc)})
 
         # After healing a pending load's contention (or finding it already
         # fit), re-trigger the pending resource's load with its FULL name.
@@ -933,19 +1097,66 @@ class Watcher:
         # raced.
         if pending is not None and not wont_fit and not eviction_raced:
             resource = pending["resource"]
-            client = self._local_clients.client_for(resource)
-            kind = self._kind_for(resource)
-            adapter = ENGINE_KINDS.get(kind) if kind is not None else None
-            if client is None or adapter is None or not adapter.demand():
-                # _infer_pending only ever returns a pending dict for a
-                # demand()-kind resource it just found declared and
-                # client-resolvable in THIS SAME world snapshot — reaching
-                # here with either false is a real bug, same totality
-                # posture as _dispatch_verb above.
-                raise ValueError(f"_execute: no load dispatch for resource {resource!r}")
-            adapter.execute_load(self, resource, client, pending, actuated)
+            # Isolated exactly like the actions above: the retrigger is one
+            # more action, and a failure in it must not cost the caller its
+            # `actuated` set (which the reconcile pass needs to avoid
+            # restore-fighting whatever DID actuate this tick).
+            try:
+                client = self._local_clients.client_for(resource)
+                kind = self._kind_for(resource)
+                adapter = ENGINE_KINDS.get(kind) if kind is not None else None
+                if client is None or adapter is None or not adapter.demand():
+                    # _infer_pending only ever returns a pending dict for a
+                    # demand()-kind resource it just found declared and
+                    # client-resolvable in THIS SAME world snapshot —
+                    # reaching here with either false is a real bug, same
+                    # totality posture as _dispatch_verb above.
+                    raise ValueError(
+                        f"_execute: no load dispatch for resource {resource!r}")
+                adapter.execute_load(self, resource, client, pending, actuated)
+            except Exception as exc:  # noqa: BLE001 — per-action isolation, see docstring
+                self._log("action-failed",
+                          {"type": "load", "node": None, "resource": resource,
+                           "error": str(exc)})
 
         return actuated
+
+    def _perform(self, action: dict, actuated: set[str]) -> bool:
+        """Dispatch ONE non-noop action. Returns whether an eviction RACED
+        (the `free` verb's own signal — see `_ComfyAdapter.execute_free`),
+        which is the only cross-action state `_execute`'s loop still keeps.
+
+        `node` (sglang-omni Task 9) is what makes an action remote: absent
+        means the local half, and the actuator is called exactly as before;
+        present means the resource lives on another box, and its actuator is
+        called with the keyword-only `node_id` its intent key is built from
+        (app.engine_kinds — there is deliberately no default for that half,
+        so a kind whose actuator does not take it fails loudly at the call
+        site rather than silently recording against the LOCAL resource of the
+        same name).
+        """
+        verb = action["type"]
+        resource = action["resource"]
+        node = action.get("node")
+        # Empty for the local half: every existing actuator is called with
+        # the exact signature it always was. A remote action adds the one
+        # keyword the remote intent key needs, for EVERY verb — a kind whose
+        # actuator does not take it (the E1 triple, all local-only by
+        # signature) raises TypeError here and is reported by name, rather
+        # than actuating while recording against the wrong node.
+        where = {} if node is None else {"node_id": node}
+        if verb == "unload":
+            adapter, client = self._dispatch_verb(resource, "unload", node)
+            adapter.execute_unload(self, resource, client, action["model"],
+                                   actuated, **where)
+            return False
+        if verb == "free":
+            adapter, client = self._dispatch_verb(resource, "free", node)
+            return bool(adapter.execute_free(self, resource, client, **where))
+        # decide() only ever emits "unload"/"free"/"noop" — an action of any
+        # other shape must not vanish silently (no actuation, no log), the
+        # same totality floor as _dispatch_verb's own raise.
+        raise ValueError(f"_execute: no dispatch for action {action!r}")
 
     def _clear_failure_dedup(self) -> None:
         """Re-arm the load/unload failure-dedup memo (`_FAILURE_DEDUP_KINDS`,
@@ -977,8 +1188,34 @@ class Watcher:
         intents = self._intent_store.get()
         observed = merge_observations(
             observe_local(world),
+            # Remote DECLARED engines (sglang-omni Task 6). Already observed
+            # into the snapshot above — this only maps them, so it costs no
+            # probe; including them here rather than later is what keeps this
+            # pass and app.routers.build_observations describing the same set
+            # of resources.
+            #
+            # SINCE TASK 8 an intent CAN name one of these keys — the remote
+            # verb routes (app.routers.serving.engine_verb) record
+            # `<node>/<resource>` — so plan_reconcile really does emit
+            # restores for them. TASK 9 closed both halves of serving one:
+            # `_restore` resolves a remote key through
+            # `self._remote_engine_clients` (see its docstring), and the
+            # `join_warming` stage below supplies the `transitioning` the
+            # observation path deliberately cannot — without which a
+            # ~4-minute cold boot (GF4) observes exactly like a death and
+            # gets restore-stormed into quarantine before it finishes
+            # booting.
+            observe_remote(world),
             *self._node_observations(),
         )
+
+        # Intent x observation, the ONE join a kind's own boot-window rule
+        # needs (app.lifecycle.join_warming — shared verbatim with the HTTP
+        # view, so the board and the reconciler never disagree about whether
+        # an engine is booting or dead). Runs BEFORE the actuated-key drop
+        # below and before derive_status, since `warming` is what keeps a
+        # boot in flight out of `plan_reconcile`'s actionable set at all.
+        observed = join_warming(observed, world, intents)
 
         # A key `_execute` actuated THIS tick predates its own action by
         # construction: `world` was snapshotted before `_execute` ran, so
@@ -1168,6 +1405,30 @@ class Watcher:
         through self._local_clients — a node swaps a profile
         (app/engines/spark.py).
 
+        WHICH CLIENT MAP a kind-dispatched restore resolves through is
+        decided by the NODE half of the key (sglang-omni Task 9, closing the
+        deliberate R9 window Task 8 opened): `local/<resource>` through
+        `self._local_clients`, any other node through
+        `self._remote_engine_clients` — the same per-(node, resource) map the
+        observation half already reads, keyed the way the spark branch above
+        already keys its own. Before this, EVERY non-spark key was fed to
+        `local_key`'s removeprefix and looked up locally, so a remote key
+        resolved to no client at all and raised "no restore handler" —
+        charging the failure budget toward quarantine for an engine the deck
+        simply had not learned to reach.
+
+        The KIND's `restore`, not its `execute_load`, for a remote key too:
+        restore is the uniform, dispatch-only surface every kind exposes, and
+        it deliberately records NOTHING. `execute_load` would re-record the
+        intent — stamping a fresh `updated_ts` on every retry, which is
+        exactly the timestamp `_SglangOmniAdapter.warming` reads, so a
+        crash-looping engine would re-arm its own boot window forever and
+        never reach quarantine — and would relabel an operator's record
+        actor="deck". The node half is therefore needed only to RESOLVE the
+        client here, never to dispatch; the keyword-only `node_id` actuators
+        belong to `_execute`'s arbitration path, where a NEW record is the
+        point.
+
         ComfyUI is deliberately absent, and cannot reach here: app.observe
         maps its 'unknown' state to unreachable, so a down ComfyUI derives
         'unreachable', never 'down'. A handler for it would be dead code
@@ -1176,9 +1437,9 @@ class Watcher:
         check below raises for it exactly like an unroutable engine name.
         """
         engine = action["engine"]
+        node_id, _sep, resource = action["key"].partition("/")
 
         if engine == "spark":
-            node_id = action["key"].split("/", 1)[0]
             client = (self._node_clients.client_for(node_id)
                       if self._node_clients is not None else None)
             if client is None:
@@ -1190,11 +1451,22 @@ class Watcher:
             client.swap(action["model"])
             return
 
-        resource = action["key"].removeprefix(f"{_LOCAL_NODE}/")
-        client = self._local_clients.client_for(resource)
+        if node_id == _LOCAL_NODE:
+            client = self._local_clients.client_for(resource)
+        elif self._remote_engine_clients is not None:
+            # `client_for` is repair-shaped, never wire-shaped
+            # (app.node_clients): None is "this (node, resource) is not
+            # operable right now" — no address, no stored credential, the
+            # resource no longer declared there, a kind with no remote
+            # constructor — and the raise below turns that into one charged,
+            # named failure rather than a crash inside the tick.
+            client = self._remote_engine_clients.client_for(node_id, resource)
+        else:
+            client = None
         adapter = ENGINE_KINDS.get(engine)
         if adapter is None or client is None or not hasattr(adapter, "restore"):
-            raise EngineError(f"no restore handler for engine {engine!r}")
+            raise EngineError(
+                f"no restore handler for engine {engine!r} on node {node_id!r}")
         adapter.restore(client, action["model"])
 
     # --- characteristics derivation ----------------------------------------
@@ -1565,7 +1837,20 @@ class Watcher:
     # source — app.engine_kinds' execute_unload/execute_load now fold
     # "resource" into both failure details — rather than here, since this
     # memo's own job is only to compare whatever detail it's handed.
-    _FAILURE_DEDUP_KINDS = frozenset({"load-failed", "unload-failed"})
+    #
+    # `action-failed` (sglang-omni Task 9, moved here in fix round 1, M-1)
+    # belongs to THIS memo for the reason spelled out just above, not to
+    # `_DEDUP_KINDS`: the failures that reach it are structural (an actuator
+    # signature that cannot take the action, a resource whose client will not
+    # resolve), so they repeat identically every ~2 s tick for as long as the
+    # declaration stays that way — and a contention tick emits a `noop`
+    # alongside them, so the one-slot `_last_event_key` alternates and logs
+    # BOTH forever, exactly the outage shape that check never fires for. Its
+    # detail carries type/node/resource, so two different broken actions stay
+    # distinguishable, and the success arms' `_clear_failure_dedup` re-arms
+    # it so fail→recover→identical-fail still logs both.
+    _FAILURE_DEDUP_KINDS = frozenset({"load-failed", "unload-failed",
+                                      "action-failed"})
 
     def _log(self, kind: str, detail: dict) -> None:
         key = (kind, tuple(sorted(detail.items())))

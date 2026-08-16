@@ -6,6 +6,7 @@ import ModelChip from "../ui/ModelChip";
 import Panel from "../ui/Panel";
 import DriftCard from "./DriftCard";
 import PlacementActions from "./PlacementActions";
+import RemoteEngineActions from "./RemoteEngineActions";
 import type { SettingsTarget } from "./SettingsModal";
 import SparkSwap from "./SparkSwap";
 
@@ -127,6 +128,18 @@ export default function ResourcePanel({
             )}
           </div>
         ))
+      )}
+
+      {/* A DECLARED REMOTE engine's controls (Task 10b). Outside the `stale`
+          gate below on purpose: an unreachable node's engine card keeps
+          showing what it last knew AND the engine's own state word, while
+          every verb arrives already disabled — nodes.ts folds staleness into
+          the verb list itself (model/engineVerbs.ts), so the disabled-ness
+          travels with the button rather than being re-decided here.
+          `remoteEngine` and a non-empty `controls` are mutually exclusive by
+          construction (nodes.ts). */}
+      {resource.remoteEngine && (
+        <RemoteEngineActions control={resource.remoteEngine} onRefresh={onRefresh} />
       )}
 
       {!stale &&

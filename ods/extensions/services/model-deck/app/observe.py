@@ -27,6 +27,31 @@ from app.engines.spark import boot_in_flight
 
 _LOCAL_NODE = "local"
 
+
+def node_key(node_id: str, resource: str) -> str:
+    """The intent/observation key for a DECLARED resource on ANY node
+    (``<node>/<resource>``) — ``local_key`` generalized past its one
+    hardcoded node id (sglang-omni Task 6, once engines[] can be declared
+    on a node-agent entry too).
+
+    Node-keying is not cosmetic: a key has to say WHICH BOX, because the
+    thing it addresses is one engine on one machine. Keying observations and
+    intent by the resource name alone would collapse two boxes' same-named
+    resources into one record — and this layer must not depend on the
+    registry to prevent that, since a hand-edited nodes.json really can hold
+    the collision until ``NodeStore._load``'s own heal runs on it
+    (tests/test_observe.py pins the non-collision at THIS level).
+
+    Since sglang-omni Task 9 (ruling R10) the declaration boundary ALSO
+    refuses a resource another node already declares, deck-wide
+    (``app.node_store._require_unique_resources``). That is what lets
+    PolicyStore keep its flat bare-resource rows — see
+    app/routers/nodes.py's ``forget_engine`` — and it does not make these
+    keys flat: uniqueness makes a bare name RESOLVABLE to one node, while
+    the key still has to carry which one."""
+    return f"{node_id}/{resource}"
+
+
 def local_key(resource: str) -> str:
     """The intent/observation key for a DECLARED local resource
     (``local/<resource>``) — the per-resource generalization of the old
@@ -36,8 +61,14 @@ def local_key(resource: str) -> str:
     (app.arbiter's reconcile pass, ``observe_local`` below) derive the key
     from HERE so actuation and observation can never disagree on it — same
     rationale ``LOCAL_HIPFIRE_KEY`` below already followed for hipfire
-    specifically, generalized past a single hardcoded name."""
-    return f"{_LOCAL_NODE}/{resource}"
+    specifically, generalized past a single hardcoded name.
+
+    Kept as its own name (sglang-omni Task 6) rather than folded into its
+    ~40 call sites' ``node_key("local", r)``: "this is the LOCAL node's key"
+    is the thing those call sites are asserting, and it is now literally
+    ``node_key`` with the node id fixed — one definition, two spellings that
+    cannot drift (tests/test_observe.py pins the equivalence)."""
+    return node_key(_LOCAL_NODE, resource)
 
 
 # Same rationale as local_key above, kept as a named constant for hipfire
@@ -65,8 +96,10 @@ def observe_local(world: dict) -> dict[str, dict]:
 
     Field mapping is still per KIND (each REAL World.snapshot tenant
     carries `engine`, stamped there) — a second lemonade-kind resource maps
-    exactly like the first. This dispatch is a disclosed, small residue of
-    engine-kind-name literals outside app.engine_kinds (see that module's
+    exactly like the first — and lives in ``_observe_tenant`` below since
+    sglang-omni Task 6, shared with ``observe_remote``. That dispatch is a
+    disclosed, small residue of engine-kind-name literals outside
+    app.engine_kinds (see that module's
     docstring): Task 3's brief scoped app/observe.py out, but leaving this
     function's old hardcoded `tenants["lemonade"]`/`tenants["hipfire"]`/
     `tenants["comfyui"]` reads in place would KeyError on every
@@ -86,47 +119,106 @@ def observe_local(world: dict) -> dict[str, dict]:
     tests/ that also route through this function), so a resource-name guess
     is no longer needed — every tenant this function ever sees now carries
     its own kind explicitly, same as production."""
-    out: dict[str, dict] = {}
-    for resource, tenant in world["tenants"].items():
-        kind = tenant["engine"]
-        state = tenant["state"]
-        if kind == "lemonade":
-            record = _record(
-                unknown=state == "unknown",
-                loaded=state == "loaded",
-                model=tenant.get("model"),
-                # "loading" = a load is in flight (LemonadeClient.load_in_flight,
-                # app/engine_kinds.py's lemonade adapter). Neither loaded nor
-                # dead; acting on it restarts a model that is already mid-load.
-                transitioning=state == "loading",
-            )
-        elif kind == "hipfire":
-            record = _record(
-                unknown=state == "unknown",
-                loaded=state == "running",
-                model=tenant.get("model"),
-                # "loading" = container up, health not yet 200. Neither loaded
-                # nor dead; acting on it restarts a model that is already on its
-                # way up (HipfireClient.status, app/engines/hipfire.py:100-107).
-                transitioning=state == "loading",
-            )
-        elif kind == "comfyui":
-            record = _record(
-                unknown=state == "unknown",
-                loaded=state in ("busy", "idle"),
-                model=None,
-            )
-        else:
-            # Not reachable from a REAL World.snapshot (NodeStore validates
-            # `kind` against engine_kinds.KNOWN_KINDS before an entry can
-            # ever land in the declaration one was built from) nor from any
-            # existing hand-built world dict (every one in this codebase
-            # names its tenants lemonade/comfyui/hipfire) — only a future
-            # fourth kind or a fixture using some other resource name
-            # without an explicit "engine" key would reach this.
-            raise ValueError(f"unhandled engine kind {kind!r}")
-        out[local_key(resource)] = record
-    return out
+    return {local_key(resource): _observe_tenant(tenant)
+            for resource, tenant in world["tenants"].items()}
+
+
+def observe_remote(world: dict) -> dict[str, dict]:
+    """Every DECLARED engine on a registry entry OTHER than the local one,
+    in the same shape ``observe_local`` produces for the local ones
+    (sglang-omni Task 6).
+
+    Keyed ``<node>/<resource>`` from each tenant's OWN ``node_id``/
+    ``resource`` fields — never from the map key — so the world map's key
+    and the observation key cannot drift apart, and a caller cannot rename
+    an observation by choosing a different map key.
+
+    Field mapping is ``_observe_tenant``, the SAME function the local half
+    calls: a kind must read identically wherever it runs, and one shared
+    mapping is why a new kind is one branch to add, not two.
+
+    A ``world`` with no ``remote_tenants`` key (every hand-built world dict
+    in this codebase predates the remote half, and so does any caller that
+    snapshots only the local one) simply has no remote engines — spec §1's
+    absence-is-representable rule, not a crash.
+    """
+    return {node_key(tenant["node_id"], tenant["resource"]): _observe_tenant(tenant)
+            for tenant in world.get("remote_tenants", {}).values()}
+
+
+def _observe_tenant(tenant: dict) -> dict:
+    """One World tenant -> one observation record, dispatched by KIND.
+
+    THE per-engine-vocabulary dispatch this module's docstring describes —
+    lifted out of ``observe_local``'s loop body VERBATIM (sglang-omni Task
+    6) so the local and remote halves share ONE copy. Two copies of a
+    per-kind mapping is precisely how the next vocabulary-drift bug gets in,
+    and a fourth kind must be one branch to add here, not two — which is
+    exactly what sglang-omni (Task 7) turned out to be.
+    """
+    kind = tenant["engine"]
+    state = tenant["state"]
+    if kind == "lemonade":
+        return _record(
+            unknown=state == "unknown",
+            loaded=state == "loaded",
+            model=tenant.get("model"),
+            # "loading" = a load is in flight (LemonadeClient.load_in_flight,
+            # app/engine_kinds.py's lemonade adapter). Neither loaded nor
+            # dead; acting on it restarts a model that is already mid-load.
+            transitioning=state == "loading",
+        )
+    if kind == "hipfire":
+        return _record(
+            unknown=state == "unknown",
+            loaded=state == "running",
+            model=tenant.get("model"),
+            # "loading" = container up, health not yet 200. Neither loaded
+            # nor dead; acting on it restarts a model that is already on its
+            # way up (HipfireClient.status, app/engines/hipfire.py:100-107).
+            transitioning=state == "loading",
+        )
+    if kind == "comfyui":
+        return _record(
+            unknown=state == "unknown",
+            loaded=state in ("busy", "idle"),
+            model=None,
+        )
+    if kind == "sglang-omni":
+        return _record(
+            unknown=state == "unknown",
+            # Same reading as comfyui's just above, for the same reason:
+            # "idle" describes the engine's REQUEST queue, not its
+            # residency — it holds ~62 GiB of weights between renders.
+            # "down" (the engine is not serving, observed through a node
+            # agent that DID answer) is the one state that is reachable but
+            # not loaded, which is what turns a loaded intent into a
+            # restore.
+            loaded=state in ("busy", "idle"),
+            # GF2: the engine's own model id is its container mount path,
+            # not an identity — app.engine_kinds' adapter deliberately
+            # reports none, and this branch must not invent one.
+            model=None,
+            # No `transitioning` source here, deliberately and permanently:
+            # this kind's warming rule (app.engine_kinds'
+            # _SglangOmniAdapter.warming, GF4) needs the INTENT record's
+            # timestamp, and this path is intent-blind BY DESIGN. Task 9
+            # wired it where the two already meet instead —
+            # app.lifecycle.join_warming, one stage after this one, applied
+            # by both consumers of that pair (the arbiter's reconcile pass
+            # and app.routers.build_lifecycle_view). A `down` record from
+            # here is therefore "not serving"; whether that is a death or a
+            # ~4-minute boot is a question only intent can answer.
+        )
+    # Not reachable from a REAL World.snapshot (NodeStore validates
+    # `kind` against engine_kinds.KNOWN_KINDS before an entry can
+    # ever land in the declaration one was built from) — only a
+    # future FIFTH kind whose author forgot this dispatch, or a
+    # fixture using some other resource name without an explicit
+    # "engine" key, would reach it now. It did its job on the fourth:
+    # sglang-omni (Task 7) added its branch above rather than
+    # discovering the gap live on the next GET /api/state.
+    raise ValueError(f"unhandled engine kind {kind!r}")
 
 
 def observe_spark(spark_status: dict | None, node_id: str) -> dict[str, dict]:

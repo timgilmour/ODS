@@ -533,12 +533,6 @@ def test_local_entry_accepts_validated_engines(store):
     assert store.get("local")["engines"][0]["resource"] == "gguf-a"
 
 
-def test_engines_refused_on_non_local_entries(store):
-    with pytest.raises(ValueError, match="engines"):
-        store.add({"id": "boxa", "label": "Box A", "agent_kind": "node-agent",
-                   "address": "http://boxa:7720", "engines": []})
-
-
 def test_invalid_engines_refused_at_add(store):
     with pytest.raises(ValueError, match="unknown kind"):
         store.add({"id": "local", "label": "Box L", "agent_kind": "local",
@@ -562,26 +556,200 @@ def test_load_heals_local_entry_with_invalid_engines(store, tmp_path):
     assert loaded["engines"] == []
 
 
-def test_load_strips_engines_from_non_local_entries(store, tmp_path):
-    """Non-local entry with engines list loads with key stripped, entry preserved.
-    A subsequent update() patch on that node must succeed (not bricked)."""
-    _write_nodes(tmp_path, [
-        {"id": "boxa", "label": "Box Alpha", "agent_kind": "node-agent",
-         "address": "http://boxa:7720",
-         "engines": [{"resource": "gguf-a", "kind": "lemonade",
+def test_load_heals_local_entry_with_a_slot0_resource(store, tmp_path):
+    """A hand-written entry declaring an otherwise-VALID engine whose
+    `resource` is literally "slot0" heals to [] exactly like any other
+    schema-invalid engines list (test_load_heals_local_entry_with_invalid_engines
+    above) — `_heal_engines` needs no separate slot0 guard of its own, it
+    already routes every list through `validate_engines`
+    (app/engine_kinds.py), so that module's reservation of the name lands
+    here automatically. This is the inheritance the single gate depends
+    on: a second guard planted here instead would be exactly the
+    duplicated-site pattern [[guard-at-the-boundary]] warns against."""
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                      "address": "http://hera:7720"})
+    _write_nodes(tmp_path, [good,
+        {"id": "local", "label": "Local Box", "agent_kind": "local",
+         "engines": [{"resource": "slot0", "kind": "lemonade",
                       "connection": {"url": "http://gguf-a:8080",
-                                     "metrics_url": "http://gguf-a:8001/metrics",
-                                     "container": "ods-gguf-a"},
-                      "gpu_index": 0,
+                                    "metrics_url": "http://gguf-a:8001/metrics",
+                                    "container": "ods-gguf-a"},
+                      "gpu_index": 3,
                       "policy_defaults": {"priority": 10, "pinned": False,
                                           "idle_ttl": 60}}]}])
-    loaded = store.get("boxa")
+    loaded = store.get("local")
     assert loaded is not None
-    assert loaded["id"] == "boxa"
-    assert "engines" not in loaded
-    # Subsequent update() must succeed (not bricked by engines validation)
-    result = store.update("boxa", {"label": "Renamed"})
+    assert loaded["id"] == "local"
+    assert loaded["engines"] == []
+
+
+def test_heal_engines_strips_from_unknown_agent_kind():
+    """`_heal_engines` still strips engines from any OTHER/unknown
+    agent_kind (E1 Task 5: only local/node-agent may carry the key now).
+    `NodeStore._load()` can never actually reach this branch today —
+    `_well_formed` (app/node_store.py) drops any entry whose agent_kind
+    isn't already in {"local", "node-agent"} BEFORE `_heal_engines` ever
+    runs on it (see test_load_drops_dict_with_bogus_agent_kind above) — so
+    this pins the function's own documented contract directly, the only
+    way to actually exercise the branch."""
+    from app.node_store import _heal_engines
+    entry = {"id": "ghost", "label": "Ghost", "agent_kind": "vampire",
+             "engines": [{"resource": "x"}]}
+    healed = _heal_engines(entry)
+    assert "engines" not in healed
+
+
+# --- E1 Task 5: engines[] on a node-agent entry (remote_capable gate) ------
+# Fixture rule ([[defaults-that-hide-bugs]]): node id "nimbus" (not the
+# live-seeded "sparky"), resource "gguf-r" (not "omni") — nothing here may
+# pass by coinciding with a live seed.
+
+def _remote_spec(node_id="nimbus", label="Nimbus Box"):
+    return {"id": node_id, "label": label, "agent_kind": "node-agent",
+            "address": f"http://{node_id}:7720"}
+
+
+_REMOTE_ENGINE = {
+    "resource": "gguf-r", "kind": "lemonade",
+    "connection": {"url": "http://gguf-r:8080",
+                   "metrics_url": "http://gguf-r:8001/metrics",
+                   "container": "ods-gguf-r"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 30},
+}
+
+
+def test_node_agent_engines_accepted_with_prereqs(store):
+    """Happy path: engines[] on a node-agent entry is no longer an
+    outright refusal. An EMPTY list is vacuously valid for ANY kind set —
+    every kind named in THIS module is a non-remote-capable one, so a
+    populated list here always fails the kind-not-remote_capable gate below
+    — and with address + credential both present it is accepted
+    (address+credential are NOT actually required for
+    an empty list — see test_node_agent_engines_empty_list_accepted_without_credential
+    below — but this pins the case where they happen to be present too)."""
+    entry = store.add({**_remote_spec(), "engines": []}, credential="key-nimbus")
+    assert entry["engines"] == []
+    assert store.get("nimbus")["engines"] == []
+
+
+def test_node_agent_engines_empty_list_accepted_without_credential(store):
+    """Fix round 1 (Finding 1): `engines: []` declares nothing operable,
+    so it must NOT require a credential the entry doesn't have —
+    `_require_engine_prereqs` is gated on a NON-EMPTY list (truthiness),
+    matching `validate_engines([], remote=True)`'s own vacuous pass."""
+    entry = store.add({**_remote_spec(), "engines": []})  # no credential
+    assert entry["engines"] == []
+
+
+def test_node_agent_with_empty_engines_and_no_credential_is_not_bricked(store, tmp_path):
+    """Regression (fix round 1, Finding 1 — reviewer-reproduced live bug):
+    before the fix, `_require_engine_prereqs` fired on the mere PRESENCE
+    of the `engines` key, so a node-agent entry with `engines: []` and no
+    stored credential (e.g. a hand-written nodes.json with a lost
+    credential sidecar) became unpatchable in EVERY field — a label-only
+    PATCH 422'd with "requires credential". Combined with `_heal_engines`
+    now PRESERVING (not stripping) the key on node-agent entries, this was
+    reachable through ordinary use, not just a contrived hand-edit. Pins
+    the property the old (now-superseded)
+    test_load_strips_engines_from_non_local_entries used to pin under the
+    old "strip" behavior: the entry stays patchable."""
+    _write_nodes(tmp_path, [{**_remote_spec(), "engines": []}])
+    loaded = store.get("nimbus")
+    assert loaded is not None
+    assert loaded["engines"] == []          # heal preserved it, didn't strip
+    assert store.credential_set("nimbus") is False
+    result = store.update("nimbus", {"label": "Renamed"})
     assert result["label"] == "Renamed"
+
+
+def test_require_engine_prereqs_names_missing_fields(store):
+    """Direct unit pin of `_require_engine_prereqs`'s own checklist
+    contract. Exercised directly (not through add()/update()) because it
+    is UNREACHABLE through the public API for the kinds THIS module
+    declares: the callers gate it on a NON-EMPTY engines list (see the
+    not-bricked regression above), and any non-empty LEMONADE-kind list on
+    a node-agent spec fails `_validate`'s kind-not-remote_capable check
+    FIRST (see the ordering test below). Task 7's remote-capable kind made
+    it reachable in general; it is still exercised directly here because
+    that remains the only way to reach it from this module's fixtures."""
+    with pytest.raises(ValueError, match="credential") as exc:
+        store._require_engine_prereqs({"address": "http://nimbus:7720"},
+                                       credential_present=False)
+    assert "engines on a node-agent entry" in str(exc.value)
+
+
+def test_node_agent_engines_kind_not_remote_capable_refused_naming_kind(store):
+    """Every declared kind must be `remote_capable`; the E1 triple are not,
+    so a lemonade-kind list is refused BY NAME even with every other
+    prerequisite (address + credential) satisfied. Still exactly the live
+    behavior after Task 7 — that task made ONE kind remote-capable, it did
+    not make the gate permissive."""
+    with pytest.raises(ValueError, match="lemonade"):
+        store.add({**_remote_spec(), "engines": [_REMOTE_ENGINE]},
+                  credential="key-nimbus")
+
+
+def test_node_agent_engines_kind_check_precedes_credential_check(store):
+    """Ordering proof (fix round 1): a node-agent spec with BOTH a
+    non-remote-capable kind AND no stored credential fails on the KIND
+    first — `_validate` (called unconditionally at the top of add()) runs
+    before `_require_engine_prereqs` ever would. The error names
+    "lemonade", never "credential"."""
+    with pytest.raises(ValueError, match="lemonade") as exc:
+        store.add({**_remote_spec(), "engines": [_REMOTE_ENGINE]})  # no credential
+    assert "credential" not in str(exc.value)
+
+
+def test_node_agent_engines_gate_also_applies_on_update(store):
+    """The same two checks run on update(), not just add() — mirrors the
+    control:"swap" prereq check's own add/update parity."""
+    store.add(_remote_spec(), credential="key-nimbus")  # no engines yet
+    with pytest.raises(ValueError, match="lemonade"):
+        store.update("nimbus", {"engines": [_REMOTE_ENGINE]})
+
+
+def test_heal_preserves_empty_engines_on_node_agent_entry(store, tmp_path):
+    """The core gate-opening behavior at the LOAD side: `_heal_engines`
+    stops stripping engines from node-agent entries — a hand-written (or
+    previously-written) node-agent row with a valid (empty) engines list
+    survives `_load()` with the key intact, across a fresh `NodeStore`
+    instance (proves it's the file, not in-memory state, that's healed)."""
+    _write_nodes(tmp_path, [{**_remote_spec(), "engines": []}])
+    reloaded = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+    loaded = reloaded.get("nimbus")
+    assert loaded is not None
+    assert loaded["engines"] == []
+
+
+def test_heal_node_agent_entry_with_non_remote_capable_kind_heals_to_empty(store, tmp_path):
+    """A hand-edited node-agent entry with a POPULATED engines list of a
+    NON-remote-capable kind — never legally reachable through
+    add()/update() — heals to [] rather than being dropped or
+    crashing the load, same posture as a local entry's schema-invalid
+    engines (test_load_heals_local_entry_with_invalid_engines above)."""
+    good = store.add({"id": "hera", "label": "Hera Box", "agent_kind": "node-agent",
+                      "address": "http://hera:7720"})
+    _write_nodes(tmp_path, [good, {**_remote_spec(), "engines": [_REMOTE_ENGINE]}])
+    loaded = store.get("nimbus")
+    assert loaded is not None
+    assert loaded["id"] == "nimbus"
+    assert loaded["engines"] == []
+    # The sibling entry is untouched — one bad row heals in place, it
+    # doesn't take the rest of the file down with it.
+    assert store.get("hera")["id"] == "hera"
+
+
+def test_local_engines_behavior_is_unaffected_by_the_node_agent_gate(store):
+    """`local` byte-identical check: the pre-existing local-entry happy
+    path (test_local_entry_accepts_validated_engines above) and this
+    negative one both still hold exactly as before — local never goes
+    through `_require_engine_prereqs` (that only fires for agent_kind ==
+    "node-agent") and its own kind gate stays `remote=False`, so all three
+    of today's (non-remote-capable) kinds remain valid there."""
+    entry = store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+                       "engines": [_REMOTE_ENGINE]})
+    assert entry["engines"][0]["kind"] == "lemonade"
 
 
 # ---- E1 T2: seed_engines_if_missing ----
@@ -632,3 +800,105 @@ def test_seed_engines_runs_once(store, tmp_path):
     store.update("local", {"engines": []})     # operator emptied it
     assert seed_engines_if_missing(store, _settings(), tmp_path) is False
     assert store.get("local")["engines"] == []  # seed did NOT resurrect
+
+
+# --- Task 7 fix round 1: the LOCAL direction of the run-location gate ------
+
+_LOCAL_ONLY_REFUSED_ENGINE = {
+    "resource": "song-r", "kind": "sglang-omni",
+    "connection": {"url": "http://127.0.0.1:8008"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+
+def test_heal_local_entry_with_a_remote_only_kind_heals_to_empty(store, tmp_path):
+    """Fix round 1 (review finding 2), the LOAD side of the same gate: a
+    hand-edited nodes.json declaring a remote-only kind on the LOCAL entry
+    heals to [] instead of surviving to brick every world snapshot. Mirrors
+    test_heal_node_agent_entry_with_non_remote_capable_kind_heals_to_empty,
+    the other direction of the same rule."""
+    _write_nodes(tmp_path, [{"id": "local", "label": "This Box",
+                             "agent_kind": "local",
+                             "engines": [_LOCAL_ONLY_REFUSED_ENGINE]}])
+    reloaded = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+
+    assert reloaded.get("local")["engines"] == []
+
+
+def test_local_entry_refuses_a_remote_only_kind_naming_it(store):
+    """...and the WRITE side: refused by name, before anything lands."""
+    with pytest.raises(ValueError, match="sglang-omni") as exc:
+        store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+                   "engines": [_LOCAL_ONLY_REFUSED_ENGINE]})
+    assert "remote-only" in str(exc.value)
+
+
+
+# --- sglang-omni Task 9 / ruling R10: resource names are unique DECK-WIDE --
+#
+# PolicyStore keys its rows by BARE resource and has no node dimension
+# anywhere (app/policy.py). R10 keeps that keying and pays for it here, at
+# the declaration boundary [[guard-at-the-boundary]]: if a resource name can
+# only ever be declared on ONE node, a bare-resource policy row unambiguously
+# belongs to that node's engine, and `forget` can drop it without needing to
+# know which box it was on.
+
+_OMNI_ENGINE = {
+    "resource": "song-r", "kind": "sglang-omni",
+    "connection": {"url": "http://nimbus:8008"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+
+def _local_gguf(resource="gguf-a"):
+    return {"resource": resource, "kind": "lemonade",
+            "connection": {"url": f"http://{resource}:8080",
+                           "metrics_url": f"http://{resource}:8001/metrics",
+                           "container": f"ods-{resource}"},
+            "gpu_index": 2,
+            "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60}}
+
+
+def test_a_resource_another_node_already_declares_is_refused_naming_the_owner(store):
+    """The refusal has to name BOTH halves: which resource collided and
+    which node already owns it — an operator holding one node's editor
+    cannot see the other's declaration."""
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    store.add({**_remote_spec(), "engines": [_OMNI_ENGINE]}, credential="key-nimbus")
+
+    with pytest.raises(ValueError, match="song-r") as exc:
+        store.update("local", {"engines": [_local_gguf("song-r")]})
+    assert "nimbus" in str(exc.value)
+    # Refused before any write: the local entry is untouched.
+    assert store.get("local").get("engines", []) == []
+
+
+def test_redeclaring_a_resource_on_its_OWN_node_is_not_a_collision(store):
+    """The gate compares against OTHER nodes only — editing a node's own
+    declaration (the update route's whole job) must not see itself."""
+    store.add({**_remote_spec(), "engines": [_OMNI_ENGINE]}, credential="key-nimbus")
+
+    entry = store.update("nimbus", {"engines": [{**_OMNI_ENGINE, "gpu_index": 6}]})
+
+    assert entry["engines"][0]["gpu_index"] == 6
+
+
+def test_load_heals_a_hand_edited_cross_node_duplicate(store, tmp_path):
+    """Heal-side consistency: a nodes.json hand-edited past the write gate
+    must not leave two nodes claiming one policy row. The FIRST entry in file
+    order keeps the name (deterministic, no guessing which is "real"); the
+    later one loses that engine and keeps the rest — the surgical heal, not
+    the whole-list wipe a schema-invalid declaration gets, because the other
+    entries are individually fine."""
+    local = {"id": "local", "label": "This Box", "agent_kind": "local",
+             "control": "none", "engines": [_local_gguf("song-r")]}
+    remote = {**_remote_spec(), "control": "none",
+              "engines": [_OMNI_ENGINE, {**_OMNI_ENGINE, "resource": "song-b"}]}
+    _write_nodes(tmp_path, [local, remote])
+
+    reloaded = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+
+    assert [e["resource"] for e in reloaded.get("local")["engines"]] == ["song-r"]
+    assert [e["resource"] for e in reloaded.get("nimbus")["engines"]] == ["song-b"]

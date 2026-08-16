@@ -100,7 +100,15 @@ def test_local_engines_declared(deck):
 
 
 def test_engine_kinds_served(deck):
-    kinds = deck.get("/api/engine-kinds").json()["kinds"]
-    # app/engine_kinds.py:90-94's KNOWN_KINDS — the live triple, unchanged
-    # by E1 (declared RESOURCES generalize; the set of known KINDS doesn't).
-    assert {k["kind"] for k in kinds} == {"lemonade", "comfyui", "hipfire"}
+    kinds = {k["kind"]: k for k in deck.get("/api/engine-kinds").json()["kinds"]}
+    # app.engine_kinds' KNOWN_KINDS. RE-EXPRESSED (sglang-omni Task 7): E1
+    # generalized declared RESOURCES and left the KIND set alone, so this
+    # pinned the live triple; Task 7 adds the first genuinely new kind since
+    # the deck shipped — the one that runs OFF this box.
+    assert set(kinds) == {"lemonade", "comfyui", "hipfire", "sglang-omni"}
+    # ...and WHERE each may run, in both directions — the two flags the
+    # registry write gate consults before allowing an engines[] declaration
+    # (Task 7 fix round 1). sglang-omni is the only remote-capable kind and
+    # the only remote-ONLY one; the E1 triple are local-only.
+    assert [k for k, v in kinds.items() if v["remote_capable"]] == ["sglang-omni"]
+    assert [k for k, v in kinds.items() if not v["local_capable"]] == ["sglang-omni"]

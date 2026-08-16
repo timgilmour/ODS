@@ -112,26 +112,67 @@ def _heal_control(entry: dict) -> dict:
 def _heal_engines(entry: dict) -> dict:
     """Heal invalid engines (guard-at-the-boundary posture).
 
-    Non-local entries must not carry an engines key at all; if present,
-    strip it (guard-at-boundary: reject at load, don't brick future patches).
-    Local entries with schema-invalid engines heal to [] rather than being
-    dropped, preserving the entry."""
+    E1 Task 5: local AND node-agent entries may carry engines[] now — an
+    entry of EITHER shape with schema-invalid engines (including, for a
+    node-agent entry, a declared kind that isn't `remote_capable`) heals to
+    [] rather than being dropped, preserving the entry. Only an entry of
+    some OTHER/unknown agent_kind has the key stripped outright; today that
+    branch is defensive rather than reachable through NodeStore._load()
+    (`_well_formed` already drops any entry whose `agent_kind` isn't
+    "local"/"node-agent" before `_heal_engines` ever runs) — kept anyway so
+    this function's own contract doesn't quietly depend on being called
+    from exactly one place forever."""
     if "engines" not in entry:
         return entry
 
-    # Non-local entries must never have engines key
-    if entry.get("agent_kind") != "local":
+    if entry.get("agent_kind") not in _AGENT_KINDS:
         return {k: v for k, v in entry.items() if k != "engines"}
 
-    # Local entry: validate schema, heal to [] if invalid
     engines = entry.get("engines")
     try:
         from app.engine_kinds import validate_engines
-        validate_engines(engines)
+        validate_engines(engines, remote=entry["agent_kind"] == "node-agent")
         return entry
     except ValueError:
         # Invalid engines: heal to empty list instead of dropping the entry
         return {**entry, "engines": []}
+
+
+def _heal_unique_resources(entries: list[dict]) -> list[dict]:
+    """Deck-wide resource-name uniqueness, healed at the LOAD boundary
+    (sglang-omni Task 9, ruling R10).
+
+    The write gate (`NodeStore._require_unique_resources`) refuses a
+    declaration naming a resource another node already owns, but nodes.json
+    is hand-editable, and two nodes claiming one name would leave the deck's
+    bare-resource-keyed policy row (app/policy.py) ambiguous — the exact
+    condition R10 pays for uniqueness to avoid. So the file heals the same
+    way it heals every other shape defect: in memory, silently, on load.
+
+    FILE ORDER decides: the first entry to declare a name keeps it, later
+    ones lose that ONE engine and keep the rest. Deliberately surgical rather
+    than `_heal_engines`' whole-list wipe — the colliding entry is the only
+    thing wrong, and emptying a node's whole declaration over one duplicate
+    would take working engines down with it.
+
+    Runs LAST in `_load`'s heal chain, so every entry it sees has already
+    been through `_heal_engines` — the list is present-and-valid or absent,
+    and each element already has its `resource` (validate_engines' own bar).
+    No re-guarding here for what that gate guarantees, per this module's
+    docstring.
+    """
+    owners: set[str] = set()
+    healed: list[dict] = []
+    for entry in entries:
+        engines = entry.get("engines")
+        if engines is None:
+            healed.append(entry)
+            continue
+        kept = [e for e in engines if e["resource"] not in owners]
+        owners |= {e["resource"] for e in kept}
+        healed.append(entry if len(kept) == len(engines)
+                      else {**entry, "engines": kept})
+    return healed
 
 
 def _validate(spec: dict) -> None:
@@ -161,10 +202,16 @@ def _validate(spec: dict) -> None:
                 'the local node cannot be control: "swap" — local actuation '
                 "is docker-ctl, not the swap protocol (G1 revisits)")
     if "engines" in spec:
-        if spec["agent_kind"] != "local":
-            raise ValueError("engines is only valid on the local node entry")
+        # spec["agent_kind"] is already known to be in _AGENT_KINDS by this
+        # point (checked above) -- {"local", "node-agent"} is exactly the
+        # set engines[] is valid on (E1 Task 5). A node-agent declaration
+        # additionally needs remote_capable kinds (checked here) AND agent
+        # operability -- address + a stored credential -- which needs the
+        # credential sidecar, not available to this pure function; that
+        # half is `_require_engine_prereqs`, called by add()/update() right
+        # after this, mirroring `_require_swap_prereqs`'s split.
         from app.engine_kinds import validate_engines
-        validate_engines(spec["engines"])
+        validate_engines(spec["engines"], remote=spec["agent_kind"] == "node-agent")
 
 
 class NodeStore:
@@ -201,7 +248,12 @@ class NodeStore:
         # over a field this increment introduced would be the gate punishing
         # old data for new vocabulary. One gate, here — no per-site guards.
         # `engines` is similarly healed to [] if invalid, preserving the entry.
-        return [_heal_engines(_heal_control(entry)) for entry in data if _well_formed(entry)]
+        # A cross-node duplicate resource is healed LAST and across the whole
+        # list (see _heal_unique_resources) — it is the one shape rule that
+        # cannot be decided from a single entry.
+        return _heal_unique_resources(
+            [_heal_engines(_heal_control(entry)) for entry in data
+             if _well_formed(entry)])
 
     def _save(self, data: list[dict]) -> None:
         save_json(self._path, data)
@@ -239,12 +291,80 @@ class NodeStore:
                 'control: "swap" requires ' + ", ".join(missing)
                 + " to be set first")
 
+    def _require_engine_prereqs(self, entry: dict, credential_present: bool) -> None:
+        """Engines[] on a node-agent entry additionally requires agent
+        OPERABILITY -- address + a credential, present simultaneously (E1
+        Task 5). Mirrors `_require_swap_prereqs`' checklist style: missing
+        fields are NAMED, the 422 is the operator's checklist. `address` is
+        checked here too even though `_validate` already refuses ANY
+        node-agent spec missing it (unconditionally, regardless of
+        engines) -- same redundancy `_require_swap_prereqs` already keeps
+        for the same field, so this checklist is self-contained rather
+        than depending on a caller reading a second error message to learn
+        what else is missing.
+
+        Callers gate this on a NON-EMPTY engines list (fix round 1 — see
+        add()/update()): `engines: []` declares nothing operable, so it
+        must not demand a credential the entry doesn't have. A node-agent
+        entry that lost its credential sidecar (or never had one) must
+        stay patchable in every OTHER field while its engines[] is empty
+        — the mere presence of the key must never brick the row."""
+        missing = [f for f in ("address",) if not entry.get(f)]
+        if not credential_present:
+            missing.append("credential")
+        if missing:
+            raise ValueError(
+                "engines on a node-agent entry requires " + ", ".join(missing)
+                + " to be set first")
+
+    def _require_unique_resources(self, node_id: str, engines: list,
+                                  data: list[dict]) -> None:
+        """Deck-wide resource-name uniqueness (sglang-omni Task 9, ruling
+        R10). Refused BY NAME, naming the OWNING NODE too: an operator
+        editing one node cannot see another node's declaration, so "already
+        declared" without "where" is not actionable.
+
+        WHY IT IS A RULE AT ALL: policy rows are keyed by bare resource and
+        PolicyStore has no node dimension anywhere (app/policy.py — its
+        declared-defaults source, `app.arbiter`'s `policy.get(resource)`
+        lookup, and `forget`'s pop all speak the same flat key). R10 keeps
+        that keying and buys its unambiguity HERE, at the boundary the names
+        enter through, rather than threading a node half through the store
+        and everything that reads it. Intent and observation stay
+        node-keyed regardless (`app.observe.node_key`) — this rule makes a
+        bare resource name resolve to exactly one of those keys, it does not
+        make the keys flat.
+
+        Compares against OTHER nodes only: re-declaring a node's own resource
+        is what every `PUT .../engines/{resource}` does.
+
+        Both callers run `_validate` (and therefore `validate_engines`) on
+        the same list FIRST, and `data` comes from `_load`, so every engine
+        on either side already has its `resource` — nothing is re-guarded
+        here for that, per this module's docstring.
+        """
+        owners = {}
+        for other in data:
+            if other["id"] == node_id:
+                continue
+            for engine in other.get("engines") or []:
+                owners[engine["resource"]] = other["id"]
+        for engine in engines:
+            owner = owners.get(engine["resource"])
+            if owner is not None:
+                raise ValueError(
+                    f"resource {engine['resource']!r} is already declared on "
+                    f"node {owner!r} — resource names are unique across the "
+                    "whole deck")
+
     def add(self, spec: dict, credential: str | None = None) -> dict:
         spec = dict(spec)
         spec.setdefault("control", "none")
         _validate(spec)
         if spec["control"] == "swap":
             self._require_swap_prereqs(spec, credential_present=bool(credential))
+        if spec["agent_kind"] == "node-agent" and spec.get("engines"):
+            self._require_engine_prereqs(spec, credential_present=bool(credential))
         with self._lock:
             if spec["agent_kind"] == "local" and self.get("local") is not None:
                 raise ValueError("the local node is seeded, not added")
@@ -255,6 +375,8 @@ class NodeStore:
                 raise GuardError(f"node {spec['id']!r} already exists")
             spec["added_ts"] = datetime.now(UTC).isoformat()
             data = self._load()
+            if "engines" in spec:
+                self._require_unique_resources(spec["id"], spec["engines"], data)
             data.append(spec)
             self._save(data)
             if credential:
@@ -278,6 +400,15 @@ class NodeStore:
                             merged,
                             credential_present=bool(credential)
                             or self.credential_set(node_id))
+                    if (merged.get("agent_kind") == "node-agent"
+                            and merged.get("engines")):
+                        self._require_engine_prereqs(
+                            merged,
+                            credential_present=bool(credential)
+                            or self.credential_set(node_id))
+                    if "engines" in patch:
+                        self._require_unique_resources(
+                            node_id, patch["engines"], data)
                     node.update(patch)
                     self._save(data)
                     if credential:

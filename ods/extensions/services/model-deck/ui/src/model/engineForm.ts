@@ -4,8 +4,8 @@
  * docstring names).
  *
  * Every per-kind field — which connection keys exist, and which of them are
- * required — comes from `GET /api/engine-kinds` (app/routers/nodes.py:324-339's
- * `list_engine_kinds`, sourced from `KNOWN_KINDS`, app/engine_kinds.py:90-94),
+ * required — comes from `GET /api/engine-kinds` (app/routers/nodes.py:476-504's
+ * `list_engine_kinds`, sourced from `KNOWN_KINDS`, app/engine_kinds.py:177-192),
  * NEVER a UI literal (spec §5). `EngineFormState` bakes the matching kind's
  * required-field LIST in at construction time (`emptyForm`/`formForEntry`/
  * `withKind`) precisely so `canSave` needs no second lookup against the
@@ -19,7 +19,12 @@
  * are deliberately NOT re-implemented here — see `formErrors`'s docstring).
  */
 
-import type { DeclaredEngine, EngineKindsResponse, EnginePolicyDefaults } from "../api";
+import type {
+  DeclaredEngine,
+  EngineKindDef,
+  EngineKindsResponse,
+  EnginePolicyDefaults,
+} from "../api";
 import { labels } from "./messages";
 
 export interface EngineFormState {
@@ -73,6 +78,22 @@ function connectionFor(
     connection: Object.fromEntries(Object.keys(schema).map((field) => [field, ""])),
     requiredConnectionFields: requiredFieldsOf(schema),
   };
+}
+
+/** Which of `kinds.kinds` may be declared on the node currently being
+ * edited — `isRemote` true for a node-agent target, false for the local
+ * one. Mirrors `app.engine_kinds.validate_engines`'s two capability
+ * refusals (app/engine_kinds.py:234-235 for a node-agent target's
+ * `remote_capable` check, :236-238 for the local mirror) at the picker
+ * itself (sglang-omni Task 10, Task 7's review fallout): offering a kind
+ * here that the write gate would refuse is exactly the 422-after-the-fact
+ * `list_engine_kinds`' own docstring (app/routers/nodes.py:485-492)
+ * describes serving both flags to avoid. The Add/Edit kind `<select>` maps
+ * over this function's OUTPUT rather than `kinds.kinds` directly
+ * (no-logic-inline-in-components) — the capability check itself lives here,
+ * once, not in the component's JSX. */
+export function kindsFor(kinds: EngineKindsResponse, isRemote: boolean): EngineKindDef[] {
+  return kinds.kinds.filter((k) => (isRemote ? k.remote_capable : k.local_capable));
 }
 
 export function emptyForm(kinds: EngineKindsResponse, kind: string): EngineFormState {
@@ -133,7 +154,7 @@ export function setField(form: EngineFormState, field: string, value: string): E
 /** Whether every REQUIRED connection field (the selected kind's own schema,
  * baked in at construction) is filled — mirrors
  * `app.engine_kinds.validate_engines`'s per-field check
- * (engine_kinds.py:134-137) for save-gating only. Deliberately does NOT
+ * (engine_kinds.py:247-249) for save-gating only. Deliberately does NOT
  * also require `resource`/`gpuIndex` to be set — see `formErrors` below for
  * the full gate; this narrower check is its own pinned unit, reused by
  * `formErrors` rather than duplicated. */
@@ -144,8 +165,8 @@ export function canSave(form: EngineFormState): boolean {
 /** The full Save-gate + tooltip text: `canSave` above, plus the two
  * structural fields every kind needs regardless of its own connection
  * schema — `app.engine_kinds.validate_engines` requires a non-empty
- * `resource` (engine_kinds.py:116-119) and an integer `gpu_index`
- * (:138-140) unconditionally. Still requiredness-only (no format/duplicate
+ * `resource` (engine_kinds.py:224-227) and an integer `gpu_index`
+ * (:251-253) unconditionally. Still requiredness-only (no format/duplicate
  * checks — the backend 422 stays authoritative for those, per this
  * module's docstring): an operator can still hit Save with e.g. a
  * duplicate resource name and see the server's own refusal, same as
@@ -164,7 +185,7 @@ export function formErrors(form: EngineFormState): string[] {
 
 /** The POST/PUT body — exactly `app.engine_kinds.validate_engines`'s
  * accepted shape (resource, kind, connection, gpu_index, policy_defaults;
- * engine_kinds.py:112-113's extra-field check refuses anything else). Only
+ * engine_kinds.py:220-223's extra-field check refuses anything else). Only
  * meaningful once `formErrors(form)` is empty (`gpuIndex` is asserted
  * non-null here on that assumption, same posture nodeForm.ts's
  * `toCreatePayload`/`toPatchPayload` take: the Save button stays disabled

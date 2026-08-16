@@ -5,6 +5,7 @@ know engine names (spec §8)."""
 import pytest
 
 from app.engine_kinds import KNOWN_KINDS, validate_engines
+from app.engines import EngineError
 
 
 def _entry(**over):
@@ -19,8 +20,20 @@ def _entry(**over):
     return e
 
 
-def test_known_kinds_are_exactly_the_three_adapters():
-    assert set(KNOWN_KINDS) == {"lemonade", "comfyui", "hipfire"}
+def test_known_kinds_are_exactly_the_four_adapters():
+    """RE-EXPRESSED (sglang-omni Task 7, was
+    ...are_exactly_the_three_adapters): the kind set is closed, and it is
+    now four — E1's built-in triple plus the first kind that runs OFF the
+    deck's own box. Still an exact-set assertion, not a superset one: a
+    kind appearing in KNOWN_KINDS with no ENGINE_KINDS adapter (or the
+    reverse) is exactly the drift this pins."""
+    assert set(KNOWN_KINDS) == {"lemonade", "comfyui", "hipfire", "sglang-omni"}
+
+
+def test_every_known_kind_has_an_adapter():
+    from app.engine_kinds import ENGINE_KINDS
+
+    assert set(ENGINE_KINDS) == set(KNOWN_KINDS)
 
 
 def test_valid_list_passes():
@@ -67,6 +80,77 @@ def test_resource_shape_refused_when_slashy():
     # would forge a foreign key ([[literal-declared-inputs]]).
     with pytest.raises(ValueError, match="resource"):
         validate_engines([_entry(resource="local/evil")])
+
+
+def test_resource_shape_refuses_the_reserved_slot0_name():
+    """'slot0' is the serving slot's own observation key
+    (app.observe.slot_key: '<node>/slot0'), not a name any DECLARED engine
+    may also claim — an engine named 'slot0' on a swap-capable node would
+    collide with the slot at that same key across merge_observations
+    (last-wins, so the engine silently vanishes), the intent store (one
+    record per key, so a load overwrites the slot's swap intent), and the
+    board (duplicate React keys). Checked in the resource-shape block,
+    before the kind/remote_capable checks below it, so the refusal fires
+    regardless of `remote` — this fixture's kind (lemonade) is not even
+    remote_capable, and the point is precisely that the slot0 check never
+    has to reach that gate to refuse it."""
+    with pytest.raises(ValueError, match="slot0"):
+        validate_engines([_entry(resource="slot0")])
+
+
+def test_resource_shape_refuses_slot0_on_a_remote_declaration_too():
+    """Same refusal on `remote=True`, and with a kind that IS remote_capable
+    (sglang-omni, via `_omni_entry` below) — deliberately NOT the lemonade
+    fixture above ([[defaults-that-hide-bugs]]): `_entry(resource="slot0")`
+    under `remote=True` would raise "not remote_capable" first (lemonade
+    isn't), and that message happens to also contain "slot0" (the resource
+    name rides in every error string here), so it would pass this test for
+    the wrong reason. A remote_capable kind removes that confound: the only
+    thing left that can raise is the slot0 reservation itself."""
+    with pytest.raises(ValueError, match="slot0"):
+        validate_engines([_omni_entry(resource="slot0")], remote=True)
+
+
+# --- E1 Task 5: KNOWN_KINDS gains remote_capable; validate_engines gains
+# a `remote` argument enforcing it ------------------------------------------
+
+
+def test_known_kinds_declare_remote_capability_per_kind():
+    """RE-EXPRESSED (sglang-omni Task 7, was
+    ...declare_connection_and_remote_capable_shape): the old blanket
+    `spec["remote_capable"] is False` was true only while no kind could run
+    off-box. It is now per-kind — the E1 triple are all sibling containers
+    on THIS box and stay False; sglang-omni is the first True — so the
+    assertion names which is which rather than asserting one answer for
+    everything (a superset check like "at least one is True" would pass
+    even if a local kind silently flipped).
+
+    The SHAPE half of the old assertion moved to
+    test_known_kinds_declare_where_each_kind_may_RUN (fix round 1), which
+    owns the key set now that there are two run-location flags."""
+    remote_capable = {"lemonade": False, "comfyui": False, "hipfire": False,
+                      "sglang-omni": True}
+    for kind, spec in KNOWN_KINDS.items():
+        assert spec["remote_capable"] is remote_capable[kind], kind
+
+
+def test_validate_engines_default_is_not_remote():
+    """`remote` defaults False — every existing caller (the local entry's
+    own validation, and every test above that calls validate_engines with
+    just one argument) is unaffected by this task."""
+    validate_engines([_entry()])  # no error, same as remote=False
+
+
+def test_validate_engines_remote_refuses_non_remote_capable_kind_naming_it():
+    with pytest.raises(ValueError, match="lemonade") as exc:
+        validate_engines([_entry()], remote=True)
+    assert "not remote_capable" in str(exc.value)
+
+
+def test_validate_engines_remote_accepts_an_empty_list():
+    # Vacuously true: no kind is named, so nothing can fail the
+    # remote_capable check.
+    validate_engines([], remote=True)
 
 
 # ===========================================================================
@@ -263,3 +347,836 @@ def test_hipfire_observe_looks_up_its_own_resource_name_in_routes():
            "resource": "agent"}
     obs = hipfire.observe(_FakeHipfireClient(), {}, 0.0, ctx)
     assert obs["model"] == "big-model"
+
+
+# ===========================================================================
+# sglang-omni Task 6 — `unknown()`: the kind's own "we failed to look"
+# record, callable WITHOUT a client.
+#
+# The two call sites must agree by construction, so each case below proves
+# `unknown()` against what that kind's own `observe()` returns when its
+# client raises — never against a hand-written expected dict, which would
+# just be a third copy of the same shape drifting on its own.
+# ===========================================================================
+
+
+class _RaisingClient:
+    """Every probe surface any adapter's observe() touches, all raising —
+    what a real client does with its engine unreachable. `load_in_flight`
+    and `activity` answer instead of raising: their own clients' contracts
+    say they never raise (app/engines/lemonade.py)."""
+
+    def load_in_flight(self):
+        return False
+
+    def activity(self):
+        return None
+
+    def status(self):
+        raise EngineError("unreachable")
+
+    def queue_len(self):
+        raise EngineError("unreachable")
+
+    def stats(self):
+        raise EngineError("unreachable")
+
+
+@pytest.mark.parametrize("kind", ["lemonade", "comfyui", "hipfire", "sglang-omni"])
+def test_adapter_unknown_matches_its_own_observe_on_engine_error(kind):
+    from app.engine_kinds import ENGINE_KINDS
+
+    adapter = ENGINE_KINDS[kind]
+    observed = adapter.observe(_RaisingClient(), {}, 0.0,
+                               {"registry": _FakeRegistry(), "routes": {},
+                                "resource": "r-1"})
+
+    assert adapter.unknown() == observed
+    assert observed["state"] == "unknown"
+
+
+@pytest.mark.parametrize("kind", ["lemonade", "comfyui", "hipfire", "sglang-omni"])
+def test_adapter_unknown_is_not_a_bare_state_dict(kind):
+    """The point of asking the KIND: each one's record carries different
+    fields (model/footprint/idle_s vs queue/idle_s vs queue_depth), and a
+    caller synthesizing `{"state": "unknown"}` would hand downstream a
+    shape that KeyErrors."""
+    from app.engine_kinds import ENGINE_KINDS
+
+    assert set(ENGINE_KINDS[kind].unknown()) != {"state"}
+
+
+# ===========================================================================
+# sglang-omni Task 7 — the fourth kind: `_SglangOmniAdapter`.
+#
+# The first kind that runs OFF this box: every probe and every verb rides a
+# node-agent, so the "client" here duck-types app/engines/sglang_omni.py's
+# SglangOmniClient (status/up/down), never a local HTTP engine.
+#
+# Fixture rule ([[defaults-that-hide-bugs]]): node "nimbus" (never the
+# live-seeded "sparky"), resource "song-r" (never "omni"), GPU 4, and every
+# policy fixture's `idle_ttl` is 120 — deliberately NOT the declared default
+# 900, so a test can never pass by coinciding with a default.
+# ===========================================================================
+
+# GF5 (gate run 2026-08-16): ~62 GiB resident at idle on sparky. Written out
+# here rather than imported from the adapter so the FACT is pinned by the
+# test, not just the code agreeing with itself.
+_OMNI_IDLE_FOOTPRINT = 62 * 1024**3
+
+_OMNI_KEY = "nimbus/song-r"
+
+
+class _FakeOmni:
+    """Duck-types the SglangOmniClient surface the adapter touches.
+
+    `status()` answers the node-agent's wire dict VERBATIM
+    (`{"reachable", "healthy", "busy_requests"}`, app/engines/sglang_omni.py's
+    documented contract) — never a deck-shaped dict, so a test cannot pass
+    against a shape the wire never sends.
+    """
+
+    def __init__(self, *, reachable=True, healthy=True, busy_requests=0,
+                 raises=None, verb_raises=None):
+        self._status = {"reachable": reachable, "healthy": healthy,
+                        "busy_requests": busy_requests}
+        self._raises = raises
+        self._verb_raises = verb_raises
+        self.calls = []          # mutating verbs only
+
+    def status(self):
+        if self._raises is not None:
+            raise self._raises
+        return dict(self._status)
+
+    def up(self):
+        self.calls.append("up")
+        if self._verb_raises is not None:
+            raise self._verb_raises
+
+    def down(self):
+        self.calls.append("down")
+        if self._verb_raises is not None:
+            raise self._verb_raises
+
+    def close(self):
+        pass
+
+
+def _omni():
+    from app.engine_kinds import ENGINE_KINDS
+
+    return ENGINE_KINDS["sglang-omni"]
+
+
+def _observe(client, mem=None, now=0.0):
+    """One adapter observation. `routes` is None on purpose: the litellm
+    route table is the LOCAL box's, and World.snapshot_remote hands remote
+    kinds None for it (that method's own docstring)."""
+    return _omni().observe(client, {} if mem is None else mem, now,
+                           {"registry": _FakeRegistry(), "routes": None,
+                            "resource": "song-r"})
+
+
+def _policy(*, pinned=False, idle_ttl=120, priority=5):
+    return {"priority": priority, "pinned": pinned, "idle_ttl": idle_ttl}
+
+
+def _obs(state, busy_requests, idle_s=0.0):
+    return {"state": state, "busy_requests": busy_requests, "model": None,
+            "idle_s": idle_s}
+
+
+# --- declaration: the kind is known, remote-capable, one required field ----
+
+
+def test_sglang_omni_connection_schema_requires_only_a_url():
+    assert KNOWN_KINDS["sglang-omni"]["connection"] == {"url": True}
+
+
+def _omni_entry(**over):
+    e = {"resource": "song-r", "kind": "sglang-omni",
+         "connection": {"url": "http://127.0.0.1:8008"},
+         "gpu_index": 4,
+         "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120}}
+    e.update(over)
+    return e
+
+
+def test_validate_engines_accepts_sglang_omni_on_a_remote_declaration():
+    """The point of the whole task: `remote=True` no longer refuses every
+    kind. A declaration naming sglang-omni passes the gate the other three
+    kinds still fail."""
+    validate_engines([_omni_entry()], remote=True)
+
+
+def test_sglang_omni_refuses_an_unknown_connection_field():
+    """Refuse-never-coerce reaches the new kind too: only `url` is declared,
+    so the node-agent-side facts (health_url, busy port, compose file) stay
+    where A1 put them — the HOST-owned engines.json allowlist — and cannot
+    be smuggled in through the deck's declaration.
+
+    `remote=True` (fix round 1): the only place this kind may legally be
+    declared at all, so the connection schema has to be checked there — on
+    a local declaration the remote-only refusal now fires first, which would
+    make this test pass for the wrong reason."""
+    with pytest.raises(ValueError, match="extra"):
+        validate_engines([_omni_entry(
+            connection={"url": "http://127.0.0.1:8008", "container": "omni"})],
+            remote=True)
+
+
+# --- the four busy cases, one test each ------------------------------------
+# ([[defaults-that-hide-bugs]]: indicator present-and-nonzero, present-zero,
+# absent, and error are four DIFFERENT inputs with three different answers —
+# collapsing them into one parametrized case would let "absent" ride on
+# "present-zero"'s assertion.)
+
+
+def test_sglang_omni_healthy_with_requests_in_flight_observes_busy():
+    obs = _observe(_FakeOmni(busy_requests=2))
+
+    assert obs["state"] == "busy"
+    assert obs["busy_requests"] == 2
+
+
+def test_sglang_omni_healthy_with_no_requests_in_flight_observes_idle():
+    obs = _observe(_FakeOmni(busy_requests=0))
+
+    assert obs["state"] == "idle"
+    assert obs["busy_requests"] == 0
+
+
+def test_sglang_omni_healthy_with_an_unavailable_busy_indicator_observes_busy():
+    """design §4 / GF3: the busy signal is an agent-side established-
+    connection count, and `None` means the agent could not take it. An
+    unavailable indicator fails toward ALIVE — reading it as 0 would let
+    idle-release kill a render that has been running for minutes."""
+    obs = _observe(_FakeOmni(busy_requests=None))
+
+    assert obs["state"] == "busy"
+    assert obs["busy_requests"] is None
+
+
+def test_sglang_omni_status_error_observes_unknown():
+    """A failed probe is "we failed to look", never "nothing is loaded"."""
+    obs = _observe(_FakeOmni(raises=EngineError("nimbus is not answering")))
+
+    assert obs == _omni().unknown()
+    assert obs["state"] == "unknown"
+
+
+# --- the rest of the state map ---------------------------------------------
+
+
+def test_sglang_omni_reachable_but_not_healthy_observes_down():
+    """The engine answered the socket but /health is not 200 — observed,
+    not merely unseen. `down` is what intent-loaded turns into a restore."""
+    obs = _observe(_FakeOmni(reachable=True, healthy=False, busy_requests=0))
+
+    assert obs["state"] == "down"
+
+
+def test_sglang_omni_unreachable_engine_observes_down_not_unknown():
+    """The AGENT answered — it is the ENGINE that is not up. That is a fact
+    we observed, so it must not degrade to `unknown` (which means the deck
+    could not look at all, and which the reconciler never acts on)."""
+    obs = _observe(_FakeOmni(reachable=False, healthy=False, busy_requests=None))
+
+    assert obs["state"] == "down"
+    assert obs["busy_requests"] is None
+
+
+def test_sglang_omni_never_reports_a_model_name():
+    """GF2: the engine's own model id is `/model` — the container's mount
+    path, not an identity. Never trusted, and the declaration carries no
+    model either, so identity is None exactly as it is for every other
+    single-model engine (derive_status's "loaded, no opinion which model"
+    branch)."""
+    assert _observe(_FakeOmni(busy_requests=0))["model"] is None
+    assert _observe(_FakeOmni(busy_requests=7))["model"] is None
+
+
+# --- the idle clock --------------------------------------------------------
+
+
+def test_sglang_omni_idle_seconds_accrue_while_idle():
+    mem = {}
+    _observe(_FakeOmni(busy_requests=0), mem, now=1000.0)
+
+    obs = _observe(_FakeOmni(busy_requests=0), mem, now=1120.0)
+
+    assert obs["idle_s"] == 120.0
+
+
+def test_sglang_omni_a_request_in_flight_rearms_the_idle_clock():
+    """The render-protection invariant at the clock level: a song that
+    starts after 10 minutes of idle resets the countdown, so idle-release
+    can never fire on the tick after a render began."""
+    mem = {}
+    _observe(_FakeOmni(busy_requests=0), mem, now=1000.0)
+    _observe(_FakeOmni(busy_requests=1), mem, now=1600.0)
+
+    obs = _observe(_FakeOmni(busy_requests=0), mem, now=1605.0)
+
+    assert obs["idle_s"] == 5.0
+
+
+def test_sglang_omni_an_unavailable_busy_indicator_rearms_the_idle_clock():
+    """Same re-arm as a real in-flight request: `None` is treated as busy
+    everywhere, including the clock — otherwise a run of unavailable
+    indicators would quietly accrue the idle time that authorizes an
+    unload."""
+    mem = {}
+    _observe(_FakeOmni(busy_requests=0), mem, now=1000.0)
+    _observe(_FakeOmni(busy_requests=None), mem, now=1600.0)
+
+    obs = _observe(_FakeOmni(busy_requests=0), mem, now=1605.0)
+
+    assert obs["idle_s"] == 5.0
+
+
+def test_sglang_omni_a_down_engine_rearms_the_idle_clock():
+    """No instant-evict of a just-booted engine: an engine that was DOWN for
+    ten minutes and has only now come up healthy has been idle for seconds,
+    not minutes. Accruing across the down window would put it past any sane
+    idle_ttl on its very first healthy tick — the deck would unload what it
+    just spent ~4 minutes (GF4) booting."""
+    mem = {}
+    _observe(_FakeOmni(busy_requests=0), mem, now=1000.0)
+    _observe(_FakeOmni(reachable=False, healthy=False, busy_requests=None),
+             mem, now=1600.0)
+
+    obs = _observe(_FakeOmni(busy_requests=0), mem, now=1602.0)
+
+    assert obs["idle_s"] == 2.0
+
+
+def test_sglang_omni_a_failed_probe_rearms_the_idle_clock():
+    """Same rule for the unknown arm: time we could not observe is not time
+    we observed it idle."""
+    mem = {}
+    _observe(_FakeOmni(busy_requests=0), mem, now=1000.0)
+    _observe(_FakeOmni(raises=EngineError("nimbus is not answering")),
+             mem, now=1600.0)
+
+    obs = _observe(_FakeOmni(busy_requests=0), mem, now=1602.0)
+
+    assert obs["idle_s"] == 2.0
+
+
+def test_sglang_omni_down_and_unknown_carry_no_idle_seconds():
+    """`idle_s` is None, not 0.0, when "idle" is not a meaningful notion —
+    0.0 would read as a real (freshly re-armed) clock."""
+    assert _observe(_FakeOmni(healthy=False))["idle_s"] is None
+    assert _omni().unknown()["idle_s"] is None
+
+
+# --- verbs, activity, demand ----------------------------------------------
+
+
+def test_sglang_omni_adapter_active_verbs_and_demand():
+    omni = _omni()
+    assert omni.active(_obs("busy", 1)) is True
+    assert omni.active(_obs("idle", 0)) is True
+    assert omni.active(_obs("down", None)) is False
+    assert omni.active(omni.unknown()) is False
+    assert omni.arbiter_verbs() == frozenset({"unload"})
+    assert omni.human_verbs() == frozenset({"load", "unload"})
+    # No pending-load inference for this kind: nothing routes chat traffic
+    # at it, so there is no "someone asked for a model that isn't loaded"
+    # signal to demand one from.
+    assert omni.demand() is False
+
+
+def test_sglang_omni_idle_still_counts_as_active():
+    """An idle engine still holds ~62 GiB (GF5) — idle describes its
+    REQUEST queue, not its residency, the same reading comfyui's adapter
+    already documents."""
+    assert _omni().active(_obs("idle", 0)) is True
+
+
+def test_sglang_omni_never_uses_a_gguf_and_needs_no_container_restart():
+    omni = _omni()
+    assert omni.uses_gguf(_obs("idle", 0)) is None
+    assert omni.restart_container(_omni_entry()) is None
+
+
+# --- reclaimable: the busy-signal invariant lives HERE ---------------------
+
+
+def test_sglang_omni_reclaimable_is_the_idle_footprint_when_idle_and_unbusy():
+    assert _omni().reclaimable(_obs("idle", 0), None, 0) == _OMNI_IDLE_FOOTPRINT
+    # Non-zero matters: idle_action's `reclaimable != 0` clause would
+    # suppress every unload if this were 0.
+    assert _OMNI_IDLE_FOOTPRINT > 0
+
+
+def test_sglang_omni_reclaimable_is_none_while_busy():
+    assert _omni().reclaimable(_obs("busy", 3), None, 0) is None
+
+
+def test_sglang_omni_reclaimable_is_none_when_the_busy_indicator_is_unavailable():
+    """The design §4 invariant, pinned at the ONE place it lives: an
+    observation that says idle but carries no usable busy count is not a
+    reclaim candidate. Asserted against a hand-built obs (not one observe()
+    can produce) precisely so the guard is proven in `reclaimable` itself
+    rather than inherited from observe's state mapping — a future call site
+    that builds its own obs still cannot get an eviction out of it."""
+    assert _omni().reclaimable(_obs("idle", None), None, 0) is None
+
+
+def test_sglang_omni_reclaimable_is_none_when_down_or_unknown():
+    omni = _omni()
+    assert omni.reclaimable(_obs("down", None), None, 0) is None
+    assert omni.reclaimable(omni.unknown(), None, 0) is None
+
+
+def test_sglang_omni_reclaimable_ignores_the_gpu_snapshot():
+    """Unlike comfyui's, this kind's footprint is DECLARED (GF5), not
+    inferred from a GPU's unexplained usage — the GPU pool belongs to
+    another machine, and co-resident footprints there are that box's own
+    arithmetic. Both are accepted for interface uniformity and ignored."""
+    assert _omni().reclaimable(
+        _obs("idle", 0), {"index": 4, "total": 1, "used": 1, "free": 0},
+        99 * 1024**3) == _OMNI_IDLE_FOOTPRINT
+
+
+# --- idle_action: the full predicate, one clause per test ------------------
+
+
+def test_sglang_omni_idle_action_unloads_once_past_the_ttl():
+    action = _omni().idle_action(_obs("idle", 0, idle_s=121.0), _policy(), None, 0)
+
+    assert action == {"type": "unload", "model": None}
+
+
+def test_sglang_omni_idle_action_is_none_before_the_ttl():
+    assert _omni().idle_action(_obs("idle", 0, idle_s=119.0), _policy(), None, 0) is None
+
+
+def test_sglang_omni_idle_action_is_none_when_pinned():
+    assert _omni().idle_action(_obs("idle", 0, idle_s=1000.0),
+                               _policy(pinned=True), None, 0) is None
+
+
+def test_sglang_omni_idle_action_is_none_when_the_ttl_is_zero():
+    """idle_ttl 0 means "never idle-release" (the vocabulary every other
+    kind already uses), not "release immediately"."""
+    assert _omni().idle_action(_obs("idle", 0, idle_s=1000.0),
+                               _policy(idle_ttl=0), None, 0) is None
+
+
+def test_sglang_omni_idle_action_is_none_while_busy():
+    assert _omni().idle_action(_obs("busy", 4, idle_s=1000.0), _policy(),
+                               None, 0) is None
+
+
+def test_sglang_omni_idle_action_is_none_when_the_busy_indicator_is_unavailable():
+    """THE render-protection headline (design §4): a long-idle-looking
+    observation whose busy count is unavailable must never authorize an
+    unload — a five-minute song render is exactly the thing that would be
+    killed."""
+    assert _omni().idle_action(_obs("idle", None, idle_s=1000.0), _policy(),
+                               None, 0) is None
+
+
+def test_sglang_omni_idle_action_is_none_when_down_or_unknown():
+    omni = _omni()
+    assert omni.idle_action(_obs("down", None, idle_s=1000.0), _policy(), None, 0) is None
+    assert omni.idle_action(omni.unknown(), _policy(), None, 0) is None
+
+
+# --- actuation: whoever actuates, records — and records FIRST --------------
+
+
+class _RecordingWorld:
+    """The one World method an actuator calls (app.state.World.note_freed),
+    recording the (resource, node_id) pair it was re-armed for."""
+
+    def __init__(self) -> None:
+        self.rearmed = []
+
+    def note_freed(self, resource, node_id=None):
+        self.rearmed.append((resource, node_id))
+
+
+class _RecordingObserver:
+    """The one RemoteObserver method an actuator calls."""
+
+    def __init__(self) -> None:
+        self.invalidations = 0
+
+    def invalidate(self):
+        self.invalidations += 1
+
+
+class _RecordingWatcher:
+    """The slice of app.arbiter.Watcher the adapter actuators reach into.
+
+    `_world`/`_remote_observer` joined it with Task 9: a successful remote
+    unload re-arms that resource's idle clock and drops the cached remote
+    half, the two obligations a comfyui-kind free already had (`note_freed`)
+    sharpened by the observation being TTL-cached off-box. `_remote_observer`
+    is None-able there, so this fake supplies a real recorder and the
+    None case gets its own test below."""
+
+    def __init__(self, intent_store, remote_observer=None) -> None:
+        self._intent_store = intent_store
+        self._world = _RecordingWorld()
+        self._remote_observer = remote_observer
+        self.logs = []
+        self.dedup_clears = 0
+
+    def _log(self, kind, detail):
+        self.logs.append((kind, detail))
+
+    def _clear_failure_dedup(self):
+        self.dedup_clears += 1
+
+
+class _IntentReadingOmni(_FakeOmni):
+    """Reads the intent store the moment the verb lands, so "recorded
+    BEFORE the engine call" is proven by ORDER, not by a post-hoc read that
+    would pass either way."""
+
+    def __init__(self, store, **kw):
+        super().__init__(**kw)
+        self._store = store
+        self.intent_at_call = None
+
+    def _snapshot(self):
+        self.intent_at_call = self._store.get().get(_OMNI_KEY)
+
+    def up(self):
+        self._snapshot()
+        super().up()
+
+    def down(self):
+        self._snapshot()
+        super().down()
+
+
+def _intent_store(tmp_path):
+    from app.intent import IntentStore
+
+    return IntentStore(tmp_path / "intent.json")
+
+
+def test_sglang_omni_execute_unload_records_the_node_keyed_intent_first(tmp_path):
+    store = _intent_store(tmp_path)
+    watcher = _RecordingWatcher(store)
+    client = _IntentReadingOmni(store)
+    actuated = set()
+
+    _omni().execute_unload(watcher, "song-r", client, None, actuated,
+                           node_id="nimbus")
+
+    assert client.calls == ["down"]
+    assert client.intent_at_call["state"] == "unloaded"     # recorded FIRST
+    record = store.get()[_OMNI_KEY]
+    assert record["engine"] == "sglang-omni"
+    assert record["actor"] == "deck"
+    assert actuated == {_OMNI_KEY}
+
+
+def test_sglang_omni_execute_unload_rolls_the_intent_back_when_the_engine_refuses(tmp_path):
+    """A refused unload did not happen, so leaving `unloaded` standing would
+    derive the inert 'unexpected' against a still-running engine."""
+    store = _intent_store(tmp_path)
+    store.record(_OMNI_KEY, state="loaded", model=None, engine="sglang-omni",
+                 actor="operator")
+    watcher = _RecordingWatcher(store)
+    client = _FakeOmni(verb_raises=EngineError("agent said no"))
+
+    _omni().execute_unload(watcher, "song-r", client, None, set(),
+                           node_id="nimbus")
+
+    assert store.get()[_OMNI_KEY]["state"] == "loaded"
+    assert [kind for kind, _d in watcher.logs] == ["unload-failed"]
+    assert watcher.logs[0][1]["resource"] == "song-r"
+    assert watcher.logs[0][1]["node"] == "nimbus"
+
+
+class _SupersedingOmni(_FakeOmni):
+    """An operator records a NEW intent while the unload hangs, then the
+    unload fails — the compare-and-swap case."""
+
+    def __init__(self, store, **kw):
+        super().__init__(**kw)
+        self._store = store
+
+    def down(self):
+        self._store.record(_OMNI_KEY, state="loaded", model=None,
+                           engine="sglang-omni", actor="operator")
+        super().down()
+
+
+def test_sglang_omni_execute_unload_rollback_is_skipped_when_the_intent_changed(tmp_path):
+    """Compare-and-swap, not check-then-act: blindly putting the prior
+    record back would silently revert an operator's deliberate action taken
+    during the seconds the engine call hung."""
+    store = _intent_store(tmp_path)
+    store.record(_OMNI_KEY, state="unloaded", model=None, engine="sglang-omni",
+                 actor="operator")
+    watcher = _RecordingWatcher(store)
+    client = _SupersedingOmni(store, verb_raises=EngineError("agent said no"))
+
+    _omni().execute_unload(watcher, "song-r", client, None, set(),
+                           node_id="nimbus")
+
+    assert store.get()[_OMNI_KEY]["state"] == "loaded"      # operator's, kept
+    assert [kind for kind, _d in watcher.logs] == [
+        "unload-failed", "unload-rollback-skipped"]
+
+
+def test_sglang_omni_execute_unload_rearms_the_failure_dedup_on_success(tmp_path):
+    """fail -> recover -> fail must not swallow the second failure."""
+    store = _intent_store(tmp_path)
+    watcher = _RecordingWatcher(store)
+
+    _omni().execute_unload(watcher, "song-r", _FakeOmni(), None, set(),
+                           node_id="nimbus")
+
+    assert watcher.dedup_clears == 1
+
+
+def test_sglang_omni_execute_unload_rearms_the_clock_and_drops_the_cache(tmp_path):
+    """Task 9: the comfyui-kind free's own two obligations, on a REMOTE
+    engine. `down()` is a 202 and the observation is TTL-cached, so without
+    both the same idle-past-ttl record drives one unload dispatch per tick
+    until the container finally disappears (the free-spam lesson, with a
+    whole engine at the other end). Re-armed for THIS node's key, never the
+    local resource of the same name."""
+    store = _intent_store(tmp_path)
+    observer = _RecordingObserver()
+    watcher = _RecordingWatcher(store, remote_observer=observer)
+
+    _omni().execute_unload(watcher, "song-r", _FakeOmni(), None, set(),
+                           node_id="nimbus")
+
+    assert watcher._world.rearmed == [("song-r", "nimbus")]
+    assert observer.invalidations == 1
+
+
+def test_sglang_omni_execute_unload_does_neither_when_the_engine_refuses(tmp_path):
+    """A refused unload changed nothing, so it must not re-arm the idle
+    clock (which would delay the retry by a whole idle_ttl) nor spend the
+    deck-wide cache drop — the same success-path-only discipline
+    `_ComfyAdapter.execute_free` keeps for `note_freed`."""
+    store = _intent_store(tmp_path)
+    observer = _RecordingObserver()
+    watcher = _RecordingWatcher(store, remote_observer=observer)
+
+    _omni().execute_unload(watcher, "song-r",
+                           _FakeOmni(verb_raises=EngineError("agent said no")),
+                           None, set(), node_id="nimbus")
+
+    assert watcher._world.rearmed == []
+    assert observer.invalidations == 0
+
+
+def test_sglang_omni_execute_unload_survives_a_watcher_without_an_observer(tmp_path):
+    """`remote_observer=None` is a real Watcher state (every caller built
+    before Task 7, and every unit test that wires no remote half): the
+    actuation still happens, with nothing to invalidate."""
+    store = _intent_store(tmp_path)
+    watcher = _RecordingWatcher(store)
+    client = _FakeOmni()
+
+    _omni().execute_unload(watcher, "song-r", client, None, set(),
+                           node_id="nimbus")
+
+    assert client.calls == ["down"]
+    assert watcher._world.rearmed == [("song-r", "nimbus")]
+
+
+def test_sglang_omni_execute_load_records_the_intent_first_and_calls_up(tmp_path):
+    store = _intent_store(tmp_path)
+    watcher = _RecordingWatcher(store)
+    client = _IntentReadingOmni(store)
+    actuated = set()
+
+    _omni().execute_load(watcher, "song-r", client, {"model": None}, actuated,
+                         node_id="nimbus")
+
+    assert client.calls == ["up"]
+    assert client.intent_at_call["state"] == "loaded"
+    assert store.get()[_OMNI_KEY]["actor"] == "deck"
+    assert actuated == {_OMNI_KEY}
+
+
+def test_sglang_omni_execute_load_leaves_the_intent_standing_when_the_engine_refuses(tmp_path):
+    """Deliberate, and the same call the lemonade-kind load arm makes: a
+    failed load derives 'down' and the reconciler retries it under the
+    existing failure budget. Rolling back here would make the deck forget it
+    ever wanted the engine up."""
+    store = _intent_store(tmp_path)
+    watcher = _RecordingWatcher(store)
+
+    _omni().execute_load(watcher, "song-r", _FakeOmni(verb_raises=EngineError("no")),
+                         {"model": None}, set(), node_id="nimbus")
+
+    assert store.get()[_OMNI_KEY]["state"] == "loaded"
+    assert [kind for kind, _d in watcher.logs] == ["load-failed"]
+
+
+def test_sglang_omni_restore_brings_the_engine_up():
+    client = _FakeOmni()
+
+    _omni().restore(client, None)
+
+    assert client.calls == ["up"]
+
+
+# --- construction ----------------------------------------------------------
+
+
+def test_sglang_omni_build_remote_client_binds_the_node_and_the_resource():
+    from app.engines.sglang_omni import SglangOmniClient
+
+    client = _omni().build_remote_client(
+        "http://nimbus:7720", "key-nimbus", "song-r",
+        {"url": "http://127.0.0.1:8008"})
+
+    try:
+        assert isinstance(client, SglangOmniClient)
+    finally:
+        client.close()
+
+
+def test_sglang_omni_has_no_local_client_and_says_so(tmp_path):
+    """`build_client` exists for protocol completeness and REFUSES: this
+    kind speaks the node-agent wire, so there is nothing to build for a
+    declaration on the local entry. Refusing by name beats the bare
+    AttributeError a missing method would raise inside a world snapshot."""
+    with pytest.raises(ValueError, match="sglang-omni"):
+        _omni().build_client({"url": "http://127.0.0.1:8008"}, object())
+
+
+# --- warming (GF4): the rule, ahead of the reconcile wiring ----------------
+
+
+def _loaded_intent(updated_ts):
+    return {"state": "loaded", "model": None, "engine": "sglang-omni",
+            "actor": "operator", "updated_ts": updated_ts}
+
+
+def test_sglang_omni_is_warming_while_a_recent_load_is_still_booting():
+    """GF4: a cold start takes ~3.5-4.5 minutes, and the whole time the
+    engine observes exactly like one that died. Within the window, a
+    loaded-intent + down observation is a boot in flight."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    intent = _loaded_intent((now - timedelta(seconds=300)).isoformat())
+
+    assert _omni().warming(intent, _obs("down", None), now) is True
+
+
+def test_sglang_omni_is_not_warming_once_the_window_lapses():
+    """The condition SparkObserver's boot_in_flight exists to enforce: a
+    stale "we asked it to load" must not shield a model that died hours
+    later from restore forever (the 26-hour hipfire failure)."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    intent = _loaded_intent((now - timedelta(seconds=601)).isoformat())
+
+    assert _omni().warming(intent, _obs("down", None), now) is False
+
+
+def test_sglang_omni_is_not_warming_without_a_loaded_intent():
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+
+    assert _omni().warming(None, _obs("down", None), now) is False
+    assert _omni().warming({**_loaded_intent(now.isoformat()), "state": "unloaded"},
+                           _obs("down", None), now) is False
+
+
+def test_sglang_omni_is_not_warming_once_it_is_healthy():
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    intent = _loaded_intent(now.isoformat())
+
+    assert _omni().warming(intent, _obs("idle", 0), now) is False
+    assert _omni().warming(intent, _obs("busy", 1), now) is False
+
+
+# ===========================================================================
+# Fix round 1 — review findings 2 and 3.
+# ===========================================================================
+
+
+def test_sglang_omni_malformed_status_body_observes_unknown():
+    """Finding 3, at the consumer: a 200 the deck cannot read is "we failed
+    to look", never a crash. The client refuses the body (EngineError) and
+    observe's existing narrow catch heals it — the same one arm, so there is
+    no second definition of "malformed" to drift."""
+    class _MalformedOmni:
+        def status(self):
+            raise EngineError("sglang-omni engine 'song-r' status: "
+                              "malformed body (missing 'healthy')")
+
+    obs = _observe(_MalformedOmni())
+
+    assert obs == _omni().unknown()
+
+
+def test_known_kinds_declare_where_each_kind_may_RUN():
+    """Finding 2: `remote_capable` alone described only ONE direction, so
+    nothing refused a remote-only kind on the LOCAL entry. Both directions
+    are declared now, and every kind must be runnable SOMEWHERE (a kind
+    with both False could be declared nowhere and would be dead weight in
+    the picker)."""
+    for kind, spec in KNOWN_KINDS.items():
+        assert set(spec) == {"connection", "remote_capable", "local_capable"}, kind
+        assert isinstance(spec["local_capable"], bool), kind
+        assert spec["remote_capable"] or spec["local_capable"], kind
+
+
+def test_sglang_omni_is_the_only_remote_only_kind():
+    assert [k for k, s in KNOWN_KINDS.items() if not s["local_capable"]] == [
+        "sglang-omni"]
+
+
+def test_validate_engines_refuses_a_remote_only_kind_on_a_local_declaration():
+    """Guard at the BOUNDARY (finding 2): before this, a local sglang-omni
+    declaration was accepted here and only refused later, when
+    `build_client` was asked for a client that cannot exist — which surfaced
+    as a 422 on /api/state (and a tick-error every ~2 s) rather than a 422
+    on the declaration that caused it."""
+    with pytest.raises(ValueError, match="sglang-omni") as exc:
+        validate_engines([_omni_entry()])
+
+    assert "remote-only" in str(exc.value)
+    # ...and it says where it CAN be declared, so the refusal is actionable.
+    assert "node-agent" in str(exc.value)
+
+
+@pytest.mark.parametrize("kind, connection", [
+    ("lemonade", {"url": "http://u", "metrics_url": "http://m",
+                  "container": "c"}),
+    ("comfyui", {"url": "http://u"}),
+    ("hipfire", {"container": "c"}),
+])
+def test_validate_engines_still_accepts_every_local_kind_locally(kind, connection):
+    """The other half of finding 2's fix: the new gate refuses ONE kind, it
+    does not make local declarations stricter in general."""
+    validate_engines([_entry(kind=kind, connection=connection)])
+
+
+def test_validate_engines_local_gate_is_the_mirror_of_the_remote_one():
+    """The two gates are symmetric and independent: the same entry is
+    refused locally and accepted remotely, and a lemonade entry is the
+    reverse. Proven together so a future edit cannot silently collapse them
+    into one flag."""
+    validate_engines([_omni_entry()], remote=True)
+    with pytest.raises(ValueError, match="remote-only"):
+        validate_engines([_omni_entry()], remote=False)
+    validate_engines([_entry()], remote=False)
+    with pytest.raises(ValueError, match="not remote_capable"):
+        validate_engines([_entry()], remote=True)
