@@ -71,7 +71,7 @@ already has its own logged event regardless).
 Final-review item 3a (E1): the per-resource catch around `_restart` above
 now names `GuardError` alongside `EngineError` — a container outside
 `settings.park_allowlist` makes `DockerCtl.stop()`/`start()` raise
-`GuardError` (app/docker_ctl.py:198-199), and `GuardError` is deliberately
+`GuardError` (app/engines/docker_ctl.py:197-199), and `GuardError` is deliberately
 NOT an `EngineError` subclass (app/engines/__init__.py:30-38: "Callers that
 want to distinguish 'engine is broken' from 'guard tripped' need these to
 be unrelated exception types"). An `EngineError`-only catch here let that

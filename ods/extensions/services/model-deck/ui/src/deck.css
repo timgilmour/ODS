@@ -174,12 +174,6 @@ input[type="password"] {
   background: var(--meter-red);
 }
 
-.external-row {
-  font-size: 0.8rem;
-  color: var(--text-dim);
-  padding: 0.2rem 0;
-}
-
 /* ---------------------------------------------------------------- tenant card */
 
 .tenant-card {

@@ -374,7 +374,7 @@ export const messages = {
   // additionally needs the resource's connection.container name in the
   // HOST's settings.park_allowlist (app/settings.py:95) — DockerCtl
   // refuses any other name with GuardError, checked before any HTTP call
-  // (app/docker_ctl.py:198-199). Neutral, not a warning: this is not a
+  // (app/engines/docker_ctl.py:197-199). Neutral, not a warning: this is not a
   // defect in what the operator just typed, it's a heads-up about a
   // SEPARATE, host-level prerequisite the form has no way to check or set.
   engineParkAllowlistNote: (): Message => ({

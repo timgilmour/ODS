@@ -145,7 +145,7 @@ describe("engines editor messages (E1 Task 12)", () => {
   it("notes that container verbs need the host's park allowlist too (E1 final-review item 3b)", () => {
     // Backs the note shown in the Add flow — README's "Declared Engines"
     // Park-allowlist prerequisite (settings.park_allowlist,
-    // app/settings.py:95, enforced in app/docker_ctl.py:198-199): a newly
+    // app/settings.py:95, enforced in app/engines/docker_ctl.py:197-199): a newly
     // declared resource is fully usable for observation/policy/Set Builder
     // with NO allowlist entry — only park/resume/the storage restart hook
     // need one. Neutral, not a warning: it's a heads-up about a separate

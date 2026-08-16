@@ -279,7 +279,7 @@ def test_first_failure_logs_and_sibling_still_restarts_then_raises(tmp_path):
 # E1 final-review item 3a: GuardError is deliberately NOT an EngineError
 # subclass (app/engines/__init__.py:30-38) — a container outside
 # settings.park_allowlist makes DockerCtl.stop()/start() raise GuardError
-# (app/docker_ctl.py:198-199), not EngineError. Before this fix the
+# (app/engines/docker_ctl.py:197-199), not EngineError. Before this fix the
 # per-resource try/except above named EngineError only, so a park-allowlist
 # refusal escaped it entirely: the loop aborted mid-way, every SIBLING's
 # restart was skipped, and no notify-restart-failed event was ever logged
