@@ -206,38 +206,38 @@ export default function App() {
           <div className="deck-subtitle">{labels.appSubtitle}</div>
         </div>
         <nav className="view-tabs">
-          <button
+          <button type="button"
             className={view === "deck" ? "primary" : undefined}
             onClick={() => showView("deck")}
           >
             {labels.deck}
           </button>
-          <button
+          <button type="button"
             className={view === "builder" ? "primary" : undefined}
             onClick={() => showView("builder")}
           >
             {labels.setBuilder}
           </button>
-          <button
+          <button type="button"
             className={view === "storage" ? "primary" : undefined}
             onClick={() => showView("storage")}
           >
             {labels.storage}
           </button>
-          <button
+          <button type="button"
             className={view === "nodes" ? "primary" : undefined}
             onClick={() => showView("nodes")}
           >
             {labels.nodes}
           </button>
-          <button
+          <button type="button"
             className={view === "events" ? "primary" : undefined}
             onClick={() => showView("events")}
           >
             {labels.events}
           </button>
         </nav>
-        <button onClick={() => setPolicyModalOpen(true)} disabled={!state}>
+        <button type="button" onClick={() => setPolicyModalOpen(true)} disabled={!state}>
           {labels.policy}
         </button>
       </header>

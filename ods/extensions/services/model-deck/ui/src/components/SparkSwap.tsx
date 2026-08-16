@@ -108,7 +108,7 @@ export default function SparkSwap({
           </option>
         ))}
       </select>
-      <button
+      <button type="button"
         disabled={busy || !selected || spark.swap_status?.state === "swapping"}
         onClick={() => doSwap(false)}
       >

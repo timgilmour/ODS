@@ -53,12 +53,12 @@ export default function SetStrip({ onModalOpenChange, onChanged }: SetStripProps
       {listError && <Banner message={messages.stateRefreshFailed(listError)} />}
       <div className="set-strip">
         {sets.map((s) => (
-          <button key={s.name} onClick={() => openPreview(slugify(s.name), s)}>
+          <button type="button" key={s.name} onClick={() => openPreview(slugify(s.name), s)}>
             {s.name}
           </button>
         ))}
         {previous && (
-          <button
+          <button type="button"
             className="set-btn-previous"
             onClick={() => openPreview(PREVIOUS_SLUG, previous)}
           >

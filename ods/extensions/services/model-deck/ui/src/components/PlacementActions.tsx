@@ -243,7 +243,7 @@ export default function PlacementActions({
               </optgroup>
             )}
           </select>
-          <button
+          <button type="button"
             disabled={busy || !selectedModel}
             onClick={() => {
               const coldUnit = coldGgufs.find((u) => u.name === selectedModel);
@@ -257,7 +257,7 @@ export default function PlacementActions({
           >
             {labels.load}
           </button>
-          <button
+          <button type="button"
             disabled={busy || tenant.state !== "loaded"}
             onClick={() =>
               runAction(() => postAction(`/tenants/${resource}/unload`, {}), { clearPulling: true })
@@ -269,7 +269,7 @@ export default function PlacementActions({
       )}
 
       {kind === "comfyui" && (
-        <button
+        <button type="button"
           disabled={busy || comfyuiBlocked}
           // Tooltip tracks the SAME condition as `disabled`: a non-empty
           // queue disables Free while the resource still reads "idle", so
@@ -284,13 +284,13 @@ export default function PlacementActions({
 
       {kind === "hipfire" && (
         <>
-          <button
+          <button type="button"
             disabled={busy || tenant.state === "parked"}
             onClick={() => runAction(() => postAction(`/tenants/${resource}/park`), { parkGuard: true })}
           >
             {labels.park}
           </button>
-          <button
+          <button type="button"
             disabled={busy || tenant.state === "running"}
             onClick={() => runAction(() => postAction(`/tenants/${resource}/resume`))}
           >
