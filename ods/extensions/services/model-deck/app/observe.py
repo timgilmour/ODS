@@ -245,11 +245,25 @@ def observe_spark(spark_status: dict | None, node_id: str) -> dict[str, dict]:
     # serves under --served-model-name aeon; comparing served names would
     # report permanent drift for a perfectly correct placement.
     profile = spark_status.get("profile")
+    # loaded requires a LIVE endpoint, not just a remembered profile name.
+    # serving.model is the node-agent's memory of the last-configured
+    # profile — for every NON-vLLM engine it comes straight from profile
+    # metadata (node-agent/serving.py probe(), the `meta` branch), so it
+    # survives process death untouched. That is the exact 2026-08-05
+    # incident: spark-ds4 exited cleanly and sat dead for 19 hours while
+    # status.json still echoed "ds4" here, and loaded read True the whole
+    # time. endpoint_ok is the only field in the payload that reflects
+    # whether anything is actually answering. This is checked AFTER
+    # transitioning downstream (app.lifecycle.derive_status), so a genuine
+    # boot — endpoint legitimately down while it comes up — is never
+    # affected by this stricter reading; only a slot that is neither
+    # booting nor answering loses "loaded".
+    loaded = bool(serving.get("endpoint_ok")) and serving.get("model") is not None
     return {
         key: {
             "reachable": True,
-            "loaded": serving.get("model") is not None,
-            "model": profile if serving.get("model") is not None else None,
+            "loaded": loaded,
+            "model": profile if loaded else None,
             "transitioning": bool(spark_status.get("swap_in_progress")),
         }
     }
@@ -431,9 +445,49 @@ class SparkObserver:
             return self._cached
 
         self._failures = 0
-        self._cached = translate_spark_status(payload)
+        self._cached = self._confirm_endpoint_down(
+            spark, translate_spark_status(payload))
         self._next_probe_at = now + self._ttl_s
         return self._cached
+
+    def _confirm_endpoint_down(self, spark, translated: dict) -> dict:
+        """A dead serving endpoint is confirmed only by a SECOND, immediate,
+        independent probe agreeing — a single dropped health check must not
+        read as a dead model (2026-08-06 review of the reboot-restore fix:
+        making ``observe_spark``'s ``loaded`` consult ``endpoint_ok`` — the
+        fix for the 19-hour-dead spark-ds4 incident, 2026-08-05 — means one
+        node-agent health check, ``node-agent/serving.py``'s
+        ``_probe_health_2xx``, can now tear down a perfectly healthy model.
+        That module has its own complementary retry-once fix; this is the
+        Deck-side backstop for the same failure mode, on a different
+        machine).
+
+        Only the reachable-but-endpoint-down case needs this: an unreachable
+        NODE already fails before this is ever reached (the except branch in
+        ``status()``), and a healthy or transitioning reading is passed
+        through untouched, at the cost of exactly one probe — same as before
+        this existed.
+        """
+        serving = translated.get("serving") or {}
+        if serving.get("endpoint_ok"):
+            return translated
+        try:
+            second_payload = spark.status()
+        except (EngineError, GuardError, BusyError) as exc:
+            # The CONFIRMING probe couldn't even reach the node — a
+            # transport failure, not proof the model is dead. Report it the
+            # way the primary probe's own failure would: reachable unknown,
+            # never 'down'. Left for the NEXT tick's ordinary probe (with
+            # its own backoff) to sort out; this is a one-shot check, not a
+            # second polling loop.
+            self._error = str(exc)
+            return dict(_UNREACHABLE_SPARK)
+        second = translate_spark_status(second_payload)
+        if (second.get("serving") or {}).get("endpoint_ok"):
+            # The two probes disagree: a transient blip, not a dead model.
+            # Report the confirming (successful) read.
+            return second
+        return translated
 
     def invalidate(self) -> None:
         """Drop the cache — call after acting on the node (a swap), whose

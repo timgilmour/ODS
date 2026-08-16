@@ -120,8 +120,15 @@ def test_spark_identity_is_the_profile_not_the_served_name():
     """The Deck's unit of control on spark is the PROFILE (that is what
     swap takes), so that is the identity intent is compared against. Using
     the served model name would report permanent drift the moment a profile
-    served under a different --served-model-name."""
-    status = {"profile": "heretic", "serving": {"model": "heretic"}, "reachable": True}
+    served under a different --served-model-name.
+
+    endpoint_ok: True here because this test is about identity mapping, not
+    liveness — see test_spark_slot_loaded_when_endpoint_ok /
+    test_spark_slot_not_loaded_when_endpoint_dead_despite_profile_echo for
+    the liveness behavior itself."""
+    status = {"profile": "heretic",
+              "serving": {"model": "heretic", "endpoint_ok": True},
+              "reachable": True}
 
     result = observe_spark(status, "sparky")
 
@@ -131,11 +138,69 @@ def test_spark_identity_is_the_profile_not_the_served_name():
 
 
 def test_spark_profile_serving_under_a_different_name_is_not_drift():
-    status = {"profile": "mm27b", "serving": {"model": "aeon"}, "reachable": True}
+    status = {"profile": "mm27b",
+              "serving": {"model": "aeon", "endpoint_ok": True},
+              "reachable": True}
 
     result = observe_spark(status, "sparky")
 
     assert result["sparky/slot0"]["model"] == "mm27b"
+
+
+def test_spark_slot_not_loaded_when_endpoint_dead_despite_profile_echo():
+    """THE 2026-08-05 incident: spark-ds4 exited cleanly and sat dead for 19
+    hours while status.json on the node still echoed profile "ds4" — a
+    stale on-disk record that outlives the process it describes — and the
+    Deck reported status: serving, loaded: true the entire time. loaded must
+    consult endpoint_ok, the only field in the payload that reflects whether
+    anything is actually answering, not just what the node last remembers
+    configuring.
+
+    This is wider than "after a reboot": sparky never rebooted that night.
+    Any out-of-band death — a crash, an OOM-kill, a manual `docker stop`
+    outside the Deck — is invisible under the old derivation, because
+    `loaded` was keyed off a profile name, not a live probe. It bites the
+    NON-vLLM profiles specifically (ds4, comfyui, sglang-omni): node-agent's
+    probe() fills serving.model from profile METADATA for those, whereas the
+    vLLM path only names a model the /v1/models probe actually answered
+    with (node-agent/serving.py, _probe_env_configured vs the meta branch).
+    """
+    status = {"reachable": True, "profile": "ds4",
+              "serving": {"model": "ds4", "endpoint_ok": False},
+              "swap_in_progress": False}
+
+    slot = observe_spark(status, "sparky")["sparky/slot0"]
+
+    assert slot["loaded"] is False
+    assert slot["model"] is None
+
+
+def test_spark_slot_loaded_when_endpoint_ok():
+    status = {"reachable": True, "profile": "ds4",
+              "serving": {"model": "ds4", "endpoint_ok": True},
+              "swap_in_progress": False}
+
+    slot = observe_spark(status, "sparky")["sparky/slot0"]
+
+    assert slot["loaded"] is True
+    assert slot["model"] == "ds4"
+
+
+def test_spark_slot_transitioning_still_wins_during_genuine_boot():
+    """The safety property that must survive the stricter `loaded`: a real
+    boot (fresh swap, endpoint not yet up) must stay warming-shaped —
+    transitioning True — regardless of the new loaded logic. transitioning
+    is derived independently from swap_in_progress and app.lifecycle checks
+    it before ever reading loaded, so a stricter loaded cannot leak through
+    the shield during a genuine 5-15 minute boot."""
+    status = {"reachable": True, "profile": "heretic",
+              "serving": {"model": "heretic", "endpoint_ok": False},
+              "swap_in_progress": True}
+
+    slot = observe_spark(status, "sparky")["sparky/slot0"]
+
+    assert slot["transitioning"] is True
+    assert slot["loaded"] is False
 
 
 def test_spark_reachable_but_nothing_serving():
@@ -399,6 +464,107 @@ def test_spark_observer_invalidate_forces_a_fresh_probe():
 
 
 # ===========================================================================
+# SparkObserver — confirming re-probe for a dead endpoint (2026-08-06 review
+# of the reboot-restore fix, C2 defense 1): the node-agent's own health
+# check is a single request on a SEPARATE deployment target
+# (node-agent/serving.py, which carries its own complementary retry-once).
+# A single dropped check must not read as a dead model here either: a
+# second, immediate, INDEPENDENT probe must agree before "endpoint down" is
+# allowed to reach observe_spark, whose `loaded` now consults endpoint_ok.
+# ===========================================================================
+
+
+class _SequencedSpark:
+    """Returns each of `responses` in order on successive status() calls,
+    then repeats the last one — so a test can drive SparkObserver's
+    confirming re-probe (which calls status() a SECOND time within one probe
+    cycle) with two DIFFERENT readings, not two reads of one cached
+    snapshot. An Exception in the sequence is raised instead of returned."""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def status(self):
+        self.calls += 1
+        response = (self._responses.pop(0) if len(self._responses) > 1
+                    else self._responses[0])
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _spark_payload(profile="ds4", serving_model="ds4", endpoint_ok=True):
+    return {
+        "profiles": [{"name": profile, "engine": "vllm"}],
+        "swap_status": {"state": "error", "profile": profile, "ts": None},
+        "serving": {"model": serving_model, "endpoint_ok": endpoint_ok},
+    }
+
+
+def test_spark_observer_masks_a_single_dropped_health_check():
+    """THE 2026-08-06 review finding: making `loaded` consult endpoint_ok
+    means a single dropped node-agent health check can now read as a dead
+    model and trigger a needless restore of a perfectly healthy one. Here
+    the FIRST probe reports the endpoint down; the observer's own immediate
+    confirming re-probe reports it healthy (the blip already cleared) — the
+    blip must not survive to observe_spark."""
+    spark = _SequencedSpark(
+        _spark_payload(endpoint_ok=False),
+        _spark_payload(endpoint_ok=True),
+    )
+
+    status = _observer(spark).status()
+
+    assert spark.calls == 2
+    assert observe_spark(status, "sparky")["sparky/slot0"]["loaded"] is True
+
+
+def test_spark_observer_confirms_a_genuinely_dead_endpoint():
+    """Two consecutive, INDEPENDENT fresh probes — not two reads of the same
+    cached snapshot — both reporting the endpoint down is what it takes to
+    confirm a real death and let it reach observe_spark."""
+    spark = _SequencedSpark(
+        _spark_payload(endpoint_ok=False),
+        _spark_payload(endpoint_ok=False),
+    )
+
+    status = _observer(spark).status()
+
+    assert spark.calls == 2
+    assert observe_spark(status, "sparky")["sparky/slot0"]["loaded"] is False
+
+
+def test_spark_observer_healthy_endpoint_skips_the_confirming_probe():
+    """The confirming re-probe only fires when the FIRST read is suspicious
+    — a healthy read still costs exactly one call, same as before this fix
+    (a busy node-agent must not be probed twice as often for no reason)."""
+    spark = _SequencedSpark(_spark_payload(endpoint_ok=True))
+
+    _observer(spark).status()
+
+    assert spark.calls == 1
+
+
+def test_spark_observer_treats_a_failed_confirming_probe_as_unreachable():
+    """If the CONFIRMING probe can't even reach the node, that is a
+    transport failure, not proof the model is dead — report it the way the
+    primary probe's own failure would (reachable unknown, never 'down'), and
+    leave it to the NEXT tick's ordinary probe to sort out."""
+    from app.engines import EngineError
+
+    spark = _SequencedSpark(
+        _spark_payload(endpoint_ok=False),
+        EngineError("connection refused"),
+    )
+
+    status = _observer(spark).status()
+
+    assert spark.calls == 2
+    assert status["reachable"] is False
+
+
+# ===========================================================================
 # N1 T3 — node-parametrized key vocabulary
 # ===========================================================================
 
@@ -410,7 +576,8 @@ def test_slot_key_is_node_slash_slot0():
 
 
 def test_observe_spark_emits_the_given_nodes_key():
-    status = {"profile": "laguna", "serving": {"model": "aeon"},
+    status = {"profile": "laguna",
+              "serving": {"model": "aeon", "endpoint_ok": True},
               "reachable": True, "swap_in_progress": False}
     obs = observe_spark(status, "boxa")
     assert set(obs) == {"boxa/slot0"}
