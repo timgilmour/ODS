@@ -761,11 +761,41 @@ def test_sglang_omni_idle_action_is_none_when_down_or_unknown():
 # --- actuation: whoever actuates, records — and records FIRST --------------
 
 
-class _RecordingWatcher:
-    """The slice of app.arbiter.Watcher the adapter actuators reach into."""
+class _RecordingWorld:
+    """The one World method an actuator calls (app.state.World.note_freed),
+    recording the (resource, node_id) pair it was re-armed for."""
 
-    def __init__(self, intent_store) -> None:
+    def __init__(self) -> None:
+        self.rearmed = []
+
+    def note_freed(self, resource, node_id=None):
+        self.rearmed.append((resource, node_id))
+
+
+class _RecordingObserver:
+    """The one RemoteObserver method an actuator calls."""
+
+    def __init__(self) -> None:
+        self.invalidations = 0
+
+    def invalidate(self):
+        self.invalidations += 1
+
+
+class _RecordingWatcher:
+    """The slice of app.arbiter.Watcher the adapter actuators reach into.
+
+    `_world`/`_remote_observer` joined it with Task 9: a successful remote
+    unload re-arms that resource's idle clock and drops the cached remote
+    half, the two obligations a comfyui-kind free already had (`note_freed`)
+    sharpened by the observation being TTL-cached off-box. `_remote_observer`
+    is None-able there, so this fake supplies a real recorder and the
+    None case gets its own test below."""
+
+    def __init__(self, intent_store, remote_observer=None) -> None:
         self._intent_store = intent_store
+        self._world = _RecordingWorld()
+        self._remote_observer = remote_observer
         self.logs = []
         self.dedup_clears = 0
 
@@ -880,6 +910,56 @@ def test_sglang_omni_execute_unload_rearms_the_failure_dedup_on_success(tmp_path
                            node_id="nimbus")
 
     assert watcher.dedup_clears == 1
+
+
+def test_sglang_omni_execute_unload_rearms_the_clock_and_drops_the_cache(tmp_path):
+    """Task 9: the comfyui-kind free's own two obligations, on a REMOTE
+    engine. `down()` is a 202 and the observation is TTL-cached, so without
+    both the same idle-past-ttl record drives one unload dispatch per tick
+    until the container finally disappears (the free-spam lesson, with a
+    whole engine at the other end). Re-armed for THIS node's key, never the
+    local resource of the same name."""
+    store = _intent_store(tmp_path)
+    observer = _RecordingObserver()
+    watcher = _RecordingWatcher(store, remote_observer=observer)
+
+    _omni().execute_unload(watcher, "song-r", _FakeOmni(), None, set(),
+                           node_id="nimbus")
+
+    assert watcher._world.rearmed == [("song-r", "nimbus")]
+    assert observer.invalidations == 1
+
+
+def test_sglang_omni_execute_unload_does_neither_when_the_engine_refuses(tmp_path):
+    """A refused unload changed nothing, so it must not re-arm the idle
+    clock (which would delay the retry by a whole idle_ttl) nor spend the
+    deck-wide cache drop — the same success-path-only discipline
+    `_ComfyAdapter.execute_free` keeps for `note_freed`."""
+    store = _intent_store(tmp_path)
+    observer = _RecordingObserver()
+    watcher = _RecordingWatcher(store, remote_observer=observer)
+
+    _omni().execute_unload(watcher, "song-r",
+                           _FakeOmni(verb_raises=EngineError("agent said no")),
+                           None, set(), node_id="nimbus")
+
+    assert watcher._world.rearmed == []
+    assert observer.invalidations == 0
+
+
+def test_sglang_omni_execute_unload_survives_a_watcher_without_an_observer(tmp_path):
+    """`remote_observer=None` is a real Watcher state (every caller built
+    before Task 7, and every unit test that wires no remote half): the
+    actuation still happens, with nothing to invalidate."""
+    store = _intent_store(tmp_path)
+    watcher = _RecordingWatcher(store)
+    client = _FakeOmni()
+
+    _omni().execute_unload(watcher, "song-r", client, None, set(),
+                           node_id="nimbus")
+
+    assert client.calls == ["down"]
+    assert watcher._world.rearmed == [("song-r", "nimbus")]
 
 
 def test_sglang_omni_execute_load_records_the_intent_first_and_calls_up(tmp_path):

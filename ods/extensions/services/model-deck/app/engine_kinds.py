@@ -1048,12 +1048,15 @@ class _SglangOmniAdapter:
         genuinely dead engine, and a redundant restore is cheap (`up()` is
         `docker compose up -d`, a no-op on a container already running).
 
-        NOT wired into the observation path yet, deliberately: `observe`
-        cannot see intent (app.state/app.observe are intent-blind BY
-        DESIGN — that separation is why app.lifecycle exists), so the join
-        belongs where intent and observation already meet. Task 9 owns that
-        wiring together with the remote reconcile proofs; this is the rule
-        it consumes, proven on its own.
+        NOT wired into the observation path, deliberately: `observe` cannot
+        see intent (app.state/app.observe are intent-blind BY DESIGN — that
+        separation is why app.lifecycle exists), so the join belongs where
+        intent and observation already meet. Task 9 wired it there —
+        `app.lifecycle.join_warming`, called by the arbiter's reconcile pass
+        and by `app.routers.build_lifecycle_view` — which is why the
+        arguments below stay in THIS adapter's own vocabulary (`obs` is a
+        world tenant, not a `derive_status` record): the join adapts, the
+        rule does not have to be re-expressed in a shape it does not own.
         """
         if intent is None or intent.get("state") != "loaded":
             return False
@@ -1163,6 +1166,26 @@ class _SglangOmniAdapter:
             # A successful unload between two identical failures must not
             # swallow the second one.
             watcher._clear_failure_dedup()
+            # RE-ARM THE IDLE CLOCK AND DROP THE CACHED OBSERVATION (Task 9),
+            # the comfyui-kind free's own pair of obligations, sharpened by
+            # this kind being REMOTE. The observation is TTL-cached
+            # (app.node_clients.RemoteObserver, 10 s) and `down()` is a 202 —
+            # the container is still going down for seconds afterwards — so
+            # the very same idle-past-ttl record is what every tick in that
+            # window reads, and the idle rule would re-fire on it every ~2 s
+            # (the comfyui free-spam lesson, with a whole engine at the other
+            # end). Invalidating alone is not enough (the fresh observation
+            # can still be idle-past-ttl while the container stops) and
+            # re-arming alone is not enough (a cached half never re-reads the
+            # clock at all): both, or the storm survives.
+            #
+            # The deck-wide `invalidate()` is what exists (no per-node form —
+            # T8 review M-2); its cost is clearing every node's probe backoff,
+            # paid at most once per idle_ttl per resource, which is nothing
+            # beside a duplicate whole-engine unload.
+            watcher._world.note_freed(resource, node_id=node_id)
+            if watcher._remote_observer is not None:
+                watcher._remote_observer.invalidate()
             watcher._log(f"unload_{resource}", {"node": node_id})
             # NOT armed: watcher._heal_suppressor. That window exists to stop
             # the LOCAL contention-healing path from re-loading a deliberately

@@ -70,11 +70,13 @@ engines DECLARED on a registry entry OTHER than the local one, kept as its
 OWN half of the world (``remote_tenants``, keyed ``<node>/<resource>``,
 with a per-node GPU pool the caller supplies) rather than merged into
 ``tenants``/``gpus``: a remote engine's ``gpu_index`` addresses ITS OWN
-box's GPU list, and resource names are unique per node rather than
-globally, so merging would let the arbiter's co-residency arithmetic
-compare two machines' GPU 0 and would let two nodes' same-named resources
-collide outright. It keeps its own ``_remote_mem`` for the same shared-
-instance reason spelled out at that attribute.
+box's GPU list, so merging would let the arbiter's co-residency arithmetic
+compare two machines' GPU 0 — and a hand-edited registry can still hold two
+nodes' same-named resources (the declaration boundary refuses that
+deck-wide since Task 9's ruling R10, and ``NodeStore._load`` heals a
+hand-edit, but this assembly must not depend on either), which merging
+would collapse into one tenant. It keeps its own ``_remote_mem`` for the
+same shared-instance reason spelled out at that attribute.
 
 No Settings import here — pure inputs only.
 """
@@ -217,8 +219,10 @@ class World:
         tenants into the local resource-keyed map would let
         ``app.arbiter``'s co-residency and eviction arithmetic (which
         matches ``tenant["gpu_index"]`` against the LOCAL gpu list) compare
-        two different machines' GPU 0 — and resource names are unique per
-        node, not globally, so the map keys could collide outright.
+        two different machines' GPU 0 — and a hand-edited registry can hold
+        two nodes' same-named resources (refused at the declaration boundary
+        and healed at load since Task 9, but not something this assembly may
+        lean on), so the map keys could collide outright.
 
         ``gpu_pools[node] is None`` (or no entry at all) ⇒ that node's
         engines are reported unknown WITHOUT probing them one by one. The
@@ -306,15 +310,25 @@ class World:
             tenants[key] = obs
         return tenants
 
-    def note_freed(self, resource: str) -> None:
-        """A successful VRAM free (any kind whose arbiter verb is "free" —
-        comfyui-kind today) re-arms that resource's idle TTL. Without this,
-        idle_s only grows once the resource is idle (freeing changes none of
-        the idle-release rule's inputs), so the watcher re-emits its free
-        action on every tick — flooding the event ring and the engine's
-        free endpoint. A no-op (mem entry harmlessly created, then pruned
-        next snapshot) if `resource` isn't currently declared."""
-        self._mem.setdefault(resource, {})["last_activity_time"] = self._clock()
+    def note_freed(self, resource: str, node_id: str | None = None) -> None:
+        """A successful deck actuation re-arms that resource's idle TTL.
+        Without this, idle_s only grows once the resource is idle (acting on
+        it changes none of the idle-release rule's inputs), so the watcher
+        re-emits its action on every tick — flooding the event ring and the
+        engine's endpoint. A no-op (mem entry harmlessly created, then pruned
+        next snapshot) if `resource` isn't currently declared.
+
+        `node_id` (sglang-omni Task 9) selects WHICH half's clock: None — a
+        successful VRAM free, the comfyui-kind original — re-arms the local
+        `_mem`; a node id re-arms `_remote_mem` under that half's own
+        `<node>/<resource>` key. The remote case is the one this matters most
+        for: a remote engine's observation is TTL-cached and its container
+        takes seconds to stop, so the very same idle-past-ttl record is what
+        the next several ticks would otherwise read and re-act on.
+        """
+        mem = self._mem if node_id is None else self._remote_mem
+        key = resource if node_id is None else node_key(node_id, resource)
+        mem.setdefault(key, {})["last_activity_time"] = self._clock()
 
     def _externals(self, gpus, engines, tenants: dict[str, dict]) -> list[dict]:
         any_tenant_active = any(

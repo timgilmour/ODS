@@ -87,3 +87,59 @@ def derive_status(intent: dict | None, observed: dict) -> dict:
             "reason": f"deliberately unloaded, but {actual!r} is loaded",
         }
     return {"status": "parked", "reason": "deliberately unloaded"}
+
+
+def join_warming(observed: dict[str, dict], world: dict,
+                 intents: dict[str, dict], now=None) -> dict[str, dict]:
+    """Mark every observation a kind considers a BOOT IN FLIGHT as
+    ``transitioning``, so ``derive_status`` reads it as ``warming`` rather
+    than ``down`` (sglang-omni Task 9).
+
+    THIS IS THE SEAM, and its placement is the whole point. A kind whose
+    "not serving yet" and "died" observations are byte-identical needs the
+    INTENT record's timestamp to tell them apart (app.engine_kinds'
+    ``_SglangOmniAdapter.warming``, GF4: a cold start takes ~3.5-4.5
+    minutes). app.state/app.observe cannot supply that — they are
+    intent-blind BY DESIGN, which is the separation THIS module exists to
+    bridge — so the join happens here, where intent and observation already
+    meet, and both consumers of that pair call it: the arbiter's reconcile
+    pass (which must not restore-storm a booting engine into quarantine) and
+    ``app.routers.build_lifecycle_view`` (so the board says the same word the
+    reconciler is acting on).
+
+    `world` is the raw snapshot, whose tenants carry each kind's OWN
+    vocabulary — `warming` is written against that, not against the record
+    shape below, because it is the ADAPTER's rule about its own engine. The
+    two are joined by key here rather than by re-expressing one in the
+    other's terms.
+
+    `warming` is OPTIONAL on the adapter protocol: a kind that does not
+    define it has no boot window (the E1 triple — lemonade's in-flight load
+    and hipfire's container-up-not-healthy are already sourced as
+    `transitioning` in app.observe, from the OBSERVATION alone, needing no
+    intent), and this function leaves its observations untouched.
+
+    Returns a NEW mapping (records copied): the caller's own `observed` stays
+    exactly what app.observe produced, which keeps this a pure stage in the
+    functional core this module belongs to.
+    """
+    from app.engine_kinds import ENGINE_KINDS
+    from app.observe import local_key, node_key
+
+    # Keys built from each tenant's OWN fields, the same way app.observe's
+    # two halves build theirs — never re-derived from a map key, so the
+    # world map and the observation map cannot drift apart here either.
+    keyed = [(local_key(resource), tenant)
+             for resource, tenant in (world.get("tenants") or {}).items()]
+    keyed += [(node_key(tenant["node_id"], tenant["resource"]), tenant)
+              for tenant in (world.get("remote_tenants") or {}).values()]
+
+    joined = {key: dict(record) for key, record in observed.items()}
+    for key, tenant in keyed:
+        warming = getattr(ENGINE_KINDS[tenant["engine"]], "warming", None)
+        record = joined.get(key)
+        if warming is None or record is None:
+            continue
+        if warming(intents.get(key), tenant, now):
+            record["transitioning"] = True
+    return joined

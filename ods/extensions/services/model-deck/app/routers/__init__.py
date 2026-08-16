@@ -64,7 +64,8 @@ def build_world_snapshot(deck: dict) -> dict:
     # engines[], each with its own node's GPU pool. Its own two top-level
     # keys, never merged into `tenants`/`gpus` — see World.snapshot_remote's
     # docstring for why (a remote gpu_index addresses another machine's GPU
-    # list, and resource names are unique per node, not globally).
+    # list, and a hand-edited registry can still hold two nodes' same-named
+    # resources even though the declaration boundary refuses them).
     #
     # Through deck["remote_observer"] since Task 7, not the bare
     # `remote_world_half`: with a `remote_capable` kind live, every call to
@@ -128,7 +129,7 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
     is what turns "down" into "down since when", which is the difference
     between a glance telling you something and telling you nothing.
     """
-    from app.lifecycle import derive_status
+    from app.lifecycle import derive_status, join_warming
     from app.observe import slot_key
 
     store = deck.get("intent_store")
@@ -168,7 +169,13 @@ def build_lifecycle_view(deck: dict, world: dict) -> dict:
             identity_maps[slot_key(entry["id"])] = (field or {}).get("value")
 
     view = {}
-    for key, obs in build_observations(deck, world).items():
+    # The SAME intent x observation join the arbiter's reconcile pass makes
+    # (app.lifecycle.join_warming, sglang-omni Task 9): a kind whose boot
+    # observes identically to its death needs the intent record's timestamp
+    # to tell the two apart, and the board must say the word the reconciler
+    # is acting on — "warming", not "down" — for the ~4 minutes that takes.
+    observed_all = join_warming(build_observations(deck, world), world, intents)
+    for key, obs in observed_all.items():
         intent = intents.get(key)
         view[key] = {
             **derive_status(intent, obs),

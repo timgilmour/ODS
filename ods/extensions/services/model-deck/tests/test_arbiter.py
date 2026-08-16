@@ -3249,28 +3249,6 @@ def test_same_tick_evict_and_reload_pins_single_load_and_final_intent(tmp_path):
     assert record["model"] == "extra.model.gguf"
 
 
-def test_execute_raises_on_action_for_a_non_legacy_resource(tmp_path):
-    """T5 review fix: decide() can now emit "unload"/"free" for ANY declared
-    resource (E1 generalization), but _execute still only actuates the
-    lemonade/comfyui pair (Task 6 generalizes the rest). An action _execute
-    doesn't recognize must raise — never vanish silently with no actuation
-    and no log line, which is what a bare unmatched-if-chain would do."""
-    watcher, _events_path = _make_watcher(
-        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
-    )
-
-    with pytest.raises(ValueError, match="gguf-a"):
-        watcher._execute(
-            [{"type": "unload", "resource": "gguf-a", "model": "x.gguf"}], None
-        )
-
-    # Same gap for the "free" verb, and for a "resource" the action vocabulary
-    # doesn't even carry (a bare "unload" for hipfire, structurally
-    # impossible from decide() itself but still a shape _execute must not
-    # silently accept from some OTHER future caller).
-    with pytest.raises(ValueError, match="img"):
-        watcher._execute([{"type": "free", "resource": "img"}], None)
-
 
 def test_reconciler_restores_a_key_at_most_once_per_cooldown(tmp_path):
     """An externally-dead engine with intent=loaded derives 'down' every
@@ -4764,3 +4742,608 @@ def test_ticks_pace_the_remote_gpu_probe(remote_engine_watcher):
     assert [address for address, _c, _a in w.agent_factory.opened] == [
         "http://nimbus:7720"]
     assert w.clients.fake("gguf-b").loaded == ["b.gguf"]
+
+
+# ===========================================================================
+# sglang-omni Task 9 — remote engine RECONCILE + IDLE RELEASE, inside a real
+# tick.
+#
+# Task 6 proved a remote engine is OBSERVED; this section proves the deck can
+# act on one: restore it when it dies, hold off while it boots, release it
+# when it goes idle, and quarantine it when restores keep failing — each
+# through the node-agent client the observation half already uses.
+#
+# The declaration goes through the REAL NodeStore write gate (sglang-omni is
+# remote_capable since Task 7), not conftest's HandBuiltRegistry: these are
+# the paths an operator's own declaration takes, and the deck-wide resource
+# uniqueness gate this task adds sits on exactly that write.
+#
+# Fixture discipline ([[defaults-that-hide-bugs]]): node "nimbus" (never the
+# live-seeded "sparky"), resource "song-r" (never "omni"), GPU 4, idle_ttl
+# 120 (never the declared 900 the local lemonade seed uses).
+# ===========================================================================
+
+_OMNI_ENGINE = {
+    "resource": "song-r", "kind": "sglang-omni",
+    "connection": {"url": "http://nimbus:8008"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+_OMNI_KEY = "nimbus/song-r"
+_OMNI_IDLE_TTL = 120
+
+
+def _omni_policy(pinned=False, idle_ttl=_OMNI_IDLE_TTL):
+    return {"song-r": {"priority": 5, "pinned": pinned, "idle_ttl": idle_ttl}}
+
+
+def _ago(seconds: float) -> str:
+    """An ISO timestamp `seconds` in the past — what an intent record's
+    `updated_ts` looks like that long after the operator acted. Real wall
+    clock deliberately: the warming window is measured against
+    ``datetime.now(UTC)`` (app.engine_kinds._within), not the injectable
+    monotonic clock the watcher's own cooldowns use."""
+    from datetime import UTC, datetime, timedelta
+
+    return (datetime.now(UTC) - timedelta(seconds=seconds)).isoformat()
+
+
+class _FakeOmni:
+    """SglangOmniClient-shaped fake: the three calls the sglang-omni adapter
+    makes (status/up/down) plus close(). `ups`/`downs` count the ATTEMPT
+    before the guard raises, so a test can tell "never dispatched" apart from
+    "dispatched and raised" (the FakeSpark lesson from N1 task 1)."""
+
+    def __init__(self, *, healthy=True, busy=0, reachable=True,
+                 raise_on_status=None, raise_on_up=None, raise_on_down=None):
+        self.healthy = healthy
+        self.busy = busy
+        self.reachable = reachable
+        self.status_calls = 0
+        self.ups = 0
+        self.downs = 0
+        self._raise_on_status = raise_on_status
+        self._raise_on_up = raise_on_up
+        self._raise_on_down = raise_on_down
+
+    def status(self) -> dict:
+        self.status_calls += 1
+        if self._raise_on_status is not None:
+            raise self._raise_on_status
+        return {"reachable": self.reachable, "healthy": self.healthy,
+                "busy_requests": self.busy}
+
+    def up(self) -> None:
+        self.ups += 1
+        if self._raise_on_up is not None:
+            raise self._raise_on_up
+
+    def down(self) -> None:
+        self.downs += 1
+        if self._raise_on_down is not None:
+            raise self._raise_on_down
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeAgent:
+    """node-agent stub for the ONE read the remote half makes per node: the
+    GPU pool (app.node_clients.read_remote_gpus), which is also that node's
+    liveness probe."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def gpu(self) -> dict:
+        self.calls += 1
+        return {"gpus": [{"index": 4, "memory_total_mb": 131072,
+                          "memory_used_mb": 65536}]}
+
+    def close(self) -> None:
+        pass
+
+
+class _OmniWatcher:
+    """remote_omni_watcher's return value: the watcher plus the handles its
+    tests drive it through."""
+
+    def __init__(self, watcher, omni, agent, intent_store, events_path, clock,
+                 node_store, world) -> None:
+        self.watcher = watcher
+        self.omni = omni
+        self.agent = agent
+        self.intent_store = intent_store
+        self.events_path = events_path
+        self.clock = clock
+        self.node_store = node_store
+        self.world = world
+
+    def events(self, kind: str) -> list[dict]:
+        return [e for e in tail_events(self.events_path) if e["kind"] == kind]
+
+    def tick_error_free(self) -> bool:
+        """The vacuity guard every proof-of-absence in this section pairs
+        with: a tick that died in the supervisor catch actuates nothing for
+        reasons that have nothing to do with the rule under test."""
+        return not self.events("tick-error")
+
+
+@pytest.fixture
+def remote_omni_watcher(tmp_path):
+    """A watcher over ONE engine declared on a node-agent entry: nimbus/song-r
+    (sglang-omni kind), observed healthy and idle by default. No local engine
+    is declared at all — the remote half must stand on its own."""
+    from app.intent import IntentStore
+    from app.node_clients import RemoteEngineClients, RemoteObserver
+    from app.node_store import NodeStore
+    from app.state import World
+
+    node_store = NodeStore(tmp_path / "nodes.json",
+                           tmp_path / "node_credentials.json")
+    node_store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    node_store.add({"id": "nimbus", "label": "Nimbus Box",
+                    "agent_kind": "node-agent", "address": "http://nimbus:7720",
+                    "control": "none"}, credential="key-nimbus")
+    node_store.update("nimbus", {"engines": [dict(_OMNI_ENGINE)]})
+
+    clock = _FakeClock()
+    omni = _FakeOmni()
+    agent = _FakeAgent()
+    remote_clients = RemoteEngineClients(
+        node_store, lambda entry, credential, engine: omni)
+    intent_store = IntentStore(tmp_path / "intent.json")
+    world = World(clock=clock)
+
+    watcher, events_path = _make_watcher(
+        tmp_path, world, FakeRegistry(), _omni_policy(),
+        node_store=node_store, local_clients=_FakeLocalClients({}),
+        intent_store=intent_store, litellm=_FakeLiteLLMRoutes(),
+        read_gpus=lambda drm, kfd: [],
+        remote_engine_clients=remote_clients,
+        node_agent_client_factory=lambda address, credential: agent,
+        # The real observer on its real TTL/backoff, driven by the SAME
+        # clock as the world and the watcher: the pacing is part of what
+        # these tests describe (a cached half is what a second tick in the
+        # same instant sees).
+        remote_observer=RemoteObserver(clock=clock),
+        clock=clock,
+    )
+    return _OmniWatcher(watcher, omni, agent, intent_store, events_path, clock,
+                        node_store, world)
+
+
+# --- obligation 1: the remote restore path ---------------------------------
+
+
+def test_remote_restore_dispatches_through_the_declaring_nodes_client(
+        remote_omni_watcher):
+    """R9 closed: intent loaded x observed down (past the warm window) ->
+    the deck asks THAT node's agent to bring THAT engine up.
+
+    Before this task every non-spark key resolved through the LOCAL client
+    map, which holds nothing for a remote resource, so the attempt raised
+    "no restore handler" and charged the failure budget instead."""
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(1200))
+
+    w.watcher.tick()
+
+    assert w.omni.ups == 1
+    assert [e["detail"]["key"] for e in w.events("lifecycle-restore")] == [
+        _OMNI_KEY]
+    assert w.tick_error_free()
+
+
+def test_remote_restore_without_health_charges_the_budget_on_redispatch(
+        remote_omni_watcher):
+    """Part A's no-raise hole, proven generic: `up()` returns fine (202 by
+    contract — nothing observes the result), the engine never becomes
+    healthy, and the NEXT dispatch for the still-unverified key charges the
+    failure budget. No new code was expected here; the proof is that the
+    machinery keys on the REMOTE key like any other."""
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(1200))
+
+    w.watcher.tick()
+    w.clock.advance(31)          # past _RESTORE_COOLDOWN_S and the remote TTL
+    w.watcher.tick()
+
+    assert w.omni.ups == 2
+    failures = [e["detail"] for e in w.events("lifecycle-restore-failed")]
+    assert [f["key"] for f in failures] == [_OMNI_KEY]
+    assert failures[0]["failures"] == 1
+
+
+def test_two_failed_remote_restores_quarantine_and_stop_retrying(
+        remote_omni_watcher):
+    """The failure budget's end state for a remote key: after FAILURE_BUDGET
+    charges the key is quarantined and the reconciler stops dispatching —
+    the crash-loop this budget exists to end."""
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(1200))
+
+    for _ in range(4):
+        w.watcher.tick()
+        w.clock.advance(31)
+
+    assert [e["detail"]["key"] for e in w.events("lifecycle-quarantined")] == [
+        _OMNI_KEY]
+    assert w.intent_store.get()[_OMNI_KEY]["quarantined"] is True
+    # Two dispatches, then silence: the third tick's redispatch charge is
+    # what quarantines, and nothing dispatches after it.
+    assert w.omni.ups == 2
+
+
+def test_a_remote_restore_that_raises_charges_the_budget_and_quarantines(
+        remote_omni_watcher):
+    """The RAISING half of the failure budget, for a remote key: the node
+    agent refuses (409 pending, 503 swap-ctl disabled, transport down — all
+    EngineError by the client's own taxonomy), which is a restore that
+    visibly failed rather than one that merely never became healthy. Two of
+    those and the key is quarantined."""
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.omni._raise_on_up = EngineError("nimbus: a request is already pending")
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(1200))
+
+    w.watcher.tick()
+    w.clock.advance(31)
+    w.watcher.tick()
+
+    assert w.omni.ups == 2
+    failures = [e["detail"] for e in w.events("lifecycle-restore-failed")]
+    assert [f["failures"] for f in failures] == [1, 2]
+    assert "already pending" in failures[0]["error"]
+    assert w.intent_store.get()[_OMNI_KEY]["quarantined"] is True
+
+
+class _VanishingClients:
+    """RemoteEngineClients-shaped, answering the real client for the first
+    `answers` lookups and None afterwards — the credential-vanished-mid-flight
+    race app.node_clients documents (design §9), landed precisely between a
+    tick's observation phase and its restore phase.
+
+    That gap is the only way the restore path's not-operable branch is
+    reachable at all: an engine whose client is already None when the world
+    is assembled observes `unknown` -> `unreachable`, which the reconciler
+    never acts on. Contrived on purpose — the branch is real, and pinning it
+    with a fixture that merely undeclares the engine would prove nothing
+    (no observation, no restore, assertion satisfied vacuously)."""
+
+    def __init__(self, client, answers: int) -> None:
+        self._client = client
+        self._answers = answers
+        self.calls = 0
+
+    def client_for(self, node_id, resource):
+        self.calls += 1
+        return self._client if self.calls <= self._answers else None
+
+    def retire_absent(self, keep_pairs) -> None:
+        pass
+
+
+def test_a_restore_for_an_inoperable_remote_node_is_a_named_failure(
+        remote_omni_watcher):
+    """`RemoteEngineClients.client_for` is repair-shaped: it answers None for
+    a pair that is not operable right now rather than raising. The restore
+    path must turn that into ONE charged, NAMED failure — naming the node,
+    since "no restore handler for engine 'sglang-omni'" alone cannot say
+    which box went dark — and never a crash inside the tick."""
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(1200))
+    clients = _VanishingClients(w.omni, answers=1)   # the observation, then dark
+    w.watcher._remote_engine_clients = clients
+
+    w.watcher.tick()
+
+    assert clients.calls == 2            # observed, then asked to restore
+    assert w.omni.ups == 0
+    failures = [e["detail"] for e in w.events("lifecycle-restore-failed")]
+    assert [f["failures"] for f in failures] == [1]
+    assert "nimbus" in failures[0]["error"]
+    assert w.tick_error_free()
+
+
+# --- obligation 3: the warming join ----------------------------------------
+
+
+def test_a_cold_boot_inside_the_warm_window_draws_no_restore(
+        remote_omni_watcher):
+    """GF4: a cold start takes ~3.5-4.5 min and observes EXACTLY like a
+    death. Read as one, the reconciler restores it every cooldown and
+    quarantines it before it ever finishes booting.
+
+    Three vacuity guards, because "no restore" is worthless on a tick that
+    never looked: the engine must have been PROBED, the tick must not have
+    died, and the sibling test below must show the same fixture restoring
+    once the window lapses."""
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(60))
+
+    for _ in range(3):
+        w.watcher.tick()
+        w.clock.advance(31)
+
+    assert w.omni.ups == 0
+    assert w.events("lifecycle-restore") == []
+    assert w.omni.status_calls > 0
+    assert w.tick_error_free()
+
+
+def test_restores_resume_once_the_warm_window_lapses(remote_omni_watcher):
+    """The other half of the pair above: an intent recorded longer ago than
+    the boot window is no longer a boot in flight — it is the 26-hour
+    hipfire failure, and the deck must act on it."""
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(601))
+
+    w.watcher.tick()
+
+    assert w.omni.ups == 1
+
+
+def test_a_warming_remote_engine_reports_warming_not_down(remote_omni_watcher):
+    """The board and the reconciler must agree about what they are looking
+    at: the same join that holds the restore off is what makes /api/lifecycle
+    say `warming` rather than `down` for those four minutes."""
+    from app.lifecycle import derive_status, join_warming
+    from app.observe import merge_observations, observe_remote
+
+    w = remote_omni_watcher
+    w.omni.healthy = False
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(60))
+    world = w.watcher._world.snapshot([], [], _FakeLocalClients({}),
+                                      _FakeLiteLLMRoutes(), FakeRegistry())
+    world.update(w.watcher._remote_observer.half(
+        w.node_store, lambda address, credential: w.agent,
+        w.watcher._remote_engine_clients, w.watcher._world, FakeRegistry()))
+
+    observed = join_warming(merge_observations(observe_remote(world)), world,
+                            w.intent_store.get())
+
+    assert observed[_OMNI_KEY]["transitioning"] is True
+    assert derive_status(w.intent_store.get()[_OMNI_KEY],
+                         observed[_OMNI_KEY])["status"] == "warming"
+
+
+# --- obligation 4: idle release for a remote engine ------------------------
+
+
+def _idle_past_ttl(w) -> None:
+    """Drive `w`'s remote engine to an observation that is idle PAST its
+    idle_ttl: one tick establishes the clock baseline (every kind's
+    first-ever observation does), then time passes. Also expires the
+    RemoteObserver's TTL, so the second tick really re-observes."""
+    w.watcher.tick()
+    w.clock.advance(_OMNI_IDLE_TTL + 80)
+
+
+def test_remote_idle_release_unloads_through_the_declaring_nodes_client(
+        remote_omni_watcher):
+    """The idle rule reaches a remote engine at all — the arbiter iterates
+    `remote_tenants` explicitly (it inherits NO coverage from the local
+    `tenants` loop, which is a different world key entirely) and actuates
+    through that node's own client.
+
+    Whoever actuates, records: the unload writes intent for the NODE-keyed
+    resource, actor "deck" (this is the arbiter's own automatic action, never
+    an operator's)."""
+    w = remote_omni_watcher
+    _idle_past_ttl(w)
+
+    w.watcher.tick()
+
+    assert w.omni.downs == 1
+    record = w.intent_store.get()[_OMNI_KEY]
+    assert record["state"] == "unloaded"
+    assert record["actor"] == "deck"
+    assert record["engine"] == "sglang-omni"
+    assert w.tick_error_free()
+
+
+def test_an_unavailable_busy_count_never_unloads_a_running_render(
+        remote_omni_watcher):
+    """THE RENDER-PROTECTION HEADLINE (design §4). MiniMax-Music3 has no
+    metrics endpoint at this pin (GF3), so "in flight" is the agent's own
+    count of established connections — and `None` means it could not take
+    that count. A song render runs for MINUTES holding its connection, so an
+    unavailable indicator must fail toward ALIVE: reading it as 0 would
+    unload the engine out from under a render in progress.
+
+    Two vacuity guards: the engine was really probed (this is not a tick that
+    never looked), and the sibling test above proves the SAME fixture with a
+    real 0 does unload — so "nothing emitted" here is the busy count's doing,
+    not an inert fixture."""
+    w = remote_omni_watcher
+    w.omni.busy = None
+    _idle_past_ttl(w)
+
+    for _ in range(3):
+        w.watcher.tick()
+        w.clock.advance(31)
+
+    assert w.omni.downs == 0
+    # Nothing was recorded either: whoever actuates records FIRST, so an
+    # intent record would be evidence of an unload this assertion missed.
+    assert w.intent_store.get() == {}
+    assert w.omni.status_calls > 0
+    assert w.tick_error_free()
+
+
+def test_a_deliberately_unloaded_remote_engine_is_left_alone(
+        remote_omni_watcher):
+    """The D9 invariant, remote edition: intent `unloaded` is a DELIBERATE
+    park, and the deck must fight it exactly never — not with a restore (a
+    parked status is inert by construction, app.reconcile) and not with a
+    second unload.
+
+    Both observations a park can produce are covered: the engine actually
+    down (status `parked`), and the engine still up (status `unexpected` —
+    someone else acted, which the deck reports and never auto-corrects).
+    Deliberately NOT covered: an observation idle PAST its ttl, where an
+    idle-release unload is the deck moving TOWARD the recorded intent rather
+    than fighting it — that is the sibling test above, not a violation of
+    this one."""
+    w = remote_omni_watcher
+    w.intent_store.record(_OMNI_KEY, state="unloaded", model=None,
+                          engine="sglang-omni", actor="operator",
+                          now=_ago(30))
+
+    # 31 s per tick clears the restore cooldown AND the observer's 10 s TTL,
+    # so every tick here is a REAL re-observation. Total elapsed since the
+    # last `down` (which re-arms the idle clock) stays well under the 120 s
+    # idle_ttl on purpose: this test is about the two statuses named above,
+    # and an idle-past-ttl observation would legitimately emit an unload —
+    # keep that margin if you add ticks.
+    for observed_healthy in (False, True):
+        w.omni.healthy = observed_healthy
+        for _ in range(3):
+            w.watcher.tick()
+            w.clock.advance(31)
+
+    assert (w.omni.ups, w.omni.downs) == (0, 0)
+    assert w.omni.status_calls > 0
+    assert w.intent_store.get()[_OMNI_KEY]["state"] == "unloaded"
+    assert w.tick_error_free()
+
+
+def test_one_idle_observation_unloads_once_however_many_ticks_see_it(
+        remote_omni_watcher):
+    """The comfyui free-spam lesson, in the one place it bites hardest: a
+    remote engine's observation is TTL-CACHED (app.node_clients.RemoteObserver,
+    10 s) and its container takes seconds to stop, so the very same
+    idle-past-ttl record is what every tick in that window reads. Unguarded
+    that is one unload dispatch per ~2 s tick until the engine finally
+    disappears.
+
+    Two mechanisms, both proven here: acting on a remote engine drops the
+    cached half (so the next tick re-observes rather than re-reading the
+    record it just acted on), and the actuation re-arms that resource's idle
+    clock (so the fresh observation is not instantly idle-past-ttl again
+    while the container is still going down — the fake keeps reporting
+    healthy-and-idle exactly to model that window)."""
+    w = remote_omni_watcher
+    _idle_past_ttl(w)
+
+    w.watcher.tick()          # emits the unload
+    w.watcher.tick()          # same instant: must not re-emit
+    w.clock.advance(11)       # past the observer's TTL: a REAL re-observation
+    w.watcher.tick()
+
+    assert w.omni.downs == 1
+
+
+# --- obligation 2: per-action isolation ------------------------------------
+
+
+def test_an_unrecognized_action_is_logged_and_the_rest_still_run(tmp_path):
+    """RE-EXPRESSED (was test_execute_raises_on_action_for_a_non_legacy_resource,
+    T5 review fix). Its intent is kept exactly: an action `_execute` cannot
+    dispatch must never vanish silently — no actuation, no log line — which
+    is what a bare unmatched if-chain would do.
+
+    What changes is the BLAST RADIUS, which is this task's obligation. The
+    raise it used to assert escaped into `tick()`'s broad supervisor catch,
+    taking the REMAINING actions and the whole reconcile/derive/provenance
+    tail of that tick with it. Now the failure is logged as loudly as before
+    and contained to its own action: the next one still runs."""
+    lemonade = FakeLemonade()
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), FakeRegistry(), _policy(),
+        lemonade=lemonade,
+    )
+
+    watcher._execute(
+        [{"type": "unload", "resource": "gguf-a", "model": "x.gguf"},
+         {"type": "free", "resource": "img"},
+         {"type": "unload", "resource": "lemonade", "model": "extra.m.gguf"}],
+        None,
+    )
+
+    # The two undispatchable actions are each reported by name...
+    failed = [e["detail"] for e in tail_events(events_path)
+              if e["kind"] == "action-failed"]
+    assert [f["resource"] for f in failed] == ["gguf-a", "img"]
+    assert all("gguf-a" in f["error"] or "img" in f["error"] for f in failed)
+    # ...and the action AFTER them still actuated.
+    assert lemonade.unloaded == ["extra.m.gguf"]
+
+
+def test_a_signature_mismatched_action_aborts_alone_not_the_whole_tick(
+        tmp_path, hand_built_registry):
+    """The T7 review's exact case, which is what made per-action isolation
+    this task's obligation: `_execute` dispatches positionally, and a kind
+    whose actuator does not take the keyword-only `node_id` a remote action
+    must carry raises TypeError — not EngineError, so no adapter's own
+    narrow handler catches it. Unisolated that killed the WHOLE tick:
+    every remaining action plus the reconcile pass.
+
+    Built with a lemonade-kind engine declared remotely (hand-built past the
+    write gate, which refuses that kind off-box) precisely because it is the
+    mismatch: the E1 kinds' actuators are local-only by signature. The
+    reconcile pass running afterwards is the proof the tick survived."""
+    from app.intent import IntentStore
+
+    entries = [
+        {"id": "local", "label": "This Box", "agent_kind": "local",
+         "control": "none", "engines": [_TWO_GGUF_ENGINES[1]]},   # gguf-b
+        {"id": "nimbus", "label": "Nimbus Box", "agent_kind": "node-agent",
+         "address": "http://nimbus:7720", "control": "none",
+         "engines": [dict(_REMOTE_ENGINE)]},                      # gguf-r
+    ]
+    registry_store = hand_built_registry(entries, {"nimbus": "key-nimbus"})
+    litellm = _FakeLiteLLMRoutes()
+    footprints = FakeRegistry(footprints={"b.gguf": 5 * GIB})
+    clients = _FakeLocalClients(
+        {"gguf-b": _PendingCapableLemonade(litellm, footprints, loaded="b.gguf")})
+    intent_store = IntentStore(tmp_path / "intent.json")
+    from app.node_clients import RemoteEngineClients
+
+    watcher, events_path = _make_watcher(
+        tmp_path, FakeWorld(_world()), footprints, _policy(),
+        node_store=registry_store, local_clients=clients,
+        intent_store=intent_store, litellm=litellm,
+        remote_engine_clients=RemoteEngineClients(
+            registry_store, lambda entry, credential, engine: _FakeOmni()),
+    )
+
+    actuated = watcher._execute(
+        [{"type": "unload", "resource": "gguf-r", "node": "nimbus",
+          "model": None},
+         {"type": "unload", "resource": "gguf-b", "model": "b.gguf"}],
+        None,
+    )
+
+    failed = [e["detail"] for e in tail_events(events_path)
+              if e["kind"] == "action-failed"]
+    assert [(f["node"], f["resource"]) for f in failed] == [("nimbus", "gguf-r")]
+    assert "node_id" in failed[0]["error"]
+    # The action after it actuated, and its key came back for the caller's
+    # own reconcile-suppression set — i.e. `_execute` returned normally.
+    assert clients.fake("gguf-b").unloaded == ["b.gguf"]
+    assert actuated == {"local/gguf-b"}

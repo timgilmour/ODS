@@ -34,13 +34,21 @@ def node_key(node_id: str, resource: str) -> str:
     hardcoded node id (sglang-omni Task 6, once engines[] can be declared
     on a node-agent entry too).
 
-    Node-keying is not cosmetic: resource names are unique per NODE, never
-    globally (app.engine_kinds' ``validate_engines`` checks its `seen` set
-    within ONE declaration list), so two boxes may each declare a resource
-    called "gguf-r". Keying observations, intent and policy by the resource
-    name alone would collapse them into one — the same cross-node collision
-    app/routers/nodes.py's ``forget_engine`` docstring names for the policy
-    store, which has no node dimension yet."""
+    Node-keying is not cosmetic: a key has to say WHICH BOX, because the
+    thing it addresses is one engine on one machine. Keying observations and
+    intent by the resource name alone would collapse two boxes' same-named
+    resources into one record — and this layer must not depend on the
+    registry to prevent that, since a hand-edited nodes.json really can hold
+    the collision until ``NodeStore._load``'s own heal runs on it
+    (tests/test_observe.py pins the non-collision at THIS level).
+
+    Since sglang-omni Task 9 (ruling R10) the declaration boundary ALSO
+    refuses a resource another node already declares, deck-wide
+    (``app.node_store._require_unique_resources``). That is what lets
+    PolicyStore keep its flat bare-resource rows — see
+    app/routers/nodes.py's ``forget_engine`` — and it does not make these
+    keys flat: uniqueness makes a bare name RESOLVABLE to one node, while
+    the key still has to carry which one."""
     return f"{node_id}/{resource}"
 
 
@@ -191,11 +199,16 @@ def _observe_tenant(tenant: dict) -> dict:
             # not an identity — app.engine_kinds' adapter deliberately
             # reports none, and this branch must not invent one.
             model=None,
-            # No `transitioning` source here yet: this kind's warming rule
-            # (app.engine_kinds' _SglangOmniAdapter.warming, GF4) needs the
-            # INTENT record's timestamp, which the observation path cannot
-            # see by design — app.lifecycle is where intent and observation
-            # meet. Wiring it is Task 9's, with the remote reconcile proofs.
+            # No `transitioning` source here, deliberately and permanently:
+            # this kind's warming rule (app.engine_kinds'
+            # _SglangOmniAdapter.warming, GF4) needs the INTENT record's
+            # timestamp, and this path is intent-blind BY DESIGN. Task 9
+            # wired it where the two already meet instead —
+            # app.lifecycle.join_warming, one stage after this one, applied
+            # by both consumers of that pair (the arbiter's reconcile pass
+            # and app.routers.build_lifecycle_view). A `down` record from
+            # here is therefore "not serving"; whether that is a death or a
+            # ~4-minute boot is a question only intent can answer.
         )
     # Not reachable from a REAL World.snapshot (NodeStore validates
     # `kind` against engine_kinds.KNOWN_KINDS before an entry can

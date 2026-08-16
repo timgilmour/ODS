@@ -124,7 +124,7 @@ def _build_deck(settings: Settings) -> dict:
     from app.intent import IntentStore
     from app.locations import LocationStore
     from app.mover import JobQueue, Mover
-    from app.policy import PolicyStore, StoragePolicyStore
+    from app.policy import PolicyStore, StoragePolicyStore, declared_defaults
     from app.provenance import ProvenanceStore
     from app.registry import Registry
     from app.sets import SetStore
@@ -280,16 +280,12 @@ def _build_deck(settings: Settings) -> dict:
     job_queue = JobQueue(mover, catalog, location_store, data_dir / "events.jsonl")
 
     def _get_declared_policy_defaults():
-        """Read policy defaults from the local node's engines[] declaration."""
-        local = node_store.get("local")
-        if not local:
-            return {}
-        engines = local.get("engines", [])
-        declared = {}
-        for engine in engines:
-            if isinstance(engine, dict) and "resource" in engine and "policy_defaults" in engine:
-                declared[engine["resource"]] = engine["policy_defaults"]
-        return declared
+        """Policy defaults from EVERY registry entry's engines[] declaration
+        (app.policy.declared_defaults — one walk, shared with the tests that
+        mirror this wiring, rather than a second copy here). Node-agent
+        entries included since sglang-omni Task 9: a declared remote engine
+        gets its policy row seeded exactly as a local one does."""
+        return declared_defaults(node_store)
 
     deck = {
         "settings": settings,

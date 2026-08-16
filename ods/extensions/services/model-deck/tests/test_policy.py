@@ -530,3 +530,82 @@ def test_undeclared_stored_row_is_invisible_but_kept(tmp_path):
     store_with.put({"gguf-a": {"priority": 7, "pinned": False, "idle_ttl": 5}})
     assert "gguf-a" not in store.get()           # undeclared -> invisible
     assert store_with.get()["gguf-a"]["priority"] == 7   # redeclare -> back
+
+
+# --- sglang-omni Task 9: declared defaults come from EVERY node ------------
+
+
+class _FakeRegistry:
+    """NodeStore's read half — `list()` is all `declared_defaults` needs."""
+
+    def __init__(self, entries):
+        self._entries = entries
+
+    def list(self):
+        return [dict(e) for e in self._entries]
+
+
+_REMOTE_OMNI = {
+    "resource": "song-r", "kind": "sglang-omni",
+    "connection": {"url": "http://nimbus:8008"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+_LOCAL_GGUF = {
+    "resource": "gguf-a", "kind": "lemonade",
+    "connection": {"url": "http://gguf-a:8080",
+                   "metrics_url": "http://gguf-a:8001/metrics",
+                   "container": "ods-gguf-a"},
+    "gpu_index": 2,
+    "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60},
+}
+
+
+def test_declared_defaults_include_engines_on_a_node_agent_entry(tmp_path):
+    """A remote engine gets its policy row seeded from its OWN declaration,
+    exactly as a local one does — the same walk, extended past the local
+    entry rather than forked. Without this a declared remote engine has no
+    policy row at all, and app.arbiter's idle rule skips any resource whose
+    row is missing (`policy.get(resource) is None` -> nothing safe to
+    decide), so it could never be idle-released."""
+    from app.policy import declared_defaults
+
+    registry = _FakeRegistry([
+        {"id": "local", "agent_kind": "local", "engines": [_LOCAL_GGUF]},
+        {"id": "nimbus", "agent_kind": "node-agent", "engines": [_REMOTE_OMNI]},
+    ])
+
+    assert declared_defaults(registry) == {
+        "gguf-a": _LOCAL_GGUF["policy_defaults"],
+        "song-r": _REMOTE_OMNI["policy_defaults"],
+    }
+
+
+def test_declared_defaults_materialize_a_remote_row_on_first_read(tmp_path):
+    """End to end through the store: the seeded row is the DECLARED one
+    (priority 5 / idle_ttl 120, both away from every legacy default), which
+    is what the arbiter's remote idle rule reads."""
+    from app.policy import declared_defaults
+
+    registry = _FakeRegistry([
+        {"id": "nimbus", "agent_kind": "node-agent", "engines": [_REMOTE_OMNI]}])
+    store = PolicyStore(tmp_path / "policy.json",
+                        declared_defaults=lambda: declared_defaults(registry))
+
+    assert store.get() == {"song-r": _REMOTE_OMNI["policy_defaults"]}
+    assert json.loads((tmp_path / "policy.json").read_text())["song-r"][
+        "idle_ttl"] == 120
+
+
+def test_declared_defaults_tolerates_an_entry_with_no_engines(tmp_path):
+    """A registry row that declares nothing (every node before its first
+    declaration) contributes nothing — absence is representable, not a
+    KeyError on the deck's first read."""
+    from app.policy import declared_defaults
+
+    registry = _FakeRegistry([{"id": "local", "agent_kind": "local"},
+                              {"id": "nimbus", "agent_kind": "node-agent",
+                               "engines": []}])
+
+    assert declared_defaults(registry) == {}

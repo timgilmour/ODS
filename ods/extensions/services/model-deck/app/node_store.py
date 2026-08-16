@@ -138,6 +138,43 @@ def _heal_engines(entry: dict) -> dict:
         return {**entry, "engines": []}
 
 
+def _heal_unique_resources(entries: list[dict]) -> list[dict]:
+    """Deck-wide resource-name uniqueness, healed at the LOAD boundary
+    (sglang-omni Task 9, ruling R10).
+
+    The write gate (`NodeStore._require_unique_resources`) refuses a
+    declaration naming a resource another node already owns, but nodes.json
+    is hand-editable, and two nodes claiming one name would leave the deck's
+    bare-resource-keyed policy row (app/policy.py) ambiguous — the exact
+    condition R10 pays for uniqueness to avoid. So the file heals the same
+    way it heals every other shape defect: in memory, silently, on load.
+
+    FILE ORDER decides: the first entry to declare a name keeps it, later
+    ones lose that ONE engine and keep the rest. Deliberately surgical rather
+    than `_heal_engines`' whole-list wipe — the colliding entry is the only
+    thing wrong, and emptying a node's whole declaration over one duplicate
+    would take working engines down with it.
+
+    Runs LAST in `_load`'s heal chain, so every entry it sees has already
+    been through `_heal_engines` — the list is present-and-valid or absent,
+    and each element already has its `resource` (validate_engines' own bar).
+    No re-guarding here for what that gate guarantees, per this module's
+    docstring.
+    """
+    owners: set[str] = set()
+    healed: list[dict] = []
+    for entry in entries:
+        engines = entry.get("engines")
+        if engines is None:
+            healed.append(entry)
+            continue
+        kept = [e for e in engines if e["resource"] not in owners]
+        owners |= {e["resource"] for e in kept}
+        healed.append(entry if len(kept) == len(engines)
+                      else {**entry, "engines": kept})
+    return healed
+
+
 def _validate(spec: dict) -> None:
     missing = {"id", "label", "agent_kind"} - set(spec)
     extra = set(spec) - _ALLOWED
@@ -211,7 +248,12 @@ class NodeStore:
         # over a field this increment introduced would be the gate punishing
         # old data for new vocabulary. One gate, here — no per-site guards.
         # `engines` is similarly healed to [] if invalid, preserving the entry.
-        return [_heal_engines(_heal_control(entry)) for entry in data if _well_formed(entry)]
+        # A cross-node duplicate resource is healed LAST and across the whole
+        # list (see _heal_unique_resources) — it is the one shape rule that
+        # cannot be decided from a single entry.
+        return _heal_unique_resources(
+            [_heal_engines(_heal_control(entry)) for entry in data
+             if _well_formed(entry)])
 
     def _save(self, data: list[dict]) -> None:
         save_json(self._path, data)
@@ -275,6 +317,46 @@ class NodeStore:
                 "engines on a node-agent entry requires " + ", ".join(missing)
                 + " to be set first")
 
+    def _require_unique_resources(self, node_id: str, engines: list,
+                                  data: list[dict]) -> None:
+        """Deck-wide resource-name uniqueness (sglang-omni Task 9, ruling
+        R10). Refused BY NAME, naming the OWNING NODE too: an operator
+        editing one node cannot see another node's declaration, so "already
+        declared" without "where" is not actionable.
+
+        WHY IT IS A RULE AT ALL: policy rows are keyed by bare resource and
+        PolicyStore has no node dimension anywhere (app/policy.py — its
+        declared-defaults source, `app.arbiter`'s `policy.get(resource)`
+        lookup, and `forget`'s pop all speak the same flat key). R10 keeps
+        that keying and buys its unambiguity HERE, at the boundary the names
+        enter through, rather than threading a node half through the store
+        and everything that reads it. Intent and observation stay
+        node-keyed regardless (`app.observe.node_key`) — this rule makes a
+        bare resource name resolve to exactly one of those keys, it does not
+        make the keys flat.
+
+        Compares against OTHER nodes only: re-declaring a node's own resource
+        is what every `PUT .../engines/{resource}` does.
+
+        Both callers run `_validate` (and therefore `validate_engines`) on
+        the same list FIRST, and `data` comes from `_load`, so every engine
+        on either side already has its `resource` — nothing is re-guarded
+        here for that, per this module's docstring.
+        """
+        owners = {}
+        for other in data:
+            if other["id"] == node_id:
+                continue
+            for engine in other.get("engines") or []:
+                owners[engine["resource"]] = other["id"]
+        for engine in engines:
+            owner = owners.get(engine["resource"])
+            if owner is not None:
+                raise ValueError(
+                    f"resource {engine['resource']!r} is already declared on "
+                    f"node {owner!r} — resource names are unique across the "
+                    "whole deck")
+
     def add(self, spec: dict, credential: str | None = None) -> dict:
         spec = dict(spec)
         spec.setdefault("control", "none")
@@ -293,6 +375,8 @@ class NodeStore:
                 raise GuardError(f"node {spec['id']!r} already exists")
             spec["added_ts"] = datetime.now(UTC).isoformat()
             data = self._load()
+            if "engines" in spec:
+                self._require_unique_resources(spec["id"], spec["engines"], data)
             data.append(spec)
             self._save(data)
             if credential:
@@ -322,6 +406,9 @@ class NodeStore:
                             merged,
                             credential_present=bool(credential)
                             or self.credential_set(node_id))
+                    if "engines" in patch:
+                        self._require_unique_resources(
+                            node_id, patch["engines"], data)
                     node.update(patch)
                     self._save(data)
                     if credential:

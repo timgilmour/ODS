@@ -806,3 +806,72 @@ def test_local_entry_refuses_a_remote_only_kind_naming_it(store):
                    "engines": [_LOCAL_ONLY_REFUSED_ENGINE]})
     assert "remote-only" in str(exc.value)
 
+
+
+# --- sglang-omni Task 9 / ruling R10: resource names are unique DECK-WIDE --
+#
+# PolicyStore keys its rows by BARE resource and has no node dimension
+# anywhere (app/policy.py). R10 keeps that keying and pays for it here, at
+# the declaration boundary [[guard-at-the-boundary]]: if a resource name can
+# only ever be declared on ONE node, a bare-resource policy row unambiguously
+# belongs to that node's engine, and `forget` can drop it without needing to
+# know which box it was on.
+
+_OMNI_ENGINE = {
+    "resource": "song-r", "kind": "sglang-omni",
+    "connection": {"url": "http://nimbus:8008"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+
+def _local_gguf(resource="gguf-a"):
+    return {"resource": resource, "kind": "lemonade",
+            "connection": {"url": f"http://{resource}:8080",
+                           "metrics_url": f"http://{resource}:8001/metrics",
+                           "container": f"ods-{resource}"},
+            "gpu_index": 2,
+            "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60}}
+
+
+def test_a_resource_another_node_already_declares_is_refused_naming_the_owner(store):
+    """The refusal has to name BOTH halves: which resource collided and
+    which node already owns it — an operator holding one node's editor
+    cannot see the other's declaration."""
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    store.add({**_remote_spec(), "engines": [_OMNI_ENGINE]}, credential="key-nimbus")
+
+    with pytest.raises(ValueError, match="song-r") as exc:
+        store.update("local", {"engines": [_local_gguf("song-r")]})
+    assert "nimbus" in str(exc.value)
+    # Refused before any write: the local entry is untouched.
+    assert store.get("local").get("engines", []) == []
+
+
+def test_redeclaring_a_resource_on_its_OWN_node_is_not_a_collision(store):
+    """The gate compares against OTHER nodes only — editing a node's own
+    declaration (the update route's whole job) must not see itself."""
+    store.add({**_remote_spec(), "engines": [_OMNI_ENGINE]}, credential="key-nimbus")
+
+    entry = store.update("nimbus", {"engines": [{**_OMNI_ENGINE, "gpu_index": 6}]})
+
+    assert entry["engines"][0]["gpu_index"] == 6
+
+
+def test_load_heals_a_hand_edited_cross_node_duplicate(store, tmp_path):
+    """Heal-side consistency: a nodes.json hand-edited past the write gate
+    must not leave two nodes claiming one policy row. The FIRST entry in file
+    order keeps the name (deterministic, no guessing which is "real"); the
+    later one loses that engine and keeps the rest — the surgical heal, not
+    the whole-list wipe a schema-invalid declaration gets, because the other
+    entries are individually fine."""
+    local = {"id": "local", "label": "This Box", "agent_kind": "local",
+             "control": "none", "engines": [_local_gguf("song-r")]}
+    remote = {**_remote_spec(), "control": "none",
+              "engines": [_OMNI_ENGINE, {**_OMNI_ENGINE, "resource": "song-b"}]}
+    _write_nodes(tmp_path, [local, remote])
+
+    reloaded = NodeStore(tmp_path / "nodes.json", tmp_path / "node_credentials.json")
+
+    assert [e["resource"] for e in reloaded.get("local")["engines"]] == ["song-r"]
+    assert [e["resource"] for e in reloaded.get("nimbus")["engines"]] == ["song-b"]

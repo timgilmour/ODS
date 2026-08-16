@@ -23,7 +23,7 @@ from app.engine_kinds import KNOWN_KINDS
 from app.engines import EngineError, GuardError
 from app.intent import IntentStore
 from app.main import create_app
-from app.policy import PolicyStore
+from app.policy import PolicyStore, declared_defaults
 from app.sets import PREVIOUS_NAME, RESERVED_SLUG, ConfigSet, SetStore
 
 # E1 Task 8: Ephemeral is now {resources: {...}} keyed by resource, not the
@@ -324,24 +324,24 @@ def make_app(tmp_path, monkeypatch):
     deck = app.state.deck
 
     def _get_declared_policy_defaults():
-        """Provide declared policy defaults LIVE off node_store's local
-        `engines[]` (mirrors app.main._build_deck's own same-named helper)
-        — not a frozen snapshot of the module-level `_ENGINES` fixture, so
-        a test that edits the declaration after construction (`_declare_local`,
-        or — T10 — the engines CRUD routes themselves) sees policy defaults
-        that track the edit, the same as production. `_ENGINES` is still
-        what `make_app` SEEDS node_store with below, so every test that never
-        calls `_declare_local` sees byte-identical behavior to before this
-        fixture fix (disclosed, T10: the static version predates any test
-        combining `_declare_local` with a policy assertion, so this gap was
-        never exercised until T10's forget-deletes-the-policy-row test)."""
-        local = deck["node_store"].get("local")
-        engines = local.get("engines", []) if local is not None else []
-        declared = {}
-        for engine in engines:
-            if "resource" in engine and "policy_defaults" in engine:
-                declared[engine["resource"]] = engine["policy_defaults"]
-        return declared
+        """Provide declared policy defaults LIVE off node_store (mirrors
+        app.main._build_deck's own same-named helper) — not a frozen snapshot
+        of the module-level `_ENGINES` fixture, so a test that edits the
+        declaration after construction (`_declare_local`, or — T10 — the
+        engines CRUD routes themselves) sees policy defaults that track the
+        edit, the same as production. `_ENGINES` is still what `make_app`
+        SEEDS node_store with below, so every test that never calls
+        `_declare_local` sees byte-identical behavior to before this fixture
+        fix (disclosed, T10: the static version predates any test combining
+        `_declare_local` with a policy assertion, so this gap was never
+        exercised until T10's forget-deletes-the-policy-row test).
+
+        Delegates to app.policy.declared_defaults (sglang-omni Task 9), which
+        is what production wires too: this used to be a hand-rolled walk of
+        the LOCAL entry alone, and a mirror that walks a different set from
+        the real one is how a test proves a seeding property production does
+        not have."""
+        return declared_defaults(deck["node_store"])
 
     deck.update(
         {
@@ -4030,39 +4030,94 @@ def test_declaring_sglang_omni_on_a_node_agent_entry_is_accepted(
     assert deck["node_store"].get("nimbus")["engines"] == [_REMOTE_OMNI_BODY]
 
 
-def test_forget_engine_on_a_node_agent_node_does_not_pop_a_same_named_local_policy_row(
+def test_a_remote_engine_gets_its_policy_row_from_its_own_declaration(
         tmp_path, monkeypatch):
-    """SUCCESSOR to the 404 tripwire above (controller ruling R7): now that
-    a remote engine can really be declared, prove the property the tripwire
-    was standing guard over.
+    """sglang-omni Task 9: policy rows are auto-created from `policy_defaults`
+    at declaration time for a REMOTE engine exactly as E1 does for a local one
+    — the same walk (app.policy.declared_defaults), extended past the local
+    entry rather than forked. The declared values (priority 5 / idle_ttl 120)
+    are away from every legacy default, so a row that appeared by coincidence
+    would not match."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
 
-    PolicyStore is node-BLIND — its rows are keyed by bare resource
-    (app/policy.py), its declared-defaults source reads only the LOCAL
-    entry's engines[], and app.arbiter indexes it by bare resource — so an
-    ungated `policy_store.forget(resource)` in `forget_engine` would pop the
-    unrelated LOCAL row of the same name. Resource names are unique per
-    NODE, never globally, so "song-r" on nimbus and "song-r" on this box are
-    two different things; forgetting one must not silently un-pin the other.
+    r = TestClient(app).post("/api/nodes/nimbus/engines", json=_REMOTE_OMNI_BODY)
 
-    The stored override (pinned=True, idle_ttl 240 — both away from the
-    declared defaults, [[defaults-that-hide-bugs]]) is what makes this
-    detectable: without the guard the row is popped and `get()` falls back
-    to the DECLARED defaults, which are deliberately different values."""
+    assert r.status_code == 200
+    assert TestClient(app).get("/api/policy").json()["song-r"] == (
+        _REMOTE_OMNI_BODY["policy_defaults"])
+
+
+def test_forget_engine_on_a_node_agent_node_pops_its_own_policy_row(
+        tmp_path, monkeypatch):
+    """RE-EXPRESSED (sglang-omni Task 9, ruling R10; was
+    test_forget_engine_on_a_node_agent_node_does_not_pop_a_same_named_local_policy_row).
+
+    That test proved R7's GUARD — `forget_engine` skipping the policy write
+    for any non-local node — and the guard existed for one reason: a remote
+    engine had no policy row of its own to forget (nothing seeded one), so a
+    bare-resource `forget` could only ever hit the unrelated LOCAL row of the
+    same name. Both halves of that premise are gone. This task seeds remote
+    rows, so there IS a row to forget; and R10 makes a resource name unique
+    across the whole deck, so a bare-resource key resolves to exactly one
+    declaration and "the local row of the same name" is no longer a state the
+    registry can even hold (its refusal is the sibling test below).
+
+    So the guard is lifted and this proves the new truth: forget is
+    bookkeeping for the engine actually being forgotten, on whichever node it
+    lives. The stored override (pinned=True, idle_ttl 240, both away from the
+    declared defaults [[defaults-that-hide-bugs]]) is what makes the pop
+    detectable — a row that merely fell back to declared defaults would look
+    different from this one either way."""
     app, deck = make_app(tmp_path, monkeypatch)
     _add_remote_node(deck)
     deck["node_store"].update("nimbus", {"engines": [_REMOTE_OMNI_BODY]})
-    # A LOCAL resource of the same name, with its own stored override.
-    _declare_local(deck, [{**_GGUF_A_ENTRY, "resource": "song-r"}])
-    override = {"priority": 33, "pinned": True, "idle_ttl": 240}
-    deck["policy_store"].put({"song-r": override})
+    deck["policy_store"].put({"song-r": {"priority": 33, "pinned": True,
+                                         "idle_ttl": 240}})
 
     r = TestClient(app).delete("/api/nodes/nimbus/engines/song-r")
 
     assert r.status_code == 200
     assert deck["node_store"].get("nimbus")["engines"] == []
-    # The local policy row is untouched — not merely present, but still
-    # carrying the OVERRIDE rather than the declaration's defaults.
-    assert deck["policy_store"].get()["song-r"] == override
+    # Undeclared now, so invisible on read — and gone from the FILE, which is
+    # what "erase the row" means (a later re-declaration of the same name
+    # must not silently inherit this override).
+    assert "song-r" not in deck["policy_store"].get()
+    assert "song-r" not in json.loads((tmp_path / "policy.json").read_text())
+
+
+def test_declaring_a_resource_another_node_owns_is_refused_naming_the_owner(
+        tmp_path, monkeypatch):
+    """The gate that makes the lifted forget above safe (ruling R10), at the
+    surface an operator meets: a resource name may be declared on exactly ONE
+    node deck-wide, and the 422 names both the resource and the node that
+    already owns it — the operator is editing the local entry and cannot see
+    nimbus's declaration.
+
+    This is the SUCCESSOR to the anti-collision property the R7 tripwire
+    guarded: "forgetting nimbus/song-r must not pop the local song-r row" is
+    now unfalsifiable by construction, because there is no way to declare
+    both."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _add_remote_node(deck)
+    deck["node_store"].update("nimbus", {"engines": [_REMOTE_OMNI_BODY]})
+
+    r = TestClient(app).post("/api/nodes/local/engines",
+                             json={**_GGUF_A_ENTRY, "resource": "song-r"})
+
+    # A plain-string 422 from the store's own gate, not a body-shape error:
+    # the defect is a conflict with state this request cannot see, the same
+    # posture the node-agent operability prereqs already take (this router's
+    # module docstring).
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "song-r" in detail
+    assert "nimbus" in detail
+    # Refused before any write: the local declaration is untouched, and the
+    # remote engine still owns the name.
+    assert [e["resource"] for e in deck["node_store"].get("local")["engines"]] == [
+        e["resource"] for e in _ENGINES]
+    assert deck["node_store"].get("nimbus")["engines"] == [_REMOTE_OMNI_BODY]
 
 
 def test_forget_engine_on_a_node_agent_node_still_forgets_its_own_intent(

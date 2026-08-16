@@ -54,10 +54,10 @@ from pydantic import BaseModel
 from app.engine_kinds import ENGINE_KINDS, KNOWN_KINDS, validate_engines
 from app.engines import EngineError
 from app.events import log_event
-# `_LOCAL_NODE` ("local") imported rather than spelled here, the same way
-# app.arbiter takes it: one definition of the local node's id, next to the
-# `node_key`/`local_key` builders that encode it.
-from app.observe import _LOCAL_NODE, node_key
+# `node_key` imported rather than spelled here, the same way app.arbiter
+# takes it: one definition of the `<node>/<resource>` key shape, next to the
+# `local_key` builder that fixes its node half.
+from app.observe import node_key
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 kinds_router = APIRouter(tags=["engine-kinds"])
@@ -387,35 +387,30 @@ def forget_engine(node_id: str, resource: str, request: Request) -> dict:
     `node_key("local", r)` is `local_key(r)` exactly, so the local path is
     byte-identical.
 
-    `policy_store.forget(resource)` below is the ONE write in this function
-    that is still node-blind, and deliberately so — not because it is
-    already correct for any node, but because PolicyStore has no node
-    dimension ANYWHERE (app/policy.py: `{resource: {...}}`, flat; its
-    declared-defaults source, app.main._get_declared_policy_defaults, reads
-    only the LOCAL entry's engines[]; app.arbiter's `policy.get(resource)`
-    indexes it by bare resource). Node-scoping the key HERE alone would
-    leave the seeder and the reader disagreeing with the forgetter about
-    what a row is called — the worse failure, and exactly the kind of
-    half-migration that only shows up at the seam. Task 9 owns policy for
-    remote engines end to end ("policy rows auto-created from
-    policy_defaults at declaration time for remote engines exactly as E1
-    does for local") and must resolve this key with them.
+    `policy_store.forget(resource)` below is node-BLIND by key, and correct
+    for every node since sglang-omni Task 9 (controller ruling R10). Two
+    things landed together to make that true, and neither works without the
+    other:
 
-    So it is GATED on the local node (sglang-omni Task 7, controller ruling
-    R7) rather than node-scoped or left open. The rationale is not "remote
-    policy is someone else's problem": it is that a remote engine's policy
-    row CANNOT EXIST yet — nothing seeds one until Task 9 does — so there
-    is nothing for a remote forget to forget, and the only thing an ungated
-    call could actually hit is the unrelated LOCAL row of the same name.
-    Resource names are unique per NODE, never globally, so "song-r" on a
-    node-agent entry and "song-r" here are two different things; popping
-    the local one would silently un-pin a resource nobody asked about. When
-    Task 9 seeds remote rows it must revisit this line WITH the keying
-    decision — the guard is the placeholder for that decision, not a
-    substitute for it. tests/test_api.py's
-    ...does_not_pop_a_same_named_local_policy_row is the proof, and the
-    successor to the tripwire that used to stand here (that test's own
-    docstring records the handover)."""
+    * policy rows are now seeded from EVERY entry's engines[]
+      (app.policy.declared_defaults), so a remote engine really has a row of
+      its own to forget — under R7 it had none, which is why that ruling
+      GATED this call on the local node rather than node-scoping it;
+    * a resource name is now unique across the whole deck
+      (app.node_store's `_require_unique_resources`, refusing at the
+      declaration boundary, `_heal_unique_resources` healing a hand-edit),
+      so a bare resource key resolves to exactly ONE declaration. "The
+      unrelated LOCAL row of the same name" — the collision R7's guard
+      existed to avoid — is no longer a state the registry can hold.
+
+    PolicyStore itself keeps its flat `{resource: {...}}` rows and gains no
+    node dimension: R10 buys the unambiguity at the boundary the names enter
+    through instead, which is one gate rather than a keying migration
+    through the store, its declared-defaults source, `app.arbiter`'s
+    `policy.get(resource)` lookup, the policy router and the UI.
+    tests/test_api.py's ...pops_its_own_policy_row and
+    ...refused_naming_the_owner are the pair that proves it (the first
+    records the handover from R7's tripwire)."""
     deck = request.app.state.deck
     store = deck["node_store"]
     node = _node_or_404(deck, node_id)
@@ -466,14 +461,12 @@ def forget_engine(node_id: str, resource: str, request: Request) -> dict:
     # local node — so this line is unchanged for every reachable caller
     # today and correct for the remote ones Task 7 unlocks.
     deck["intent_store"].forget(node_key(node_id, resource))
-    # Local only (ruling R7) — still bare-resource-keyed, so on any other
-    # node this key would name the LOCAL resource of the same name rather
-    # than the one being forgotten. A remote engine has no policy row to
-    # forget until Task 9 seeds them; see this function's docstring for why
-    # the guard is Task 9's decision point rather than a half-migration
-    # done here.
-    if node_id == _LOCAL_NODE:
-        deck["policy_store"].forget(resource)
+    # Every node (ruling R10, sglang-omni Task 9 — R7's local-only guard is
+    # lifted): the row belongs to THIS resource wherever it was declared,
+    # because a resource name can only be declared on one node deck-wide.
+    # See this function's docstring for the two changes that make the bare
+    # key unambiguous.
+    deck["policy_store"].forget(resource)
     _reobserve(deck, node)
     log_event(deck["events_path"], "engine-removed",
               {"node": node_id, "resource": resource})

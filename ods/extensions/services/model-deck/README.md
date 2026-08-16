@@ -174,7 +174,7 @@ container verb on a newly declared engine):
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/engine-kinds` | Every known kind's connection schema + `human_verbs` |
-| `POST` | `/api/nodes/local/engines` | Declare a new resource. 422 (one-line reason) for a shape/kind defect; 409 if `resource` is already declared |
+| `POST` | `/api/nodes/local/engines` | Declare a new resource. 422 (one-line reason) for a shape/kind defect; 409 if `resource` is already declared on THIS node; 422 naming the owning node if ANOTHER node already declares that resource name (see **Resource names are deck-wide** below) |
 | `PUT` | `/api/nodes/local/engines/{resource}` | Full-entry replace. The body's `resource` must equal the path — renaming is refused (422: "rename is refused; forget and re-add instead"), never coerced. 404 if `{resource}` isn't currently declared |
 | `DELETE` | `/api/nodes/local/engines/{resource}` | **Forget** (see below). 404 if unknown |
 
@@ -188,6 +188,17 @@ as it was; the deck simply stops watching and stops arbitrating it. To
 actually stop the underlying process, do that separately (e.g. `docker
 stop`) before or after forgetting the declaration — the two are
 intentionally decoupled.
+
+**Resource names are deck-wide:** a resource name may be declared on
+exactly ONE node. The write gate refuses a name another node already
+declares (422 naming both the resource and the owning node), and a
+hand-edited `nodes.json` holding a duplicate heals on load — the first
+entry in file order keeps the name, the later one loses that one engine
+and keeps the rest. This is what lets policy rows stay keyed by bare
+resource (`policy.json` has no node dimension): a row unambiguously belongs
+to one declaration, so forgetting an engine on any node forgets *its* row.
+Intent and observation stay node-keyed (`<node>/<resource>`) regardless — a
+key still has to say which box.
 
 **Park-allowlist prerequisite (container verbs only):** declaring a
 resource is enough for the deck to *observe* it, apply VRAM policy to it,

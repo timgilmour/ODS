@@ -528,9 +528,14 @@ def test_observe_remote_on_a_world_with_no_remote_half_is_empty():
 
 
 def test_local_and_remote_resources_of_the_same_name_do_not_collide():
-    """Resource names are unique per NODE, not globally — two nodes may each
-    declare "gguf-r". Node-keying is what keeps them two observations
-    instead of one overwriting the other."""
+    """Node-keying is what keeps two same-named resources two observations
+    instead of one overwriting the other.
+
+    Still worth pinning HERE after Task 9's deck-wide uniqueness gate (ruling
+    R10) refused that declaration at the boundary: this layer is pure mapping
+    over whatever world it is handed, and a hand-edited nodes.json really can
+    hold the collision until `NodeStore._load`'s heal runs. The observation
+    layer must not need the registry to be right."""
     local = _world()
     local["tenants"] = {"gguf-r": {"state": "loaded", "model": "local.gguf",
                                    "footprint": 1, "idle_s": 0,
