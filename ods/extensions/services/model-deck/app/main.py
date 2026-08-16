@@ -640,6 +640,13 @@ def create_app() -> FastAPI:
     # registration order, and /api/nodes/{id}/serving/... must never risk
     # falling into a nodes route registered ahead of it.
     app.include_router(serving.router, prefix="/api")
+    # Its sibling in the same module (sglang-omni Task 8): POST
+    # /api/nodes/{id}/engines/{resource}/{verb}, the remote counterpart of
+    # /api/tenants/{resource}/{verb}. Registered here, ahead of
+    # nodes_router, for the same registration-order reason as the line
+    # above — nodes_router owns the rest of the /api/nodes/{id}/engines
+    # space (the declaration CRUD).
+    app.include_router(serving.engines_router, prefix="/api")
     app.include_router(lifecycle.router, prefix="/api")
     app.include_router(storage.router, prefix="/api")
     app.include_router(facts.router, prefix="/api")

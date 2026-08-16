@@ -18,36 +18,67 @@ resource's declared KIND doesn't support (its ``app.engine_kinds`` adapter's
 ``human_verbs()``) is a 405 naming the kind — both strings are
 UI-catalogued verbatim (Task 11).
 
-human_verbs() is disjoint across kinds (load/unload only ever come from a
-lemonade-kind resource, free only from comfyui, park/resume only from
-hipfire — enforced by the 405 check above before any handler runs), so the
-verb alone is enough to pick the right handler below; no kind-name literal
-is needed in the dispatcher itself (spec §8: engine-kind names live in
-app.engine_kinds, not here). ``dispatch`` DOES compute ``kind`` though (the
-404/405 checks above need it), and threads it into every handler below —
-each records its intent with ``engine=kind`` rather than a hardcoded
-``"lemonade"``/``"hipfire"`` literal (final-review item 2). Human_verbs'
-disjointness is exactly why that literal happened to be correct for every
-resource that could ever reach it, kind-name-matching-resource-name
-coincidences of the seeded triple aside — a future non-disjoint kind, or
-simply removing the coincidence, would have silently mis-recorded which
-adapter owns the intent (``app.reconcile.plan_reconcile`` reads
-``intent["engine"]`` straight into the restore action's adapter lookup,
-``app.arbiter``:1178).
+Dispatch goes through ``_HANDLERS``, a table keyed ``(kind, verb)`` — NOT
+by verb alone (sglang-omni Task 8). Until a fourth engine kind existed,
+human_verbs() happened to be disjoint across kinds (load/unload only ever
+came from a lemonade-kind resource, free only from comfyui, park/resume only
+from hipfire), so the verb alone identified the handler. That is no longer a
+property anything enforces: the sglang-omni kind claims load/unload too, and
+nothing stops a later kind from claiming park. Keyed by the pair, a verb
+name shared by two kinds resolves to each kind's OWN row — or to no row at
+all, which is refused (501) rather than silently handed to whichever legacy
+handler owns that verb name. The three legacy kinds' rows are the same five
+handlers as before, so today's URLs behave byte-identically
+(tests/test_api.py's ``/tenants/*`` suite is the proof, unmodified).
 
-``LoadBody``/``UnloadBody`` are constructed HERE, inside ``dispatch``, not
-via FastAPI's automatic body binding (there is no single pydantic model
-that fits every verb's body shape at the route-decorator level, since the
-verb itself decides which body class applies). Hand-rolling the
-construction means a ``ValidationError`` it raises does NOT go through
-FastAPI's normal path — pydantic v2's ``ValidationError`` subclasses
-``ValueError``, so an uncaught one would land on ``app.main``'s bare
-``ValueError`` handler instead of the REDACTING ``RequestValidationError``
-one, echoing the raw request body (``input``) into the 422 (final-review
-item 1). Caught and re-raised as ``RequestValidationError(exc.errors())``
-below, the same idiom ``app.routers.sets.create_set`` and
-``app.routers.nodes``'s ``_shape_error`` already established for the
-identical hand-rolled-validation shape.
+The table's KEYS spell the three legacy kind names, which the pre-Task-8
+verb-only chain did not — a deliberate, DECLARED residue under spec §8 (no
+engine name in app/ outside app.engine_kinds), in the same module whose
+handlers are already called ``_lemonade_load``/``_comfy_free``/
+``_hipfire_park``. It buys the thing §8 exists to protect: which ADAPTER
+owns a resource. ``dispatch`` computes ``kind`` regardless (the 404/405
+checks need it) and threads it into every handler, each recording its intent
+with ``engine=kind`` rather than a hardcoded literal (final-review item 2) —
+and ``app.reconcile.plan_reconcile`` reads ``intent["engine"]`` straight into
+the restore action's adapter lookup (``app.arbiter``:1178). A verb-only
+dispatch that sent a second load/unload kind to the lemonade handler would
+therefore also record it under the wrong adapter, which is the bug this
+keying makes unrepresentable. Nothing else here names a kind: the vocabulary
+(405) still comes from the adapter's own ``human_verbs()``, never from this
+table.
+
+Every handler takes the SAME ``(deck, resource, kind, body, force, pull)``
+signature so the table has one call shape and ``dispatch`` needs no per-verb
+branch; a handler ignoring the arguments its verb has no use for is the
+adapter-interface uniformity app.engine_kinds' own protocol already uses
+(see ``_HipfireAdapter.observe``'s unused ``mem``). Each verb's BODY class
+is constructed inside the handler that needs one, for the same reason it
+used to be constructed in ``dispatch``: there is no single pydantic model
+that fits every verb's body at the route-decorator level.
+
+REMOTE engines are not dispatched here at all. This router reads the LOCAL
+node's declaration (``_declared_kind``), and a remote-only kind cannot be
+declared there (``app.engine_kinds.KNOWN_KINDS``' ``local_capable``), so
+``/tenants/*`` stays exactly what it was: the local surface.
+``POST /api/nodes/{node_id}/engines/{resource}/{verb}``
+(``app.routers.serving``) is the remote one.
+
+``LoadBody``/``UnloadBody`` are constructed HERE (in ``_validated``, called
+by the handler whose verb takes that body — inside ``dispatch`` itself until
+Task 8 made every handler share one signature), not via FastAPI's automatic
+body binding: there is no single pydantic model that fits every verb's body
+shape at the route-decorator level, since the verb itself decides which body
+class applies. Hand-rolling the construction means a ``ValidationError`` it
+raises does NOT go through FastAPI's normal path — pydantic v2's
+``ValidationError`` subclasses ``ValueError``, so an uncaught one would land
+on ``app.main``'s bare ``ValueError`` handler instead of the REDACTING
+``RequestValidationError`` one, echoing the raw request body (``input``)
+into the 422 (final-review item 1). Caught and re-raised as
+``RequestValidationError(exc.errors())`` below, the same idiom
+``app.routers.sets.create_set`` and ``app.routers.nodes``'s ``_shape_error``
+already established for the identical hand-rolled-validation shape. It runs
+BEFORE that handler's own guards, the order ``dispatch`` gave it: a
+malformed body is a 422 whether or not the host agent happens to be busy.
 
 Engine exceptions (GuardError, BusyError, EngineError) are deliberately left
 to propagate uncaught — ``app.main`` registers app-wide exception handlers
@@ -69,6 +100,12 @@ deliberate park from a dead backend. Two placement rules, both load-bearing:
   intent, not stale state; a call that raises is retried under the failure
   budget, not un-recorded (2026-08-06 design ruling). Either way, guards and
   model resolution still run first: a refused (409) action records nothing.
+  The REMOTE verb route (``app.routers.serving.engine_verb``) is the same
+  exception taken further — its call is 202-async and the engine behind it
+  takes minutes to boot — with the one difference the length buys: it
+  snapshots the prior record and compare-and-swaps it back when the request
+  itself raises, since "the POST never left" is knowable there in a way
+  "the load failed" is not here.
 * **``state="unloaded"`` is intent, not its absence.** A park writes a
   record; it never deletes one. Deleting would make a deliberate unload
   indistinguishable from "nobody ever asked", and the reconciler would
@@ -160,9 +197,9 @@ def _declared_kind(deck, resource: str) -> str | None:
 def dispatch(resource: str, verb: str, request: Request,
              body: dict | None = Body(default=None),
              force: bool = False, pull: bool = False) -> dict:
-    """Generic control dispatch (E1 Task 7). See module docstring for the
-    404/405 contract and why the verb alone (not a kind-name literal) is
-    enough to pick a handler below."""
+    """Generic control dispatch (E1 Task 7, keyed by ``(kind, verb)`` since
+    sglang-omni Task 8). See the module docstring for the 404/405/501
+    contract and why the verb alone can no longer pick a handler."""
     deck = request.app.state.deck
     kind = _declared_kind(deck, resource)
     if kind is None:
@@ -172,30 +209,46 @@ def dispatch(resource: str, verb: str, request: Request,
             status_code=405,
             detail=f"{resource} ({kind}) does not support {verb}",
         )
-
-    if verb == "load":
-        try:
-            load_body = LoadBody(**(body or {}))
-        except ValidationError as exc:
-            raise RequestValidationError(exc.errors()) from exc
-        return _lemonade_load(deck, resource, kind, load_body, force, pull)
-    if verb == "unload":
-        try:
-            unload_body = UnloadBody(**(body or {}))
-        except ValidationError as exc:
-            raise RequestValidationError(exc.errors()) from exc
-        return _lemonade_unload(deck, resource, kind, unload_body, force)
-    if verb == "free":
-        return _comfy_free(deck, resource)
-    if verb == "park":
-        return _hipfire_park(deck, resource, kind, force)
-    return _hipfire_resume(deck, resource, kind, force)  # verb == "resume"
+    handler = _HANDLERS.get((kind, verb))
+    if handler is None:
+        # The kind's own vocabulary says this verb exists (the 405 above
+        # passed) but this router has no row for the pair — a wiring gap in
+        # the deck, not a bad request. Refused by name rather than falling
+        # through to another kind's handler for the same verb name, the
+        # totality floor app.arbiter._dispatch_verb takes for its own
+        # can't-happen branch. 501, the status app.main already gives an
+        # UnbuiltMechError: the DECK declining, not the engine failing.
+        raise HTTPException(
+            status_code=501,
+            detail=f"{resource} ({kind}) declares {verb} but this deck has "
+                   f"no local handler for it",
+        )
+    return handler(deck, resource, kind, body, force, pull)
 
 
-def _lemonade_load(deck, resource: str, kind: str, body: LoadBody, force: bool, pull: bool) -> dict:
+def _validated(model_cls, body: dict | None):
+    """Construct this verb's body model from the raw body.
+
+    Hand-rolled (see the module docstring): a ``ValidationError`` raised
+    here would otherwise land on ``app.main``'s bare ``ValueError`` handler
+    — pydantic v2's subclasses ``ValueError`` — instead of the REDACTING
+    ``RequestValidationError`` one, echoing the raw request body into the
+    422 (final-review item 1)."""
+    try:
+        return model_cls(**(body or {}))
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def _lemonade_load(deck, resource: str, kind: str, body: dict | None,
+                   force: bool, pull: bool) -> dict:
+    # Validated BEFORE the host-agent guard, the order dispatch's own
+    # per-verb body construction used to give this handler: a malformed body
+    # is a 422 whether or not the host agent happens to be busy.
+    asked = _validated(LoadBody, body)
     _ensure_host_agent_idle(deck, force)
     client = deck["local_clients"].client_for(resource)
-    model = body.model
+    model = asked.model
     if not model.startswith(_EXTRA_PREFIX):
         model = f"{_EXTRA_PREFIX}{model}"
     bare = model.removeprefix(_EXTRA_PREFIX)
@@ -350,10 +403,14 @@ def _pull_through(deck, resource: str, kind: str, bare: str, unit: dict, pull: b
     return {"status": "pulling", "job": job["id"]}
 
 
-def _lemonade_unload(deck, resource: str, kind: str, body: UnloadBody, force: bool) -> dict:
+def _lemonade_unload(deck, resource: str, kind: str, body: dict | None,
+                     force: bool, pull: bool) -> dict:
+    # `pull` is unused for this verb (see the module docstring on the shared
+    # handler signature). Body validated first, same order as the load arm.
+    asked = _validated(UnloadBody, body)
     _ensure_host_agent_idle(deck, force)
     client = deck["local_clients"].client_for(resource)
-    model = body.model
+    model = asked.model
     if model is None:
         model = client.status()["loaded"]
         if not model:
@@ -372,12 +429,17 @@ def _lemonade_unload(deck, resource: str, kind: str, body: UnloadBody, force: bo
     return {"status": "ok"}
 
 
-def _comfy_free(deck, resource: str) -> dict:
+def _comfy_free(deck, resource: str, kind: str, body: dict | None,
+                force: bool, pull: bool) -> dict:
+    # free takes no body and no flags: it is deliberately unguarded (see
+    # _ensure_host_agent_idle) and records nothing (see the module
+    # docstring). The unused parameters are the shared handler signature.
     deck["local_clients"].client_for(resource).free()
     return {"status": "ok"}
 
 
-def _hipfire_park(deck, resource: str, kind: str, force: bool) -> dict:
+def _hipfire_park(deck, resource: str, kind: str, body: dict | None,
+                  force: bool, pull: bool) -> dict:
     # ?force=true skips the conversation-guard, never the route guard; the
     # host-agent busy guard below shares the same flag.
     _ensure_host_agent_idle(deck, force)
@@ -388,7 +450,8 @@ def _hipfire_park(deck, resource: str, kind: str, force: bool) -> dict:
     return {"status": "ok"}
 
 
-def _hipfire_resume(deck, resource: str, kind: str, force: bool) -> dict:
+def _hipfire_resume(deck, resource: str, kind: str, body: dict | None,
+                    force: bool, pull: bool) -> dict:
     _ensure_host_agent_idle(deck, force)
     deck["local_clients"].client_for(resource).resume()
     # model=None, not a name: hipfire is single-model and the Deck does not
@@ -399,3 +462,16 @@ def _hipfire_resume(deck, resource: str, kind: str, force: bool) -> dict:
         local_key(resource), state="loaded", model=None, engine=kind
     )
     return {"status": "ok"}
+
+
+# (kind, verb) -> the handler that performs it, all five rows the same
+# functions the pre-Task-8 verb-only chain called, in the same order. See
+# the module docstring for why the KIND is half the key and what a missing
+# row means. Defined here, below its handlers, so the names resolve.
+_HANDLERS = {
+    ("lemonade", "load"): _lemonade_load,
+    ("lemonade", "unload"): _lemonade_unload,
+    ("comfyui", "free"): _comfy_free,
+    ("hipfire", "park"): _hipfire_park,
+    ("hipfire", "resume"): _hipfire_resume,
+}

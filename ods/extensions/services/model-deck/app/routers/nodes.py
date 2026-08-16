@@ -217,6 +217,29 @@ def _node_or_404(deck: dict, node_id: str) -> dict:
     return node
 
 
+def _reobserve(deck: dict, node: dict) -> None:
+    """Drop the cached REMOTE half of the world after a declaration edit on
+    `node` (sglang-omni Task 8, deferred from Task 7's review).
+
+    The remote half is TTL-cached 10 s (app.node_clients.RemoteObserver), so
+    without this a newly declared engine is absent from the board — and a
+    forgotten one still on it — for up to a full TTL after a write that
+    already succeeded, which reads as "the deck ignored me".
+
+    GATED on the node being a non-local entry, matching the predicate the
+    assembly itself walks by (``remote_engine_declarations`` skips
+    ``agent_kind == "local"``): a local declaration cannot change anything
+    the observer holds, and invalidating clears every node's BACKOFF too —
+    so an ungated call would re-probe powered-off boxes (5 s transport
+    timeout each) on the next request, for an edit that provably cannot
+    affect them."""
+    if node["agent_kind"] == "local":
+        return
+    observer = deck.get("remote_observer")
+    if observer is not None:
+        observer.invalidate()
+
+
 def _shape_error(msg: str, *loc: str) -> RequestValidationError:
     """Wrap a body-shape defect as a RequestValidationError (module
     docstring: never the bare ValueError handler for a request body) —
@@ -255,6 +278,7 @@ def add_engine(node_id: str, body: dict, request: Request) -> dict:
         raise HTTPException(status_code=409,
                             detail=f"engine {resource!r} already exists")
     entry = store.update(node_id, {"engines": engines + [body]})
+    _reobserve(deck, node)
     log_event(deck["events_path"], "engine-added",
               {"node": node_id, "resource": resource, "kind": body["kind"]})
     return next(e for e in entry["engines"] if e["resource"] == resource)
@@ -343,6 +367,7 @@ def update_engine(node_id: str, resource: str, body: dict, request: Request) -> 
         deck["intent_store"].forget(node_key(node_id, resource))
     new_engines = [body if e["resource"] == resource else e for e in engines]
     entry = store.update(node_id, {"engines": new_engines})
+    _reobserve(deck, node)
     log_event(deck["events_path"], "engine-updated",
               {"node": node_id, "resource": resource})
     return next(e for e in entry["engines"] if e["resource"] == resource)
@@ -449,6 +474,7 @@ def forget_engine(node_id: str, resource: str, request: Request) -> dict:
     # done here.
     if node_id == _LOCAL_NODE:
         deck["policy_store"].forget(resource)
+    _reobserve(deck, node)
     log_event(deck["events_path"], "engine-removed",
               {"node": node_id, "resource": resource})
     return {"status": "ok"}
