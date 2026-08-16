@@ -8,8 +8,17 @@ the declaration alone, never inferred from data presence.
 import httpx
 import pytest
 
-from app.node_clients import NodeClients, NodeObservers
+from app.engines.node_agent import NodeAgentUnreachable
+from app.node_clients import (
+    NodeClients,
+    NodeObservers,
+    RemoteEngineClients,
+    read_remote_gpus,
+    remote_engine_declarations,
+    remote_world_half,
+)
 from app.node_store import NodeStore
+from app.state import World
 
 
 class FakeClient:
@@ -193,3 +202,288 @@ def test_invalidate_reaches_the_right_observer(store, clients):
     observers.snapshot()
     observers.invalidate("boxb")
     assert calls == ["boxb"]
+
+
+# ===========================================================================
+# sglang-omni Task 6 — RemoteEngineClients + the remote half of the world.
+#
+# Fixture discipline ([[defaults-that-hide-bugs]]): node "nimbus" (NOT
+# "sparky"), resource "gguf-r" (NOT "omni"), resource != kind name,
+# gpu_index 4. The registry states here are HAND-BUILT (conftest's
+# HandBuiltRegistry) because the Task 5 write gate refuses declaring any
+# kind on a node-agent entry until Task 7 flips the first `remote_capable`
+# one — see that class's docstring; the gate is deliberately not weakened.
+# ===========================================================================
+
+_R_CONNECTION = {"url": "http://gguf-r:8080",
+                 "metrics_url": "http://gguf-r:8081/metrics",
+                 "container": "gguf-r"}
+
+_R_ENGINE = {"resource": "gguf-r", "kind": "lemonade",
+             "connection": _R_CONNECTION, "gpu_index": 4,
+             "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}}
+
+
+def _entries():
+    return [
+        {"id": "local", "label": "This Box", "agent_kind": "local",
+         "control": "none",
+         "engines": [{"resource": "gguf-a", "kind": "lemonade",
+                      "connection": {"url": "http://gguf-a:8080",
+                                     "metrics_url": "http://gguf-a:8081/metrics",
+                                     "container": "gguf-a"},
+                      "gpu_index": 2,
+                      "policy_defaults": {"priority": 50, "pinned": False,
+                                          "idle_ttl": 900}}]},
+        {"id": "nimbus", "label": "Nimbus Box", "agent_kind": "node-agent",
+         "address": "http://nimbus:7720", "control": "none",
+         "engines": [dict(_R_ENGINE)]},
+        # Reachable, credentialled, declares NOTHING — must never produce a
+        # declaration, a client, or a GPU probe.
+        {"id": "bystander", "label": "Bystander", "agent_kind": "node-agent",
+         "address": "http://bystander:7720", "control": "none", "engines": []},
+    ]
+
+
+@pytest.fixture
+def registry(hand_built_registry):
+    return hand_built_registry(_entries(),
+                               {"nimbus": "key-nimbus", "bystander": "key-by"})
+
+
+class _FakeAgent:
+    """NodeAgentClient-shaped: `gpu()` + `close()` only (the two the remote
+    GPU read actually calls)."""
+
+    def __init__(self, payload=None, raises=None) -> None:
+        self.payload = payload
+        self.raises = raises
+        self.closed = False
+        self.calls = 0
+
+    def gpu(self) -> dict:
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self.payload
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _agent_factory(agent):
+    """One recording factory returning the SAME agent for every address."""
+    opened = []
+
+    def factory(address, credential):
+        opened.append((address, credential))
+        return agent
+
+    factory.opened = opened
+    return factory
+
+
+class _RemoteEngineClient:
+    def __init__(self, entry, credential, engine) -> None:
+        self.entry = dict(entry)
+        self.credential = credential
+        self.engine = dict(engine)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+# --- the declaration walk ---------------------------------------------------
+
+
+def test_remote_engine_declarations_skips_the_local_entry(registry):
+    declared = remote_engine_declarations(registry)
+
+    assert [e["resource"] for e in declared] == ["gguf-r"]
+
+
+def test_remote_engine_declarations_stamp_the_owning_node_id(registry):
+    """The engine entry alone doesn't say which box it is on; everything
+    downstream keys off this stamp."""
+    declared = remote_engine_declarations(registry)
+
+    assert declared[0]["node_id"] == "nimbus"
+    assert declared[0]["kind"] == "lemonade"
+    assert declared[0]["gpu_index"] == 4
+
+
+def test_remote_engine_declarations_on_an_empty_registry_is_empty(
+        hand_built_registry):
+    assert remote_engine_declarations(hand_built_registry([])) == []
+
+
+# --- the per-node GPU pool --------------------------------------------------
+
+
+def test_read_remote_gpus_translates_the_agent_payload_into_the_decks_shape(
+        registry):
+    """The agent reports MiB (models.IndividualGPU.memory_*_mb); the deck's
+    world speaks bytes with a derived `free`. One translation, here."""
+    agent = _FakeAgent({"gpus": [{"index": 4, "memory_total_mb": 8,
+                                  "memory_used_mb": 3}]})
+
+    pools = read_remote_gpus(registry, _agent_factory(agent), {"nimbus"})
+
+    assert pools == {"nimbus": [{"index": 4, "total": 8 * 1024**2,
+                                 "used": 3 * 1024**2,
+                                 "free": 5 * 1024**2}]}
+
+
+def test_read_remote_gpus_is_none_when_the_agent_does_not_answer(registry):
+    agent = _FakeAgent(raises=NodeAgentUnreachable("connection refused"))
+
+    assert read_remote_gpus(registry, _agent_factory(agent),
+                            {"nimbus"}) == {"nimbus": None}
+
+
+def test_read_remote_gpus_is_none_when_the_node_has_no_credential(registry):
+    """"Not set up" and "not answering" must not collapse into a crash —
+    both read as "we could not look", and neither is probed."""
+    registry.set_credential("nimbus", None)
+    agent = _FakeAgent({"gpus": []})
+
+    pools = read_remote_gpus(registry, _agent_factory(agent), {"nimbus"})
+
+    assert pools == {"nimbus": None}
+    assert agent.calls == 0
+
+
+def test_read_remote_gpus_is_none_on_a_malformed_payload(registry):
+    """Malformed heals, never kills the tick (the N1 lesson): a body the
+    agent should never send must not take the arbiter down."""
+    agent = _FakeAgent({"gpus": [{"index": 4}]})   # no memory fields
+
+    assert read_remote_gpus(registry, _agent_factory(agent),
+                            {"nimbus"}) == {"nimbus": None}
+
+
+def test_read_remote_gpus_closes_the_client_it_opened(registry):
+    agent = _FakeAgent({"gpus": []})
+
+    read_remote_gpus(registry, _agent_factory(agent), {"nimbus"})
+
+    assert agent.closed is True
+
+
+def test_read_remote_gpus_never_raises_on_a_hand_edited_address(registry):
+    registry.patch("nimbus", address="not a url")
+
+    def factory(address, credential):
+        raise httpx.InvalidURL(address)
+
+    assert read_remote_gpus(registry, factory, {"nimbus"}) == {"nimbus": None}
+
+
+# --- the lazy, self-healing client map --------------------------------------
+
+
+@pytest.fixture
+def remote_clients(registry):
+    return RemoteEngineClients(registry, _RemoteEngineClient)
+
+
+def test_remote_client_for_a_declared_engine(remote_clients):
+    client = remote_clients.client_for("nimbus", "gguf-r")
+
+    assert client.credential == "key-nimbus"
+    assert client.entry["address"] == "http://nimbus:7720"
+    assert client.engine["connection"] == _R_CONNECTION
+
+
+def test_remote_client_for_same_view_returns_the_same_client(remote_clients):
+    assert (remote_clients.client_for("nimbus", "gguf-r")
+            is remote_clients.client_for("nimbus", "gguf-r"))
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda r: r.patch("nimbus", address="http://nimbus2:7720"),
+    lambda r: r.set_credential("nimbus", "rotated"),
+    lambda r: r.patch("nimbus", engines=[{**_R_ENGINE,
+                                          "connection": {**_R_CONNECTION,
+                                                         "url": "http://moved:8080"}}]),
+])
+def test_remote_client_rebuilds_when_its_binding_changed(
+        registry, remote_clients, mutate):
+    first = remote_clients.client_for("nimbus", "gguf-r")
+
+    mutate(registry)
+    second = remote_clients.client_for("nimbus", "gguf-r")
+
+    assert second is not first
+    assert first.closed is True
+
+
+@pytest.mark.parametrize("node_id, resource", [
+    ("ghost", "gguf-r"),        # no such node
+    ("local", "gguf-a"),        # the local entry is never remote
+    ("bystander", "gguf-r"),    # node-agent, but declares nothing
+    ("nimbus", "gguf-x"),       # node exists, resource is not declared on it
+])
+def test_remote_client_for_a_non_operable_pair_is_none(
+        remote_clients, node_id, resource):
+    assert remote_clients.client_for(node_id, resource) is None
+
+
+def test_remote_client_for_is_none_once_the_credential_vanishes(
+        registry, remote_clients):
+    """design §9: a credential deleted out of band mid-flight. Not operable
+    is a STATE, never an exception raised into a reconciler tick."""
+    built = remote_clients.client_for("nimbus", "gguf-r")
+    registry.set_credential("nimbus", None)
+
+    assert remote_clients.client_for("nimbus", "gguf-r") is None
+    assert built.closed is True
+
+
+def test_remote_client_for_never_raises_on_a_hand_edited_address(registry):
+    def factory(entry, credential, engine):
+        raise httpx.InvalidURL(entry["address"])
+
+    clients = RemoteEngineClients(registry, factory)
+
+    assert clients.client_for("nimbus", "gguf-r") is None
+
+
+def test_remote_client_for_is_none_when_the_kind_has_no_remote_constructor(
+        registry):
+    """The DEFAULT factory dispatches to the engine kind's own remote
+    constructor. A kind that has none cannot run off-box at all — None
+    ("not operable") is the honest answer, not a crash, and no engine name
+    appears in the dispatch."""
+    clients = RemoteEngineClients(registry)
+
+    assert clients.client_for("nimbus", "gguf-r") is None
+
+
+def test_remote_retire_absent_closes_dropped_clients(remote_clients):
+    built = remote_clients.client_for("nimbus", "gguf-r")
+
+    remote_clients.retire_absent({("nimbus", "gguf-z")})
+
+    assert built.closed is True
+
+
+# --- the assembled remote half ----------------------------------------------
+
+
+def test_remote_world_half_is_empty_without_the_wiring(registry):
+    """Every pre-Task-6 caller (unit tests, a watcher built without the
+    remote deps) gets an empty remote half rather than a crash."""
+    assert remote_world_half(registry, None, None, object(), object()) == {
+        "remote_gpus": {}, "remote_tenants": {}}
+
+
+def test_remote_world_half_probes_only_nodes_that_declare_engines(registry):
+    agent = _FakeAgent({"gpus": []})
+    factory = _agent_factory(agent)
+
+    remote_world_half(registry, factory, RemoteEngineClients(registry),
+                      World(), object())
+
+    assert factory.opened == [("http://nimbus:7720", "key-nimbus")]

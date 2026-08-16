@@ -24,6 +24,7 @@ import pytest
 from app.arbiter import HealSuppressor, Watcher, decide
 from app.characteristics import CharacteristicsStore
 from app.engines import EngineError, GuardError
+from app.engines.node_agent import NodeAgentUnreachable
 from app.engines.spark import boot_in_flight
 from app.events import tail_events
 # app.harvest's real sentinel, for the C2 remote-pair end-to-end tests below
@@ -800,7 +801,8 @@ def _make_watcher(
     characteristics_store=None,
     gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
     configurable_engines=None, provenance_store=None, dockerctl=None,
-    node_store=None, local_clients=None, litellm=None, **sett,
+    node_store=None, local_clients=None, litellm=None,
+    remote_engine_clients=None, node_agent_client_factory=None, **sett,
 ):
     # T13 review fix (Critical 1): `litellm` used to be hardcoded to a bare
     # `object()` below with no override — silently correct for every
@@ -847,6 +849,12 @@ def _make_watcher(
         # from the lemonade/comfy/hipfire clients above) instead.
         node_store=node_store,
         local_clients=local_clients,
+        # sglang-omni Task 6: the remote half of the tick's world. Both None
+        # (every caller before that task) means "no remote engines" — the
+        # remote half is skipped entirely, exactly as it is for a deck with
+        # no node-agent entry declaring anything.
+        remote_engine_clients=remote_engine_clients,
+        node_agent_client_factory=node_agent_client_factory,
     )
     return watcher, events_path
 
@@ -4550,3 +4558,175 @@ def test_load_failure_detail_is_bounded(tmp_path):
                   if e["kind"] == "load-failed")
     assert len(failed["detail"]["error"]) < 600
     assert failed["detail"]["error"].endswith("[truncated]")
+
+
+# ===========================================================================
+# sglang-omni Task 6 — remote engine observation inside a real tick.
+#
+# The registry state is HAND-BUILT (conftest's HandBuiltRegistry): the Task 5
+# write gate refuses declaring any kind on a node-agent entry until Task 7
+# flips the first `remote_capable` one, and the gate is deliberately not
+# weakened to make this testable. Fixture discipline: node "nimbus" (NOT
+# "sparky"), resource "gguf-r" (NOT "omni"), resource != kind name, GPU 4.
+# ===========================================================================
+
+_REMOTE_ENGINE = {
+    "resource": "gguf-r", "kind": "lemonade",
+    "connection": {"url": "http://gguf-r:8080",
+                   "metrics_url": "http://gguf-r:8081/metrics",
+                   "container": "gguf-r"},
+    "gpu_index": 4,
+    "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900},
+}
+
+
+class _DownAgent:
+    """A node-agent that is not answering — the normal state of a box that
+    is powered off."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def gpu(self):
+        raise NodeAgentUnreachable("connection refused")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RemoteWatcher:
+    """The Task 6 counterpart of _TwoGgufWatcher: one local lemonade-kind
+    resource plus one engine DECLARED on a remote node whose agent is down."""
+
+    def __init__(self, watcher, clients, intent_store, events_path, world,
+                 registry_store, agent_factory, remote_clients, gpus,
+                 litellm, footprints) -> None:
+        self.watcher = watcher
+        self.clients = clients
+        self.intent_store = intent_store
+        self.events_path = events_path
+        self.world = world
+        self.registry_store = registry_store
+        self.agent_factory = agent_factory
+        self.remote_clients = remote_clients
+        self._gpus = gpus
+        self._litellm = litellm
+        self._footprints = footprints
+
+    def remote_half(self) -> dict:
+        from app.node_clients import remote_world_half
+
+        return remote_world_half(self.registry_store, self.agent_factory,
+                                 self.remote_clients, self.world,
+                                 self._footprints)
+
+
+@pytest.fixture
+def remote_engine_watcher(tmp_path, hand_built_registry):
+    from app.intent import IntentStore
+    from app.node_clients import RemoteEngineClients
+    from app.state import World
+
+    entries = [
+        {"id": "local", "label": "This Box", "agent_kind": "local",
+         "control": "none", "engines": [_TWO_GGUF_ENGINES[1]]},   # gguf-b only
+        {"id": "nimbus", "label": "Nimbus Box", "agent_kind": "node-agent",
+         "address": "http://nimbus:7720", "control": "none",
+         "engines": [dict(_REMOTE_ENGINE)]},
+    ]
+    registry_store = hand_built_registry(entries, {"nimbus": "key-nimbus"})
+
+    agents = []
+
+    def agent_factory(address, credential):
+        agent = _DownAgent()
+        agents.append((address, credential, agent))
+        return agent
+
+    agent_factory.opened = agents
+
+    litellm = _FakeLiteLLMRoutes()
+    footprints = FakeRegistry(footprints={"b.gguf": 5 * GIB})
+    clients = _FakeLocalClients(
+        {"gguf-b": _PendingCapableLemonade(litellm, footprints, loaded=None)})
+    intent_store = IntentStore(tmp_path / "intent.json")
+    world = World()
+    gpus = [{"index": 3, "vram_total": 100, "vram_used": 10, "pids": {}}]
+    remote_clients = RemoteEngineClients(
+        registry_store, lambda entry, credential, engine: _UnreachableRemote())
+
+    watcher, events_path = _make_watcher(
+        tmp_path, world, footprints, _policy(),
+        node_store=registry_store, local_clients=clients,
+        intent_store=intent_store, litellm=litellm,
+        read_gpus=lambda drm, kfd: gpus,
+        remote_engine_clients=remote_clients,
+        node_agent_client_factory=agent_factory,
+    )
+    return _RemoteWatcher(watcher, clients, intent_store, events_path, world,
+                          registry_store, agent_factory, remote_clients, gpus,
+                          litellm, footprints)
+
+
+class _UnreachableRemote:
+    """A remote engine client whose every probe fails — what a real one does
+    while its box is off."""
+
+    def load_in_flight(self) -> bool:
+        return False
+
+    def status(self) -> dict:
+        raise EngineError("nimbus is not answering")
+
+    def activity(self):
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+def test_remote_engine_appears_in_the_world_with_its_node_id(
+        remote_engine_watcher):
+    tenant = remote_engine_watcher.remote_half()["remote_tenants"]["nimbus/gguf-r"]
+
+    assert tenant["node_id"] == "nimbus"
+    assert tenant["resource"] == "gguf-r"
+    assert tenant["gpu_index"] == 4
+
+
+def test_remote_engine_on_a_down_agent_observes_unknown(remote_engine_watcher):
+    """Unknown means "we failed to look", never "nothing is loaded" — the
+    difference decides whether the reconciler restores something that may
+    already be running on that box."""
+    from app.observe import observe_remote
+
+    world = dict(remote_engine_watcher.remote_half())
+
+    observed = observe_remote(world)
+
+    assert observed["nimbus/gguf-r"] == {
+        "reachable": False, "loaded": False, "model": None,
+        "transitioning": False}
+
+
+def test_tick_survives_a_down_remote_agent_and_still_reconciles(
+        remote_engine_watcher):
+    """A down remote box must not kill the tick (the N1 lesson: malformed /
+    unreachable HEALS, it never kills).
+
+    Two vacuity guards, because "no tick-error was logged" is worthless on a
+    tick that never ran the code in question: the agent factory must have
+    been ASKED (the tick really did reach the remote half), and the local
+    resource's restore must have fired (the tick really did get past the
+    remote half into reconciliation).
+    """
+    w = remote_engine_watcher
+    w.intent_store.record("local/gguf-b", state="loaded", model="b.gguf",
+                          engine="lemonade", actor="operator")
+
+    w.watcher.tick()
+
+    assert [address for address, _c, _a in w.agent_factory.opened] == [
+        "http://nimbus:7720"]
+    assert w.clients.fake("gguf-b").loaded == ["b.gguf"]
+    assert not any(e["kind"] == "tick-error" for e in tail_events(w.events_path))

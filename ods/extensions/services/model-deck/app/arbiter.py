@@ -129,10 +129,12 @@ from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
 from app.intent import FAILURE_BUDGET
 from app.lifecycle import derive_status
+from app.node_clients import remote_world_half
 from app.observe import (
     _LOCAL_NODE,
     merge_observations,
     observe_local,
+    observe_remote,
     observe_spark,
 )
 from app.reconcile import plan_reconcile
@@ -533,6 +535,8 @@ class Watcher:
         dockerctl=None,
         node_store=None,
         local_clients=None,
+        remote_engine_clients=None,
+        node_agent_client_factory=None,
     ) -> None:
         self._settings = settings
         self._world = world
@@ -594,6 +598,13 @@ class Watcher:
         # emits no slot keys and the spark restore branch refuses.
         self._node_clients = node_clients
         self._node_observers = node_observers
+        # Remote DECLARED engines (sglang-omni Task 6): the per-(node,
+        # resource) client map and the node-agent client factory the remote
+        # half of the tick's world is assembled through. BOTH None (every
+        # unit test, every caller before that task) means no remote half at
+        # all — the same "no swap nodes" shape the two lines above take.
+        self._remote_engine_clients = remote_engine_clients
+        self._node_agent_client_factory = node_agent_client_factory
         self._interval = settings.watch_interval
 
         # Characteristics derive pass: refreshes app.characteristics from
@@ -726,6 +737,18 @@ class Watcher:
             world = self._world.snapshot(
                 gpus, engines, self._local_clients, self._litellm, self._registry
             )
+            # The REMOTE half, assembled by the SAME function
+            # app.routers.build_world_snapshot uses (sglang-omni Task 6):
+            # this tick and the HTTP surface share one World instance, whose
+            # idle-clock memory is pruned against whatever declaration each
+            # call hands it — two hand-rolled copies of this assembly would
+            # let them declare different things and thrash each other's
+            # clocks. A node whose agent is down costs ONE failed gpu read
+            # here and reports its engines unknown; it never raises into
+            # this tick.
+            world.update(remote_world_half(
+                self._node_store, self._node_agent_client_factory,
+                self._remote_engine_clients, self._world, self._registry))
             policy = self._policy_store.get()
             # While a deliberate unload's suppression window is active, skip
             # pending-load inference entirely so healing can't revert it. Idle
@@ -977,6 +1000,14 @@ class Watcher:
         intents = self._intent_store.get()
         observed = merge_observations(
             observe_local(world),
+            # Remote DECLARED engines (sglang-omni Task 6). Already observed
+            # into the snapshot above — this only maps them, so it costs no
+            # probe. No intent can name one of these keys yet (the remote
+            # verb routes are Task 8's), so plan_reconcile finds nothing to
+            # do for them today; including them here rather than later is
+            # what keeps this pass and app.routers.build_observations
+            # describing the same set of resources.
+            observe_remote(world),
             *self._node_observations(),
         )
 

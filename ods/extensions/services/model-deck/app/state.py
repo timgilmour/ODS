@@ -65,6 +65,17 @@ a tenant is loaded on one GPU while unrelated heavy VRAM use happens on
 another. Acceptable for a display-only UI list; do not use this for
 eviction decisions.
 
+``snapshot_remote()`` (sglang-omni Task 6) is the same assembly for
+engines DECLARED on a registry entry OTHER than the local one, kept as its
+OWN half of the world (``remote_tenants``, keyed ``<node>/<resource>``,
+with a per-node GPU pool the caller supplies) rather than merged into
+``tenants``/``gpus``: a remote engine's ``gpu_index`` addresses ITS OWN
+box's GPU list, and resource names are unique per node rather than
+globally, so merging would let the arbiter's co-residency arithmetic
+compare two machines' GPU 0 and would let two nodes' same-named resources
+collide outright. It keeps its own ``_remote_mem`` for the same shared-
+instance reason spelled out at that attribute.
+
 No Settings import here — pure inputs only.
 """
 
@@ -72,6 +83,7 @@ import time
 
 from app.engine_kinds import ENGINE_KINDS
 from app.engines import EngineError
+from app.observe import node_key
 
 # Externals heuristic floor: below this, transient/small allocations are
 # noise, not worth surfacing as a tenant-shaped list entry.
@@ -104,6 +116,17 @@ class World:
         # Keyed by resource (not kind): two lemonade-kind resources get
         # independent entries, independent clocks.
         self._mem: dict[str, dict] = {}
+        # The same thing for engines declared on OTHER nodes, keyed
+        # "<node>/<resource>" (sglang-omni Task 6). A SEPARATE dict, not a
+        # second namespace inside `_mem`, for one load-bearing reason: each
+        # half is pruned against the declaration ITS OWN snapshot call was
+        # given, and ONE World instance is shared by the arbiter tick and
+        # every HTTP path (app.main._build_watcher passes deck["world"]).
+        # A caller that snapshots only the local half must not wipe the
+        # remote half's idle clocks — sharing one dict would reset every
+        # remote resource's clock on every tick that skipped the remote
+        # pass, i.e. an idle TTL that never elapses.
+        self._remote_mem: dict[str, dict] = {}
 
     def snapshot(self, gpus, engines, clients, litellm, registry) -> dict:
         now = self._clock()
@@ -175,6 +198,85 @@ class World:
             "routes_known": routes is not None,
             "placement": {resource: entry["gpu_index"] for resource, entry in declared.items()},
         }
+
+    def snapshot_remote(self, engines, clients, gpu_pools, registry) -> dict[str, dict]:
+        """Observe every DECLARED engine on a registry entry OTHER than the
+        local one, keyed ``<node>/<resource>`` (app.observe.node_key).
+        sglang-omni Task 6.
+
+        ``engines`` is the remote declaration list, each entry stamped with
+        its owning ``node_id`` (app.node_clients.remote_engine_declarations).
+        ``clients`` is a ``RemoteEngineClients``: ``client_for(node_id,
+        resource)`` answers None for a pair that is not operable and NEVER
+        raises. ``gpu_pools`` is ``{node_id: [gpu, ...] | None}`` — None
+        meaning the node's own agent could not be read.
+
+        Deliberately its own half of the world, NOT merged into
+        ``snapshot()``'s ``tenants``/``gpus``: a remote engine's
+        ``gpu_index`` addresses ITS OWN box's GPU list, so folding remote
+        tenants into the local resource-keyed map would let
+        ``app.arbiter``'s co-residency and eviction arithmetic (which
+        matches ``tenant["gpu_index"]`` against the LOCAL gpu list) compare
+        two different machines' GPU 0 — and resource names are unique per
+        node, not globally, so the map keys could collide outright.
+
+        ``gpu_pools[node] is None`` (or no entry at all) ⇒ that node's
+        engines are reported unknown WITHOUT probing them one by one. The
+        agent's GPU read is the node's liveness probe — app/node_observer.py
+        already binds a node's whole status to that one call — so behind an
+        agent that just failed to answer, N per-engine probes would only buy
+        N more transport timeouts inside a 2 s arbiter tick.
+
+        A pair with no operable client is unknown for the same reason: it is
+        still DECLARED, so it must appear, and "we failed to look" is not
+        "nothing is loaded". Both unknown records come from the KIND's own
+        ``unknown()`` (app.engine_kinds) — never synthesized here, which
+        would mean this module guessing a per-kind shape only that one knows.
+        """
+        now = self._clock()
+
+        declared = {node_key(e["node_id"], e["resource"]): e for e in engines}
+        # Same rule as the local half: a resource that left the declaration
+        # loses its idle-clock memory; re-declaring it later starts fresh.
+        for gone in set(self._remote_mem) - set(declared):
+            del self._remote_mem[gone]
+
+        tenants: dict[str, dict] = {}
+        for key, entry in declared.items():
+            kind = entry["kind"]
+            adapter = ENGINE_KINDS[kind]
+            node_id = entry["node_id"]
+            resource = entry["resource"]
+            mem = self._remote_mem.setdefault(key, {})
+            # Same in-place kind-change reset the local half does — see
+            # snapshot()'s own comment for why stale bookkeeping under a new
+            # kind reads as a real, wrong idle baseline.
+            if mem.get(_KIND_MEM_KEY, kind) != kind:
+                mem.clear()
+            mem[_KIND_MEM_KEY] = kind
+
+            client = (clients.client_for(node_id, resource)
+                      if gpu_pools.get(node_id) is not None else None)
+            if client is None:
+                obs = adapter.unknown()
+            else:
+                # `routes: None` — the litellm route table is the LOCAL
+                # box's; a remote engine is not in it, and asking would
+                # answer about the wrong machine. Kinds that read it degrade
+                # that one field to None exactly as they do when litellm
+                # itself is unreachable.
+                obs = adapter.observe(
+                    client, mem, now,
+                    {"registry": registry, "routes": None, "resource": resource})
+            obs["engine"] = kind
+            obs["gpu_index"] = entry["gpu_index"]
+            # The two fields every downstream key is built from
+            # (app.observe.observe_remote). Carried ON the record rather
+            # than parsed back out of the map key, so the two cannot drift.
+            obs["node_id"] = node_id
+            obs["resource"] = resource
+            tenants[key] = obs
+        return tenants
 
     def note_freed(self, resource: str) -> None:
         """A successful VRAM free (any kind whose arbiter verb is "free" —

@@ -192,7 +192,7 @@ class _LemonadeAdapter:
         try:
             status = client.status()
         except EngineError:
-            return {"state": "unknown", "model": None, "footprint": None, "idle_s": None}
+            return self.unknown()
 
         loaded = status["loaded"]
         activity = client.activity()  # never raises
@@ -228,6 +228,22 @@ class _LemonadeAdapter:
             "footprint": footprint,
             "idle_s": idle_s,
         }
+
+    def unknown(self) -> dict:
+        """This kind's own "we failed to look" record — the exact dict
+        ``observe`` returns on ``EngineError``, named (sglang-omni Task 6)
+        so a caller holding NO client at all can still report it.
+
+        A DECLARED engine on a node the deck cannot reach — its agent did
+        not answer, its credential vanished, its kind has no remote
+        constructor — must still appear in the world, as unknown. Only this
+        module knows what a record of THIS kind looks like
+        (state/model/footprint/idle_s); a caller synthesizing a bare ``{"state": "unknown"}`` would be
+        guessing that shape, and a guess that drifts from the real one is
+        how a downstream KeyError gets in. ``observe``'s own EngineError
+        arm returns THIS, so the two can never disagree.
+        """
+        return {"state": "unknown", "model": None, "footprint": None, "idle_s": None}
 
     def active(self, obs: dict) -> bool:
         return obs["state"] == "loaded"
@@ -475,7 +491,7 @@ class _ComfyAdapter:
         try:
             queue = client.queue_len()
         except EngineError:
-            return {"state": "unknown", "queue": None, "idle_s": None}
+            return self.unknown()
 
         if mem.get("last_activity_time") is None:
             # First-ever snapshot: establish a baseline so idle_s is always
@@ -491,6 +507,22 @@ class _ComfyAdapter:
 
         idle_s = now - mem["last_activity_time"]
         return {"state": state, "queue": queue, "idle_s": idle_s}
+
+    def unknown(self) -> dict:
+        """This kind's own "we failed to look" record — the exact dict
+        ``observe`` returns on ``EngineError``, named (sglang-omni Task 6)
+        so a caller holding NO client at all can still report it.
+
+        A DECLARED engine on a node the deck cannot reach — its agent did
+        not answer, its credential vanished, its kind has no remote
+        constructor — must still appear in the world, as unknown. Only this
+        module knows what a record of THIS kind looks like
+        (state/queue/idle_s); a caller synthesizing a bare ``{"state": "unknown"}`` would be
+        guessing that shape, and a guess that drifts from the real one is
+        how a downstream KeyError gets in. ``observe``'s own EngineError
+        arm returns THIS, so the two can never disagree.
+        """
+        return {"state": "unknown", "queue": None, "idle_s": None}
 
     def active(self, obs: dict) -> bool:
         return obs["state"] == "busy"
@@ -609,7 +641,7 @@ class _HipfireAdapter:
         try:
             state = client.status()
         except EngineError:
-            return {"state": "unknown", "model": None, "footprint": 0, "queue_depth": None}
+            return self.unknown()
 
         # Poll /stats while running: besides surfacing queue_depth, this is
         # what feeds the HipfireClient conversation-activity tracker every
@@ -626,6 +658,23 @@ class _HipfireAdapter:
         model = None if routes is None else _strip_prefix(routes.get(ctx["resource"]), _OPENAI_PREFIX)
         footprint = HIPFIRE_FOOTPRINT if state == "running" else 0
         return {"state": state, "model": model, "footprint": footprint, "queue_depth": queue_depth}
+
+    def unknown(self) -> dict:
+        """This kind's own "we failed to look" record — the exact dict
+        ``observe`` returns on ``EngineError``, named (sglang-omni Task 6)
+        so a caller holding NO client at all can still report it.
+
+        A DECLARED engine on a node the deck cannot reach — its agent did
+        not answer, its credential vanished, its kind has no remote
+        constructor — must still appear in the world, as unknown. Only this
+        module knows what a record of THIS kind looks like
+        (state/model/footprint/queue_depth — footprint 0, not None: it is
+        typed a plain int in the snapshot shape); a caller synthesizing a bare ``{"state": "unknown"}`` would be
+        guessing that shape, and a guess that drifts from the real one is
+        how a downstream KeyError gets in. ``observe``'s own EngineError
+        arm returns THIS, so the two can never disagree.
+        """
+        return {"state": "unknown", "model": None, "footprint": 0, "queue_depth": None}
 
     def active(self, obs: dict) -> bool:
         return obs["state"] == "running"

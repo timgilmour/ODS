@@ -3969,7 +3969,17 @@ def test_forget_engine_on_node_agent_node_404s_today_tripwire(tmp_path, monkeypa
     declared resource on a node-agent entry becomes possible, THIS test
     must fail (a 200 where it expected 404) rather than the cross-node
     policy-row collision risk opening silently — see that docstring for
-    what has to be resolved before this test can be safely updated."""
+    what has to be resolved before this test can be safely updated.
+
+    sglang-omni Task 6 NARROWED what this guards, and deliberately did not
+    retire it. The INTENT half of the same function is node-keyed now
+    (`node_key(node_id, resource)`), so its own cross-node collision is
+    gone at the source; the assertion below is unchanged because the reason
+    for the 404 is unchanged, but the seam it protects is now the policy
+    row ALONE — which Task 9 owns end to end (seeder, reader and forgetter
+    must agree on the key, and today only the forgetter could be moved).
+    The trip condition is identical: a 200 here means a remote resource can
+    reach `policy_store.forget` before that key exists."""
     app, deck = make_app(tmp_path, monkeypatch)
     _add_remote_node(deck)
     deck["node_store"].update("nimbus", {"engines": []})
@@ -3977,3 +3987,194 @@ def test_forget_engine_on_node_agent_node_404s_today_tripwire(tmp_path, monkeypa
     r = TestClient(app).delete("/api/nodes/nimbus/engines/gguf-r")
 
     assert r.status_code == 404
+
+
+# ===========================================================================
+# sglang-omni Task 6 — node-keyed remote engine observation, at the route.
+#
+# `/api/state` now walks EVERY registry entry's engines[], not just the local
+# one. The registry state below is HAND-BUILT (conftest's HandBuiltRegistry)
+# because the Task 5 write gate refuses declaring any kind on a node-agent
+# entry until Task 7 flips the first `remote_capable` one — the gate is
+# deliberately not weakened to make this testable.
+#
+# Fixture rule ([[defaults-that-hide-bugs]]): node "nimbus" (never the
+# live-seeded "sparky"), resource "gguf-r" (never "omni"), GPU 4.
+# ===========================================================================
+
+
+class _StubAgent:
+    """NodeAgentClient-shaped stub: the GPU pool read, and close()."""
+
+    def __init__(self, payload=None, raises=None) -> None:
+        self._payload = payload
+        self._raises = raises
+
+    def gpu(self) -> dict:
+        if self._raises is not None:
+            raise self._raises
+        return self._payload
+
+    def close(self) -> None:
+        pass
+
+
+def _wire_remote_engine(deck, hand_built_registry, *, agent, engine_client):
+    """Swap in a registry carrying one remote engine, plus the two deck
+    entries the remote half of the world reads through."""
+    from app.node_clients import RemoteEngineClients
+
+    entries = [
+        {"id": "local", "label": "This Box", "agent_kind": "local",
+         "control": "none", "engines": _ENGINES},
+        {"id": "nimbus", "label": "Nimbus Box", "agent_kind": "node-agent",
+         "address": "http://nimbus:7720", "control": "none",
+         "engines": [dict(_REMOTE_ENGINE_BODY)]},
+    ]
+    store = hand_built_registry(entries, {"nimbus": "key-nimbus"})
+    deck["node_store"] = store
+    deck["node_agent_client_factory"] = lambda address, credential: agent
+    deck["remote_engine_clients"] = RemoteEngineClients(
+        store, lambda entry, credential, declared: engine_client)
+    return store
+
+
+def test_state_reports_a_remote_engine_with_its_node_id(
+        tmp_path, monkeypatch, hand_built_registry):
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry,
+        agent=_StubAgent({"gpus": [{"index": 4, "memory_total_mb": 8,
+                                    "memory_used_mb": 3}]}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    body = TestClient(app).get("/api/state").json()
+
+    tenant = body["world"]["remote_tenants"]["nimbus/gguf-r"]
+    assert tenant["node_id"] == "nimbus"
+    assert tenant["resource"] == "gguf-r"
+    assert tenant["state"] == "loaded"
+    assert body["world"]["remote_gpus"]["nimbus"] == [
+        {"index": 4, "total": 8 * 1024**2, "used": 3 * 1024**2,
+         "free": 5 * 1024**2}]
+
+
+def test_state_lifecycle_view_carries_the_node_keyed_remote_engine(
+        tmp_path, monkeypatch, hand_built_registry):
+    """The observation key is `<node>/<resource>` — the same shape intent,
+    policy and the UI already join local placements on."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry,
+        agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    body = TestClient(app).get("/api/state").json()
+
+    assert body["lifecycle"]["nimbus/gguf-r"]["observed"] == {
+        "reachable": True, "loaded": True, "model": "extra.r.gguf",
+        "transitioning": False}
+
+
+def test_state_reports_a_remote_engine_as_unknown_when_its_agent_is_down(
+        tmp_path, monkeypatch, hand_built_registry):
+    """A powered-off box is a NORMAL state: the route still answers, and the
+    engine reads as "we failed to look", never as "nothing is loaded"."""
+    from app.engines.node_agent import NodeAgentUnreachable
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry,
+        agent=_StubAgent(raises=NodeAgentUnreachable("connection refused")),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    r = TestClient(app).get("/api/state")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["world"]["remote_gpus"]["nimbus"] is None
+    assert body["lifecycle"]["nimbus/gguf-r"]["observed"] == {
+        "reachable": False, "loaded": False, "model": None,
+        "transitioning": False}
+
+
+def test_state_local_resources_keep_their_bare_resource_keys(
+        tmp_path, monkeypatch, hand_built_registry):
+    """The local half is UNTOUCHED by the remote walk: `world.tenants` stays
+    keyed by bare resource and the remote engines live in their own half,
+    so a remote engine's gpu_index can never be matched against the LOCAL
+    GPU list by the arbiter's co-residency arithmetic."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry, agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    body = TestClient(app).get("/api/state").json()
+
+    assert "gguf-r" not in body["world"]["tenants"]
+    assert set(body["world"]["tenants"]) == {"lemonade", "comfyui", "hipfire"}
+
+
+def test_remote_engine_drift_is_not_translated_through_its_nodes_slot_map(
+        tmp_path, monkeypatch, hand_built_registry):
+    """A node can be a swap node AND declare its own engines[]. The
+    profile->identity translation `_settings_drift` applies belongs to that
+    node's SERVING SLOT only (resource "slot0"), never to a declared engine
+    that merely happens to sit on the same box: translating there would
+    diff a declared engine's settings against the vLLM/checkpoint scope of
+    an unrelated swap profile.
+
+    `build_lifecycle_view` gates the translation on map PRESENCE (that
+    function's own docstring), so the map has to be keyed by the slot key
+    it belongs to — keying it by node id alone silently handed it to every
+    key on that node the moment a node could own more than one.
+    """
+    from app.intent import IntentStore
+    from app.settings_store import SettingsStore
+
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry, agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="heretic"))
+    deck["node_store"].patch("nimbus", control="swap",
+                             serving_address="http://nimbus:8000")
+    deck["characteristics_store"].put_fields(
+        "engine/nimbus/vllm",
+        {"profile_identities": {
+            "value": {"heretic": {"identity": "her-1", "service": "vllm",
+                                  "container_name": "vllm-her"}},
+            "source": "test", "derived_ts": "2026-08-16T00:00:00+00:00"}})
+    intent = IntentStore(tmp_path / "intent.json")
+    intent.record("nimbus/gguf-r", state="loaded", model="heretic",
+                  engine="lemonade")
+    deck["intent_store"] = intent
+    deck["settings_store"] = SettingsStore(tmp_path / "s.json")
+    client = TestClient(app)
+
+    # A write against the SLOT's translated scope must not light up the
+    # declared engine's drift flag.
+    client.put("/api/settings/engines/nimbus/vllm",
+               json={"namespace": "env", "values": {"VLLM_MAX_SEQ": "8"}})
+
+    entry = client.get("/api/state").json()["lifecycle"]["nimbus/gguf-r"]
+    assert entry["settings_drift"] is None
+
+
+def test_adopting_a_remote_engine_404s_with_no_engine_owns(
+        tmp_path, monkeypatch, hand_built_registry):
+    """Disclosed gap, pinned rather than left latent: a remote engine is now
+    OBSERVED (so `/api/lifecycle/adopt` finds a record for its key), but
+    `app.observe.engine_for` still resolves only local resources and swap
+    slots — so adopt refuses with "no engine owns", never a crash and never
+    a wrong-kind intent record. Extending `engine_for` to remote keys
+    belongs with the remote verb/reconcile work (Tasks 8/9), which is what
+    gives an adopted remote record anything to drive."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    _wire_remote_engine(
+        deck, hand_built_registry, agent=_StubAgent({"gpus": []}),
+        engine_client=FakeLemonade(loaded="extra.r.gguf"))
+
+    r = TestClient(app).post("/api/lifecycle/adopt/nimbus/gguf-r")
+
+    assert r.status_code == 404
+    assert "no engine owns" in r.json()["detail"]

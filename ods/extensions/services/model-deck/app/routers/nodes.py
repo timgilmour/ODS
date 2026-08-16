@@ -54,7 +54,7 @@ from pydantic import BaseModel
 from app.engine_kinds import ENGINE_KINDS, KNOWN_KINDS, validate_engines
 from app.engines import EngineError
 from app.events import log_event
-from app.observe import local_key
+from app.observe import node_key
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 kinds_router = APIRouter(tags=["engine-kinds"])
@@ -288,14 +288,16 @@ def update_engine(node_id: str, resource: str, body: dict, request: Request) -> 
     declaration write, not after (the opposite order from `forget_engine`'s
     own three-write sequence, and deliberately so).
 
-    E1 Task 5 scope note: the intent-forget below stays keyed through
-    `local_key` — i.e. it only actually forgets anything when `node_id ==
-    "local"`. A generic `<node>/<resource>` key (Task 6's `node_key`) isn't
-    wired yet, and today no node-agent entry can carry a POPULATED engines
-    list anyway (no kind is `remote_capable` until Task 7), so a remote
-    kind-change is a declaration-only edit here for now — reaching this
-    branch is not possible before Task 7 makes a remote kind change
-    possible in the first place."""
+    The intent-forget below is keyed through `node_key(node_id, resource)`
+    (sglang-omni Task 6), not the E1 `local_key` it used to be gated on:
+    the record it must invalidate is the one for THIS node's resource, and
+    `node_key("local", r)` is `local_key(r)` exactly, so the local path is
+    byte-identical. It is still unreachable for a non-local node until
+    Task 7 flips the first `remote_capable` kind — no node-agent entry can
+    carry a populated engines list before that, so `existing` is always
+    None and the 404 above fires first — but it is now correct BY KEY when
+    that changes, rather than silently forgetting the wrong node's
+    record."""
     deck = request.app.state.deck
     store = deck["node_store"]
     node = _node_or_404(deck, node_id)
@@ -312,7 +314,7 @@ def update_engine(node_id: str, resource: str, body: dict, request: Request) -> 
         validate_engines([body], remote=node["agent_kind"] == "node-agent")
     except ValueError as exc:
         raise _shape_error(str(exc)) from exc
-    if body["kind"] != existing["kind"] and node_id == "local":
+    if body["kind"] != existing["kind"]:
         # Forget BEFORE the declaration write below, not after — reversed
         # from forget_engine's own ordering (declaration first, THEN
         # intent), because the two routes' crash windows have asymmetric
@@ -334,7 +336,7 @@ def update_engine(node_id: str, resource: str, body: dict, request: Request) -> 
         # same standard forget_engine's own analysis applies, just landing
         # on the opposite conclusion because what is at risk differs (there:
         # an orphaned policy override; here: an actively wrong actuation).
-        deck["intent_store"].forget(local_key(resource))
+        deck["intent_store"].forget(node_key(node_id, resource))
     new_engines = [body if e["resource"] == resource else e for e in engines]
     entry = store.update(node_id, {"engines": new_engines})
     log_event(deck["events_path"], "engine-updated",
@@ -350,27 +352,35 @@ def forget_engine(node_id: str, resource: str, request: Request) -> dict:
     calls the engine: no client lookup anywhere in this function. 404 when
     the node OR the engine is unknown.
 
-    The intent-forget below is the same `local_key`-only scope note as
-    update_engine's docstring: it only forgets anything for `node_id ==
-    "local"` today, for the same reason (no node-agent entry can carry a
-    populated engines list before Task 7).
+    The intent-forget below is node-keyed since sglang-omni Task 6
+    (`node_key(node_id, resource)`, same change as update_engine's — see
+    that docstring): it forgets THIS node's record, and
+    `node_key("local", r)` is `local_key(r)` exactly, so the local path is
+    byte-identical.
 
-    `policy_store.forget(resource)` below carries NO such node_id guard,
-    deliberately — not because it's already correct for any node, but
-    because it's UNREACHABLE for a remote node today and the keying
-    decision belongs to whichever later task makes it reachable. This
-    resource-name-only key is a KNOWN cross-node collision risk: a remote
-    node forgetting a resource named e.g. "foo" would pop the unrelated
-    LOCAL "foo" policy row, if one happened to exist — PolicyStore has no
-    node dimension at all (app/policy.py: `{resource: {...}}`, flat). It's
-    safe only because this line can never run for a non-local node_id yet
-    — every engines[] on a node-agent entry is `[]` until Task 7 adds the
-    first remote_capable kind, so the "unknown engine" 404 above always
-    fires first. Tasks 6/9 (remote observation / remote policy) must
-    resolve this keying — node-scope the store, or gate this call — before
-    a remote resource can ever actually reach this line. A guard added
-    HERE now would just be dead code hiding the seam instead of a test
-    catching it; see the tripwire test in tests/test_api.py instead."""
+    `policy_store.forget(resource)` below is the ONE write in this function
+    that is still node-blind, and deliberately so — not because it is
+    already correct for any node, but because PolicyStore has no node
+    dimension ANYWHERE (app/policy.py: `{resource: {...}}`, flat; its
+    declared-defaults source, app.main._get_declared_policy_defaults, reads
+    only the LOCAL entry's engines[]; app.arbiter's `policy.get(resource)`
+    indexes it by bare resource). Node-scoping the key HERE alone would
+    leave the seeder and the reader disagreeing with the forgetter about
+    what a row is called — the worse failure, and exactly the kind of
+    half-migration that only shows up at the seam. Task 9 owns policy for
+    remote engines end to end ("policy rows auto-created from
+    policy_defaults at declaration time for remote engines exactly as E1
+    does for local") and must resolve this key with them.
+
+    The KNOWN cross-node collision risk that leaves standing, unchanged and
+    still contained: a remote node forgetting a resource named e.g. "foo"
+    would pop the unrelated LOCAL "foo" policy row, if one existed. It is
+    unreachable — every engines[] on a node-agent entry is `[]` until Task
+    7 adds the first `remote_capable` kind, so the "unknown engine" 404
+    above always fires first. A guard added HERE now would be untestable
+    dead code (nothing can reach the line to prove the guard fires) hiding
+    the seam instead of a test catching it; see the tripwire test in
+    tests/test_api.py, which fails the moment Task 7 makes this reachable."""
     deck = request.app.state.deck
     store = deck["node_store"]
     node = _node_or_404(deck, node_id)
@@ -412,14 +422,18 @@ def forget_engine(node_id: str, resource: str, request: Request) -> dict:
     # deliberate act, and derive_status/settings_drift are report-only —
     # nothing actuates off a stale intent on its own.
     #
-    # `node_id == "local"` guard: `local_key` always spells "local/<resource>"
-    # (E1 Task 5 scope note — see update_engine's docstring). Without the
-    # guard, forgetting a REMOTE node's resource named e.g. "foo" would
-    # forget the unrelated LOCAL "foo" intent record, if one happened to
-    # exist — a real cross-node collision, not a hypothetical one, since
-    # resource names aren't namespaced by node anywhere today.
-    if node_id == "local":
-        deck["intent_store"].forget(local_key(resource))
+    # Node-keyed (sglang-omni Task 6): the E1 `node_id == "local"` guard
+    # that used to wrap this call existed only because `local_key` always
+    # spelled "local/<resource>", so forgetting a REMOTE node's resource
+    # named e.g. "foo" would have forgotten the unrelated LOCAL "foo"
+    # record. `node_key` removes the collision at its source rather than
+    # gating around it, and answers `local_key(resource)` verbatim for the
+    # local node — so this line is unchanged for every reachable caller
+    # today and correct for the remote ones Task 7 unlocks.
+    deck["intent_store"].forget(node_key(node_id, resource))
+    # Still bare-resource-keyed, and still unreachable for a remote node —
+    # see this function's docstring for why that is Task 9's to resolve
+    # rather than half-migrated here.
     deck["policy_store"].forget(resource)
     log_event(deck["events_path"], "engine-removed",
               {"node": node_id, "resource": resource})

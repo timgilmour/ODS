@@ -5,6 +5,7 @@ know engine names (spec §8)."""
 import pytest
 
 from app.engine_kinds import KNOWN_KINDS, validate_engines
+from app.engines import EngineError
 
 
 def _entry(**over):
@@ -296,3 +297,60 @@ def test_hipfire_observe_looks_up_its_own_resource_name_in_routes():
            "resource": "agent"}
     obs = hipfire.observe(_FakeHipfireClient(), {}, 0.0, ctx)
     assert obs["model"] == "big-model"
+
+
+# ===========================================================================
+# sglang-omni Task 6 — `unknown()`: the kind's own "we failed to look"
+# record, callable WITHOUT a client.
+#
+# The two call sites must agree by construction, so each case below proves
+# `unknown()` against what that kind's own `observe()` returns when its
+# client raises — never against a hand-written expected dict, which would
+# just be a third copy of the same shape drifting on its own.
+# ===========================================================================
+
+
+class _RaisingClient:
+    """Every probe surface any adapter's observe() touches, all raising —
+    what a real client does with its engine unreachable. `load_in_flight`
+    and `activity` answer instead of raising: their own clients' contracts
+    say they never raise (app/engines/lemonade.py)."""
+
+    def load_in_flight(self):
+        return False
+
+    def activity(self):
+        return None
+
+    def status(self):
+        raise EngineError("unreachable")
+
+    def queue_len(self):
+        raise EngineError("unreachable")
+
+    def stats(self):
+        raise EngineError("unreachable")
+
+
+@pytest.mark.parametrize("kind", ["lemonade", "comfyui", "hipfire"])
+def test_adapter_unknown_matches_its_own_observe_on_engine_error(kind):
+    from app.engine_kinds import ENGINE_KINDS
+
+    adapter = ENGINE_KINDS[kind]
+    observed = adapter.observe(_RaisingClient(), {}, 0.0,
+                               {"registry": _FakeRegistry(), "routes": {},
+                                "resource": "r-1"})
+
+    assert adapter.unknown() == observed
+    assert observed["state"] == "unknown"
+
+
+@pytest.mark.parametrize("kind", ["lemonade", "comfyui", "hipfire"])
+def test_adapter_unknown_is_not_a_bare_state_dict(kind):
+    """The point of asking the KIND: each one's record carries different
+    fields (model/footprint/idle_s vs queue/idle_s vs queue_depth), and a
+    caller synthesizing `{"state": "unknown"}` would hand downstream a
+    shape that KeyErrors."""
+    from app.engine_kinds import ENGINE_KINDS
+
+    assert set(ENGINE_KINDS[kind].unknown()) != {"state"}

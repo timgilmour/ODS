@@ -247,7 +247,7 @@ def _build_deck(settings: Settings) -> dict:
         hipfire = _declared_hipfire
 
     from app.engines.spark import SparkClient
-    from app.node_clients import NodeClients, NodeObservers
+    from app.node_clients import NodeClients, NodeObservers, RemoteEngineClients
 
     def _swap_client_factory(entry: dict, credential: str):
         return SparkClient(node_url=entry["address"], node_key=credential,
@@ -255,6 +255,13 @@ def _build_deck(settings: Settings) -> dict:
 
     node_clients = NodeClients(node_store, _swap_client_factory)
     node_observers = NodeObservers(node_store, node_clients)
+    # Per-(node, resource) clients for engines DECLARED on a node-agent
+    # entry (sglang-omni Task 6). No factory argument: the default
+    # delegates to each engine KIND's own remote constructor
+    # (app.node_clients._adapter_remote_client), exactly as LocalClients
+    # delegates to build_client for local ones, so no engine name is
+    # spelled here.
+    remote_engine_clients = RemoteEngineClients(node_store)
 
     location_store = LocationStore(data_dir / "locations.json")
     catalog = Catalog(data_dir / "catalog.json", location_store)
@@ -329,6 +336,11 @@ def _build_deck(settings: Settings) -> dict:
         # registry edits apply live with no restart [max-review #13 fix].
         "node_clients": node_clients,
         "node_observers": node_observers,
+        # Remote DECLARED engines' clients — the RemoteEngineClients
+        # counterpart of local_clients below, read through by the remote
+        # half of every world snapshot (app.routers.build_world_snapshot
+        # and the arbiter tick, both via node_clients.remote_world_half).
+        "remote_engine_clients": remote_engine_clients,
         # Declared local engines' clients (app.local_clients.LocalClients,
         # Task 3, actuation added Task 6): what World.snapshot reads
         # through for every resource in node_store's local `engines[]`, AND
@@ -426,6 +438,11 @@ def _build_watcher(settings: Settings):
         # production).
         node_store=deck["node_store"],
         local_clients=deck["local_clients"],
+        # The remote half of the tick's world: the same shared client map
+        # and node-agent factory the HTTP paths read through, so both
+        # describe one world (node_clients.remote_world_half's docstring).
+        remote_engine_clients=deck["remote_engine_clients"],
+        node_agent_client_factory=deck["node_agent_client_factory"],
         policy_store=deck["policy_store"],
         events_path=deck["events_path"],
         read_gpus=deck["read_gpus"],
