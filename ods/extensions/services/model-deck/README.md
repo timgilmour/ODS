@@ -132,12 +132,15 @@ See [Node registry](#node-registry-topology-credentials-and-observation) below f
 
 ### Declared Engines
 
-The local node's `engines[]` — what the deck's VRAM arbitration, storage
+Every node's `engines[]` — what the deck's VRAM arbitration, storage
 notify hooks, and Set Builder actually watch and act on — is a **declared
 list**, not a fixed lemonade/comfyui/hipfire triple. Any number of
 resources of a known *kind* can be added, edited, or removed while the deck
 is running; nothing restarts to pick up the change (the watcher re-reads
-the declaration fresh every ~2 s tick).
+the declaration fresh every ~2 s tick). A fourth kind, `sglang-omni`, is
+**remote-only** — declared on a node-agent entry, never on `local` — see
+**Remote engines** below for what running an engine off-box actually
+requires.
 
 **Schema** — one entry per declared resource:
 
@@ -161,11 +164,17 @@ the declaration fresh every ~2 s tick).
 ```
 
 `GET /api/engine-kinds` is the picker source: every known *kind*'s
-connection schema (`{field: {required}}`) and its human-initiated verb
-vocabulary (`human_verbs`, e.g. lemonade-kind's `["load","unload"]`,
-hipfire-kind's `["park","resume"]`) — the UI never bakes a kind name in.
+connection schema (`{field: {required}}`), WHERE it may run
+(`remote_capable` — declarable on a node-agent entry; `local_capable` —
+declarable on the local one; both booleans, both enforced by the write
+gate below), and its human-initiated verb vocabulary (`human_verbs`, e.g.
+lemonade-kind's `["load","unload"]`, hipfire-kind's `["park","resume"]`,
+sglang-omni-kind's `["load","unload"]` too — see **Remote engines** below)
+— the UI never bakes a kind name in.
 
-**CRUD** (all under the local node; a resource not literally named
+**CRUD** (node-scoped since this branch — `/api/nodes/{node_id}/engines[/{resource}]`
+works identically for `local` and for any node-agent entry; `local` is just
+an id here, not a special path segment. A resource not literally named
 `lemonade`/`comfyui`/`hipfire` works identically everywhere in the deck for
 observation, VRAM policy, and Set Builder/lifecycle bookkeeping — see
 **Park-allowlist prerequisite** below for the one place it does NOT: a
@@ -174,12 +183,76 @@ container verb on a newly declared engine):
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/engine-kinds` | Every known kind's connection schema + `human_verbs` |
-| `POST` | `/api/nodes/local/engines` | Declare a new resource. 422 (one-line reason) for a shape/kind defect; 409 if `resource` is already declared on THIS node; 422 naming the owning node if ANOTHER node already declares that resource name (see **Resource names are deck-wide** below) |
-| `PUT` | `/api/nodes/local/engines/{resource}` | Full-entry replace. The body's `resource` must equal the path — renaming is refused (422: "rename is refused; forget and re-add instead"), never coerced. 404 if `{resource}` isn't currently declared |
-| `DELETE` | `/api/nodes/local/engines/{resource}` | **Forget** (see below). 404 if unknown |
+| `POST` | `/api/nodes/{node_id}/engines` | Declare a new resource on `node_id`. 404 for an unknown node; 422 (one-line reason) for a shape/kind defect **or** for a kind that isn't `local_capable`/`remote_capable` for that node's `agent_kind`; 409 if `resource` is already declared on THIS node; 422 naming the owning node if ANOTHER node already declares that resource name (see **Resource names are deck-wide** below) |
+| `PUT` | `/api/nodes/{node_id}/engines/{resource}` | Full-entry replace. The body's `resource` must equal the path — renaming is refused (422: "rename is refused; forget and re-add instead"), never coerced. 404 if the node or `{resource}` isn't currently declared. A KIND change forgets the resource's intent record first, so a stale record can never drive a restore through the old kind's adapter |
+| `DELETE` | `/api/nodes/{node_id}/engines/{resource}` | **Forget** (see below). 404 if the node or the engine is unknown |
+
+**Remote engines (fourth kind, first shipped: `sglang-omni`):** a kind
+whose `remote_capable` flag is true may be declared on a **node-agent**
+entry instead of `local` — the engine runs on that node's box, not beside
+the deck (`local_capable: false` for this kind: it has no local client to
+build at all, so `POST /api/nodes/local/engines` with `"kind":
+"sglang-omni"` 422s at the write gate). Three things have to be true before
+the declaration works end to end:
+
+1. **The node-agent entry itself is operable** — `POST /api/nodes` (or the
+   seed) recorded an `address` and a stored `credential` for it (see [Node
+   registry](#node-registry-topology-credentials-and-observation) below).
+   Without both, the verb route 503s: "a node-agent entry with an address,
+   a stored credential and a remote-capable kind is required."
+2. **The node's own `engines.json`** exists and declares the same resource
+   — a small host-owned allowlist file living beside that node's
+   `profiles.json` (ruling A1: the deck cannot name a compose file to run
+   on someone else's box), read only by the node-agent, never written by
+   it. It carries the facts only the node-agent can act on: `compose_file`
+   (absolute path), `health_url`, and a `busy` probe — today exactly
+   `{"kind": "connections", "port": N}`, a raw established-TCP count on the
+   engine's serving port (no metrics endpoint exists to scrape instead).
+   The deck-side declaration's `connection.url` is a separate,
+   operator-facing record of where the engine serves for the board to
+   show — the deck never dials it directly, only through the node-agent's
+   channel — so the two files can in principle disagree, and only
+   `engines.json` governs what actually launches.
+3. **The resource name is unique across the whole deck**, exactly as
+   **Resource names are deck-wide** below already states — a remote
+   declaration is not a separate namespace.
+
+Acting on a declared remote engine is a **separate route** from the local
+`/api/tenants/{resource}/{verb}` dispatcher (above), because it goes over
+the node-agent's own up/down channel rather than the deck calling the
+engine's HTTP API directly:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/nodes/{id}/engines/{resource}/{verb}` | Act on a node-agent-declared engine (today: `load`/`unload`). **202**, not 200 — the node-agent queues the request for the host-side swap-helper and this call does not wait for or observe the result (a cold sglang-omni start measures ~3.5–4.5 min, GF4). 404 unknown node or resource; 405 the kind doesn't support `verb`; 501 the kind's vocabulary includes `verb` but the node-agent channel has no call for it (only `load`/`unload` map to the channel's `up`/`down` today); 503 the node isn't operable (point 1 above) |
+
+Intent is recorded **before** the call, the same rule as every long-running
+actuator elsewhere in this doc, and rolled back (a compare-and-swap on the
+exact record this call wrote) if the POST itself raises, so a request that
+never left the deck records nothing durable. State comes back through the
+normal observation path — `GET /api/state`'s `lifecycle` block, keyed
+`<node>/<resource>` — never from a result file: the node-agent's own
+`engine-status-<resource>.json` is forensics for a human reading logs on
+the box, not read back by anything here.
+
+**Boot-tail note.** A cold sglang-omni boot the deck itself started can
+show the board reading `quarantined; awaiting operator` for roughly the
+last ~3 minutes of the ~3.5–4.5 minute cold start (GF4) — this is expected,
+not a stuck engine, and specific to the *reconciler's automatic* restore of
+an engine that died out-of-band: that restore deliberately does not
+re-stamp intent (so a genuinely crash-looping engine can still reach
+quarantine), so once the 2-consecutive-failure budget is spent — about 60 s
+after the reconciler dispatched the restore, well before the container is
+actually healthy — the resource reads quarantined while `docker compose up
+-d` keeps running underneath, unaffected. It **self-heals on the first
+`serving` tick**: the moment the engine reports healthy, the intent
+store's success path clears both `quarantined` and the failure count. An
+*operator*-initiated Load (the route above, which stamps a fresh intent
+timestamp) is fully covered by the kind's own ~10-minute warming window
+instead and should never reach quarantine within a normal boot.
 
 **Forget semantics (bookkeeping only):** `DELETE
-/api/nodes/local/engines/{resource}` drops the declaration entry, the
+/api/nodes/{node_id}/engines/{resource}` drops the declaration entry, the
 resource's intent record, and its stored policy row — and **nothing
 else** (settings scopes, provenance, and events all survive, same posture
 as node removal). It **never calls the engine** — no client lookup happens
@@ -1220,6 +1293,8 @@ Model Deck API (:3015, FastAPI)
   │         ├── lemonade.py ───── llama.cpp client
   │         ├── comfyui.py ────── ComfyUI client
   │         ├── hipfire.py ────── hipfire client
+  │         ├── sglang_omni.py ── remote engine client, over node_agent.py's
+  │         │                     up/down/status channel (fourth kind)
   │         └── docker_ctl.py ─── container restart/stop (for engine notify)
   ├── ui/ ────────────────────────── React frontend
   │    └── dist/ ────────────────── Built assets (served at /)
