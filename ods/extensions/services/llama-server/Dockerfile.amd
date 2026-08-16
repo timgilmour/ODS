@@ -1,12 +1,12 @@
 # ==============================================================================
 # ODS — AMD ROCm llama.cpp + Lemonade Server
 # ==============================================================================
-# Multi-stage build: compile llama.cpp with full gfx1151 optimizations (rocWMMA,
-# MMQ kernel patch, fast-math intrinsics), then inject the binary into Lemonade.
+# Multi-stage build: compile llama.cpp with HIP flash attention, per-target
+# kernel patches, and fast-math intrinsics, then inject the binary into Lemonade.
 #
 # Build args (override via .env or docker compose build --build-arg):
 #   AMDGPU_TARGET  — GPU architecture (default: gfx1151 for Strix Halo)
-#   LLAMA_CPP_REF  — llama.cpp git ref to build (default: b8763)
+#   LLAMA_CPP_REF  — llama.cpp git ref to build (default: b10452)
 #   ROCM_VERSION   — ROCm SDK version for builder (default: 7.2)
 #   LEMONADE_SERVER_IMAGE — Lemonade runtime image tag
 #
@@ -22,7 +22,7 @@ ARG LEMONADE_SERVER_IMAGE=ghcr.io/lemonade-sdk/lemonade-server:v10.2.0
 FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete AS builder
 
 ARG AMDGPU_TARGET=gfx1151
-ARG LLAMA_CPP_REF=b8763
+ARG LLAMA_CPP_REF=b10452
 # Re-declared after FROM: the pre-FROM ARG is global and not visible inside this stage.
 ARG ROCM_VERSION
 
@@ -44,6 +44,8 @@ WORKDIR /build/llama.cpp
 # exist, so the smaller tiles and halved warp count are a straight performance loss.
 # NOTE: These patches are validated against the pinned LLAMA_CPP_REF. When bumping
 # the ref, verify the sed targets still exist: grep -n 'mmq_x = ' ggml/src/ggml-cuda/mmq.cu
+# As of b10452 the targets are GONE (upstream MMQ restructure; #21284 still open
+# unmerged) — gfx1151 builds get the WARNING below and run unpatched.
 RUN if [ "${AMDGPU_TARGET}" = "gfx1151" ]; then \
         sed -i 's/mmq_x = 64/mmq_x = 48/g' ggml/src/ggml-cuda/mmq.cu 2>/dev/null || true; \
         sed -i 's/mmq_y = 128/mmq_y = 64/g' ggml/src/ggml-cuda/mmq.cu 2>/dev/null || true; \
@@ -59,10 +61,13 @@ RUN if [ "${AMDGPU_TARGET}" = "gfx1151" ]; then \
 RUN sed -i 's/\([^_]\)expf(\([^)]*\))/\1__expf(\2)/g' \
         ggml/src/ggml-cuda/fattn-common.cuh 2>/dev/null || true
 
-# ── Build with HIP + rocWMMA flash attention + hipBLASLt ──
+# ── Build with HIP flash attention + hipBLASLt ──
+# GGML_HIP_ROCWMMA_FATTN was removed upstream after b8763: HIP FlashAttention
+# kernels are now compiled unconditionally, so the flag must not be passed.
+# AMDGPU_TARGETS is deprecated-but-forwarded upstream (→ GPU_TARGETS →
+# CMAKE_HIP_ARCHITECTURES) and still works as of b10452.
 RUN cmake -B build -G Ninja \
         -DGGML_HIP=ON \
-        -DGGML_HIP_ROCWMMA_FATTN=ON \
         -DAMDGPU_TARGETS=${AMDGPU_TARGET} \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++ \
