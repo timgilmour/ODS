@@ -736,6 +736,14 @@ class FakePolicyStore:
     def set_auto(self, enabled):
         self._auto = bool(enabled)
 
+    def forget(self, resource):
+        """app.policy.PolicyStore.forget's contract: pop the stored row for
+        `resource`, and a resource with no row is a no-op rather than a
+        KeyError. Added for the §6.2 remote coexistence proof (sglang-omni
+        Task 11), which drives the REAL forget route — and that route's third
+        write is this call."""
+        self._policy.pop(resource, None)
+
 
 class FakeLemonade:
     def __init__(self, raise_on_load=None, raise_on_unload=None, in_flight=False):
@@ -4869,6 +4877,67 @@ class _OmniWatcher:
         reasons that have nothing to do with the rule under test."""
         return not self.events("tick-error")
 
+    @property
+    def policy_store(self):
+        """The watcher's own FakePolicyStore — the same instance the real
+        forget route's third write lands on (sglang-omni Task 11)."""
+        return self.watcher._policy_store
+
+    def derived_status(self, key: str = _OMNI_KEY) -> str:
+        """The lifecycle status the deck derives for `key`, through the SAME
+        two stages the board and the reconcile pass share
+        (``join_warming`` then ``derive_status`` —
+        app.routers.build_lifecycle_view and app.arbiter._reconcile_pass both
+        run exactly this pair over one snapshot).
+
+        COSTS ONE FRESH OBSERVATION of its own: it re-assembles the remote
+        half rather than reading back whatever the last tick held, so a test
+        asserting on ``omni.status_calls`` must capture that count BEFORE
+        calling this (the sglang-omni Task 11 proofs do, into a local).
+        """
+        from app.lifecycle import derive_status, join_warming
+        from app.observe import merge_observations, observe_remote
+
+        world = self.watcher._world.snapshot([], [], _FakeLocalClients({}),
+                                             _FakeLiteLLMRoutes(), FakeRegistry())
+        world.update(self.watcher._remote_observer.half(
+            self.node_store, lambda address, credential: self.agent,
+            self.watcher._remote_engine_clients, self.watcher._world,
+            FakeRegistry()))
+        intents = self.intent_store.get()
+        observed = join_warming(merge_observations(observe_remote(world)), world,
+                                intents)
+        return derive_status(intents.get(key), observed[key])["status"]
+
+    def forget(self, node_id: str = "nimbus", resource: str = "song-r") -> None:
+        """Forget one declared engine through the REAL route
+        (app.routers.nodes.forget_engine), called directly with a
+        Request-shaped stand-in.
+
+        Deliberately NOT the store-level mirror the LOCAL §6.2 proof uses
+        (`_TwoGgufWatcher.forget` above, whose own docstring says why a
+        mirror was right there: its fixture wires no policy store, and the
+        E1-era route was local-only). This proof is about a call that must
+        never happen — the node-agent engine channel — and a mirror can only
+        ever prove the MIRROR makes no engine call. So the code under test is
+        the route itself: its three writes (declaration, then intent, then
+        policy), its `_reobserve` cache drop, and, crucially, the absence of
+        any client lookup anywhere inside it.
+        """
+        from types import SimpleNamespace
+
+        from app.routers.nodes import forget_engine
+
+        deck = {
+            "node_store": self.node_store,
+            "intent_store": self.intent_store,
+            "policy_store": self.policy_store,
+            "events_path": self.events_path,
+            "remote_observer": self.watcher._remote_observer,
+        }
+        forget_engine(node_id, resource, SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(deck=deck))))
+
 
 @pytest.fixture
 def remote_omni_watcher(tmp_path):
@@ -5256,6 +5325,177 @@ def test_one_idle_observation_unloads_once_however_many_ticks_see_it(
     w.watcher.tick()
 
     assert w.omni.downs == 1
+
+
+# ===========================================================================
+# sglang-omni Task 11 — the §6 COEXISTENCE proofs, fourth kind.
+#
+# The binding invariant (E1 design §6, Tim: "an alternative, not a
+# replacement"), already proven at the top of this file for the LOCAL
+# lemonade kind (test_natively_loaded_model_is_left_alone /
+# test_forget_then_tick_never_calls_the_engine, the T13 section). These are
+# the remote editions, and the fourth kind is what makes them worth writing
+# twice: the thing an operator launches by hand off-box is the whole ENGINE
+# (a compose up on sparky), not a model inside an engine the deck already
+# talks to — and every touch the deck could make is now an HTTP call to
+# another machine's agent, which is exactly what "never touched" has to mean
+# here.
+#
+# Both are proofs of ABSENCE driven through a REAL watcher.tick(), and each
+# carries the vacuity guards this section's `tick_error_free` docstring
+# describes plus one more that matters more for a remote engine than for a
+# local one: the engine must have been PROBED. "Nothing was actuated" is free
+# on a tick that never looked, and a remote engine has three separate ways of
+# never being looked at (node in backoff, observation TTL still warm, client
+# not operable).
+#
+# The pacing (`clock.advance(11)` per tick) is load-bearing for the same
+# reason: the RemoteObserver caches the assembled half for 10 s, so ticks in
+# the same instant would prove only that the cache works.
+#
+# NOT covered here, deliberately: idle release past the declared ttl. §6.4
+# names it as the ONE deliberate touch-point ("it unloads an idle
+# lemonade-class model whoever loaded it"), so it is not a violation of §6.1
+# — its own proofs are the obligation-4 pair above. Both proofs below keep
+# their total elapsed time well inside the declared idle_ttl (120 s) so that
+# rule is never in play; keep that margin if you add ticks.
+# ===========================================================================
+
+# Enough ticks that a reconciler with any opinion at all would have acted
+# several times over, and few enough (at 11 s each) to stay inside the ttl.
+_COEXIST_TICKS = 6
+
+# A SECOND engine on the same node, declared by the §6.2 proof only. It is
+# never forgotten, so its probes are what prove the post-forget ticks really
+# did reach the remote half — nimbus's GPU pool is read only for nodes that
+# declare something (app.node_clients.remote_world_half), so a node whose
+# last engine was just forgotten stops being probed entirely, and "no calls"
+# would otherwise be satisfiable by a tick that stopped looking at the box.
+# Its own name/GPU are away from song-r's ([[defaults-that-hide-bugs]]), and
+# it deliberately gets NO policy row: an engine the arbiter has no row for is
+# never an idle-release candidate, so the neighbour cannot actuate anything
+# while it stands in as the witness.
+_OMNI_NEIGHBOUR = {
+    "resource": "tune-r", "kind": "sglang-omni",
+    "connection": {"url": "http://nimbus:8009"},
+    "gpu_index": 5,
+    "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
+}
+
+
+def test_natively_loaded_sglang_omni_is_left_alone(remote_omni_watcher):
+    """Spec §6.1, fourth kind: an engine somebody brought up BY HAND on its
+    own box — declared to the deck, observed healthy, with NO intent record
+    anywhere — is watched and never touched.
+
+    This is the state a box is in the moment an operator declares an engine
+    that is already running, and the state it stays in for anyone who keeps
+    using `docker compose up` on sparky directly. The deck's own docstrings
+    call the derived status `unmanaged` — "loaded but the Deck has no intent
+    for it", an ADOPT CANDIDATE — and adopting it is exactly what must not
+    happen: a restore-shaped touch would be the deck claiming an engine
+    nobody handed it, and an unload-shaped one would be the deck switching
+    off a render somebody started.
+
+    Four vacuity guards, because every assertion below is an absence:
+
+    * the engine was really PROBED, once per tick (so this is not a tick that
+      never looked, nor one served entirely from the observation cache);
+    * the tick did not die in the supervisor catch;
+    * nothing was RECORDED either — whoever actuates records first, so an
+      intent record would be evidence of an actuation these counters missed;
+    * and the status the deck derived really is `unmanaged`. That last one is
+      the guard specific to a REMOTE engine: an unreachable node observes
+      `unknown` -> `unreachable`, which the reconciler is inert about for
+      reasons that have nothing to do with this rule, and a fixture that
+      drifted that way would pass everything above while proving nothing.
+    """
+    w = remote_omni_watcher
+    assert w.intent_store.get() == {}
+
+    for _ in range(_COEXIST_TICKS):
+        w.watcher.tick()
+        w.clock.advance(11)
+
+    # Captured BEFORE derived_status(), which takes a fresh observation of
+    # its own (see its docstring).
+    probes = w.omni.status_calls
+
+    assert (w.omni.ups, w.omni.downs) == (0, 0)   # nothing actuated
+    assert w.intent_store.get() == {}              # nothing recorded
+    assert probes == _COEXIST_TICKS
+    assert w.tick_error_free()
+    assert w.derived_status() == "unmanaged"
+
+
+def test_forget_remote_engine_never_calls_the_engine(remote_omni_watcher):
+    """Spec §6.2, remote edition: forget is BOOKKEEPING. It drops the
+    deck's three records of an engine — the declaration, the intent record,
+    the stored policy row — and says nothing to the engine at all, which on
+    another box means: not one node-agent request.
+
+    Removing a declaration is an operator saying "stop watching this", never
+    "shut this down". The engine keeps serving whatever it was serving; the
+    only thing that ends is the deck's opinion about it. Getting this wrong
+    on a remote engine is worse than getting it wrong locally — a forget that
+    tidied up after itself would stop a render on a machine the operator was
+    not even looking at.
+
+    Driven through the REAL route (see `_OmniWatcher.forget`), with a
+    prior intent record and a live policy row in place so that all three
+    drops are DETECTABLE — asserting a key is absent from a store it was
+    never in proves nothing.
+
+    Three vacuity guards: the engine was really probed while it was still
+    declared (so "no calls" describes a change, not a fixture that never
+    called anything), the deck went on probing its NEIGHBOUR on the same node
+    afterwards (so the ticks really did keep reaching the remote half — see
+    `_OMNI_NEIGHBOUR`), and the tick never died.
+
+    `close()` is not counted as touching the engine, and is not: retiring an
+    undeclared pair (app.node_clients.RemoteEngineClients.retire_absent)
+    releases the deck's OWN http client. It sends nothing.
+    """
+    from app.node_clients import RemoteEngineClients
+
+    w = remote_omni_watcher
+    neighbour = _FakeOmni()
+    w.node_store.update("nimbus", {"engines": [dict(_OMNI_ENGINE),
+                                               dict(_OMNI_NEIGHBOUR)]})
+    w.watcher._remote_engine_clients = RemoteEngineClients(
+        w.node_store,
+        lambda entry, credential, engine:
+            neighbour if engine["resource"] == _OMNI_NEIGHBOUR["resource"] else w.omni)
+    w.intent_store.record(_OMNI_KEY, state="loaded", model=None,
+                          engine="sglang-omni", actor="operator", now=_ago(30))
+
+    w.watcher.tick()                 # while still declared: the deck DOES probe it
+    probes_while_declared = w.omni.status_calls
+    neighbour_probes_before = neighbour.status_calls
+    w.clock.advance(11)
+
+    assert probes_while_declared > 0
+    assert _OMNI_KEY in w.intent_store.get()
+    assert "song-r" in w.policy_store.get()
+
+    w.forget()
+
+    for _ in range(_COEXIST_TICKS):
+        w.watcher.tick()
+        w.clock.advance(11)
+
+    # The engine: not one further call, of any kind.
+    assert w.omni.status_calls == probes_while_declared
+    assert (w.omni.ups, w.omni.downs) == (0, 0)
+    # The deck's three records of it: gone.
+    assert [e["resource"] for e in w.node_store.get("nimbus")["engines"]] == [
+        _OMNI_NEIGHBOUR["resource"]]
+    assert _OMNI_KEY not in w.intent_store.get()
+    assert "song-r" not in w.policy_store.get()
+    # ...and the ticks that saw none of that really ran, and really looked:
+    # one real probe of the surviving engine per tick, on the same node.
+    assert neighbour.status_calls == neighbour_probes_before + _COEXIST_TICKS
+    assert w.tick_error_free()
 
 
 # --- obligation 2: per-action isolation ------------------------------------
