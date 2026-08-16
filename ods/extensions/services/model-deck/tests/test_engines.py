@@ -1694,17 +1694,19 @@ def test_sglang_omni_down_raises_engineerror_naming_resource_on_non_202(status_c
     assert "sglang-omni-2" in str(exc_info.value)
 
 
-def test_sglang_omni_up_raises_engineerror_on_transport_failure():
+def test_sglang_omni_up_raises_engineerror_naming_resource_on_transport_failure():
     def handler(request):
         raise httpx.ConnectError("refused")
 
-    with pytest.raises(EngineError):
-        _sglang_client(handler).up()
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-3").up()
+    assert "sglang-omni-3" in str(exc_info.value)
 
 
-def test_sglang_omni_down_raises_engineerror_on_transport_failure():
+def test_sglang_omni_down_raises_engineerror_naming_resource_on_transport_failure():
     def handler(request):
         raise httpx.ConnectError("refused")
 
-    with pytest.raises(EngineError):
-        _sglang_client(handler).down()
+    with pytest.raises(EngineError) as exc_info:
+        _sglang_client(handler, resource="sglang-omni-3").down()
+    assert "sglang-omni-3" in str(exc_info.value)

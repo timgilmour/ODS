@@ -78,8 +78,18 @@ class SglangOmniClient(NodeAgentHTTP):
         self._request("down")
 
     def _request(self, verb: str) -> None:
-        resp = guarded_send(lambda: self._node.post(
-            f"/v1/node/engine/{self._resource}/{verb}"))
+        try:
+            resp = guarded_send(lambda: self._node.post(
+                f"/v1/node/engine/{self._resource}/{verb}"))
+        except EngineError as exc:
+            # guarded_send raises a plain EngineError(str(exc)) on a
+            # transport failure -- there is no resp to read a resource
+            # name off of, so it must be added here, same idiom as
+            # status()'s re-wrap (and same reason: the caller-facing
+            # message must always name `resource`, never just the raw
+            # httpx text).
+            raise type(exc)(
+                f"sglang-omni engine {self._resource!r} {verb}: {exc}") from exc
         if resp.status_code != _ACCEPTED:
             raise EngineError(
                 f"sglang-omni engine {self._resource!r} {verb} request not "
