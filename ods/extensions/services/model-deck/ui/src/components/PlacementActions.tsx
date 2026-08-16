@@ -9,6 +9,7 @@ import {
   type World,
 } from "../api";
 import { isArmedFor } from "../model/armed";
+import { forceParkCanOverride } from "../model/refusals";
 import { messages, labels } from "../model/messages";
 import Banner from "../ui/Banner";
 import ArmedButton from "../ui/ArmedButton";
@@ -118,7 +119,12 @@ export default function PlacementActions({
         err.message.includes("pull=true");
       setPullOffer(isPullGuard ? (opts!.pullGuard as { model: string; sizeBytes: number }) : null);
       setError(isPullGuard ? null : err instanceof Error ? err.message : String(err));
-      setOfferForcePark(Boolean(opts?.parkGuard) && err instanceof ApiError && err.status === 409);
+      setOfferForcePark(
+        Boolean(opts?.parkGuard) &&
+          err instanceof ApiError &&
+          err.status === 409 &&
+          forceParkCanOverride(err.message),
+      );
       // Bump refusal sequence to disarm any armed Force button on retry
       setRefusalSeq((n) => n + 1);
     } finally {
