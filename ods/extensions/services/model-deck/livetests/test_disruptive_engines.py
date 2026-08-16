@@ -211,18 +211,15 @@ def test_d12_remote_engine_round_trip(deck, engine_window, restore_engine,
     node_id, resource, key, _was_up = engine_window
 
     # --- leg 1: up, and the deck says so -----------------------------------
-    if not _is_up(deck, key):
-        _verb(deck, node_id, resource, "load")
-        _wait_for(lambda: _is_up(deck, key), BOOT_TIMEOUT,
-                  f"{key} never came up (GF4 budget is ~4.5 min; past "
-                  f"{BOOT_TIMEOUT:.0f}s the deck reads a boot as a death)")
-    else:
-        # Already resident, but possibly with no intent recorded (an engine
-        # somebody launched by hand reads 'unmanaged'). The load is what makes
-        # the unload below a DELIBERATE one rather than a park of something
-        # the deck never claimed — and it is idempotent on a running engine
-        # (`up` is a compose up).
-        _verb(deck, node_id, resource, "load")
+    # Unconditional, including on an engine already resident: `up` is a
+    # compose up (idempotent), and this is the call that RECORDS intent. An
+    # engine somebody launched by hand carries none — it reads 'unmanaged' —
+    # and unloading that would be parking something the deck never claimed,
+    # a different case from the one under test.
+    _verb(deck, node_id, resource, "load")
+    _wait_for(lambda: _is_up(deck, key), BOOT_TIMEOUT,
+              f"{key} never came up (GF4 budget is ~4.5 min; past "
+              f"{BOOT_TIMEOUT:.0f}s the deck reads a boot as a death)")
     _wait_for(lambda: _lifecycle(deck, key)["status"] == "serving", DERIVE_TIMEOUT,
               f"{key} is up but the deck does not read it as 'serving'")
 
