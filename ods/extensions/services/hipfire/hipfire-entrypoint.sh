@@ -2,10 +2,18 @@
 # hipfire entrypoint for ODS.
 #
 # hipfire's server settings (host/port/idle_timeout/default_model) are CONFIG-FILE
-# keys, not env vars — the daemon reads ~/.hipfire/config.json and ignores the
+# keys, not env vars — the CLI reads ~/.hipfire/config.toml and ignores the
 # environment. So we translate ODS's env into `hipfire config set` on every start.
 # (Same class of trap as Lemonade's cached config.json, which is what kept ODS's
 # own llama-server on a Vulkan fallback.)
+#
+# The flat key spellings below (host, port, idle_timeout, max_seq, max_tokens,
+# thinking_budget, default_model) are the post-rewrite CLI's documented legacy
+# aliases for the namespaced schema (serve.host, serve.idle_timeout_seconds,
+# memory.max_seq, ...) — hipfire-config lib.rs carries a legacy_key per field
+# and docs/CONFIG.md commits to accepting them. If a `config set` here ever
+# starts failing, that contract broke: check `hipfire config list` for the
+# namespaced names.
 set -euo pipefail
 
 # Defence in depth against the empty-but-defined HSA bug: ROCm treats a *defined*

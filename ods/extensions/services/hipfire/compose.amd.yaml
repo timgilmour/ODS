@@ -4,8 +4,10 @@ services:
       context: ./extensions/services/hipfire
       dockerfile: Dockerfile.amd
       args:
-        AMDGPU_TARGET: "${AMDGPU_TARGET:-gfx1201}"
-        HIPFIRE_REF: "${HIPFIRE_REF:-5d3683a7847391cf91bd76304188c926737d4146}"
+        # AMDGPU_TARGET is gone: kernels are JIT-compiled at runtime for
+        # whatever arch the daemon finds, not baked at build time.
+        # ⚠ .env also pins HIPFIRE_REF (it beats this default) — keep both in sync.
+        HIPFIRE_REF: "${HIPFIRE_REF:-8510ca5f247da2b87082e0ae7218c3521bdb1032}"
     image: ods-hipfire:latest
     container_name: ods-hipfire
     restart: unless-stopped
@@ -24,7 +26,18 @@ services:
       # ODS's own llama-server on a Vulkan fallback. hipfire needs no override on gfx1201 anyway
       # (upstream refuses to depend on lying about the hardware identity).
       - HSA_OVERRIDE_GFX_VERSION
-      - HIPFIRE_MODEL=${HIPFIRE_MODEL:-qwen36-35b-a3b.mq4}
+      # ⚠ This default is what a FRESH install gets: phase 06 only writes
+      # HIPFIRE_MODEL into .env once a dashboard activation has picked one, so
+      # `./install.sh --hipfire` falls through to the value below and the
+      # entrypoint `hipfire pull`s it. It MUST therefore be a name the engine's
+      # bundled registry can resolve (registry/models.json at HIPFIRE_REF), or
+      # the pull fails and the container crashloops under `set -e`.
+      # `qwen36-35b-a3b.mq4` (no dots) was NOT such a name — no registry key or
+      # file matches it, so it only ever worked on a box where the weights had
+      # been placed by hand. `qwen3.6-35b-a3b.mq4p` is upstream's own default
+      # SKU for the same model (tag `qwen3.6:35b-a3b`, 19.8 GB).
+      # Existing installs are unaffected: a set .env value beats this default.
+      - HIPFIRE_MODEL=${HIPFIRE_MODEL:-qwen3.6-35b-a3b.mq4p}
       # 0 = never evict. The default (300s) frees VRAM when idle and forces a
       # 30s-2min cold reload on the next request — wrong behind LiteLLM.
       - HIPFIRE_IDLE_TIMEOUT=${HIPFIRE_IDLE_TIMEOUT:-0}
@@ -37,27 +50,35 @@ services:
       # take effect.
       - HIPFIRE_MAX_TOKENS=${HIPFIRE_MAX_TOKENS:-4096}
       - HIPFIRE_THINKING_BUDGET=${HIPFIRE_THINKING_BUDGET:-med}
-      # Tool-call grammar kill-switch (daemon default is ON: `env != "0"`).
-      # The qwen35 grammar refuses to let the model close a tool call until
-      # every `required` field NAME has appeared in the args body — see
-      # grammar.rs `required_fields_satisfied`, a loose substring match.
-      # omp declares `i` ("concise intent") required on 11 of its 12 tools;
-      # when the model omits it the close is rejected indefinitely, the model
-      # spirals appending fragments until EOS, and the resulting JSON is
-      # unparseable — so the daemon falls back to dumping the raw
-      # `<tool_call>` buffer as assistant TEXT, which clients print verbatim.
-      # Measured 57% of tool-calling turns. Analysis: ~/notes/reports/2026-08-08.md
+      # Tool-call grammar kill-switch. History: the qwen35 grammar refused to
+      # let the model close a tool call until every `required` field NAME
+      # appeared in the args body; omp's schemas deadlocked it on 57% of
+      # tool-calling turns (~/notes/reports/2026-08-08.md). Upstream has since
+      # restructured around exactly this: for plain Qwen3.5/3.6 models the
+      # grammar now defaults OFF and the native-XML tool-call path is
+      # first-class, with matching history rendering (prompt_frame.rs
+      # `qwen35_grammar_on`: explicit "0" = off; unset = off unless the model
+      # is a carnice/Hermes card). We keep the explicit 0 — it now AGREES with
+      # the upstream default for this model instead of fighting it.
       - HIPFIRE_QWEN35_GRAMMAR=${HIPFIRE_QWEN35_GRAMMAR:-0}
     volumes:
-      - ./data/hipfire/models:/opt/hipfire/.hipfire/models:ro,z
-      # JIT-validated kernel-blob cache (.hsaco + .hash sidecars). The image
-      # ships precompiled blobs WITHOUT .hash sidecars, so a fresh container
-      # distrusts them and recompiles every kernel the model touches (~20 s
-      # of cold start). Model activation RECREATES this container (stop +
-      # up -d, because HIPFIRE_MODEL is baked in at create time), which
-      # discards the overlay-fs copy of the JIT cache — persisting the hot
-      # cache dir makes recompilation once-per-toolchain instead of
-      # once-per-activation.
+      # Must be WRITABLE. This is $HIPFIRE_HOME/models — the directory
+      # `hipfire pull` downloads into. It was `:ro`, which silently made the
+      # engine unable to fetch its own weights: the entrypoint's pull fallback
+      # died on "Read-only file system" and took the container with it under
+      # `set -e`, and the dashboard's hipfire activation path (host-agent
+      # `_do_hipfire_activate`, which documents "pulls weights if missing")
+      # could never activate a model that wasn't already on disk. Read-only
+      # only ever appeared to work here because the weights were pre-placed.
+      - ./data/hipfire/models:/opt/hipfire/.hipfire/models:z
+      # JIT kernel cache (.hsaco + .hash sidecars, keyed on
+      # source+arch+flags+toolchain+ABI). The image ships NO precompiled
+      # blobs anymore — every kernel the model touches is hipcc-compiled on
+      # first use and cached here. Model activation RECREATES this container
+      # (stop + up -d, because HIPFIRE_MODEL is baked in at create time),
+      # which discards the overlay-fs copy — persisting the cache dir makes
+      # compilation once-per-toolchain instead of once-per-activation. The
+      # container reads the path from HIPFIRE_KERNEL_CACHE (set in the image).
       - ./data/hipfire/kernels:/opt/hipfire/.hipfire_kernels:z
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${HIPFIRE_PORT:-11435}:11435"

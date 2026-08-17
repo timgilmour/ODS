@@ -27,31 +27,57 @@ must be resident on a *single* card, because hipfire has **no pipeline-parallel 
 
 ## The model is NOT interchangeable with ODS's GGUFs
 
-hipfire uses its own MQ4 format. Two traps, both verified the hard way:
+hipfire uses its own MQ4 format, not GGUF. `ods model swap` and the dashboard's GGUF download
+endpoints do **not** manage these files; the dashboard's *model activation* path does (it writes
+`HIPFIRE_MODEL`, recreates the container, and lets the entrypoint pull).
 
-1. **`hipfire pull qwen3.6:35b-a3b` 404s.** Both 35B-A3B MoE entries in upstream's registry point
-   at unpublished HuggingFace repos (one is even tagged "LOCAL ONLY").
-2. **Converting the existing GGUF does not work.** hipfire's GGUF→MQ4 path has no branch for 3-D
-   MoE expert tensors, so it dumps all 256 experts/layer to F16: 7.1 % quantized, **66 GB out of a
-   22 GB input**, unloadable. Only the *safetensors* path splits and quantizes experts.
+One trap still stands, one has expired:
 
-So the model was built from the original BF16 safetensors (kept at
-`/home/tim/models/Qwen3.6-35B-A3B`):
+1. ~~**`hipfire pull qwen3.6:35b-a3b` 404s.**~~ **Fixed upstream.** As of the `8510ca5f` pin,
+   `hipfire-models/qwen3.6-35b-a3b` is published with all seven SKUs (`.mq2` … `.mq6`, `.mfp4`,
+   plus the `.mtp` sidecar), and `hipfire-models/qwen3.8-27b` carries `.mq4` + `.mq4r`. Pulling by
+   tag or by registry filename works. Verified 2026-08-17 against the HF tree API.
+2. **Converting an existing GGUF may still not work for MoE.** hipfire's GGUF→MQ4 path had no
+   branch for 3-D MoE expert tensors and dumped all 256 experts/layer to F16: 7.1 % quantized,
+   **66 GB out of a 22 GB input**, unloadable. Only the *safetensors* path splits and quantizes
+   experts. Not re-verified against the post-restructure quantizer — pull the published SKU
+   instead of converting. (Related: `run_gguf_pipeline` still maps only `"qwen3moe" => 6`, so a
+   `qwen35moe` GGUF is misidentified. Fix exists locally at `~/projects/hipfire` `e6fb7ef9`,
+   never upstreamed.)
 
-```bash
-hipfire-quantize --input /home/tim/models/Qwen3.6-35B-A3B \
-                 --output data/hipfire/models/qwen36-35b-a3b.mq4 --format mq4
-# -> 22.8 GB, 100.0% of params quantized, mean quant error 0.0
-```
+### Model names must be registry-resolvable
 
-`ods model swap` and the dashboard's model endpoints do **not** know about this file — they
-manage GGUFs for llama-server. Re-quantize by hand to change hipfire's model.
+`HIPFIRE_MODEL` is a **filename from the engine's bundled registry**, e.g. `qwen3.6-35b-a3b.mq4p`
+or `qwen3.8-27b.mq4`. `hipfire list` prints the resolved tag in parentheses beside each local
+file; **a file listed with no tag is not registry-resolvable** and will not receive its tag policy
+(KV backend, native context, max-output allowance). Hand-built artifacts fall in this bucket — the
+box that first ran this extension served `qwen36-35b-a3b.mq4`, a locally-quantized file whose name
+matches nothing upstream, which is why the fresh-install default used to crashloop.
 
 ## Version pin
 
 `HIPFIRE_REF` is pinned to a **master commit, deliberately not the v0.2.1 tag**: v0.2.1's
 quantizer *silently* produces the broken 66 GB model above, and the gfx1201 kernel work landed
-after the tag. Bump it consciously.
+after the tag. Bump it consciously — **in `.env` too, whose pin beats the compose default**.
+
+Bumped 2026-08-16 from `5d3683a7` (2026-07-11) to `8510ca5f` (2026-08-15), ~1,539 commits.
+The repo moved to `warpfront/hipfire` (old URL redirects). Upstream restructured in between:
+
+- The Bun/TS CLI (`cli/index.ts`) was rewritten as a Rust binary (`hipfire-cli`); the
+  runtime image no longer contains Bun.
+- Kernels are JIT-compiled by hipcc on first use (embedded sources) and cached in the
+  mounted `data/hipfire/kernels` volume; the build-time "compile 528 kernels + count gate"
+  stage is gone. Shipped-blob precompiles were rejected on purpose: their `toolchain_id=""`
+  packaging hashes only validate on hipcc-free runtimes, and ours ships hipcc for JIT.
+- **`finish-reason.patch` is retired.** It patched `cli/index.ts`, which no longer exists;
+  the Rust CLI carries the terminal-finish_reason rule natively (its test suite asserts
+  `finish_reason == "tool_calls"` on emitted tool calls). Verified against the live API at
+  deploy time rather than assumed.
+- The tool-call grammar that deadlocked omp (2026-08-08) now **defaults OFF** for plain
+  Qwen3.5/3.6 models upstream; the native-XML path is first-class with matching history
+  rendering. Our explicit `HIPFIRE_QWEN35_GRAMMAR=0` is kept and now agrees with upstream.
+- Config keys went namespaced (`serve.host`, `memory.max_seq`, ...) but the entrypoint's
+  flat spellings are documented legacy aliases and keep working.
 
 ## Enable / disable
 

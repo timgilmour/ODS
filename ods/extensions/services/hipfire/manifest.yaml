@@ -27,10 +27,13 @@ service:
 features:
   - id: fast-text
     name: Fast local text inference
-    # Only gfx1201 (RDNA4) is built and validated; the image defaults to
-    # AMDGPU_TARGET=gfx1201 and its kernel-count gate is calibrated for it.
-    # Other RDNA targets need a rebuild with a different AMDGPU_TARGET.
-    description: RDNA-native text generation on Radeon GPUs (validated on gfx1201/RDNA4)
+    # No build-time arch pin since the 2026-08-16 upstream restructure: kernels
+    # are hipcc-JIT-compiled on first use for whatever arch the daemon finds and
+    # cached in the mounted kernel volume, so one image serves every supported
+    # RDNA target. Upstream validates RDNA3 (gfx1100-gfx1103), RDNA3.5
+    # (gfx1150-gfx1152), and RDNA4 (gfx1200/gfx1201); locally exercised on
+    # gfx1201. A different card costs a one-time JIT pass, not a rebuild.
+    description: RDNA-native text generation on Radeon GPUs (RDNA3/3.5/4; validated locally on gfx1201)
     icon: Zap
     category: core
     requirements:

@@ -1,37 +1,49 @@
 # hipfire — RDNA-native LLM inference engine, containerized for ODS.
 #
-# Two stages: the build needs the full ROCm SDK (hipcc compiles the HIP kernels,
-# which upstream does not commit), but serving needs only the HIP runtime + Bun.
+# Two stages: the build needs the ROCm SDK base only for parity with the
+# runtime (the cargo build itself needs no GPU — ROCm/HIP is dlopen'd at
+# runtime), and the runtime needs hipcc + HIP headers because kernels are
+# JIT-compiled on first use.
 #
-# Corrections vs. the first draft, all verified against the real tree:
-#   - The HTTP server lives in cli/index.ts (Bun), NOT a "cli/serve_admission.ts"
-#     (that file does not exist on any ref). The Rust daemon has no HTTP deps at
-#     all — `serve` is a Bun process that spawns the daemon over JSON-lines stdio.
-#     So the runtime stage genuinely needs Bun.
-#   - There is no top-level registry/ dir. The model registry is cli/registry.json,
-#     so copying cli/ covers it. (The old draft's `COPY /src/registry` would have
-#     failed the build outright.)
-#   - HIPFIRE_DIR is NOT honored: cli/index.ts hardcodes join(homedir(), ".hipfire").
-#     Only HOME matters — hence ENV HOME below, and no HIPFIRE_DIR.
-#   - The engine probes kernels at {exe_dir}/kernels/compiled/{arch}, i.e. next to
-#     the daemon binary, so they land in bin/kernels/compiled/$AMDGPU_TARGET.
-#   - compile-kernels.sh writes to <repo>/kernels/compiled/<arch>.
+# Rewritten 2026-08-16 for the post-July upstream restructure (repo moved to
+# warpfront/hipfire; verified against the pinned tree):
+#   - The Bun/TypeScript CLI (cli/index.ts) is GONE. The CLI is now a Rust
+#     binary (`cargo build -p hipfire-cli` → target/release/hipfire). No Bun
+#     in the runtime image anymore.
+#   - Kernels are no longer pre-compiled at build time. Every .hip source and
+#     its helper headers are embedded in the daemon via include_str! and
+#     JIT-compiled by hipcc on first use, cached under HIPFIRE_KERNEL_CACHE
+#     with hash sidecars keyed on source+arch+flags+toolchain+ABI. The old
+#     "compile 528 kernels, gate on a count" stage is obsolete. Baking
+#     pre-compiled blobs was considered and rejected: packaged blobs carry
+#     toolchain_id="" hashes which only validate on a hipcc-FREE runtime
+#     (compiler.rs cache_hash vs packaging_hash); with hipcc present — which
+#     JIT needs anyway — they hash-mismatch and everything recompiles. The
+#     compose-mounted cache volume makes JIT a once-per-toolchain cost.
+#   - The finish-reason.patch is RETIRED. It patched cli/index.ts, which no
+#     longer exists; the Rust rewrite carries the terminal finish_reason
+#     rule natively (see cli tests asserting finish_reason == "tool_calls").
+#     Verified behaviorally at deploy, not assumed — see README.
+#   - Config discovery roots at $HIPFIRE_HOME (falling back to $HOME/.hipfire).
+#     NOTE: upstream's own Containerfile sets HIPFIRE_DIR, which nothing in
+#     the tree reads — the real env var is HIPFIRE_HOME (hipfire-config
+#     lib.rs discover()). We set both HOME and HIPFIRE_HOME explicitly.
+#   - The daemon path is taken from HIPFIRE_DAEMON_BIN (honored by the CLI).
 #
-ARG AMDGPU_TARGET=gfx1201
-# Pinned to a master commit, NOT v0.2.1: v0.2.1 cannot quantize this box's
-# Qwen3.6-35B-A3B MoE (it F16-dumps the expert tensors), and the gfx1201 kernel
-# work landed after the tag. Bump deliberately, never float.
-ARG HIPFIRE_REF=5d3683a7847391cf91bd76304188c926737d4146
+# Pinned to a master commit, NOT a release tag: the last tag (v0.2.1) predates
+# both the MoE quantizer fix and the whole Rust-CLI restructure. Upstream's
+# Cargo.toml says 0.3.0 but no v0.3.0 tag exists yet. Bump deliberately,
+# never float.
+ARG HIPFIRE_REF=8510ca5f247da2b87082e0ae7218c3521bdb1032
 
 # ─────────────────────────────────────────────────────────────
-# Stage 1: builder — ROCm SDK, Rust daemon, HIP kernels
+# Stage 1: builder — Rust daemon + Rust CLI
 # ─────────────────────────────────────────────────────────────
-# ROCm 7.2, NOT 7.0: on 7.0 the gfx1201 attention_dflash_wmma_* kernels fail to
-# compile (69 of 528 failed), and the host runs ROCm 7.2.4 anyway. Keep the
-# builder's ROCm major.minor aligned with the host's.
-FROM rocm/dev-ubuntu-24.04:7.2-complete AS builder
+# Same ROCm base family as the runtime (host runs ROCm 7.2.4). The 7.2.4
+# non-"-complete" dev image ships hipcc + HIP headers, which is all the JIT
+# path needs; the build stage itself only needs the matching system libs.
+FROM rocm/dev-ubuntu-24.04:7.2.4 AS builder
 
-ARG AMDGPU_TARGET
 ARG HIPFIRE_REF
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -44,98 +56,48 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal
 
 WORKDIR /src
-RUN git clone https://github.com/Kaden-Schutt/hipfire.git . \
+RUN git clone https://github.com/warpfront/hipfire.git . \
  && git checkout --detach "${HIPFIRE_REF}"
 
-# The engine is an *example* target of hipfire-runtime, not a bin — this is how
-# upstream's own install.sh builds it.
-RUN cargo build --release --features deltanet --example daemon -p hipfire-runtime
-
-# Kernels are not committed; hipcc compiles them here. gfx1201 is already one of
-# compile-kernels.sh's default targets.
-# 69 of 528 kernels (all attention_dflash_wmma_* spec-decode variants) fail to
-# compile for gfx1201 upstream. Verified identical on the ROCm 7.2.4 HOST
-# toolchain, so it is not a container artifact — and the engine serves fine
-# without them (they are speculative-decode paths, not the AR decode hot path).
-# compile-kernels.sh therefore exits non-zero on a healthy build.
-#
-# So the gate is an explicit COUNT, not the script's exit code. This is NOT the
-# `|| true` antipattern: swallowing the status without checking anything is what
-# shipped ODS's llama-server an image with empty kernel dirs and a green build.
-# Here the count is asserted loudly and the build dies if the kernels aren't there.
-RUN ./scripts/compile-kernels.sh "${AMDGPU_TARGET}" || true; \
-    n=$(ls kernels/compiled/${AMDGPU_TARGET}/*.hsaco 2>/dev/null | wc -l); \
-    echo "kernels compiled for ${AMDGPU_TARGET}: $n"; \
-    if [ "$n" -lt 450 ]; then \
-        echo "FATAL: only $n kernels for ${AMDGPU_TARGET} (expected >=450)."; \
-        echo "       ROCm may not support this target; refusing to ship a hollow image."; \
-        exit 1; \
-    fi
+# The daemon is an *example* target of hipfire-runtime, not a bin — this is
+# how upstream's own Containerfile builds it. Default features already pull
+# in the arch crates; deltanet is additive.
+RUN cargo build --release --locked --features deltanet \
+        --example daemon -p hipfire-runtime
+RUN cargo build --release --locked -p hipfire-cli
 
 # ─────────────────────────────────────────────────────────────
-# Stage 2: runtime — HIP runtime + Bun + daemon + kernels + CLI
+# Stage 2: runtime — HIP runtime + hipcc (JIT) + daemon + CLI
 # ─────────────────────────────────────────────────────────────
-FROM rocm/dev-ubuntu-24.04:7.2 AS runtime
-
-ARG AMDGPU_TARGET
+FROM rocm/dev-ubuntu-24.04:7.2.4 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates unzip \
+        curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ENV BUN_INSTALL=/opt/bun
-ENV PATH=/opt/bun/bin:$PATH
-RUN curl -fsSL https://bun.sh/install | bash
-
-# The CLI resolves everything from $HOME/.hipfire — this is the only knob.
-ENV HOME=/opt/hipfire
+# Config/model/registry discovery roots at HIPFIRE_HOME (HOME/.hipfire as
+# fallback — keep both aligned so nothing diverges). The models volume mounts
+# at /opt/hipfire/.hipfire/models, same path as the pre-rewrite image, so the
+# compose mounts are unchanged.
+ENV HOME=/opt/hipfire \
+    HIPFIRE_HOME=/opt/hipfire/.hipfire \
+    HIPFIRE_DAEMON_BIN=/opt/hipfire/.hipfire/bin/daemon \
+    HIPFIRE_KERNEL_CACHE=/opt/hipfire/.hipfire_kernels \
+    HIP_PATH=/opt/rocm
 WORKDIR /opt/hipfire
 
 COPY --from=builder /src/target/release/examples/daemon \
                     /opt/hipfire/.hipfire/bin/daemon
-COPY --from=builder /src/kernels/compiled/${AMDGPU_TARGET} \
-                    /opt/hipfire/.hipfire/bin/kernels/compiled/${AMDGPU_TARGET}
-COPY --from=builder /src/cli /opt/hipfire/.hipfire/cli
-
-RUN cd /opt/hipfire/.hipfire/cli && bun install --frozen-lockfile
-
-# ── Local patch: terminal finish_reason ─────────────────────────────
-#
-# The CLI closed a tool-call stream with `daemonFR ?? "tool_calls"`. The
-# daemon's field answers "what did I extract from the text", not "what is
-# this response" — and with HIPFIRE_QWEN35_GRAMMAR=0 its own extraction
-# comes back empty, so it reports "stop". That is non-null, so `??` took
-# it, and clients received tool_call deltas under finish_reason "stop".
-# omp tolerates that; anything checking `=== "tool_calls"` strictly does
-# not. See ~/notes/reports/2026-08-08.md.
-#
-# Applied as a PATCH rather than a copied index.ts on purpose: if upstream
-# ever changes these lines, `patch` exits non-zero and the build FAILS
-# LOUDLY. A whole-file copy would silently revert the fix on the next
-# HIPFIRE_REF bump — the same silent-revert trap that nearly ate the
-# HIPFIRE_QWEN35_GRAMMAR line when it lived only in the un-versioned ~/ods.
-#
-# Applied after `bun install` so the dependency layer stays cached, and in
-# the runtime stage only, so neither the Rust build nor the 450-kernel
-# compile is invalidated.
-COPY finish-reason.patch /tmp/finish-reason.patch
-RUN cd /opt/hipfire/.hipfire && patch -p1 < /tmp/finish-reason.patch \
- && rm /tmp/finish-reason.patch
-
-# Upstream's own wrapper: probes for bun, then runs the TS CLI.
-RUN printf '%s\n' \
-      '#!/bin/bash' \
-      'set -e' \
-      'exec /opt/bun/bin/bun run "$HOME/.hipfire/cli/index.ts" "$@"' \
-      > /usr/local/bin/hipfire \
- && chmod +x /usr/local/bin/hipfire
+COPY --from=builder /src/target/release/hipfire /usr/local/bin/hipfire
 
 COPY hipfire-entrypoint.sh /usr/local/bin/hipfire-entrypoint.sh
 RUN chmod +x /usr/local/bin/hipfire-entrypoint.sh
 
 EXPOSE 11435
 
-# /health returns 503 while a model loads; a cold load can take minutes.
+# /health returns 503 while a model loads; a cold load can take minutes, and
+# the first load after a toolchain change also JIT-compiles the kernels the
+# model touches.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=5 \
   CMD curl -fsS http://127.0.0.1:11435/health || exit 1
 
