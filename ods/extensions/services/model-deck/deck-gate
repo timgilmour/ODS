@@ -31,8 +31,30 @@ if [[ ! -f "$UI_DIR/dist/index.html" ]]; then
   echo "deck-gate: REFUSED — ui/dist is missing. Run: (cd ui && npm run build)" >&2
   exit 2
 fi
-if [[ -n "$(find "$UI_DIR/src" -newer "$UI_DIR/dist/index.html" -print -quit)" ]]; then
-  echo "deck-gate: REFUSED — ui/dist is older than ui/src. Run: (cd ui && npm run build)" >&2
+
+# Fix round 1, items 2+3. The staleness guard must watch everything Vite
+# actually bundles, not just ui/src: ui/index.html (the Vite entry),
+# ui/vite.config.ts, and ui/public/ all change the built output without
+# touching ui/src, which would otherwise give a false PASS against a stale
+# dist. ui/gates is deliberately EXCLUDED — gate .mjs is never bundled, so
+# watching it would refuse on every gate edit for no reason.
+#
+# A missing required path must refuse rather than pass silently: `find` on a
+# nonexistent path writes to stderr and produces no matches, so the `[[ -n
+# ... ]]` staleness test below would read empty and let a build with no
+# source tree through as "fresh". Check existence explicitly first.
+WATCH_PATHS=("$UI_DIR/src" "$UI_DIR/index.html" "$UI_DIR/vite.config.ts")
+for p in "${WATCH_PATHS[@]}"; do
+  if [[ ! -e "$p" ]]; then
+    echo "deck-gate: REFUSED — $p is missing; cannot verify dist freshness." >&2
+    exit 2
+  fi
+done
+[[ -d "$UI_DIR/public" ]] && WATCH_PATHS+=("$UI_DIR/public")
+
+if [[ -n "$(find "${WATCH_PATHS[@]}" -newer "$UI_DIR/dist/index.html" -print -quit)" ]]; then
+  echo "deck-gate: REFUSED — ui/dist is older than one of: ui/src, ui/index.html," >&2
+  echo "ui/vite.config.ts, ui/public. Run: (cd ui && npm run build)" >&2
   echo "A gate against a stale bundle proves nothing about the code you just wrote." >&2
   exit 2
 fi

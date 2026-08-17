@@ -32,7 +32,11 @@ if (!gatePaths) {
   process.exit(2);
 }
 
-const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+// Fix round 1, item 4: captured before the loop runs — a report labelled
+// "started" must carry the time the run began, not the time the last gate
+// finished.
+const startedAt = new Date();
+const stamp = startedAt.toISOString().replace(/[:.]/g, "-");
 const rows = [];
 for (const path of gatePaths) {
   const mod = await import(path);
@@ -41,7 +45,20 @@ for (const path of gatePaths) {
   rows.push(...results.rows());
 }
 
-const meta = { tier, startedIso: new Date().toISOString(), target: arg("--deck-url") };
+// Fix round 1, item 1: a -k pattern that matches no gate (or, more
+// generally, any run that produces zero checks) is the same silent no-op
+// success ruling R2 forbids one level below the tier check — refuse rather
+// than report a green "0 passed / 0 failed". No report is written, mirroring
+// the tier-check refusal above.
+if (rows.length === 0) {
+  console.error(
+    `deck-gate: no checks ran` +
+      (pattern ? ` — pattern "${pattern}" matched no gate in tier "${tier}"` : ""),
+  );
+  process.exit(2);
+}
+
+const meta = { tier, startedIso: startedAt.toISOString(), target: arg("--deck-url") };
 await mkdir(reportDir, { recursive: true });
 await writeFile(join(reportDir, `${stamp}.md`), renderMarkdown(rows, meta));
 await writeFile(join(reportDir, `${stamp}.json`), renderJson(rows, meta));
