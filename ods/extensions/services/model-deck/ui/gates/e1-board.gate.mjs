@@ -10,14 +10,17 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 export const name = "e1-board";
 
-/** E1 items 9-13: the Set Builder's dynamic per-resource board — one draft
+/** E1 items 9-15: the Set Builder's dynamic per-resource board — one draft
  * card, per-kind rows inside it, a working model-chip drop confined to the
  * one load-verb resource's card, the 409 overwrite-lockdown invariant,
  * durable (survives-a-reload) model removal — plus (Task 9) the live Deck
  * board's own per-resource controls: generic (never `/api/spark`) dispatch
  * URLs, the Force-park two-click arm/confirm contract, the cold-GGUF
  * pull-through banner, and ResourcePanel actually rendering verbs (not
- * silently nothing, not SparkSwap) for a non-spark resource.
+ * silently nothing, not SparkSwap) for a non-spark resource — plus (Task 10)
+ * the model-detail drawer's external-process chip and action suppression,
+ * and the GPU-1 shared-meter invariant (lemonade + comfyui both read the
+ * SAME total, never a per-tenant split).
  *
  * Selector table, read out of ui/src/components/SetBuilder.tsx at bfa75274
  * (labels/messages confirmed in ui/src/model/messages.ts; supporting reads:
@@ -125,7 +128,56 @@ export const name = "e1-board";
  * keys on `url.pathname` only (stub-server.mjs:53) — a query string carries
  * no route identity there, which is exactly why the alias-removal check
  * above cannot rely on query strings either and reads the recorded `path`
- * instead. */
+ * instead.
+ *
+ * Items 14-15 selector table (Task 10), read out of
+ * ui/src/components/ModelDetailDrawer.tsx, ui/src/ui/ModelChip.tsx,
+ * ui/src/ui/Meter.tsx and ui/src/model/nodes.ts at 918a160b (also see
+ * selector-notes.md's RESOLVED section, written for this task):
+ *
+ * | What                           | Selector / text                                         |
+ * |--------------------------------|----------------------------------------------------------|
+ * | GPU meter (per resource card)  | `.ui-meter-label`, text `"{used} / {total} GB"`          |
+ * |                                 | (`bytesToGB`, one decimal) — read straight off            |
+ * |                                 | `world.gpus[tenant.gpu_index]`, never divided by the      |
+ * |                                 | number of tenants sharing that index (nodes.ts's           |
+ * |                                 | `localNode`)                                               |
+ * | External proc's placement row  | `.resource-placement` containing text `"pid {pid}"`       |
+ * |                                 | (`Placement.name` for `kind: "external"` is literally      |
+ * |                                 | `` `pid ${e.pid}` ``, nodes.ts's `externalPlacement`)      |
+ * | External chip glyph            | `▨` inside that row's `.ui-chip` (`ModelChip.tsx`'s        |
+ * |                                 | `ICON.external`; compare `▤` for `kind: "engine"`)         |
+ * | Model-detail drawer            | `.ui-drawer` (role `dialog`, `aria-label="Model detail"`) |
+ * | Drawer's model identity        | `.drawer-name` (verbatim `placement.name`, untruncated)   |
+ * | Drawer close button            | `.ui-drawer button[aria-label="Close"]`                   |
+ * | Drawer's placement-actions row | `.ui-drawer .tenant-actions` — present only when          |
+ * |                                 | `ModelDetailDrawer.tsx`'s `tenantControl` is non-null,     |
+ * |                                 | which is gated `placement.kind !== "external"` (line       |
+ * |                                 | 319-322, a recorded fix-loop finding: "an external PID's   |
+ * |                                 | drawer would be nonsensical")                              |
+ *
+ * Item 14's external-proc attribution: a GPU's `world.externals` are
+ * claimed by the FIRST resource card that lands on that `gpu_index` in
+ * `sortedResourceEntries` order (gpu_index then resource name —
+ * `nodes.ts`'s `externalsClaimed` set), never by every co-located resource.
+ * This fixture's GPU 1 carries both comfyui and lemonade; "comfyui" sorts
+ * before "lemonade", so the external chip lands on comfyui's card.
+ *
+ * Item 14's absence check follows NO VACUOUS NEGATIONS: `.tenant-actions`
+ * is asserted PRESENT on a real tenant's own drawer (hipfire) before it is
+ * asserted ABSENT on the external placement's drawer — otherwise a typo'd
+ * selector would read "0" either way and the check would prove nothing.
+ * `.drawer-name`'s exact text is waited on before each `.tenant-actions`
+ * read too, so the absence check is against a drawer proven genuinely open
+ * for the RIGHT placement, not a stale or unopened one.
+ *
+ * Item 15's fixture (`defaults-that-hide-bugs`): GPU 1's total
+ * (21474836480, "21.5 GB") is deliberately neither 0 nor equal to GPU 0's
+ * (34208743424, "34.2 GB") — a fixture where the two coincided could not
+ * distinguish "read GPU 1's real total" from "read GPU 0's by mistake" or
+ * "divide the shared total by the tenant count and round to the same
+ * number"; a fixture where GPU 1 read 0 could not distinguish "the real
+ * total" from "a split that happened to floor to zero." */
 
 async function assertUnique(page, selector, what) {
   const n = await page.locator(selector).count();
@@ -219,6 +271,101 @@ export async function run() {
         .locator('.resource-panel:has-text("comfyui") .tenant-actions button:has-text("Free")')
         .count();
       results.check("item13: comfyui's Free button renders", comfyuiVerbCount === 1, String(comfyuiVerbCount));
+
+      // --------------------------------------------------------------
+      // Items 14-15 (Task 10) — still the default "deck" view. Both
+      // ResourcePanel's Meter and ModelDetailDrawer only ever render here,
+      // never on the Set Builder tab, so these run before item 12's clicks
+      // below and before the tab switch that starts items 9-11.
+      // --------------------------------------------------------------
+
+      // Item 15 — lemonade and comfyui share GPU 1 (world.gpus[1]). Each
+      // card's Meter reads world.gpus BY THE RESOURCE'S OWN gpu_index
+      // (nodes.ts's localNode: `world.gpus.find((g) => g.index ===
+      // tenant.gpu_index)`) — there is no per-tenant division anywhere in
+      // that lookup — so both cards must report the IDENTICAL total.
+      // `defaults-that-hide-bugs`: the fixture gives GPU 1 a total
+      // (21474836480, "21.5 GB") that is neither 0 nor equal to GPU 0's
+      // (34208743424, "34.2 GB") specifically so a "split the meter between
+      // the two tenants" regression would be arithmetically visible — a
+      // fixture where the two GPUs' totals coincided could not tell "read
+      // GPU 1's real total" apart from "read GPU 0's total by mistake," and
+      // one where GPU 1 read 0 could not tell "the real total" apart from
+      // "divide it by the tenant count and it happened to floor to zero."
+      await assertUnique(page, '.resource-panel:has-text("lemonade") .ui-meter-label', "lemonade's GPU meter label");
+      await assertUnique(page, '.resource-panel:has-text("comfyui") .ui-meter-label', "comfyui's GPU meter label");
+      const lemonadeMeter = await page
+        .locator('.resource-panel:has-text("lemonade") .ui-meter-label')
+        .innerText();
+      const comfyuiMeter = await page
+        .locator('.resource-panel:has-text("comfyui") .ui-meter-label')
+        .innerText();
+      results.check(
+        "item15: lemonade's GPU-1 card reads the fixture's distinctive total (not 0, not GPU 0's)",
+        lemonadeMeter === "4.3 / 21.5 GB",
+        lemonadeMeter,
+      );
+      results.check(
+        "item15: comfyui's GPU-1 card reports the SAME total as lemonade's — both share GPU 1, and a per-tenant split would make these diverge",
+        comfyuiMeter === lemonadeMeter,
+        `lemonade=${lemonadeMeter} comfyui=${comfyuiMeter}`,
+      );
+
+      // Item 14 — the external placement's own chip, and the drawer it
+      // opens. Two claims, per selector-notes.md's RESOLVED section, not
+      // one: the chip itself renders `▨` (ModelChip.tsx's `ICON.external`,
+      // distinct from `▤` for an "engine" placement), AND opening its
+      // drawer offers no placement actions —
+      // ModelDetailDrawer.tsx:319-322 deliberately gates `tenantControl` on
+      // `placement.kind !== "external"`, a recorded fix-loop finding ("an
+      // external PID's drawer would be nonsensical"). The fixture's
+      // external proc (pid 91234, gpu 1) is attributed to comfyui's card:
+      // nodes.ts's `externalsClaimed` gives a GPU's externals to the FIRST
+      // resource card in `sortedResourceEntries` order (gpu_index then
+      // name), and "comfyui" sorts before "lemonade".
+      await assertUnique(
+        page,
+        '.resource-panel:has-text("comfyui") .resource-placement:has-text("pid 91234")',
+        "the external proc's placement row",
+      );
+      const externalChipText = await page
+        .locator('.resource-panel:has-text("comfyui") .resource-placement:has-text("pid 91234") .ui-chip')
+        .innerText();
+      results.check(
+        "item14: the external placement renders its own chip with the ▨ glyph (ModelChip's external icon)",
+        externalChipText.includes("▨"),
+        externalChipText,
+      );
+
+      // NO VACUOUS NEGATIONS: prove the positive case FIRST. Open a real
+      // tenant's own drawer (hipfire) and confirm its placement actions
+      // genuinely render, so the item's absence check below is proven
+      // against a selector that CAN find something — not one that would
+      // read "0" for a typo'd class regardless of what the drawer holds.
+      await assertUnique(page, '.resource-panel:has-text("hipfire") .resource-placement .ui-chip', "hipfire's own chip");
+      await page.click('.resource-panel:has-text("hipfire") .resource-placement .ui-chip');
+      await page.waitForSelector('.ui-drawer .drawer-name:text-is("qwen-test-model")');
+      const hipfireDrawerActions = await page.locator(".ui-drawer .tenant-actions").count();
+      results.check(
+        "item14: opening hipfire's OWN (non-external) drawer shows its placement actions (positive control proving the absence check below means something)",
+        hipfireDrawerActions === 1,
+        String(hipfireDrawerActions),
+      );
+      await assertUnique(page, '.ui-drawer button[aria-label="Close"]', "hipfire drawer's close button");
+      await page.click('.ui-drawer button[aria-label="Close"]');
+      await page.waitForSelector(".ui-drawer", { state: "detached" });
+
+      await page.click('.resource-panel:has-text("comfyui") .resource-placement:has-text("pid 91234") .ui-chip');
+      await page.waitForSelector('.ui-drawer .drawer-name:text-is("pid 91234")');
+      const externalDrawerActions = await page.locator(".ui-drawer .tenant-actions").count();
+      results.check(
+        'item14: opening the external placement\'s drawer offers NO placement actions (placement.kind === "external" suppression) — the drawer itself is genuinely open, proven by the drawer-name wait above, not merely absent',
+        externalDrawerActions === 0,
+        String(externalDrawerActions),
+      );
+      await assertUnique(page, '.ui-drawer button[aria-label="Close"]', "external drawer's close button");
+      await page.click('.ui-drawer button[aria-label="Close"]');
+      await page.waitForSelector(".ui-drawer", { state: "detached" });
 
       // Item 12 (part 1) — force-park requires arming. The plain "Park"
       // click dispatches unconditionally and 409s on the host-agent-busy
