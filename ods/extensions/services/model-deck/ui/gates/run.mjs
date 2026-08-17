@@ -36,14 +36,13 @@ if (tier === "capture") {
   process.exit(0);
 }
 
-// R1 (controller ruling): only "smoke" is registered here. Task 6 registers
-// e1-engines.gate.mjs into "fixture" and Task 8 registers fidelity.gate.mjs
-// into "live" — each task adds its own gate to its own tier when the module
-// actually exists. A dynamic import() of a not-yet-written module would
-// throw at dispatch time, which would make this task's own acceptance step
-// unrunnable.
+// R1 (controller ruling): Task 8 registers fidelity.gate.mjs into "live" —
+// each task adds its own gate to its own tier when the module actually
+// exists. A dynamic import() of a not-yet-written module would throw at
+// dispatch time, which would make that task's own acceptance step
+// unrunnable. Task 6 adds e1-engines.gate.mjs here, into "fixture".
 const GATES = {
-  fixture: ["./smoke.gate.mjs"],
+  fixture: ["./smoke.gate.mjs", "./e1-engines.gate.mjs"],
 };
 
 // R2 (controller ruling): a tier with no registered gates is not "nothing to
@@ -61,11 +60,32 @@ if (!gatePaths) {
 // finished.
 const startedAt = new Date();
 const stamp = startedAt.toISOString().replace(/[:.]/g, "-");
+// Task 4 carry-over, closed by Task 6: createResults()'s duplicate-name
+// guard is per-instance, i.e. per-gate. With a second gate now registered,
+// two DIFFERENT gates could emit the same check name and one FAIL would
+// hide behind the other gate's same-named PASS in the merged report below —
+// a silent failure the whole point of this harness is to rule out. Checked
+// here, across every gate's rows, before they are merged; a collision
+// refuses loudly (exit 2) naming both the check and the gate that repeated
+// it, rather than writing a report that could hide one behind the other.
 const rows = [];
+const seenNames = new Set();
 for (const path of gatePaths) {
   const mod = await import(path);
   if (pattern && !mod.name.includes(pattern)) continue;
   const results = await mod.run({ deckUrl: arg("--deck-url") });
+  for (const row of results.rows()) {
+    if (seenNames.has(row.name)) {
+      console.error(
+        `deck-gate: duplicate check name across gates: "${row.name}" ` +
+          `(reintroduced by gate "${mod.name}"). Duplicate-name protection ` +
+          `is per-gate (createResults()); a name repeated in a second gate ` +
+          `can hide a FAIL behind another gate's PASS once rows are merged.`,
+      );
+      process.exit(2);
+    }
+    seenNames.add(row.name);
+  }
   rows.push(...results.rows());
 }
 
