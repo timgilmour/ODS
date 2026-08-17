@@ -218,21 +218,30 @@ export async function run() {
 
     await assertUnique(page, '.engine-row:has-text("gguf-test")', "the new gguf-test row");
 
-    // Item 5 — PolicyModal shows 4 rows, not 3, after the add. PolicyModal
+    // Item 5 — PolicyModal renders every row of its policy map. PolicyModal
     // takes its `policy` prop straight off /api/state's own `policy` field
     // (App.tsx: `<PolicyModal policy={state.policy} .../>`) — it issues no
     // GET of its own (putPolicy is a PUT only). /api/state IS the
-    // ambient-polled route the item-4(b) comment above just ruled out for
-    // proving CAUSALITY, so this check does not lean on that: it only
-    // asserts PolicyModal's own row-fidelity against whatever `policy` map
-    // it is handed (a real fixture gap does the opposite of what item 4(b)
-    // needs — dropping a row it was given — which is exactly what this
-    // item's RED mutation targets). The causal half (did the click cause
-    // the add) is item 4's job, proven above.
+    // ambient-polled route the item-4(b) comment above rules out for
+    // proving CAUSALITY (App.tsx's POLL_MS=3000 timer advances it whether
+    // or not any click happened) — R12 (controller ruling): a polled route
+    // may carry only a CONSTANT, never a transition a check leans on. So
+    // the fixture's GET /api/state is a single repeat:true entry, 4 policy
+    // keys (gguf-test included) from the very first fetch — not a
+    // 3-then-4 script. This check therefore does NOT claim the Add caused
+    // the 4th row (that causal claim is item 4's job, proven above via
+    // GET /api/nodes, which only advances on mount/afterMutate); it only
+    // asserts PolicyModal's own row-fidelity against a constant policy
+    // map it is handed — exactly what this item's RED mutation (dropping a
+    // row PolicyModal was given) targets.
     await assertUnique(page, 'text="Policy"', "Policy button");
     await page.click('text="Policy"');
     const policyRows = await page.locator(".policy-table .tenant-name").count();
-    results.check("item5: PolicyModal shows 4 rows not 3", policyRows === 4, String(policyRows));
+    results.check(
+      "item5: PolicyModal renders every policy row it is given (4, not the seeded 3)",
+      policyRows === 4,
+      String(policyRows),
+    );
     // Not Escape: Modal.tsx (the shared shell) wires no keydown handler —
     // only AllOptionsModal/SettingsModal/ModelDetailDrawer do that
     // individually — so PolicyModal has no Escape-to-close. Its footer
@@ -254,8 +263,17 @@ export async function run() {
     // EngineFormPanel's JSX, before the kind-varying connection-field
     // block, so `label:nth-of-type(n)` — plain CSS, browser-native — is both
     // valid here and stable across every kind.
+    //
+    // disabledExpression (dom.mjs) returns false for a MISSING element, not
+    // an error — so on the "kind stays editable" check (negated: expects
+    // isTrulyDisabled to be false), a wrong/stale selector would ALSO
+    // return false and the negation would read as PASS. assertUnique closes
+    // that: a selector matching zero (or more than one) element fails
+    // loudly here, before either isTrulyDisabled call ever runs.
     await page.click('.engine-row:has-text("gguf-test") button:has-text("Edit")');
     await page.waitForSelector(".engine-form");
+    await assertUnique(page, ".engine-form label:nth-of-type(1) input", "Resource name input (edit mode)");
+    await assertUnique(page, ".engine-form label:nth-of-type(2) select", "Kind select (edit mode)");
     results.check(
       "item6: resource is locked in Edit mode",
       await isTrulyDisabled(page, ".engine-form label:nth-of-type(1) input"),
@@ -295,6 +313,11 @@ export async function run() {
       confirmCopy.includes("a running engine keeps running"),
       confirmCopy,
     );
+    // assertUnique on the hipfire row itself, not just the caption count:
+    // otherArmed === 0 is trivially true for a selector that matches zero
+    // elements FOR THE WRONG REASON (stale resource name, typo) as much as
+    // for the right one (row exists, genuinely unarmed) — R4/finding 2.
+    await assertUnique(page, '.engine-row:has-text("hipfire")', "the hipfire row");
     const otherArmed = await page
       .locator('.engine-row:has-text("hipfire") .engine-caption')
       .count();
