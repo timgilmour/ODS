@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { errors as playwrightErrors } from "playwright-core";
 import { createResults } from "./lib/check.mjs";
 import { launch } from "./lib/browser.mjs";
 import { isTrulyDisabled, textsOf } from "./lib/dom.mjs";
@@ -30,7 +31,13 @@ export const name = "e1-engines";
  * | Kind select           | `.engine-form label:has-text("Kind") select`                 |
  * | GPU select's label    | `.engine-form label:has-text("GPU")`                         |
  * | Save                  | `.engine-form-actions .primary` (text `Save`)                |
+ * | Cancel                | `.engine-form-actions button` (text `Cancel`, exact)         |
  * | Allowlist banner      | `.engine-form .ui-banner` (hasText "park allowlist")         |
+ * | Policy button         | `text="Policy"` (exact — App.tsx header)                     |
+ * | Policy table rows     | `.policy-table .tenant-name`                                 |
+ * | Row Edit button       | `.engine-row:has-text(RESOURCE) button:has-text("Edit")`     |
+ * | Row Forget button     | `.engine-row:has-text(RESOURCE) button:has-text("Forget")`   |
+ * | Armed-confirm caption | `.engine-row .engine-caption` (rendered only while armed)    |
  *
  * R4 (controller ruling): `:has-text()` substring-matches, and the engine
  * form has several `<label>` elements. "Kind" and "GPU" are each confirmed,
@@ -40,7 +47,13 @@ export const name = "e1-engines";
  * label's text — but `assertUnique` below still asserts the match count
  * rather than trusting that reading, so a future label addition that DOES
  * collide fails loudly here instead of silently widening the selector's
- * match set. */
+ * match set. Items 4-7 (Task 7) add two exact-text() selectors: `text="Policy"`
+ * (labels.policy on the App.tsx header button, and labels.policyTitle on the
+ * PolicyModal's own <h3> once open — asserted unique BEFORE the modal opens,
+ * when only the button exists) and `text="Cancel"` (labels.cancel, shared by
+ * EngineFormPanel's Cancel and PolicyModal's footer Cancel — exact matching
+ * means neither collides with the unrelated "Cancel move" label, and only one
+ * of the two Cancel buttons is ever mounted at the point this gate clicks it). */
 
 async function assertUnique(page, selector, what) {
   const n = await page.locator(selector).count();
@@ -140,18 +153,195 @@ export async function run() {
       await isTrulyDisabled(page, ".engine-form-actions .primary"),
     );
 
-    // Deliberately no blanket "no console errors" check here (unlike
-    // smoke.gate.mjs): this fixture's `sparky` node-agent is control:"swap",
-    // so App.tsx's swap-probe effect fires GET /api/nodes/sparky/serving/status
-    // and GET /api/settings/catalog/sparky/vllm on load — routes this
-    // scenario does not script, because items 1-3 (Nodes tab, local node's
-    // Engines editor) have nothing to do with sparky's swap-probe UI. Those
-    // 599s are real but orthogonal to this gate's scope; asserting a global
-    // console.errors.length === 0 here would fail for a reason unrelated to
-    // anything items 1-3 claim to check, in a fixture a later task did not
-    // author to be console-clean beyond what E1 itself needs. consoleErrors
-    // stays wired through launch() so a future gate item CAN use it.
-    void consoleErrors;
+    // Item 4 — Add the dummy. Two DISTINCT claims, asserted separately
+    // (R12, controller ruling):
+    //
+    //   (a) DISPATCH — the POST actually carried what the operator typed.
+    //       Read straight from stub.requests(), never from anything the UI
+    //       re-renders. gpu_index is the load-bearing field: GPU 0 is the
+    //       picker's first <option>, so a form that silently dropped the
+    //       gpu_index selection would still coincidentally submit 0 — the
+    //       fixture's gguf-test is GPU 1 for exactly this reason.
+    //
+    //   (b) RENDER — the new row appears in the declared-engines list. This
+    //       is deliberately NOT read off a board card / `/api/state`: that
+    //       route is polled every 3000ms (App.tsx POLL_MS) independent of
+    //       any click, so a scripted state transition on it would advance on
+    //       a TIMER and could show "gguf-test" whether or not the POST ever
+    //       fired — a check that passes when the feature is broken. The
+    //       engines list instead comes from GET /api/nodes
+    //       (listNodeRegistry, via EnginesSection's reload()), which this
+    //       app calls from exactly two places: on mount, and from
+    //       afterMutate() right after a successful add/edit/forget — never
+    //       from the poll. Its scripted 3-entry transition (triple ->
+    //       triple+gguf-test -> triple, fixtures/e1-seeded-triple/
+    //       scenario.json) therefore only advances in lockstep with this
+    //       gate's own clicks, so it is a check that can actually fail when
+    //       the add flow is broken. The board-card half of item 4's original
+    //       "appears as a board card" wording is NOT asserted here — see
+    //       this task's report for why.
+    await page.fill('.engine-form label:has-text("Resource name") input', "gguf-test");
+    await page.selectOption('.engine-form label:has-text("Kind") select', "lemonade");
+    // lemonade's connection fields (GET /api/engine-kinds: url, metrics_url,
+    // container, all required) render as labels DERIVED from the field key
+    // (engineFieldLabel, model/messages.ts) — "url", "metrics url",
+    // "container" — with " *" appended when required. "url" is a SUBSTRING
+    // of "metrics url"'s own label text, so a plain :has-text("url") would
+    // match both and Playwright's strict mode would refuse to fill either
+    // (R4): excluded with :not(:has-text("metrics")).
+    await page.fill(
+      '.engine-form label:has-text("url"):not(:has-text("metrics")) input',
+      "http://llama-server-test:8080",
+    );
+    await page.fill(
+      '.engine-form label:has-text("metrics url") input',
+      "http://llama-server-test:8001/metrics",
+    );
+    await page.fill(
+      '.engine-form label:has-text("container") input',
+      "ods-llama-server-test",
+    );
+    await page.selectOption('.engine-form label:has-text("GPU") select', "1");
+    await page.click(".engine-form-actions .primary");
+    await page.waitForTimeout(300);
+    const posted = stub.requests().find((r) => r.method === "POST");
+    results.check(
+      "item4: Save dispatched POST /api/nodes/local/engines with the typed values",
+      posted?.path === "/api/nodes/local/engines" &&
+        posted?.body?.resource === "gguf-test" &&
+        posted?.body?.kind === "lemonade" &&
+        posted?.body?.gpu_index === 1,
+      JSON.stringify(posted ?? null),
+    );
+    const after = await textsOf(page, ".engines-list .engine-row .engine-row-resource");
+    results.check("item4: the new engine renders as a row", after.includes("gguf-test"));
+
+    await assertUnique(page, '.engine-row:has-text("gguf-test")', "the new gguf-test row");
+
+    // Item 5 — PolicyModal shows 4 rows, not 3, after the add. PolicyModal
+    // takes its `policy` prop straight off /api/state's own `policy` field
+    // (App.tsx: `<PolicyModal policy={state.policy} .../>`) — it issues no
+    // GET of its own (putPolicy is a PUT only). /api/state IS the
+    // ambient-polled route the item-4(b) comment above just ruled out for
+    // proving CAUSALITY, so this check does not lean on that: it only
+    // asserts PolicyModal's own row-fidelity against whatever `policy` map
+    // it is handed (a real fixture gap does the opposite of what item 4(b)
+    // needs — dropping a row it was given — which is exactly what this
+    // item's RED mutation targets). The causal half (did the click cause
+    // the add) is item 4's job, proven above.
+    await assertUnique(page, 'text="Policy"', "Policy button");
+    await page.click('text="Policy"');
+    const policyRows = await page.locator(".policy-table .tenant-name").count();
+    results.check("item5: PolicyModal shows 4 rows not 3", policyRows === 4, String(policyRows));
+    // Not Escape: Modal.tsx (the shared shell) wires no keydown handler —
+    // only AllOptionsModal/SettingsModal/ModelDetailDrawer do that
+    // individually — so PolicyModal has no Escape-to-close. Its footer
+    // Cancel button is the real close path (discards local edits, never
+    // calls putPolicy). At this point in the flow it is the ONLY "Cancel"
+    // on screen: item 4's Add form already closed via afterMutate.
+    await page.click('text="Cancel"');
+    await page.waitForSelector(".policy-table", { state: "detached" });
+
+    // Item 6 — Edit: resource locked, kind still editable (deliberately, in
+    // BOTH modes — NodesView.tsx's EngineFormPanel doc comment: a resource
+    // re-declared under a different kind is explicitly accommodated).
+    //
+    // isTrulyDisabled (dom.mjs) runs its selector through the BROWSER's own
+    // `document.querySelector`, not Playwright's selector engine — so a
+    // Playwright-only pseudo-class like `:has-text()` throws inside
+    // page.evaluate ("not a valid selector") rather than failing the check.
+    // Resource name and Kind are always the FIRST and SECOND <label> in
+    // EngineFormPanel's JSX, before the kind-varying connection-field
+    // block, so `label:nth-of-type(n)` — plain CSS, browser-native — is both
+    // valid here and stable across every kind.
+    await page.click('.engine-row:has-text("gguf-test") button:has-text("Edit")');
+    await page.waitForSelector(".engine-form");
+    results.check(
+      "item6: resource is locked in Edit mode",
+      await isTrulyDisabled(page, ".engine-form label:nth-of-type(1) input"),
+    );
+    results.check(
+      "item6: kind stays editable in Edit mode",
+      !(await isTrulyDisabled(page, ".engine-form label:nth-of-type(2) select")),
+    );
+
+    // Item 7 — Forget is armed, states what it does, and isolates its
+    // arming (does not arm any other row's Forget). Uses the shared armed
+    // machinery (ArmedButton + model/armed.ts): the FIRST click on a row's
+    // Forget arms it; the SECOND, on the same button, confirms it. The
+    // rendered label text does not change between the two states (only
+    // aria-label does), so the same selector re-clicked is correct, not
+    // accidental.
+    await page.click('text="Cancel"');
+    await assertUnique(page, '.engine-row:has-text("gguf-test") button:has-text("Forget")', "gguf-test Forget button");
+    await page.click('.engine-row:has-text("gguf-test") button:has-text("Forget")');
+    // Bounded wait, not the 30s locator default: a mutation that fires
+    // doForget on the first click (no arm step at all) would otherwise hang
+    // here for 30s before failing loudly instead of failing fast. Only a
+    // TimeoutError (the caption never showed up) is swallowed into "" —
+    // matching this check's own "absent counts as not-armed" contract;
+    // anything else propagates.
+    let confirmCopy = "";
+    try {
+      confirmCopy = await page
+        .locator('.engine-row:has-text("gguf-test") .engine-caption')
+        .innerText({ timeout: 3000 });
+    } catch (err) {
+      if (!(err instanceof playwrightErrors.TimeoutError)) throw err;
+      confirmCopy = "";
+    }
+    results.check(
+      "item7: armed copy states the engine keeps running",
+      confirmCopy.includes("a running engine keeps running"),
+      confirmCopy,
+    );
+    const otherArmed = await page
+      .locator('.engine-row:has-text("hipfire") .engine-caption')
+      .count();
+    results.check("item7: arming one row does not arm another", otherArmed === 0, String(otherArmed));
+    // Bounded for the same reason as the innerText() read above: a mutation
+    // that fires doForget on the FIRST click already removes the row (via
+    // afterMutate's reload()) before this second click, which would
+    // otherwise hang 30s waiting for a target that is never coming back.
+    try {
+      await page.click(
+        '.engine-row:has-text("gguf-test") button:has-text("Forget")',
+        { timeout: 3000 },
+      );
+    } catch (err) {
+      if (!(err instanceof playwrightErrors.TimeoutError)) throw err;
+    }
+    await page.waitForTimeout(300);
+    const deleted = stub.requests().find((r) => r.method === "DELETE");
+    results.check(
+      "item7: confirm dispatched DELETE for the right resource",
+      deleted?.path === "/api/nodes/local/engines/gguf-test",
+      JSON.stringify(deleted ?? null),
+    );
+
+    // R14 (controller ruling): restore the blanket console-errors check
+    // Task 6 dropped. Task 6's reason was real (sparky's swap-probe effect
+    // fired two unscripted routes and 599'd) but was a FIXTURE gap, not a
+    // reason to drop the assertion — spec §7 makes console errors an
+    // assertion so a runtime failure cannot pass silently, and every later
+    // gate built on this fixture would otherwise inherit the blind spot.
+    // Closed here instead: fixtures/e1-seeded-triple/scenario.json now
+    // scripts GET /api/nodes/sparky/serving/status (repeat:true — polled
+    // every refreshState, same cadence as /api/state) and GET
+    // /api/settings/catalog/sparky/vllm (single entry — the catalog probe
+    // effect is keyed on the swap-node id list, which is "sparky" from the
+    // very first /api/state response and never changes, so it fires
+    // exactly once). The console is now genuinely clean, so the blanket
+    // check applies with no named allowlist needed.
+    // Named distinctly from smoke.gate.mjs's own "no console errors" check:
+    // run.mjs's cross-gate duplicate-name guard (Task 4/6) refuses two gates
+    // sharing a check name — caught on first run of the full suite, exactly
+    // the FAIL-hiding-behind-another-gate's-PASS failure mode it exists for.
+    results.check(
+      "e1-engines: no console errors",
+      consoleErrors.length === 0,
+      consoleErrors.join(" | "),
+    );
   } finally {
     await browser.close();
     await stub.stop();
