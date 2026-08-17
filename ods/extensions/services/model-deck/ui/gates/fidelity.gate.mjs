@@ -17,7 +17,7 @@
  *
  * WHAT THIS ASSERTS — three things only, per the design (spec §6): key
  * sets per payload section (`shape`), value TYPES are not checked here
- * (the four token families capture.mjs harvests are already string-typed
+ * (the three token families capture.mjs harvests are already string-typed
  * by construction — see capture.mjs), and the observed enum-token
  * inventory (`tokens`). It does NOT diff values: `/api/state` churns
  * constantly (VRAM, queue depths, `last_healthy_ts`, timestamps), and a
@@ -152,18 +152,58 @@ function diffTokens(live, committed) {
   return rows;
 }
 
+/** Sanity half (review fix round 1, IMPORTANT finding). `diffShape` and
+ * `diffTokens` only ever compare paths/families the COMMITTED fixture
+ * declares — an empty or truncated `committed` (`{shape: {}, tokens: {}}`)
+ * makes `sharedPaths` empty and `Object.keys(committedTokens)` empty, so
+ * both loops silently iterate zero times and produce zero findings. Before
+ * this check, that degenerate fixture read as a clean PASS (an aggregate
+ * shape row saying "0 shared path(s) checked, all keys known" is
+ * technically true and utterly meaningless) — a corrupted or truncated
+ * `vocabulary.json` would gate GREEN, the exact opposite of what a
+ * fidelity check exists to do. Two rows, checked against `committed` alone
+ * (no live data involved, so a degenerate fixture is caught even before
+ * `readLive` runs — see `run()`): committed must declare at least one
+ * shape path, and every token family it declares must carry at least one
+ * known token (an empty family is the same "reads as coverage, catches
+ * nothing" problem R13 fixed for `eventKind` — see capture.mjs). */
+function diffSanity(committed) {
+  const committedShape = committed.shape ?? {};
+  const committedTokens = committed.tokens ?? {};
+  const families = Object.keys(committedTokens);
+  const emptyFamilies = families.filter((f) => (committedTokens[f] ?? []).length === 0);
+
+  return [
+    {
+      name: "sanity: the committed fixture declares at least one shape path",
+      ok: Object.keys(committedShape).length > 0,
+      detail: `${Object.keys(committedShape).length} shape path(s) declared`,
+    },
+    {
+      name: "sanity: every token family the committed fixture declares carries at least one known token",
+      ok: families.length > 0 && emptyFamilies.length === 0,
+      detail:
+        families.length === 0
+          ? "no token families declared"
+          : emptyFamilies.length === 0
+            ? `${families.length} family(ies) declared, all non-empty`
+            : `empty famil(y/ies): ${emptyFamilies.join(", ")}`,
+    },
+  ];
+}
+
 /** PURE. `live` and `committed` are both `{shape, tokens}` — the shape
  * `extract()` (capture.mjs) produces and the shape the committed
  * `vocabulary.json` fixture is stored in. No I/O, no console output, never
  * throws on well-formed input (see `run()` for the impure shell that reads
  * the live deck and the fixture off disk). */
 export function compare(live, committed) {
-  return [...diffShape(live, committed), ...diffTokens(live, committed)];
+  return [...diffSanity(committed), ...diffShape(live, committed), ...diffTokens(live, committed)];
 }
 
 /** The impure shell. GET-only — `readLive` (capture.mjs) is the ONLY
  * function in this module's live-facing call path, and it in turn makes
- * only `fetch(..., )` calls with no method override, so "no HTTP method
+ * only `fetch(url)` calls with no method override, so "no HTTP method
  * other than GET ever appears in a live-facing code path" is confirmable
  * by reading that one function. */
 export async function run({ deckUrl }) {

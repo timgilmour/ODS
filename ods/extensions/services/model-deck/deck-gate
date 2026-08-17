@@ -11,12 +11,19 @@ DECK_URL="${DECK_URL:-http://127.0.0.1:3015}"
 
 TIER="fixture"
 PATTERN=""
+ALLOW_SHRINK=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --live) TIER="live"; shift ;;
     --capture) TIER="capture"; shift ;;
     --report-dir) REPORT_DIR="$2"; shift 2 ;;
     -k) PATTERN="$2"; shift 2 ;;
+    # R17 (controller ruling): --capture default-unions with the committed
+    # fixture (a token/shape key, once known, survives a routine
+    # re-capture). This opts back into the old raw-overwrite behavior, for
+    # deliberately retiring a stale path/token — only meaningful with
+    # --capture; run.mjs ignores it on every other tier.
+    --allow-shrink) ALLOW_SHRINK="--allow-shrink"; shift ;;
     *) echo "deck-gate: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -69,4 +76,4 @@ fi
 mkdir -p "$REPORT_DIR"
 cd "$UI_DIR"
 exec node gates/run.mjs --tier "$TIER" --report-dir "$REPORT_DIR" \
-     --deck-url "$DECK_URL" ${PATTERN:+--pattern "$PATTERN"}
+     --deck-url "$DECK_URL" ${PATTERN:+--pattern "$PATTERN"} $ALLOW_SHRINK

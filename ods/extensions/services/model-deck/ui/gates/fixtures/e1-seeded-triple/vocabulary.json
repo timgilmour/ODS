@@ -317,15 +317,15 @@
       "pinned",
       "priority"
     ],
-    "/api/events?n=500": [
+    "/api/events": [
       "events"
     ],
-    "/api/events?n=500.events": [
+    "/api/events.events": [
       "detail",
       "kind",
       "ts"
     ],
-    "/api/events?n=500.events.detail": [
+    "/api/events.events.detail": [
       "artifact_id",
       "current",
       "detail",
@@ -343,6 +343,7 @@
       "note",
       "operation",
       "outcome",
+      "phase",
       "reason",
       "resource",
       "source",
@@ -350,14 +351,14 @@
       "to",
       "unit"
     ],
-    "/api/events?n=500.events.detail.detail": [
+    "/api/events.events.detail.detail": [
       "diverges_from_default",
       "newer",
       "reference",
       "tag_count",
       "unranked"
     ],
-    "/api/events?n=500.events.detail.detail.diverges_from_default": [
+    "/api/events.events.detail.detail.diverges_from_default": [
       "ahead_by",
       "behind_by"
     ],
@@ -4151,26 +4152,63 @@
       "warming"
     ],
     "eventKind": [
+      "action-failed",
+      "activate",
       "apply-end",
       "apply-start",
+      "apply-vetoed",
+      "apply-warn",
       "engine-added",
+      "engine-removed",
+      "engine-updated",
+      "engine-verb-rollback-skipped",
+      "free",
+      "free-failed",
+      "free-raced",
       "free_comfyui",
       "harvest-failed",
       "host-agent-busy",
+      "lifecycle-node-misconfigured",
       "lifecycle-quarantined",
       "lifecycle-restore",
       "lifecycle-restore-failed",
       "lifecycle-spark-unreachable",
       "load",
+      "load-failed",
       "load-retriggered",
       "load_lemonade",
+      "move_cancelled",
       "move_done",
+      "move_failed",
       "move_started",
+      "node-added",
+      "node-observe-error",
+      "node-removed",
       "node-test-failed",
       "node-updated",
+      "noop",
+      "notify-restart-failed",
+      "origin-moved",
+      "park",
+      "policy_patch",
+      "provenance-pass-error",
+      "provenance-seed-watch-failed",
+      "pull-through-superseded",
+      "restore_settings",
+      "resume",
+      "storage-tick-error",
+      "storage_notify_deferred",
+      "storage_shortfall",
+      "storage_skip",
+      "storage_suggestion",
+      "tick-error",
       "unload",
+      "unload-failed",
+      "unload-rollback-skipped",
       "unload_lemonade",
       "update-available",
+      "update-check-artifact-error",
+      "update-check-error",
       "update-check-failed"
     ],
     "kind": [

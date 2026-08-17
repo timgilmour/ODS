@@ -105,12 +105,52 @@ describe("compare", () => {
     expect(bad.some((r) => r.detail.includes("label"))).toBe(true);
   });
 
-  it("fails on an unknown token in a family the fixture has never populated", () => {
+  it("fails on an unknown token in a family the fixture declares empty — AND the sanity check separately flags the empty family itself", () => {
+    // Review fix round 1 (IMPORTANT): an empty declared family is now its
+    // own finding (diffSanity), on top of the pre-existing token-diff
+    // finding this test originally pinned alone — see the dedicated
+    // degenerate-fixture tests below for diffSanity in isolation.
     const committedWithEmptyKind = { shape: committed.shape, tokens: { ...committed.tokens, kind: [] } };
     const live = { shape: committed.shape, tokens: { status: ["serving"], kind: ["hipfire"] } };
     const bad = compare(live, committedWithEmptyKind).filter((r) => !r.ok);
-    expect(bad).toHaveLength(1);
-    expect(bad[0].name).toContain("kind");
-    expect(bad[0].detail).toContain("hipfire");
+    expect(bad).toHaveLength(2);
+    expect(bad.some((r) => r.name.includes("sanity") && r.detail.includes("kind"))).toBe(true);
+    expect(bad.some((r) => r.name.includes("kind") && r.detail.includes("hipfire"))).toBe(true);
+  });
+
+  // Review fix round 1 (IMPORTANT finding): a truncated/corrupted committed
+  // fixture must not read as a clean PASS just because there is nothing in
+  // it to disagree with.
+  describe("degenerate committed fixture (review fix round 1, IMPORTANT)", () => {
+    it("a wholly empty committed fixture ({shape:{}, tokens:{}}) does NOT go green, for ANY live payload", () => {
+      const degenerate = { shape: {}, tokens: {} };
+      const anyLive = { shape: { "/api/state": ["node"] }, tokens: { status: ["idle"] } };
+      const rows = compare(anyLive, degenerate);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.some((r) => !r.ok)).toBe(true);
+      expect(rows.some((r) => r.name.includes("sanity") && !r.ok)).toBe(true);
+    });
+
+    it("catches a degenerate fixture even with matching (also-empty) live data — this is a fixture defect, not a live-drift finding", () => {
+      const degenerate = { shape: {}, tokens: {} };
+      const alsoEmptyLive = { shape: {}, tokens: {} };
+      // Every OTHER check here is vacuously fine (nothing to compare), which
+      // is exactly why this needs its own dedicated guard: without it,
+      // "nothing observed disagrees with nothing known" reads as a pass.
+      expect(compare(alsoEmptyLive, degenerate).some((r) => !r.ok)).toBe(true);
+    });
+
+    it("a fixture with shape but a token family declared as an empty array is still degenerate", () => {
+      const halfDegenerate = { shape: { "/api/state": ["node"] }, tokens: { status: [] } };
+      const live = { shape: { "/api/state": ["node"] }, tokens: { status: [] } };
+      const bad = compare(live, halfDegenerate).filter((r) => !r.ok);
+      expect(bad.length).toBeGreaterThan(0);
+      expect(bad.some((r) => r.detail.includes("status"))).toBe(true);
+    });
+
+    it("a genuinely non-degenerate fixture is unaffected by the sanity check", () => {
+      const live = { shape: committed.shape, tokens: committed.tokens };
+      expect(compare(live, committed).every((r) => r.ok)).toBe(true);
+    });
   });
 });

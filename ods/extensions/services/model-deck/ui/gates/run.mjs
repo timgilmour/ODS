@@ -1,7 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderMarkdown, renderJson } from "./lib/report.mjs";
+import { unionVocabulary, shrinkDelta } from "./lib/vocab-merge.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -20,19 +21,64 @@ const pattern = arg("--pattern");
 // registered into it as a gate. Every OTHER unregistered tier still fails
 // loudly (see below): this branch does not weaken that refusal, it only
 // gives "capture" a real destination instead of falling into it.
+//
+// R17 (controller ruling, review fix round 1): a single live snapshot only
+// ever shows the vocabulary the box happens to be exercising AT THAT
+// INSTANT — a healthy box never shows "status": "unreachable", a quiet
+// event tail can easily miss "apply-vetoed". Overwriting the committed
+// fixture with exactly that snapshot (the old behavior) meant EVERY
+// `--capture` could silently shrink a token family, undoing hand-verified
+// coverage the moment someone re-ran it from a healthy box — a warning in
+// a docstring is not a guard against that. `--capture` now UNIONS its
+// freshly observed shape/tokens with whatever is already committed (see
+// `lib/vocab-merge.mjs`, PURE and unit-tested there so this file stays a
+// thin shell), so a token or shape key, once known, survives a routine
+// re-capture. Shrinking on purpose (dropping a genuinely retired
+// path/token) requires the explicit `--allow-shrink` flag, which restores
+// the old raw-overwrite behavior — and even then, the delta is printed
+// rather than silently applied.
 if (tier === "capture") {
   const deckUrl = arg("--deck-url");
   if (!deckUrl) {
     console.error(`deck-gate: --capture requires --deck-url`);
     process.exit(2);
   }
+  const allowShrink = process.argv.includes("--allow-shrink");
   const { extract, readLive } = await import("./capture.mjs");
   const payloads = await readLive(deckUrl);
-  const vocabulary = extract(payloads);
+  const observed = extract(payloads);
   const outPath = join(HERE, "fixtures/e1-seeded-triple/vocabulary.json");
+
+  let existing = { shape: {}, tokens: {} };
+  try {
+    existing = JSON.parse(await readFile(outPath, "utf8"));
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+
+  const vocabulary = allowShrink ? observed : unionVocabulary(existing, observed);
+
+  // The delta is always measured against `observed` (this run's RAW
+  // reading), never against `vocabulary`: under union, `vocabulary` is
+  // constructed to always be a superset of `existing`, so
+  // `shrinkDelta(existing, vocabulary)` is definitionally always empty —
+  // checking it would just be re-confirming the union's own invariant, not
+  // reporting anything. What's actually informative is what THIS capture's
+  // live snapshot alone would have dropped, whether or not that drop is
+  // actually applied (union keeps it; --allow-shrink applies it for real).
+  const lost = shrinkDelta(existing, observed);
+  if (lost.length) {
+    console.log(
+      `deck-gate: --capture ${allowShrink ? "DROPPED (--allow-shrink)" : "did not reproduce (kept anyway via union)"}:\n  ${lost.join("\n  ")}`,
+    );
+  }
+
   await mkdir(dirname(outPath), { recursive: true });
   await writeFile(outPath, JSON.stringify(vocabulary, null, 2) + "\n");
-  console.log(`deck-gate: captured vocabulary from ${deckUrl} -> ${outPath}`);
+  console.log(
+    `deck-gate: captured vocabulary from ${deckUrl} -> ${outPath}` +
+      (allowShrink ? " (--allow-shrink: raw overwrite)" : " (unioned with the existing fixture)"),
+  );
   process.exit(0);
 }
 
