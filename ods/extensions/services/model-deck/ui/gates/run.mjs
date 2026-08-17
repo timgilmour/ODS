@@ -42,7 +42,7 @@ if (tier === "capture") {
 // dispatch time, which would make that task's own acceptance step
 // unrunnable. Task 6 adds e1-engines.gate.mjs here, into "fixture".
 const GATES = {
-  fixture: ["./smoke.gate.mjs", "./e1-engines.gate.mjs"],
+  fixture: ["./smoke.gate.mjs", "./e1-engines.gate.mjs", "./e1-board.gate.mjs"],
 };
 
 // R2 (controller ruling): a tier with no registered gates is not "nothing to

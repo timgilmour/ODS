@@ -1,0 +1,173 @@
+{
+  "_note": "Hand-authored fixture for e1-board.gate.mjs (E1 items 9-11, SetBuilder). Declares the SAME local triple shape e1-seeded-triple uses (hipfire GPU0, lemonade GPU1, comfyui GPU1) but carries NO node-agent/swap entry in state.nodes at all — swapNodes(state) then returns [], so App.tsx's per-swap-node serving-status poll and vllm-catalog probe never fire, and this fixture needs no sparky-shaped routes to keep the console clean (unlike e1-seeded-triple, which needed two extra scripted routes for exactly that reason — see its own _note). GET /api/state, /api/storage/state and /api/engine-kinds are each a SINGLE repeat:true entry (R12: a timer-polled route may carry only a constant — App.tsx's POLL_MS=3000 re-fetches /api/state and /api/storage/state every tick regardless of any click, and this fixture never needs either to transition). GET /api/sets is the one route this gate scripts a real transition on, because it is NOT on that poll: SetStrip.tsx:27,36 and SetBuilder.tsx:129,138 each fetch it once on their OWN mount only, so its script only advances on a tab switch or a page reload — both genuine clicks/navigations, never the clock. The scenario seeds ONE saved set, 'with-model', already carrying a placed model (durable.default_route_model='extra.test-model.gguf', ephemeral.resources.lemonade.desired='loaded') so item 11's Load can prove the POSITIVE round-trip (Load genuinely restores a placed model) before proving the negative one (removed — no ghost) — without that positive proof first, the negative check would risk passing vacuously if Load never showed a model at all, working or not. Entries 1-2 (both 'with-model' unchanged) cover the initial SetStrip mount and the first Set Builder tab click; entry 3 covers the refetch after the gate's OWN save-after-removal succeeds; entry 4 (repeat:true) covers the reload's SetStrip remount and the second Set Builder tab click. POST /api/sets carries exactly two entries in click order: a 409 (the set 'with-model' already exists — this IS item 10's fieldset-lockdown proof, reusing item 11's own real first save attempt rather than a throwaway one) followed by a 200 success for the Overwrite retry. No node-editing routes (POST/DELETE .../engines, GET /api/nodes) are scripted — this gate never visits the Nodes tab.",
+  "routes": {
+    "GET /api/engine-kinds": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": {
+          "kinds": [
+            {
+              "kind": "comfyui",
+              "connection": { "url": { "required": true } },
+              "remote_capable": false,
+              "local_capable": true,
+              "human_verbs": ["free"]
+            },
+            {
+              "kind": "hipfire",
+              "connection": { "container": { "required": true } },
+              "remote_capable": false,
+              "local_capable": true,
+              "human_verbs": ["park", "resume"]
+            },
+            {
+              "kind": "lemonade",
+              "connection": {
+                "url": { "required": true },
+                "metrics_url": { "required": true },
+                "container": { "required": true }
+              },
+              "remote_capable": false,
+              "local_capable": true,
+              "human_verbs": ["load", "unload"]
+            }
+          ]
+        }
+      }
+    ],
+    "GET /api/state": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": {
+          "node": { "id": "local", "label": "autarch" },
+          "world": {
+            "gpus": [
+              { "index": 0, "total": 34208743424, "used": 20000000000, "free": 14208743424 },
+              { "index": 1, "total": 34208743424, "used": 2000000000, "free": 32208743424 }
+            ],
+            "tenants": {
+              "hipfire": {
+                "engine": "hipfire",
+                "gpu_index": 0,
+                "state": "running",
+                "model": "qwen-test-model",
+                "footprint": 20000000000,
+                "queue_depth": 0
+              },
+              "lemonade": {
+                "engine": "lemonade",
+                "gpu_index": 1,
+                "state": "unloaded",
+                "model": null,
+                "footprint": null,
+                "idle_s": null
+              },
+              "comfyui": {
+                "engine": "comfyui",
+                "gpu_index": 1,
+                "state": "idle",
+                "queue": 0,
+                "idle_s": 1200
+              }
+            },
+            "externals": [],
+            "default_route": null,
+            "placement": { "hipfire": 0, "lemonade": 1, "comfyui": 1 }
+          },
+          "policy": {
+            "hipfire": { "priority": 100, "pinned": true, "idle_ttl": 0 },
+            "lemonade": { "priority": 50, "pinned": false, "idle_ttl": 900 },
+            "comfyui": { "priority": 40, "pinned": false, "idle_ttl": 300 }
+          },
+          "models": [
+            { "file": "test-model.gguf", "size": 8000000000, "footprint": 8000000000 }
+          ],
+          "lifecycle": {},
+          "nodes": []
+        }
+      }
+    ],
+    "GET /api/storage/state": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": { "locations": [], "units": [], "jobs": [], "policy": { "auto": false } }
+      }
+    ],
+    "GET /api/sets": [
+      {
+        "status": 200,
+        "body": {
+          "sets": [
+            {
+              "name": "with-model",
+              "notes": "",
+              "durable": { "default_route_model": "extra.test-model.gguf", "activate_model_id": null },
+              "ephemeral": { "resources": { "lemonade": { "desired": "loaded" } } },
+              "policy_overrides": null
+            }
+          ],
+          "previous": null
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "sets": [
+            {
+              "name": "with-model",
+              "notes": "",
+              "durable": { "default_route_model": "extra.test-model.gguf", "activate_model_id": null },
+              "ephemeral": { "resources": { "lemonade": { "desired": "loaded" } } },
+              "policy_overrides": null
+            }
+          ],
+          "previous": null
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "sets": [
+            {
+              "name": "with-model",
+              "notes": "",
+              "durable": null,
+              "ephemeral": { "resources": { "lemonade": { "desired": "unloaded" } } },
+              "policy_overrides": null
+            }
+          ],
+          "previous": null
+        }
+      },
+      {
+        "status": 200,
+        "repeat": true,
+        "body": {
+          "sets": [
+            {
+              "name": "with-model",
+              "notes": "",
+              "durable": null,
+              "ephemeral": { "resources": { "lemonade": { "desired": "unloaded" } } },
+              "policy_overrides": null
+            }
+          ],
+          "previous": null
+        }
+      }
+    ],
+    "POST /api/sets": [
+      {
+        "status": 409,
+        "body": { "detail": "a set named 'with-model' already exists" }
+      },
+      {
+        "status": 200,
+        "body": { "slug": "with-model" }
+      }
+    ]
+  }
+}
