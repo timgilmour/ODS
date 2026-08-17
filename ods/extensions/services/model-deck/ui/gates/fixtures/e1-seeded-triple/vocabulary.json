@@ -1,0 +1,4112 @@
+{
+  "shape": {
+    "/api/state": [
+      "lifecycle",
+      "models",
+      "node",
+      "nodes",
+      "policy",
+      "provenance",
+      "world"
+    ],
+    "/api/state.node": [
+      "id",
+      "label"
+    ],
+    "/api/state.world": [
+      "default_route",
+      "externals",
+      "gpus",
+      "placement",
+      "remote_gpus",
+      "remote_tenants",
+      "routes_known",
+      "tenants"
+    ],
+    "/api/state.world.gpus": [
+      "free",
+      "index",
+      "total",
+      "used"
+    ],
+    "/api/state.world.tenants": [
+      "comfyui",
+      "hipfire",
+      "lemonade"
+    ],
+    "/api/state.world.tenants.hipfire": [
+      "engine",
+      "footprint",
+      "gpu_index",
+      "model",
+      "queue_depth",
+      "state"
+    ],
+    "/api/state.world.tenants.lemonade": [
+      "engine",
+      "footprint",
+      "gpu_index",
+      "idle_s",
+      "model",
+      "state"
+    ],
+    "/api/state.world.tenants.comfyui": [
+      "engine",
+      "gpu_index",
+      "idle_s",
+      "queue",
+      "state"
+    ],
+    "/api/state.world.placement": [
+      "comfyui",
+      "hipfire",
+      "lemonade"
+    ],
+    "/api/state.world.remote_gpus": [
+      "sparky"
+    ],
+    "/api/state.world.remote_gpus.sparky": [
+      "free",
+      "index",
+      "total",
+      "used"
+    ],
+    "/api/state.world.remote_tenants": [
+      "sparky/omni"
+    ],
+    "/api/state.world.remote_tenants.sparky/omni": [
+      "busy_requests",
+      "engine",
+      "gpu_index",
+      "idle_s",
+      "model",
+      "node_id",
+      "resource",
+      "state"
+    ],
+    "/api/state.policy": [
+      "comfyui",
+      "hipfire",
+      "lemonade",
+      "omni"
+    ],
+    "/api/state.policy.hipfire": [
+      "idle_ttl",
+      "pinned",
+      "priority"
+    ],
+    "/api/state.policy.lemonade": [
+      "idle_ttl",
+      "pinned",
+      "priority"
+    ],
+    "/api/state.policy.comfyui": [
+      "idle_ttl",
+      "pinned",
+      "priority"
+    ],
+    "/api/state.policy.omni": [
+      "idle_ttl",
+      "pinned",
+      "priority"
+    ],
+    "/api/state.models": [
+      "file",
+      "footprint",
+      "size"
+    ],
+    "/api/state.lifecycle": [
+      "local/comfyui",
+      "local/hipfire",
+      "local/lemonade",
+      "sparky/omni",
+      "sparky/slot0"
+    ],
+    "/api/state.lifecycle.local/hipfire": [
+      "intent",
+      "last_healthy_ts",
+      "observed",
+      "reason",
+      "settings_drift",
+      "status"
+    ],
+    "/api/state.lifecycle.local/hipfire.intent": [
+      "actor",
+      "engine",
+      "failures",
+      "last_healthy_ts",
+      "model",
+      "quarantined",
+      "state",
+      "updated_ts"
+    ],
+    "/api/state.lifecycle.local/hipfire.observed": [
+      "loaded",
+      "model",
+      "reachable",
+      "transitioning"
+    ],
+    "/api/state.lifecycle.local/lemonade": [
+      "intent",
+      "last_healthy_ts",
+      "observed",
+      "reason",
+      "settings_drift",
+      "status"
+    ],
+    "/api/state.lifecycle.local/lemonade.intent": [
+      "actor",
+      "engine",
+      "failures",
+      "last_healthy_ts",
+      "model",
+      "quarantined",
+      "state",
+      "updated_ts"
+    ],
+    "/api/state.lifecycle.local/lemonade.observed": [
+      "loaded",
+      "model",
+      "reachable",
+      "transitioning"
+    ],
+    "/api/state.lifecycle.local/comfyui": [
+      "intent",
+      "last_healthy_ts",
+      "observed",
+      "reason",
+      "settings_drift",
+      "status"
+    ],
+    "/api/state.lifecycle.local/comfyui.observed": [
+      "loaded",
+      "model",
+      "reachable",
+      "transitioning"
+    ],
+    "/api/state.lifecycle.sparky/omni": [
+      "intent",
+      "last_healthy_ts",
+      "observed",
+      "reason",
+      "settings_drift",
+      "status"
+    ],
+    "/api/state.lifecycle.sparky/omni.observed": [
+      "loaded",
+      "model",
+      "reachable",
+      "transitioning"
+    ],
+    "/api/state.lifecycle.sparky/slot0": [
+      "intent",
+      "last_healthy_ts",
+      "observed",
+      "reason",
+      "settings_drift",
+      "status"
+    ],
+    "/api/state.lifecycle.sparky/slot0.intent": [
+      "actor",
+      "engine",
+      "failures",
+      "last_healthy_ts",
+      "model",
+      "quarantined",
+      "state",
+      "updated_ts"
+    ],
+    "/api/state.lifecycle.sparky/slot0.observed": [
+      "loaded",
+      "model",
+      "reachable",
+      "transitioning"
+    ],
+    "/api/state.provenance": [
+      "drift",
+      "gaps",
+      "updates"
+    ],
+    "/api/state.nodes": [
+      "address",
+      "agent_kind",
+      "control",
+      "credential_set",
+      "error",
+      "gpus",
+      "id",
+      "label",
+      "last_seen",
+      "serving",
+      "serving_address",
+      "status"
+    ],
+    "/api/state.nodes.gpus": [
+      "assigned_services",
+      "index",
+      "memory_percent",
+      "memory_total_mb",
+      "memory_type",
+      "memory_usage_available",
+      "memory_used_mb",
+      "name",
+      "power_w",
+      "temperature_available",
+      "temperature_c",
+      "utilization_available",
+      "utilization_percent",
+      "uuid"
+    ],
+    "/api/state.nodes.serving": [
+      "container_status",
+      "endpoint_ok",
+      "model"
+    ],
+    "/api/engine-kinds": [
+      "kinds"
+    ],
+    "/api/engine-kinds.kinds": [
+      "connection",
+      "human_verbs",
+      "kind",
+      "local_capable",
+      "remote_capable"
+    ],
+    "/api/engine-kinds.kinds.connection": [
+      "container",
+      "metrics_url",
+      "url"
+    ],
+    "/api/engine-kinds.kinds.connection.url": [
+      "required"
+    ],
+    "/api/engine-kinds.kinds.connection.container": [
+      "required"
+    ],
+    "/api/engine-kinds.kinds.connection.metrics_url": [
+      "required"
+    ],
+    "/api/nodes": [
+      "nodes"
+    ],
+    "/api/nodes.nodes": [
+      "added_ts",
+      "address",
+      "agent_kind",
+      "control",
+      "credential_set",
+      "engines",
+      "id",
+      "label",
+      "serving_address"
+    ],
+    "/api/nodes.nodes.engines": [
+      "connection",
+      "gpu_index",
+      "kind",
+      "policy_defaults",
+      "resource"
+    ],
+    "/api/nodes.nodes.engines.connection": [
+      "container",
+      "metrics_url",
+      "url"
+    ],
+    "/api/nodes.nodes.engines.policy_defaults": [
+      "idle_ttl",
+      "pinned",
+      "priority"
+    ],
+    "/openapi.json": [
+      "components",
+      "info",
+      "openapi",
+      "paths"
+    ],
+    "/openapi.json.info": [
+      "title",
+      "version"
+    ],
+    "/openapi.json.paths": [
+      "/api/engine-kinds",
+      "/api/events",
+      "/api/facts",
+      "/api/facts/declared/{key}",
+      "/api/facts/drift",
+      "/api/lifecycle/adopt/{key}",
+      "/api/lifecycle/auto",
+      "/api/lifecycle/quarantine/{key}/clear",
+      "/api/nodes",
+      "/api/nodes/test",
+      "/api/nodes/{node_id}",
+      "/api/nodes/{node_id}/engines",
+      "/api/nodes/{node_id}/engines/{resource}",
+      "/api/nodes/{node_id}/engines/{resource}/{verb}",
+      "/api/nodes/{node_id}/serving/reload",
+      "/api/nodes/{node_id}/serving/status",
+      "/api/nodes/{node_id}/serving/swap",
+      "/api/policy",
+      "/api/provenance",
+      "/api/provenance/backfill",
+      "/api/provenance/check",
+      "/api/provenance/desired",
+      "/api/provenance/history",
+      "/api/provenance/origin",
+      "/api/provenance/verify",
+      "/api/provenance/watch",
+      "/api/rename/plan",
+      "/api/sets",
+      "/api/sets/{slug}",
+      "/api/sets/{slug}/adopt",
+      "/api/sets/{slug}/apply",
+      "/api/sets/{slug}/preview",
+      "/api/sets/{slug}/settings-diff",
+      "/api/settings/adopt/{node}/{engine}",
+      "/api/settings/catalog/{node}/{engine}",
+      "/api/settings/effective/{node}/{engine}/{model}",
+      "/api/settings/harvest/{node}/{engine}",
+      "/api/settings/preview",
+      "/api/settings/{kind}/{key}",
+      "/api/state",
+      "/api/storage/locations",
+      "/api/storage/locations/{name}",
+      "/api/storage/moves",
+      "/api/storage/moves/{job_id}",
+      "/api/storage/policy",
+      "/api/storage/rescan",
+      "/api/storage/state",
+      "/api/storage/units/{unit_id}",
+      "/api/tenants/{resource}/{verb}",
+      "/health"
+    ],
+    "/openapi.json.paths./health": [
+      "get"
+    ],
+    "/openapi.json.paths./health.get": [
+      "operationId",
+      "responses",
+      "summary"
+    ],
+    "/openapi.json.paths./health.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./health.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./health.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./health.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./health.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./health.get.responses.200.content.application/json.schema.additionalProperties": [
+      "type"
+    ],
+    "/openapi.json.paths./api/state": [
+      "get"
+    ],
+    "/openapi.json.paths./api/state.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/state.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/state.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/state.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/state.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/state.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/events": [
+      "get"
+    ],
+    "/openapi.json.paths./api/events.get": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/events.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/events.get.parameters.schema": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/events.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/events.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/events.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/events.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/events.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/events.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/events.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/events.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/events.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}": [
+      "post"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.parameters.schema": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.requestBody": [
+      "content"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.requestBody.content.application/json.schema": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.requestBody.content.application/json.schema.anyOf": [
+      "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/tenants/{resource}/{verb}.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets": [
+      "get",
+      "post"
+    ],
+    "/openapi.json.paths./api/sets.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/sets.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets.post": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets.post.parameters.schema": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/sets.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets.post.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}": [
+      "delete",
+      "get"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.200.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff": [
+      "get"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/settings-diff.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt": [
+      "post"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.200.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/adopt.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview": [
+      "post"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/preview.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply": [
+      "post"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.parameters.schema": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/sets/{slug}/apply.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/policy": [
+      "get",
+      "put"
+    ],
+    "/openapi.json.paths./api/policy.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/policy.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/policy.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/policy.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/policy.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/policy.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/policy.put": [
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/policy.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/policy.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/policy.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/policy.put.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/policy.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/policy.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status": [
+      "get"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/status.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap": [
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/swap.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload": [
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/serving/reload.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}": [
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses": [
+      "202",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.202": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.202.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.202.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.202.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}/{verb}.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto": [
+      "get",
+      "post"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.get": [
+      "description",
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post": [
+      "description",
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/auto.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear": [
+      "post"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/quarantine/{key}/clear.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}": [
+      "post"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/adopt/{key}.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/state": [
+      "get"
+    ],
+    "/openapi.json.paths./api/storage/state.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/state.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/storage/state.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/state.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/state.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/state.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/locations": [
+      "post"
+    ],
+    "/openapi.json.paths./api/storage/locations.post": [
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}": [
+      "delete",
+      "put"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/locations/{name}.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/moves": [
+      "post"
+    ],
+    "/openapi.json.paths./api/storage/moves.post": [
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}": [
+      "delete",
+      "get"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/moves/{job_id}.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}": [
+      "put"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/units/{unit_id}.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/policy": [
+      "get",
+      "put"
+    ],
+    "/openapi.json.paths./api/storage/policy.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/policy.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/storage/policy.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/policy.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/policy.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/policy.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/policy.put": [
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/policy.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/storage/rescan": [
+      "post"
+    ],
+    "/openapi.json.paths./api/storage/rescan.post": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/storage/rescan.post.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/storage/rescan.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/storage/rescan.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/storage/rescan.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/storage/rescan.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/facts": [
+      "get"
+    ],
+    "/openapi.json.paths./api/facts.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/facts.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/facts.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/facts.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/facts.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/facts.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}": [
+      "put"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/facts/declared/{key}.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/facts/drift": [
+      "get"
+    ],
+    "/openapi.json.paths./api/facts/drift.get": [
+      "description",
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/facts/drift.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/facts/drift.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/facts/drift.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/facts/drift.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/facts/drift.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}": [
+      "get"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.200.content.application/json.schema": [],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/catalog/{node}/{engine}.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}": [
+      "post"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/harvest/{node}/{engine}.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}": [
+      "get"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.parameters.schema": [
+      "anyOf",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.parameters.schema.anyOf": [
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/effective/{node}/{engine}/{model}.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/settings/preview": [
+      "post"
+    ],
+    "/openapi.json.paths./api/settings/preview.post": [
+      "description",
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/preview.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}": [
+      "post"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/adopt/{node}/{engine}.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}": [
+      "get",
+      "put"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/settings/{kind}/{key}.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/rename/plan": [
+      "post"
+    ],
+    "/openapi.json.paths./api/rename/plan.post": [
+      "description",
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.requestBody": [
+      "content"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.requestBody.content.application/json.schema": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.requestBody.content.application/json.schema.anyOf": [
+      "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/rename/plan.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance": [
+      "delete",
+      "get"
+    ],
+    "/openapi.json.paths./api/provenance.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/provenance.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance.delete": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/history": [
+      "get"
+    ],
+    "/openapi.json.paths./api/provenance/history.get": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/history.get.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/backfill": [
+      "post"
+    ],
+    "/openapi.json.paths./api/provenance/backfill.post": [
+      "description",
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/backfill.post.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/provenance/backfill.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/backfill.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/backfill.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/backfill.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/origin": [
+      "put"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put": [
+      "description",
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/origin.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/desired": [
+      "delete",
+      "put"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put": [
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/desired.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/desired.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/watch": [
+      "put"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put": [
+      "description",
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/watch.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/check": [
+      "post"
+    ],
+    "/openapi.json.paths./api/provenance/check.post": [
+      "description",
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/check.post.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/provenance/check.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/check.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/check.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/check.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/verify": [
+      "post"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post": [
+      "description",
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/provenance/verify.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes": [
+      "get",
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes.get": [
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/nodes.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes.post": [
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}": [
+      "delete",
+      "put"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/test": [
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes/test.post": [
+      "operationId",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/test.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines": [
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}": [
+      "delete",
+      "put"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put": [
+      "description",
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.requestBody.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.put.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/engines/{resource}.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/engine-kinds": [
+      "get"
+    ],
+    "/openapi.json.paths./api/engine-kinds.get": [
+      "description",
+      "operationId",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/engine-kinds.get.responses": [
+      "200"
+    ],
+    "/openapi.json.paths./api/engine-kinds.get.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/engine-kinds.get.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/engine-kinds.get.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/engine-kinds.get.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components": [
+      "schemas"
+    ],
+    "/openapi.json.components.schemas": [
+      "AdoptRequest",
+      "ArtifactBody",
+      "AutoBody",
+      "ConfigSet",
+      "DesiredBody",
+      "Durable",
+      "Ephemeral",
+      "HTTPValidationError",
+      "LocationPatch",
+      "MoveBody",
+      "NodeCreate",
+      "NodePatch",
+      "NodeTestBody",
+      "OriginBody",
+      "PinBody",
+      "ReloadBody",
+      "ResourceDesired",
+      "SwapBody",
+      "ValidationError",
+      "WatchBody"
+    ],
+    "/openapi.json.components.schemas.AdoptRequest": [
+      "additionalProperties",
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.AdoptRequest.properties": [
+      "keys",
+      "mode"
+    ],
+    "/openapi.json.components.schemas.AdoptRequest.properties.mode": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.AdoptRequest.properties.keys": [
+      "default",
+      "items",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.AdoptRequest.properties.keys.items": [
+      "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ArtifactBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ArtifactBody.properties": [
+      "artifact_id"
+    ],
+    "/openapi.json.components.schemas.ArtifactBody.properties.artifact_id": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.AutoBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.AutoBody.properties": [
+      "enabled"
+    ],
+    "/openapi.json.components.schemas.AutoBody.properties.enabled": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ConfigSet": [
+      "additionalProperties",
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties": [
+      "durable",
+      "ephemeral",
+      "name",
+      "notes",
+      "policy_overrides",
+      "settings_snapshot"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.name": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.notes": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.durable": [
+      "anyOf"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.durable.anyOf": [
+      "$ref",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.ephemeral": [
+      "anyOf"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.ephemeral.anyOf": [
+      "$ref",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.policy_overrides": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.policy_overrides.anyOf": [
+      "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.settings_snapshot": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.ConfigSet.properties.settings_snapshot.anyOf": [
+      "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.components.schemas.DesiredBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.DesiredBody.properties": [
+      "artifact_id",
+      "label",
+      "version"
+    ],
+    "/openapi.json.components.schemas.DesiredBody.properties.artifact_id": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.DesiredBody.properties.version": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.DesiredBody.properties.version.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.DesiredBody.properties.label": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.DesiredBody.properties.label.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.Durable": [
+      "additionalProperties",
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.Durable.properties": [
+      "activate_model_id",
+      "default_route_model"
+    ],
+    "/openapi.json.components.schemas.Durable.properties.default_route_model": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.Durable.properties.activate_model_id": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.Durable.properties.activate_model_id.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.Ephemeral": [
+      "additionalProperties",
+      "properties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.Ephemeral.properties": [
+      "resources"
+    ],
+    "/openapi.json.components.schemas.Ephemeral.properties.resources": [
+      "additionalProperties",
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.Ephemeral.properties.resources.additionalProperties": [
+      "$ref"
+    ],
+    "/openapi.json.components.schemas.Ephemeral.properties.resources.default": [],
+    "/openapi.json.components.schemas.HTTPValidationError": [
+      "properties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.HTTPValidationError.properties": [
+      "detail"
+    ],
+    "/openapi.json.components.schemas.HTTPValidationError.properties.detail": [
+      "items",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.HTTPValidationError.properties.detail.items": [
+      "$ref"
+    ],
+    "/openapi.json.components.schemas.LocationPatch": [
+      "properties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties": [
+      "archive_to",
+      "readonly",
+      "role",
+      "watermark_gb"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.role": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.role.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.watermark_gb": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.watermark_gb.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.archive_to": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.archive_to.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.readonly": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.LocationPatch.properties.readonly.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.MoveBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.MoveBody.properties": [
+      "dest",
+      "unit_id"
+    ],
+    "/openapi.json.components.schemas.MoveBody.properties.unit_id": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.MoveBody.properties.dest": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties": [
+      "address",
+      "control",
+      "credential",
+      "id",
+      "label",
+      "serving_address"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.id": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.label": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.address": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.serving_address": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.serving_address.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.credential": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.credential.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.control": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodePatch": [
+      "properties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties": [
+      "address",
+      "control",
+      "credential",
+      "label",
+      "serving_address"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.label": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.label.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.address": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.address.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.serving_address": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.serving_address.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.credential": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.credential.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.control": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.control.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody": [
+      "properties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody.properties": [
+      "address",
+      "credential",
+      "node_id"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody.properties.node_id": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody.properties.node_id.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody.properties.address": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody.properties.address.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody.properties.credential": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodeTestBody.properties.credential.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.OriginBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties": [
+      "artifact_id",
+      "notes",
+      "origin",
+      "role",
+      "update_path"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.artifact_id": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.role": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.origin": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.origin.anyOf": [
+      "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.update_path": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.update_path.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.notes": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.OriginBody.properties.notes.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.PinBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.PinBody.properties": [
+      "pinned"
+    ],
+    "/openapi.json.components.schemas.PinBody.properties.pinned": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ReloadBody": [
+      "properties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ReloadBody.properties": [
+      "force",
+      "profile"
+    ],
+    "/openapi.json.components.schemas.ReloadBody.properties.profile": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.ReloadBody.properties.profile.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.ReloadBody.properties.force": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ResourceDesired": [
+      "additionalProperties",
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ResourceDesired.properties": [
+      "desired",
+      "model"
+    ],
+    "/openapi.json.components.schemas.ResourceDesired.properties.desired": [
+      "enum",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ResourceDesired.properties.model": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.ResourceDesired.properties.model.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.SwapBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.SwapBody.properties": [
+      "force",
+      "profile"
+    ],
+    "/openapi.json.components.schemas.SwapBody.properties.profile": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.SwapBody.properties.force": [
+      "default",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ValidationError": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties": [
+      "ctx",
+      "input",
+      "loc",
+      "msg",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties.loc": [
+      "items",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties.loc.items": [
+      "anyOf"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties.loc.items.anyOf": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties.msg": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties.type": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties.input": [
+      "title"
+    ],
+    "/openapi.json.components.schemas.ValidationError.properties.ctx": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.WatchBody": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.WatchBody.properties": [
+      "artifact_id",
+      "sources"
+    ],
+    "/openapi.json.components.schemas.WatchBody.properties.artifact_id": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.WatchBody.properties.sources": [
+      "items",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.WatchBody.properties.sources.items": [
+      "additionalProperties",
+      "type"
+    ]
+  },
+  "tokens": {
+    "status": [
+      "idle",
+      "parked",
+      "serving",
+      "unmanaged"
+    ],
+    "eventKind": [],
+    "kind": [
+      "comfyui",
+      "hipfire",
+      "lemonade",
+      "sglang-omni"
+    ],
+    "origin": []
+  }
+}

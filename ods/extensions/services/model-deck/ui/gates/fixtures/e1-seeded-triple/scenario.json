@@ -1,0 +1,463 @@
+{
+  "_note": "Hand-authored from the live deck at http://127.0.0.1:3015 (captured 2026-08-17; see vocabulary.json for the extracted shape/token baseline of the SAME capture). Models the E1 seed migration's exact local triple — hipfire GPU 0, lemonade GPU 1, comfyui GPU 1, policy_defaults verified against live /api/nodes — plus the sparky node-agent's declared sglang-omni engine, so R9's four engine-kinds (comfyui/hipfire/lemonade local_capable, sglang-omni remote_capable-only) have a REAL node-agent entry behind them, not just a catalog line: without it, no later gate item can exercise kindsFor()'s remote-vs-local split. R10: sparky's real LAN address is redacted here to 192.0.2.15 (RFC 5737 TEST-NET-1), the range .env.example's node-agent example already committed to (43112ff7) — same convention, not a new one; the real address never appears in this file or its history. GET /api/state and GET /api/storage/state carry repeat:true (R7 — POLL_MS=3000 re-fetches both every tick; Task 4 found this the hard way). GET /api/engine-kinds and GET /api/sets are each fetched once on mount (App.tsx:137-147, SetStrip.tsx:27,36) and are NOT re-scripted. GET /api/nodes, POST .../engines, DELETE .../engines/{resource}, and GET /api/policy are scripted exactly to Task 7's needs: nodes goes triple -> triple+gguf-test -> back to triple (declare, then forget); policy goes 3 rows -> 4 rows. gguf-test is deliberately GPU 1 + pinned:true — both AWAY from the add-form's defaults (GPU 0 is the picker's first option; DEFAULT_POLICY.pinned is false, model/engineForm.ts) — so a form that silently dropped the operator's picks would still fail a gpu_index:0/pinned:false assertion instead of coinciding with it.",
+  "routes": {
+    "GET /api/engine-kinds": [
+      {
+        "status": 200,
+        "body": {
+          "kinds": [
+            {
+              "kind": "comfyui",
+              "connection": { "url": { "required": true } },
+              "remote_capable": false,
+              "local_capable": true,
+              "human_verbs": ["free"]
+            },
+            {
+              "kind": "hipfire",
+              "connection": { "container": { "required": true } },
+              "remote_capable": false,
+              "local_capable": true,
+              "human_verbs": ["park", "resume"]
+            },
+            {
+              "kind": "lemonade",
+              "connection": {
+                "url": { "required": true },
+                "metrics_url": { "required": true },
+                "container": { "required": true }
+              },
+              "remote_capable": false,
+              "local_capable": true,
+              "human_verbs": ["load", "unload"]
+            },
+            {
+              "kind": "sglang-omni",
+              "connection": { "url": { "required": true } },
+              "remote_capable": true,
+              "local_capable": false,
+              "human_verbs": ["load", "unload"]
+            }
+          ]
+        }
+      }
+    ],
+    "GET /api/sets": [
+      { "status": 200, "body": { "sets": [], "previous": null } }
+    ],
+    "GET /api/state": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": {
+          "node": { "id": "local", "label": "autarch" },
+          "world": {
+            "gpus": [
+              { "index": 0, "total": 34208743424, "used": 20000000000, "free": 14208743424 },
+              { "index": 1, "total": 34208743424, "used": 2000000000, "free": 32208743424 }
+            ],
+            "tenants": {
+              "hipfire": {
+                "engine": "hipfire",
+                "gpu_index": 0,
+                "state": "running",
+                "model": "qwen-test-model",
+                "footprint": 20000000000,
+                "queue_depth": 0
+              },
+              "lemonade": {
+                "engine": "lemonade",
+                "gpu_index": 1,
+                "state": "unloaded",
+                "model": null,
+                "footprint": null,
+                "idle_s": null
+              },
+              "comfyui": {
+                "engine": "comfyui",
+                "gpu_index": 1,
+                "state": "idle",
+                "queue": 0,
+                "idle_s": 1200
+              }
+            },
+            "externals": [],
+            "default_route": null,
+            "placement": { "hipfire": 0, "lemonade": 1, "comfyui": 1 },
+            "remote_tenants": {
+              "sparky/omni": {
+                "engine": "sglang-omni",
+                "gpu_index": 0,
+                "state": "down",
+                "node_id": "sparky",
+                "resource": "omni",
+                "busy_requests": 0,
+                "model": null,
+                "idle_s": null
+              }
+            }
+          },
+          "policy": {
+            "hipfire": { "priority": 100, "pinned": true, "idle_ttl": 0 },
+            "lemonade": { "priority": 50, "pinned": false, "idle_ttl": 900 },
+            "comfyui": { "priority": 40, "pinned": false, "idle_ttl": 300 }
+          },
+          "models": [
+            { "file": "Qwen3.5-27B-Q4_K_M.gguf", "size": 16740812704, "footprint": 20088975244 }
+          ],
+          "lifecycle": {
+            "local/hipfire": {
+              "status": "serving",
+              "reason": "'qwen-test-model' serving as intended",
+              "intent": {
+                "state": "loaded",
+                "model": null,
+                "engine": "hipfire",
+                "actor": "operator",
+                "updated_ts": "2026-08-14T14:07:44.258474+00:00",
+                "last_healthy_ts": "2026-08-17T19:57:47.187380+00:00",
+                "failures": 0,
+                "quarantined": false
+              },
+              "observed": {
+                "reachable": true,
+                "loaded": true,
+                "model": "qwen-test-model",
+                "transitioning": false
+              },
+              "last_healthy_ts": "2026-08-17T19:57:47.187380+00:00",
+              "settings_drift": null
+            },
+            "local/lemonade": {
+              "status": "parked",
+              "reason": "deliberately unloaded",
+              "intent": {
+                "state": "unloaded",
+                "model": null,
+                "engine": "lemonade",
+                "actor": "deck",
+                "updated_ts": "2026-08-17T00:44:10.033004+00:00",
+                "last_healthy_ts": "2026-08-16T13:36:20.843866+00:00",
+                "failures": 0,
+                "quarantined": false
+              },
+              "observed": {
+                "reachable": true,
+                "loaded": false,
+                "model": null,
+                "transitioning": false
+              },
+              "last_healthy_ts": "2026-08-16T13:36:20.843866+00:00",
+              "settings_drift": null
+            },
+            "local/comfyui": {
+              "status": "unmanaged",
+              "reason": "None is loaded but the Deck has no intent for it",
+              "intent": null,
+              "observed": {
+                "reachable": true,
+                "loaded": true,
+                "model": null,
+                "transitioning": false
+              },
+              "last_healthy_ts": null,
+              "settings_drift": null
+            },
+            "sparky/omni": {
+              "status": "idle",
+              "reason": "no intent recorded and nothing loaded",
+              "intent": null,
+              "observed": {
+                "reachable": true,
+                "loaded": false,
+                "model": null,
+                "transitioning": false
+              },
+              "last_healthy_ts": null,
+              "settings_drift": null
+            }
+          },
+          "nodes": [
+            {
+              "id": "local",
+              "label": "autarch",
+              "agent_kind": "local",
+              "address": null,
+              "serving_address": null,
+              "credential_set": false,
+              "control": "none",
+              "status": "online",
+              "last_seen": null,
+              "gpus": null,
+              "serving": null,
+              "error": null
+            },
+            {
+              "id": "sparky",
+              "label": "sparky",
+              "agent_kind": "node-agent",
+              "address": "http://192.0.2.15:7720",
+              "serving_address": "http://192.0.2.15:8000",
+              "credential_set": true,
+              "control": "swap",
+              "status": "online",
+              "last_seen": "2026-08-17T19:57:44.163490+00:00",
+              "gpus": [
+                {
+                  "index": 0,
+                  "name": "AMD Instinct MI300X",
+                  "memory_used_mb": 115000,
+                  "memory_total_mb": 131072,
+                  "utilization_percent": 88
+                }
+              ],
+              "serving": { "model": null, "endpoint_ok": true },
+              "error": null
+            }
+          ]
+        }
+      }
+    ],
+    "GET /api/storage/state": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": { "locations": [], "units": [], "jobs": [], "policy": { "auto": false } }
+      }
+    ],
+    "GET /api/nodes": [
+      {
+        "status": 200,
+        "body": {
+          "nodes": [
+            {
+              "id": "local",
+              "label": "autarch",
+              "agent_kind": "local",
+              "added_ts": "2026-08-10T22:04:52.492211+00:00",
+              "control": "none",
+              "credential_set": false,
+              "engines": [
+                {
+                  "resource": "hipfire",
+                  "kind": "hipfire",
+                  "connection": { "container": "ods-hipfire" },
+                  "gpu_index": 0,
+                  "policy_defaults": { "priority": 100, "pinned": true, "idle_ttl": 0 }
+                },
+                {
+                  "resource": "lemonade",
+                  "kind": "lemonade",
+                  "connection": {
+                    "url": "http://llama-server:8080",
+                    "metrics_url": "http://llama-server:8001/metrics",
+                    "container": "ods-llama-server"
+                  },
+                  "gpu_index": 1,
+                  "policy_defaults": { "priority": 50, "pinned": false, "idle_ttl": 900 }
+                },
+                {
+                  "resource": "comfyui",
+                  "kind": "comfyui",
+                  "connection": { "url": "http://comfyui:8188" },
+                  "gpu_index": 1,
+                  "policy_defaults": { "priority": 40, "pinned": false, "idle_ttl": 300 }
+                }
+              ]
+            },
+            {
+              "id": "sparky",
+              "label": "sparky",
+              "agent_kind": "node-agent",
+              "address": "http://192.0.2.15:7720",
+              "serving_address": "http://192.0.2.15:8000",
+              "added_ts": "2026-08-10T22:04:52.492352+00:00",
+              "control": "swap",
+              "credential_set": true,
+              "engines": [
+                {
+                  "resource": "omni",
+                  "kind": "sglang-omni",
+                  "connection": { "url": "http://192.0.2.15:8008" },
+                  "gpu_index": 0,
+                  "policy_defaults": { "priority": 40, "pinned": false, "idle_ttl": 0 }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "nodes": [
+            {
+              "id": "local",
+              "label": "autarch",
+              "agent_kind": "local",
+              "added_ts": "2026-08-10T22:04:52.492211+00:00",
+              "control": "none",
+              "credential_set": false,
+              "engines": [
+                {
+                  "resource": "hipfire",
+                  "kind": "hipfire",
+                  "connection": { "container": "ods-hipfire" },
+                  "gpu_index": 0,
+                  "policy_defaults": { "priority": 100, "pinned": true, "idle_ttl": 0 }
+                },
+                {
+                  "resource": "lemonade",
+                  "kind": "lemonade",
+                  "connection": {
+                    "url": "http://llama-server:8080",
+                    "metrics_url": "http://llama-server:8001/metrics",
+                    "container": "ods-llama-server"
+                  },
+                  "gpu_index": 1,
+                  "policy_defaults": { "priority": 50, "pinned": false, "idle_ttl": 900 }
+                },
+                {
+                  "resource": "comfyui",
+                  "kind": "comfyui",
+                  "connection": { "url": "http://comfyui:8188" },
+                  "gpu_index": 1,
+                  "policy_defaults": { "priority": 40, "pinned": false, "idle_ttl": 300 }
+                },
+                {
+                  "resource": "gguf-test",
+                  "kind": "lemonade",
+                  "connection": {
+                    "url": "http://llama-server-test:8080",
+                    "metrics_url": "http://llama-server-test:8001/metrics",
+                    "container": "ods-llama-server-test"
+                  },
+                  "gpu_index": 1,
+                  "policy_defaults": { "priority": 0, "pinned": true, "idle_ttl": 0 }
+                }
+              ]
+            },
+            {
+              "id": "sparky",
+              "label": "sparky",
+              "agent_kind": "node-agent",
+              "address": "http://192.0.2.15:7720",
+              "serving_address": "http://192.0.2.15:8000",
+              "added_ts": "2026-08-10T22:04:52.492352+00:00",
+              "control": "swap",
+              "credential_set": true,
+              "engines": [
+                {
+                  "resource": "omni",
+                  "kind": "sglang-omni",
+                  "connection": { "url": "http://192.0.2.15:8008" },
+                  "gpu_index": 0,
+                  "policy_defaults": { "priority": 40, "pinned": false, "idle_ttl": 0 }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "nodes": [
+            {
+              "id": "local",
+              "label": "autarch",
+              "agent_kind": "local",
+              "added_ts": "2026-08-10T22:04:52.492211+00:00",
+              "control": "none",
+              "credential_set": false,
+              "engines": [
+                {
+                  "resource": "hipfire",
+                  "kind": "hipfire",
+                  "connection": { "container": "ods-hipfire" },
+                  "gpu_index": 0,
+                  "policy_defaults": { "priority": 100, "pinned": true, "idle_ttl": 0 }
+                },
+                {
+                  "resource": "lemonade",
+                  "kind": "lemonade",
+                  "connection": {
+                    "url": "http://llama-server:8080",
+                    "metrics_url": "http://llama-server:8001/metrics",
+                    "container": "ods-llama-server"
+                  },
+                  "gpu_index": 1,
+                  "policy_defaults": { "priority": 50, "pinned": false, "idle_ttl": 900 }
+                },
+                {
+                  "resource": "comfyui",
+                  "kind": "comfyui",
+                  "connection": { "url": "http://comfyui:8188" },
+                  "gpu_index": 1,
+                  "policy_defaults": { "priority": 40, "pinned": false, "idle_ttl": 300 }
+                }
+              ]
+            },
+            {
+              "id": "sparky",
+              "label": "sparky",
+              "agent_kind": "node-agent",
+              "address": "http://192.0.2.15:7720",
+              "serving_address": "http://192.0.2.15:8000",
+              "added_ts": "2026-08-10T22:04:52.492352+00:00",
+              "control": "swap",
+              "credential_set": true,
+              "engines": [
+                {
+                  "resource": "omni",
+                  "kind": "sglang-omni",
+                  "connection": { "url": "http://192.0.2.15:8008" },
+                  "gpu_index": 0,
+                  "policy_defaults": { "priority": 40, "pinned": false, "idle_ttl": 0 }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "POST /api/nodes/local/engines": [
+      {
+        "status": 201,
+        "body": {
+          "resource": "gguf-test",
+          "kind": "lemonade",
+          "connection": {
+            "url": "http://llama-server-test:8080",
+            "metrics_url": "http://llama-server-test:8001/metrics",
+            "container": "ods-llama-server-test"
+          },
+          "gpu_index": 1,
+          "policy_defaults": { "priority": 0, "pinned": true, "idle_ttl": 0 }
+        }
+      }
+    ],
+    "DELETE /api/nodes/local/engines/gguf-test": [
+      { "status": 204, "body": null }
+    ],
+    "GET /api/policy": [
+      {
+        "status": 200,
+        "body": {
+          "hipfire": { "priority": 100, "pinned": true, "idle_ttl": 0 },
+          "lemonade": { "priority": 50, "pinned": false, "idle_ttl": 900 },
+          "comfyui": { "priority": 40, "pinned": false, "idle_ttl": 300 }
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "hipfire": { "priority": 100, "pinned": true, "idle_ttl": 0 },
+          "lemonade": { "priority": 50, "pinned": false, "idle_ttl": 900 },
+          "comfyui": { "priority": 40, "pinned": false, "idle_ttl": 300 },
+          "gguf-test": { "priority": 0, "pinned": true, "idle_ttl": 0 }
+        }
+      }
+    ]
+  }
+}

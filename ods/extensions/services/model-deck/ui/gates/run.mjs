@@ -1,6 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { renderMarkdown, renderJson } from "./lib/report.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 function arg(flag, fallback = null) {
   const i = process.argv.indexOf(flag);
@@ -10,6 +13,28 @@ function arg(flag, fallback = null) {
 const tier = arg("--tier", "fixture");
 const reportDir = arg("--report-dir");
 const pattern = arg("--pattern");
+
+// R2 (controller ruling), capture half: "capture" produces no PASS/FAIL
+// rows — it reads the live deck and WRITES the vocabulary fixture — so it
+// is handled here, before the GATES dispatch below, rather than being
+// registered into it as a gate. Every OTHER unregistered tier still fails
+// loudly (see below): this branch does not weaken that refusal, it only
+// gives "capture" a real destination instead of falling into it.
+if (tier === "capture") {
+  const deckUrl = arg("--deck-url");
+  if (!deckUrl) {
+    console.error(`deck-gate: --capture requires --deck-url`);
+    process.exit(2);
+  }
+  const { extract, readLive } = await import("./capture.mjs");
+  const payloads = await readLive(deckUrl);
+  const vocabulary = extract(payloads);
+  const outPath = join(HERE, "fixtures/e1-seeded-triple/vocabulary.json");
+  await mkdir(dirname(outPath), { recursive: true });
+  await writeFile(outPath, JSON.stringify(vocabulary, null, 2) + "\n");
+  console.log(`deck-gate: captured vocabulary from ${deckUrl} -> ${outPath}`);
+  process.exit(0);
+}
 
 // R1 (controller ruling): only "smoke" is registered here. Task 6 registers
 // e1-engines.gate.mjs into "fixture" and Task 8 registers fidelity.gate.mjs
@@ -24,8 +49,7 @@ const GATES = {
 // R2 (controller ruling): a tier with no registered gates is not "nothing to
 // do" — GATES[tier] ?? [] would run zero gates and exit 0, a silent no-op
 // that is exactly the failure the design's fail-loudly rule exists to
-// prevent (e.g. --capture maps to TIER=capture in deck-gate, but Task 5 is
-// what adds the capture branch here). Fail loudly instead, naming the tier.
+// prevent. Fail loudly instead, naming the tier.
 const gatePaths = GATES[tier];
 if (!gatePaths) {
   console.error(`deck-gate: no gates registered for tier "${tier}"`);
