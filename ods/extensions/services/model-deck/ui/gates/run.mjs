@@ -36,13 +36,15 @@ if (tier === "capture") {
   process.exit(0);
 }
 
-// R1 (controller ruling): Task 8 registers fidelity.gate.mjs into "live" —
-// each task adds its own gate to its own tier when the module actually
-// exists. A dynamic import() of a not-yet-written module would throw at
-// dispatch time, which would make that task's own acceptance step
-// unrunnable. Task 6 adds e1-engines.gate.mjs here, into "fixture".
+// R1 (controller ruling): each task adds its own gate to its own tier when
+// the module actually exists. A dynamic import() of a not-yet-written
+// module would throw at dispatch time, which would make that task's own
+// acceptance step unrunnable. Task 6 added e1-engines.gate.mjs here, into
+// "fixture". Task 11 adds fidelity.gate.mjs into "live" — the first (and,
+// today, only) tier-2 gate.
 const GATES = {
   fixture: ["./smoke.gate.mjs", "./e1-engines.gate.mjs", "./e1-board.gate.mjs"],
+  live: ["./fidelity.gate.mjs"],
 };
 
 // R2 (controller ruling): a tier with no registered gates is not "nothing to

@@ -317,6 +317,50 @@
       "pinned",
       "priority"
     ],
+    "/api/events?n=500": [
+      "events"
+    ],
+    "/api/events?n=500.events": [
+      "detail",
+      "kind",
+      "ts"
+    ],
+    "/api/events?n=500.events.detail": [
+      "artifact_id",
+      "current",
+      "detail",
+      "error",
+      "failures",
+      "fields",
+      "from",
+      "job",
+      "key",
+      "kind",
+      "latest",
+      "model",
+      "name",
+      "node",
+      "note",
+      "operation",
+      "outcome",
+      "reason",
+      "resource",
+      "source",
+      "target",
+      "to",
+      "unit"
+    ],
+    "/api/events?n=500.events.detail.detail": [
+      "diverges_from_default",
+      "newer",
+      "reference",
+      "tag_count",
+      "unranked"
+    ],
+    "/api/events?n=500.events.detail.detail.diverges_from_default": [
+      "ahead_by",
+      "behind_by"
+    ],
     "/openapi.json": [
       "components",
       "info",
@@ -4095,18 +4139,45 @@
   },
   "tokens": {
     "status": [
+      "down",
+      "drifted",
       "idle",
       "parked",
+      "quarantined",
       "serving",
-      "unmanaged"
+      "unexpected",
+      "unmanaged",
+      "unreachable",
+      "warming"
     ],
-    "eventKind": [],
+    "eventKind": [
+      "apply-end",
+      "apply-start",
+      "engine-added",
+      "free_comfyui",
+      "harvest-failed",
+      "host-agent-busy",
+      "lifecycle-quarantined",
+      "lifecycle-restore",
+      "lifecycle-restore-failed",
+      "lifecycle-spark-unreachable",
+      "load",
+      "load-retriggered",
+      "load_lemonade",
+      "move_done",
+      "move_started",
+      "node-test-failed",
+      "node-updated",
+      "unload",
+      "unload_lemonade",
+      "update-available",
+      "update-check-failed"
+    ],
     "kind": [
       "comfyui",
       "hipfire",
       "lemonade",
       "sglang-omni"
-    ],
-    "origin": []
+    ]
   }
 }
