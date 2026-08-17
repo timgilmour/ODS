@@ -70,10 +70,37 @@ const stamp = startedAt.toISOString().replace(/[:.]/g, "-");
 // it, rather than writing a report that could hide one behind the other.
 const rows = [];
 const seenNames = new Set();
+// R15 (controller ruling): a gate that THROWS must still produce a report.
+// Before this, an exception from mod.run() propagated straight out of this
+// loop with nothing written — the exact gap that forced Task 8's item-9
+// RED proof into a hand-saved terminal capture instead of a real report
+// file. A gate's `createResults().check()` prints PASS/FAIL synchronously
+// as it goes, so those checks are real even when the gate later throws;
+// they are recovered here IF the gate attaches them to the error as
+// `partialRows` before rethrowing (e1-board.gate.mjs does this — see its
+// own try/catch). A gate that does not do this simply contributes no rows
+// of its own, and the synthetic row below still names it and its error, so
+// the crash is never silent even in that case.
 for (const path of gatePaths) {
   const mod = await import(path);
   if (pattern && !mod.name.includes(pattern)) continue;
-  const results = await mod.run({ deckUrl: arg("--deck-url") });
+  let results;
+  try {
+    results = await mod.run({ deckUrl: arg("--deck-url") });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`deck-gate: gate "${mod.name}" threw: ${message}`);
+    if (Array.isArray(err?.partialRows)) {
+      for (const row of err.partialRows) {
+        if (!seenNames.has(row.name)) {
+          seenNames.add(row.name);
+          rows.push(row);
+        }
+      }
+    }
+    rows.push({ name: `${mod.name}: gate threw before completing`, ok: false, detail: message });
+    break;
+  }
   for (const row of results.rows()) {
     if (seenNames.has(row.name)) {
       console.error(
