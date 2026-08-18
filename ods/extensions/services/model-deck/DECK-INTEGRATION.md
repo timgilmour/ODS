@@ -55,17 +55,24 @@ The deck needs a way to change the engine's state, and a way to reconcile
 it back to a previously-recorded intent after a restart. Two shapes exist
 in the codebase today:
 
-- **Arbiter-eligible kinds** (lemonade, comfyui) implement
+- **Arbiter-eligible kinds** (lemonade, comfyui, sglang-omni) implement
   `execute_load`/`execute_unload`/`execute_free` directly on the adapter —
   see `_LemonadeAdapter.execute_unload` (`app/engine_kinds.py:445`) and
-  `.execute_load` (`app/engine_kinds.py:555`) for the shape.
+  `.execute_load` (`app/engine_kinds.py:555`) for the shape. sglang-omni's
+  `_SglangOmniAdapter` (`app/engine_kinds.py:871`) implements the same pair
+  (`:1133,1224`) and its `arbiter_verbs()` (`:991`) returns
+  `frozenset({"unload"})` — the deck's own idle/contention arbiter can act
+  on it unprompted, which is exactly the exposure that matters for item 5
+  below.
 - **Human-only kinds** expose their verbs through `human_verbs()` instead
   of an arbiter verb, dispatched by `(kind, verb)` in
   `app/routers/control.py`'s `_HANDLERS` table.
 
-*hipfire:* `_HipfireAdapter.arbiter_verbs()` returns an empty frozenset —
-park/resume are deliberately human-only, never automatic
-(`app/engine_kinds.py:814-818`, comment: "park stays human-only"). The verbs
+*hipfire:* `_HipfireAdapter.arbiter_verbs()` returns an empty frozenset
+(`app/engine_kinds.py:814-818`) — park/resume are deliberately human-only,
+never automatic, per the class's own docstring: "no arbiter verb — park
+stays human-only (structural omission made explicit)"
+(`app/engine_kinds.py:758-759`). The verbs
 are dispatched as `_hipfire_park` (`app/routers/control.py:441`) /
 `_hipfire_resume` (`app/routers/control.py:453`), wired into `_HANDLERS` as
 `("hipfire", "park")` / `("hipfire", "resume")` (`app/routers/control.py:475-476`).
@@ -155,12 +162,33 @@ running system today — check which one a given store uses before assuming
 the other.
 
 ⚠ **`_recreate_llama_server` (`ods/bin/ods-host-agent.py:13066`) has the
-same deck-blind shape as hipfire's activation path did, and this branch
-deliberately left it unbracketed.** It stops and recreates the llama-server
-container the same way `_do_hipfire_activate` stopped and recreated
-hipfire's, with no `_deck_bracket` around it. If llama-server ever becomes
-a deck-managed engine kind, this is the next item-5 gap to close — do not
-assume item 5 is satisfied fleet-wide because hipfire's path now is.
+same deck-blind shape hipfire's activation path had, it is CURRENT — not a
+future risk — and this branch deliberately left it unbracketed.**
+llama-server is not a hypothetical future addition to the deck: it is
+*already* deck-managed today, declared under the `lemonade` kind. The
+declared `lemonade` resource's `connection.container` is literally
+`"ods-llama-server"` (live `~/ods/data/model-deck/nodes.json`;
+`app/settings.py:88`'s `lemonade_container: str = "ods-llama-server"` is
+only the one-time seed default, per
+`ods/extensions/services/model-deck/README.md:50`). `_recreate_llama_server`
+stops and recreates that same `ods-llama-server` container — called from
+the live dashboard activation path at `ods/bin/ods-host-agent.py:8002`,
+`:8468-8477`, `:12628`, `:12639` — with no `_deck_bracket` anywhere in any
+of those call sites.
+
+This is a **strictly larger exposure than hipfire's was**, not an
+equivalent one. `_LemonadeAdapter` implements `execute_load`/
+`execute_unload` (item 3 above, `app/engine_kinds.py:445,555`), so
+`lemonade` is arbiter-eligible: the deck's own automatic idle-release and
+contention arbiter can act on this resource unprompted. hipfire's park is
+human-only — the exposure there was operator-vs-deck, a one-off race
+between a person and the reconciler. Here the deck's own arbiter can fire
+*while* `_recreate_llama_server` is yanking the container out from under
+it, with nothing announcing the teardown either way. Closing this gap is
+deliberately out of scope for this branch — it fixed hipfire's actuation
+bracket only. Do not assume item 5 is satisfied fleet-wide because
+hipfire's path now is; `lemonade`'s dashboard path is the known, live,
+larger counter-example.
 
 ## 6. Own its durable state honestly
 
@@ -175,7 +203,7 @@ model-selection state written by the dashboard's activation path
 `ods/bin/ods-host-agent.py:8898`). The deck *also* models this resource's
 load state, independently, in its own intent store (`IntentStore`,
 `app/intent.py:55`), recorded under the `local_key("hipfire")` key by
-`_hipfire_park`/`_hipfire_resume` (`app/routers/control.py:447,462`) and
+`_hipfire_park`/`_hipfire_resume` (`app/routers/control.py:447,461`) and
 by `_deck_bracket`'s `adopt` call (item 5). These are two records of the
 same fact, written by two different actors, and nothing declares that
 relationship or reconciles them against each other.
@@ -209,11 +237,12 @@ claim every declared engine currently satisfies every item.
   than hipfire had going into this investigation. Having a `KNOWN_KINDS`
   entry does not imply a complete provenance record; check the artifact.
 - Item 5 (actuation-bracket): satisfied for hipfire's dashboard activation
-  path only. `_recreate_llama_server` is the known unbracketed sibling
-  (see item 5's warning). Other out-of-band actuators — installer scripts,
-  manual `docker compose` calls, a future extension's own control surface —
-  have not been audited by this branch and should be assumed unbracketed
-  until checked.
+  path only. `lemonade`'s dashboard activation path
+  (`_recreate_llama_server`) is the known unbracketed, currently-live,
+  arbiter-eligible counter-example (see item 5's warning). Other
+  out-of-band actuators — installer scripts, manual `docker compose`
+  calls, a future extension's own control surface — have not been
+  audited by this branch and should be assumed unbracketed until checked.
 - Item 6 (durable-state declaration): written here for hipfire only. No
   other engine's out-of-deck durable state has been inventoried as part of
   this branch.
