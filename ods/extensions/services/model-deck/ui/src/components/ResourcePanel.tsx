@@ -10,9 +10,9 @@ import RemoteEngineActions from "./RemoteEngineActions";
 import type { SettingsTarget } from "./SettingsModal";
 import SparkSwap from "./SparkSwap";
 
-/** The facts that do not fit on the chip: which engine (when it is not the
- * node's usual one), whether a turn is in flight, queue depth, idle time,
- * and the two policy fields that decide what gets evicted first.
+/** The facts that do not fit on the chip: which engine is serving it, whether
+ * a turn is in flight, queue depth, idle time, and the two policy fields
+ * that decide what gets evicted first.
  *
  * Every value is read straight off the placement — the adapter decides what
  * is knowable and what is merely zero, so an absent field renders nothing at
