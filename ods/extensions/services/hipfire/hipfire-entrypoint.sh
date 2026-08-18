@@ -32,13 +32,28 @@ hipfire config set host 0.0.0.0                                    >/dev/null
 hipfire config set port "${HIPFIRE_PORT_INTERNAL}"                 >/dev/null
 hipfire config set idle_timeout "${HIPFIRE_IDLE_TIMEOUT:-0}"       >/dev/null
 
-# Context and generation caps. max_seq is the KV capacity allocated at model
-# load — the served model's native window is the sensible ceiling. Reasoning
-# tokens count against max_tokens, so a raised thinking_budget preset only
-# takes effect if max_tokens exceeds the preset's token value.
-hipfire config set max_seq "${HIPFIRE_MAX_SEQ:-32768}"                >/dev/null
-hipfire config set max_tokens "${HIPFIRE_MAX_TOKENS:-4096}"           >/dev/null
-hipfire config set thinking_budget "${HIPFIRE_THINKING_BUDGET:-med}"  >/dev/null
+# DELIBERATELY NOT SET HERE: max_seq, max_tokens, thinking_budget.
+#
+# hipfire resolves configuration as: global user override > registry model
+# policy > built-in default. A `config set` here writes the GLOBAL layer, which
+# outranks the per-model policy the registry ships for every tagged SKU — so
+# setting these pinned one model's tuning onto every model the box ever served.
+# `_do_hipfire_activate` only rewrites HIPFIRE_MODEL/HIPFIRE_ACTIVE on a swap,
+# so the values stayed behind: the 262144/32768/xhigh trio tuned for
+# Qwen3.6-35B-A3B on 2026-07-20 was still being applied to Qwen3.8-27B a month
+# later, silently overriding that model's own card.
+#
+# Verified 2026-08-18 with `hipfire config <model> list`, which prints each
+# key's source. For a tagged model the registry supplies kv_cache=q8,
+# kv_backend=vmm, and the full generation.* sampling block on its own; these
+# three keys were the ONLY ones the global layer was stomping. Leaving them
+# unset is therefore both necessary and sufficient for a model to serve under
+# its own policy.
+#
+# If a deliberate deviation from upstream is ever needed, the Model Deck
+# settings store already resolves engine -> model -> engine_model most-specific
+# -wins (app/routers/settings.py:_resolve_env, live for sparky's vllm
+# profiles). That is the place to put it — NOT a global `config set` here.
 
 if [ -n "${HIPFIRE_MODEL:-}" ]; then
     hipfire config set default_model "${HIPFIRE_MODEL}" >/dev/null

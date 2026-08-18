@@ -1846,18 +1846,18 @@
       "llama_server_image": null
     },
     {
-      "id": "qwen3.6-35b-a3b-hipfire-mq4",
-      "name": "Qwen 3.6 35B-A3B (hipfire)",
+      "id": "qwen3.6-35b-a3b-hipfire-mq4r",
+      "name": "Qwen 3.6 35B-A3B Fast (hipfire)",
       "family": "qwen",
       "engine": "hipfire",
-      "model_file": "qwen36-35b-a3b.mq4",
-      "size_mb": 22855,
-      "vram_required_gb": 30,
+      "model_file": "qwen3.6-35b-a3b.mq4r",
+      "size_mb": 19167,
+      "vram_required_gb": 27,
       "context_length": 262144,
-      "quantization": "MQ4",
+      "quantization": "MQ4R",
       "specialty": "Fast",
-      "description": "Qwen 3.6 35B-A3B served by the hipfire RDNA-native engine on a single AMD GPU. Locally quantized from BF16 safetensors, so this filename resolves to no upstream registry tag and receives no tag policy - the published equivalents are qwen3.6:35b-a3b (.mq4p) and qwen3.6:35b-a3b-mq4r. Weights are managed by hipfire itself, not downloaded as a GGUF.",
-      "tokens_per_sec_estimate": 104,
+      "description": "Qwen 3.6 35B-A3B served by the hipfire RDNA-native engine on a single AMD GPU, as the published MQ4R Redline speed SKU (registry tag qwen3.6:35b-a3b-mq4r). Replaces the locally quantized qwen36-35b-a3b.mq4, which resolved to no registry tag and therefore received no tag policy and no MTP sidecar. Because this filename resolves, hipfire applies the model's own policy: 262144 native context, an 81,920-token output allowance, the VMM KV backend, and the card's sampling block (temperature 1.0, top_p 0.95, presence_penalty 1.5, repeat_penalty 1.0). The .mq4r suffix also takes the automatic retained-PM4 Redline route on gfx1201. The 0.47 GB qwen3.6-35b-a3b.mtp multi-token-prediction head ships with the model and is loaded automatically for speculative decode; size_mb includes it. Weights are pulled and managed by hipfire itself, not downloaded as a GGUF. Sizing note: the profile estimate is the full-262K worst case (17.4 GiB weights + 0.4 GiB MTP head + ~8.6 GiB Q8 KV); the VMM backend commits KV pages lazily, so a freshly loaded engine measures about 23 GiB. Size for the ceiling, not the idle reading.",
+      "tokens_per_sec_estimate": 140,
       "runtime_profiles": [
         {
           "id": "amd-rdna-262k-q8-kv",
@@ -1867,9 +1867,9 @@
             "amd64"
           ],
           "memory_type": "discrete",
-          "vram_min_gb": 31,
+          "vram_min_gb": 28,
           "context_length": 262144,
-          "estimated_required_gb": 29.9,
+          "estimated_required_gb": 26.5,
           "fit_label": "262K full-context profile"
         }
       ]

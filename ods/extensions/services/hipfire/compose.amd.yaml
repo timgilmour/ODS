@@ -41,15 +41,20 @@ services:
       # 0 = never evict. The default (300s) frees VRAM when idle and forces a
       # 30s-2min cold reload on the next request — wrong behind LiteLLM.
       - HIPFIRE_IDLE_TIMEOUT=${HIPFIRE_IDLE_TIMEOUT:-0}
-      # KV capacity allocated at model load; the served model's native context
-      # window is the sensible ceiling (Qwen3.6-35B-A3B: 262144).
-      - HIPFIRE_MAX_SEQ=${HIPFIRE_MAX_SEQ:-32768}
-      # Per-turn generation cap for requests that omit max_tokens. Reasoning
-      # tokens count against it, so it must exceed the thinking_budget preset
-      # (low=512 med=2048 high=8192 xhigh=24576 max=32768) for the budget to
-      # take effect.
-      - HIPFIRE_MAX_TOKENS=${HIPFIRE_MAX_TOKENS:-4096}
-      - HIPFIRE_THINKING_BUDGET=${HIPFIRE_THINKING_BUDGET:-med}
+      # NO context/generation/thinking tunables here — deliberately.
+      #
+      # These used to be HIPFIRE_MAX_SEQ / HIPFIRE_MAX_TOKENS /
+      # HIPFIRE_THINKING_BUDGET, which the entrypoint turned into `hipfire
+      # config set`. That writes hipfire's GLOBAL layer, which outranks the
+      # per-model policy the registry ships for every tagged SKU. Because a
+      # model swap rewrites only HIPFIRE_MODEL, one model's tuning became every
+      # model's tuning until an operator noticed. See the long note in
+      # hipfire-entrypoint.sh for the measurement that established this.
+      #
+      # A tagged model now supplies its own kv_cache, kv_backend, sampling,
+      # context window, output cap and reasoning effort. Re-adding a knob here
+      # silently disables that for EVERY model on the box, not just the one it
+      # was added for.
       # Tool-call grammar kill-switch. History: the qwen35 grammar refused to
       # let the model close a tool call until every `required` field NAME
       # appeared in the args body; omp's schemas deadlocked it on 57% of
