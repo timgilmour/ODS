@@ -499,6 +499,14 @@ def list_engine_kinds() -> dict:
                           for field, required in spec["connection"].items()},
             "remote_capable": spec["remote_capable"],
             "local_capable": spec["local_capable"],
+            # Whether a released resource of this kind comes BACK by itself.
+            # This is what makes idle_ttl either free (lemonade: the next
+            # request reloads it, and an idle resident model burns ~70 W for
+            # nothing) or one-way (everything else: the operator returns to a
+            # gone engine, ~4 min to rebuild for sglang-omni, GF4). Served
+            # rather than inferred so no component learns a kind name
+            # (spec §8) -- app/engine_kinds.py's per-kind `demand()`.
+            "demand": ENGINE_KINDS[kind].demand(),
             "human_verbs": sorted(ENGINE_KINDS[kind].human_verbs()),
         })
     return {"kinds": kinds}

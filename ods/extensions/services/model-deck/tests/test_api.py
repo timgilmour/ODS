@@ -3849,6 +3849,28 @@ def test_engine_kinds_route_lists_four_kinds(tmp_path, monkeypatch):
         ["comfyui", "hipfire", "lemonade", "sglang-omni"])
 
 
+def test_engine_kinds_serves_demand_so_the_ui_can_state_ttl_consequence(tmp_path, monkeypatch):
+    """Whether a released engine comes BACK by itself is the whole meaning of
+    idle_ttl, and it is per-kind knowledge that must not be a UI literal
+    (spec §8). lemonade reloads on the next request, so releasing it is
+    invisible and buys ~70 W (~/notes/lemonade-idle-gpu-burn.md); the other
+    three do not, so the same number means "you come back and it is gone".
+    Served here so the TTL editors can say which one the operator is
+    choosing."""
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    body = TestClient(app).get("/api/engine-kinds").json()
+    kinds = {k["kind"]: k for k in body["kinds"]}
+
+    assert kinds["lemonade"]["demand"] is True
+    assert kinds["comfyui"]["demand"] is False
+    assert kinds["hipfire"]["demand"] is False
+    assert kinds["sglang-omni"]["demand"] is False
+    # Every kind carries it — a new kind must not silently omit the field
+    # and leave the editor with nothing to say.
+    assert all("demand" in k for k in body["kinds"])
+
+
 def test_engine_add_validates_and_lands(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     _declare_local(deck, [])
