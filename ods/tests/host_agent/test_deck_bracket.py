@@ -5,6 +5,7 @@ the sequence is the contract: hold before the teardown, adopt after it, and
 release if adopt never happened.
 """
 
+import http.client
 import importlib.util
 from pathlib import Path
 
@@ -110,3 +111,60 @@ def test_deck_base_url_reads_the_configured_port():
     assert agent._deck_base_url({"MODEL_DECK_PORT": "3999"}) == "http://127.0.0.1:3999"
     assert agent._deck_base_url({}) == "http://127.0.0.1:3015"
     assert agent._deck_base_url({"MODEL_DECK_PORT": ""}) == "http://127.0.0.1:3015"
+
+
+def test_deck_call_survives_http_client_exceptions(monkeypatch):
+    """http.client.HTTPException (e.g. BadStatusLine, InvalidURL) is not an
+    OSError or a ValueError. A deck answering with garbage — or a malformed
+    MODEL_DECK_PORT pointing at a non-HTTP listener — must not escape
+    _deck_call and kill the caller."""
+    def explode(*a, **kw):
+        raise http.client.BadStatusLine("")
+
+    monkeypatch.setattr(agent.urllib_request, "urlopen", explode)
+
+    assert agent._deck_call({}, "POST", "/api/lifecycle/expect-absence/local/hipfire",
+                             {"ttl_s": 10}) is False
+
+
+def test_a_down_deck_never_breaks_the_caller_on_http_client_exceptions(monkeypatch):
+    """Same as test_a_down_deck_never_breaks_the_caller, but for the
+    HTTPException family specifically — this is the exact hole the fix
+    round closed."""
+    def explode(*a, **kw):
+        raise http.client.BadStatusLine("")
+
+    monkeypatch.setattr(agent.urllib_request, "urlopen", explode)
+
+    body_ran = False
+    with agent._deck_bracket({}, "local/hipfire"):
+        body_ran = True
+
+    assert body_ran is True
+
+
+def test_renew_reissues_the_hold(calls):
+    """The bracket yields a callable. Calling it re-arms the same hold with
+    the same TTL — used before a second teardown (e.g. a rollback recreate)
+    so it is not racing the first hold's expiry."""
+    with agent._deck_bracket({}, "local/hipfire", ttl_s=250) as renew:
+        assert callable(renew)
+        renew()
+
+    assert [(m, p, pl) for m, p, pl in calls] == [
+        ("POST", "/api/lifecycle/expect-absence/local/hipfire", {"ttl_s": 250}),
+        ("POST", "/api/lifecycle/expect-absence/local/hipfire", {"ttl_s": 250}),
+        ("POST", "/api/lifecycle/adopt/local/hipfire", None),
+    ]
+
+
+def test_happy_path_when_renew_is_never_called_is_still_just_hold_then_adopt(calls):
+    """Renew is opt-in per call site. A caller that never invokes it gets
+    exactly the original hold-then-adopt sequence, unchanged."""
+    with agent._deck_bracket({}, "local/hipfire") as renew:
+        assert callable(renew)
+
+    assert [(m, p) for m, p, _ in calls] == [
+        ("POST", "/api/lifecycle/expect-absence/local/hipfire"),
+        ("POST", "/api/lifecycle/adopt/local/hipfire"),
+    ]

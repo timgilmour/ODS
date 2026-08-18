@@ -17,6 +17,7 @@ import base64
 import collections
 import contextlib
 import hashlib
+import http.client
 import importlib
 import importlib.util
 import json
@@ -8890,7 +8891,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             if lemonade_backup is not None:
                 lemonade_yaml.write_text(lemonade_backup, encoding="utf-8")
 
-        with _deck_bracket(env_pre, "local/hipfire"):
+        with _deck_bracket(env_pre, "local/hipfire") as renew_hold:
             try:
                 lemonade_backup = lemonade_yaml.read_text(encoding="utf-8") if lemonade_yaml.exists() else None
 
@@ -8939,10 +8940,17 @@ class AgentHandler(BaseHTTPRequestHandler):
                     json_response(self, 200, {"status": "activated", "model_id": model_id, "engine": "hipfire"})
                 else:
                     logger.warning("hipfire activation failed — rolling back")
+                    # The health loop above can run up to ~15 minutes
+                    # (60 attempts of curl --max-time 5 + sleep 5, worse if
+                    # the subprocess timeout=10 fires). Re-arm the hold
+                    # before this second recreate so it does not race the
+                    # first hold's TTL expiring mid-rollback.
+                    renew_hold()
                     restore_backups()
                     _compose_recreate_hipfire()
                     json_response(self, 500, {"error": "hipfire health check failed — rolled back to previous model", "rolled_back": True})
             except Exception as exc:
+                renew_hold()
                 if committed:
                     json_response(self, 500, {"error": f"hipfire model activation failed: {exc}"})
                     return
@@ -12456,9 +12464,16 @@ def _log_env_rollback(restored: dict) -> None:
 
 
 # Window during which the Model Deck stands down for one deliberate teardown.
-# Above hipfire's manifest health_timeout (300) so a normal cold MQ4 load
-# never races its own hold expiring, and well under app.holds.MAX_HOLD_TTL_S.
-_DECK_BRACKET_TTL_S = 360
+# Must cover the WHOLE bracketed duration, not just a cold load: the health
+# loop alone is up to 60 * (curl --max-time 5 + sleep 5) plus an initial
+# sleep(5) — ~605s if curl always hits its own timeout, worse if the
+# subprocess timeout=10 fires — and an unhealthy result then runs a SECOND
+# _compose_recreate_hipfire() for rollback on top of that. 600 leaves the
+# bracket's initial hold covering the ordinary run and sits under
+# app.holds.MAX_HOLD_TTL_S (900); `_deck_bracket`'s yielded `renew` call
+# re-arms a fresh window immediately before the rollback recreate so the
+# pathological case is never actually bounded by this constant alone.
+_DECK_BRACKET_TTL_S = 600
 
 
 def _deck_base_url(env: dict) -> str:
@@ -12479,10 +12494,10 @@ def _deck_call(env: dict, method: str, path: str, payload: dict | None = None) -
     The lifecycle routes take no auth (see the router's docstring), so no
     token is threaded here.
     """
-    url = f"{_deck_base_url(env)}{path}"
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Content-Type": "application/json"} if data is not None else {}
     try:
+        url = f"{_deck_base_url(env)}{path}"
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        headers = {"Content-Type": "application/json"} if data is not None else {}
         request = urllib_request.Request(url, data=data, headers=headers, method=method)
         with urllib_request.urlopen(request, timeout=5) as response:
             if 200 <= response.status < 300:
@@ -12490,7 +12505,7 @@ def _deck_call(env: dict, method: str, path: str, payload: dict | None = None) -
             logger.warning("Deck %s %s answered %s (continuing)",
                            method, path, response.status)
             return False
-    except (OSError, urllib_error.URLError, ValueError):
+    except (OSError, urllib_error.URLError, ValueError, http.client.HTTPException):
         logger.warning("Deck %s %s failed (continuing)", method, path, exc_info=True)
         return False
 
@@ -12513,11 +12528,22 @@ def _deck_bracket(env: dict, key: str, ttl_s: int = _DECK_BRACKET_TTL_S):
     Wrap the rollback too, not just the forward path — `_do_hipfire_activate`
     recreates the container a SECOND time when it rolls back, and that
     absence needs announcing exactly as much as the first one.
+
+    Yields a zero-argument `renew` callable that re-issues the same
+    expect-absence hold with the same TTL. The TTL bounds a stuck actuator,
+    not an entire long operation — call `renew()` immediately before a
+    second teardown (e.g. the rollback recreate) so it gets a fresh window
+    regardless of how long the preceding health-gate ran. If the caller
+    never calls it, or dies before calling it, the original hold simply
+    expires on its own — fail-open is unaffected.
     """
-    _deck_call(env, "POST", f"/api/lifecycle/expect-absence/{key}", {"ttl_s": ttl_s})
+    def renew():
+        _deck_call(env, "POST", f"/api/lifecycle/expect-absence/{key}", {"ttl_s": ttl_s})
+
+    renew()
     adopted = False
     try:
-        yield
+        yield renew
         adopted = _deck_call(env, "POST", f"/api/lifecycle/adopt/{key}")
     finally:
         if not adopted:
