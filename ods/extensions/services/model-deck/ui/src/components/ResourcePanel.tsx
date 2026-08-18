@@ -1,6 +1,7 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import { labels, messages } from "../model/messages";
-import { resourceHasOwnPlacement, SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
+import { controlHasPlacement, SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
+import GpuStatsBlock from "../ui/GpuStatsBlock";
 import Meter from "../ui/Meter";
 import ModelChip from "../ui/ModelChip";
 import Panel from "../ui/Panel";
@@ -10,9 +11,9 @@ import RemoteEngineActions from "./RemoteEngineActions";
 import type { SettingsTarget } from "./SettingsModal";
 import SparkSwap from "./SparkSwap";
 
-/** The facts that do not fit on the chip: which engine (when it is not the
- * node's usual one), whether a turn is in flight, queue depth, idle time,
- * and the two policy fields that decide what gets evicted first.
+/** The facts that do not fit on the chip: which engine is serving it, whether
+ * a turn is in flight, queue depth, idle time, and the two policy fields
+ * that decide what gets evicted first.
  *
  * Every value is read straight off the placement — the adapter decides what
  * is knowable and what is merely zero, so an absent field renders nothing at
@@ -97,7 +98,18 @@ export default function ResourcePanel({
   onRefresh: () => void;
 }) {
   return (
-    <Panel title={resource.label} className="resource-panel">
+    <Panel
+      title={
+        <>
+          {resource.label}
+          {resource.stats?.name && (
+            <span className="gpu-name">{resource.stats.name}</span>
+          )}
+        </>
+      }
+      className="resource-panel"
+    >
+      {resource.stats && <GpuStatsBlock stats={resource.stats} />}
       <Meter capacity={resource.capacity} />
 
       {resource.placements.length === 0 ? (
@@ -130,17 +142,16 @@ export default function ResourcePanel({
         ))
       )}
 
-      {/* A DECLARED REMOTE engine's controls (Task 10b). Outside the `stale`
-          gate below on purpose: an unreachable node's engine card keeps
-          showing what it last knew AND the engine's own state word, while
+      {/* The DECLARED REMOTE engines whose chips ride this GPU card (Task
+          10b) — several, since one GPU can carry more than one. Outside the
+          `stale` gate below on purpose: an unreachable node's card keeps
+          showing what it last knew AND each engine's own state word, while
           every verb arrives already disabled — nodes.ts folds staleness into
           the verb list itself (model/engineVerbs.ts), so the disabled-ness
-          travels with the button rather than being re-decided here.
-          `remoteEngine` and a non-empty `controls` are mutually exclusive by
-          construction (nodes.ts). */}
-      {resource.remoteEngine && (
-        <RemoteEngineActions control={resource.remoteEngine} onRefresh={onRefresh} />
-      )}
+          travels with the button rather than being re-decided here. */}
+      {resource.remoteEngines?.map((control) => (
+        <RemoteEngineActions key={control.resource} control={control} onRefresh={onRefresh} />
+      ))}
 
       {!stale &&
         resource.controls.map((control) =>
@@ -149,22 +160,26 @@ export default function ResourcePanel({
               <SparkSwap key={control} nodeId={nodeId} spark={spark} onChanged={onRefresh} />
             )
           ) : (
-            // Any non-spark control is a local resource's own name (E1:
-            // nodes.ts's DeckResource.controls carries exactly `[resource]`
-            // for a declared local resource — never an unrecognized
-            // string), so no narrowing guard is needed here anymore.
+            // Any non-spark control is a local resource's own name
+            // (nodes.ts's DeckResource.controls carries the resources
+            // DECLARED on this GPU — never an unrecognized string), so no
+            // narrowing guard is needed here anymore.
             <PlacementActions
               key={control}
               resource={control}
               world={world}
               models={models}
-              // Whether this resource already has a chip on this card. A
-              // parked hipfire-kind resource deliberately has none, and then
-              // the control row is the only thing that can say what state
-              // it is in. Shared with ModelDetailDrawer's identical
-              // question via nodes.ts's resourceHasOwnPlacement — one
-              // function, so the two can't disagree.
-              hasPlacement={resourceHasOwnPlacement(resource)}
+              // Whether THIS control already has a chip on this card — the
+              // per-control question, and the only real "has a placement"
+              // question the board has (ModelDetailDrawer's own call site
+              // has already proved its answer and passes the literal; see
+              // nodes.ts's controlHasPlacement). A shared GPU can carry two
+              // controls and one chip: an unloaded resource's row must not
+              // read as "has a chip" just because a co-resident neighbour's
+              // does. A parked hipfire-kind resource deliberately has none,
+              // and then the control row is the only thing that can say what
+              // state it is in.
+              hasPlacement={controlHasPlacement(resource, control)}
               coldGgufs={coldGgufs}
               onRefresh={onRefresh}
             />

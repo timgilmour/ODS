@@ -71,7 +71,12 @@ def _nodes_block(deck: dict) -> list[dict]:
             "control": entry["control"],
             "status": "online" if entry["agent_kind"] == "local" else obs.get("status"),
             "last_seen": obs.get("last_seen"),
-            "gpus": obs.get("gpus"),
+            # The local entry has no observer snapshot (it's never probed
+            # like a node-agent) — its gpus come from app.telemetry's own
+            # pass-through of the sibling dashboard-api container instead,
+            # so every node in this list ends up with the SAME shape.
+            "gpus": (deck["telemetry"].gpus() if entry["agent_kind"] == "local"
+                     else obs.get("gpus")),
             "serving": obs.get("serving"),
             "error": obs.get("error"),
         })

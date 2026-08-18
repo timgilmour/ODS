@@ -21,6 +21,7 @@
  */
 
 import type { EngineKindsResponse } from "../api";
+import type { RemoteEngineControl } from "./nodes";
 
 /** One offered verb. `disabled` is a no-op/unreachable judgement, not a
  * permission one — see `remoteEngineVerbs`. */
@@ -85,4 +86,21 @@ export function remoteEngineVerbs(
     verb,
     disabled: stale || isNoOp(verb, state),
   }));
+}
+
+/**
+ * The "load" entry of a DECLARED REMOTE engine's own verb list — the node
+ * header's "Load engine…" menu (Task 5) has nothing else to ask: `control
+ * .verbs` was already built by `remoteEngineVerbs` above (same kind lookup,
+ * same stale/no-op folding), so this never re-derives disabledness, it only
+ * picks the one entry the menu cares about.
+ *
+ * `null` for two DIFFERENT reasons the caller does not need to tell apart:
+ * the kind's own `human_verbs` doesn't include "load" at all (a kind with no
+ * load verb offers no menu entry), or `verbs` is empty because the catalog
+ * hasn't landed yet (same "render nothing rather than invent a verb" rule
+ * `remoteEngineVerbs` follows).
+ */
+export function loadVerbFor(control: RemoteEngineControl): EngineVerb | null {
+  return control.verbs.find((v) => v.verb === "load") ?? null;
 }

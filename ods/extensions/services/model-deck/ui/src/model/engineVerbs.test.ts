@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { EngineKindsResponse } from "../api";
-import { remoteEngineVerbs } from "./engineVerbs";
+import type { RemoteEngineControl } from "./nodes";
+import { loadVerbFor, remoteEngineVerbs } from "./engineVerbs";
+
+// Only the fields loadVerbFor reads — nodeId/resource/kind/state are along
+// for the ride on the real type, never consulted here.
+function control(verbs: RemoteEngineControl["verbs"]): RemoteEngineControl {
+  return { nodeId: "zeta", resource: "song-lab", kind: "sglang-omni", state: "down", verbs };
+}
 
 // GET /api/engine-kinds's shape (app/routers/nodes.py:493-504). Invented
 // kinds ("widget"/"gadget") wherever the test is about the RULE rather than
@@ -109,5 +116,29 @@ describe("remoteEngineVerbs", () => {
       { verb: "load", disabled: true },
       { verb: "unload", disabled: false },
     ]);
+  });
+});
+
+describe("loadVerbFor", () => {
+  it("returns the load entry when the control's verbs carry one", () => {
+    expect(
+      loadVerbFor(control([{ verb: "load", disabled: false }, { verb: "unload", disabled: true }])),
+    ).toEqual({ verb: "load", disabled: false });
+  });
+
+  it("returns the (disabled) load entry unchanged — this fn re-derives nothing", () => {
+    expect(loadVerbFor(control([{ verb: "load", disabled: true }]))).toEqual({
+      verb: "load",
+      disabled: true,
+    });
+  });
+
+  it("returns null for a kind whose verbs don't include load", () => {
+    // e.g. "gadget" in the fixture above, whose only human_verb is "polish".
+    expect(loadVerbFor(control([{ verb: "polish", disabled: false }]))).toBeNull();
+  });
+
+  it("returns null when verbs is empty — the catalog hasn't landed", () => {
+    expect(loadVerbFor(control([]))).toBeNull();
   });
 });

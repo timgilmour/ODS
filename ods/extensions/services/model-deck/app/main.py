@@ -261,6 +261,12 @@ def _build_deck(settings: Settings) -> dict:
 
     node_clients = NodeClients(node_store, _swap_client_factory)
     node_observers = NodeObservers(node_store, node_clients)
+    # Local-node counterpart of node_observers above: a node-agent entry's
+    # gpus come from probing that box, the local entry's come from this
+    # process's own sibling dashboard-api container instead (app.telemetry).
+    from app.telemetry import LocalTelemetry
+
+    telemetry = LocalTelemetry(settings)
     # Per-(node, resource) clients for engines DECLARED on a node-agent
     # entry (sglang-omni Task 6). No factory argument: the default
     # delegates to each engine KIND's own remote constructor
@@ -348,6 +354,10 @@ def _build_deck(settings: Settings) -> dict:
         # registry edits apply live with no restart [max-review #13 fix].
         "node_clients": node_clients,
         "node_observers": node_observers,
+        # Local GPU telemetry pass-through (app.telemetry) — the LOCAL
+        # entry's counterpart of node_observers above; see that class's
+        # docstring.
+        "telemetry": telemetry,
         # Remote DECLARED engines' clients — the RemoteEngineClients
         # counterpart of local_clients below, read through by the remote
         # half of every world snapshot (app.routers.build_world_snapshot
