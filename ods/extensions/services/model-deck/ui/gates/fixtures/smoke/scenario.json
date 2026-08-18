@@ -1,0 +1,32 @@
+{
+  "_note": "R7/R8 (controller ruling) plus one observed-reality addition from Step 4: App.tsx polls GET /api/state AND GET /api/storage/state every POLL_MS=3000 (refreshState, App.tsx:67-124) — a fixed-length script drains and 599s, so both routes' last (only) entry carries repeat:true. GET /api/engine-kinds is fetched exactly once on mount (App.tsx:137-147). world.nodes is empty so swapNodes()/buildNodes() never fire getNodeServingStatus or getCatalog, and the default view is \"deck\" so EventsView (GET /api/events) never mounts — neither needed scripting. What the brief's list missed: SetStrip (rendered unconditionally under view===\"deck\", App.tsx:281) fires GET /api/sets once on mount (SetStrip.tsx:27,36) — a real dispatched request the brief's two-route scenario did not cover, discovered by the route-named 599 the stub is designed to surface. /api/state's body also carries \"models\": [] and \"policy\": {} — StateResponse types both as required (api.ts:224-235) and Board/SetBuilder/NodesView read them unconditionally once state is non-null.",
+  "routes": {
+    "GET /api/engine-kinds": [
+      { "status": 200, "body": { "kinds": [] } }
+    ],
+    "GET /api/sets": [
+      { "status": 200, "body": { "sets": [], "previous": null } }
+    ],
+    "GET /api/state": [
+      {
+        "status": 200,
+        "body": {
+          "node": { "id": "local", "label": "autarch" },
+          "world": { "gpus": [], "tenants": {} },
+          "policy": {},
+          "models": [],
+          "lifecycle": {},
+          "nodes": []
+        },
+        "repeat": true
+      }
+    ],
+    "GET /api/storage/state": [
+      {
+        "status": 200,
+        "body": { "locations": [], "units": [], "jobs": [], "policy": { "auto": false } },
+        "repeat": true
+      }
+    ]
+  }
+}

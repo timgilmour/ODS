@@ -1327,9 +1327,47 @@ Model Deck API (:3015, FastAPI)
 - `app/events.py` — Audit event logging
 - `app/settings.py` — Configuration, environment variables
 - `ui/` — React source code
+- `ui/gates/` — `deck-gate`'s browser-gate harness (see [Testing](#testing) below)
 - `tests/` — Pytest test suite
+- `livetests/` — `deck-drill`'s live capability suite (see [Testing](#testing) below)
 - `Dockerfile` — Multi-stage container (Node + Python)
 - `requirements.txt` — Python dependencies
+
+## Testing
+
+Two live/scripted suites sit beside the unit suites (`pytest`, `npm test`), each with its
+own runner script at the extension root and its own detailed README. **Do not confuse
+them** — they exercise different halves of the stack:
+
+- **`./deck-drill`** exercises the **backend** against a live box — real API calls, safe
+  tier reversible-by-finalizer, disruptive tier gated behind a pre-flight window. Details:
+  `livetests/README.md`.
+- **`./deck-gate`** exercises the **UI** — headless Chrome (`playwright-core`, driving the
+  system `google-chrome`, never a downloaded browser binary) clicking through the real
+  built bundle. Fixture tier (default) is deterministic and needs nothing running; `--live`
+  is a strictly read-only fidelity check against a live deck. Full details, the two tiers,
+  the stub-never-derives rule, and known limitations: `ui/gates/README.md`.
+
+Both share the same shape deliberately (exit codes `0`/`1`/`2`, `-k` selection, a
+`~/notes/evidence/deck-<name>s/` report directory) — that convergence is intentional.
+Shared *code* between them is not: `deck-drill` has no idea what a browser is, and
+`deck-gate` never **writes** to a backend route outside its stub (`--live`'s fidelity check
+does call the live deck directly, but GET-only — see `ui/gates/README.md`'s "two tiers"
+section) and never exercises backend *behaviour* at all, written or read: the add/forget
+flows it clicks through are proven only against the stub's scripted responses, never against
+a real box actually accepting or persisting anything.
+
+`playwright-core` is a **devDependency of `ui/` only** and must never resolve inside the
+built container — verify with:
+
+```bash
+docker build -t model-deck-packaging-probe .
+docker run --rm model-deck-packaging-probe sh -c \
+  'ls /srv/app/ui/gates 2>&1; node -e "require(\"playwright-core\")" 2>&1 | head -1'
+```
+
+Expect `ui/gates` absent from the image (check `/srv/app`, not `/app` — the image's
+`WORKDIR` is `/srv`, not `/app`) and `playwright-core` unresolvable.
 
 ## Troubleshooting
 
