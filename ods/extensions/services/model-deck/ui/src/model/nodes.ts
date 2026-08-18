@@ -48,6 +48,7 @@ import type {
   StateResponse,
 } from "../api";
 import { isResident, remoteEngineVerbs, type EngineVerb } from "./engineVerbs";
+import { engineChipVisible } from "./chipVisibility";
 
 /** Node-level rollup. Deliberately NOT LifecycleStatus: that describes one
  * resource's relationship to its recorded intent and stays on the placement.
@@ -106,10 +107,9 @@ export interface Placement {
   /** Seconds since this tenant last did anything. Feeds idle-TTL eviction,
    * so it explains why something is about to be dropped. */
   idleSeconds?: number | null;
-  /** The engine's name, set ONLY when it differs from what the node
-   * normally runs — otherwise every spark chip would carry a redundant
-   * "vllm". The comparison is made here, not in a component, so a node
-   * registry can vary the default per node without touching the board. */
+  /** The engine's name, always present on model chips (ruling 2026-08-18 —
+   * previously set only when it differed from what the node normally runs,
+   * so a spark chip's "vllm" stayed silent; that special-casing is gone). */
   engineBadge?: string;
   /** Declared settings written more recently than this placement's intent
    * last (re)launched it — copied verbatim from the lifecycle view's own
@@ -203,8 +203,10 @@ export interface DeckNode {
  * swap nodes share one control name without colliding. */
 const SPARK_CONTROL = "spark";
 
-/** What the spark normally serves. Any other engine gets a badge on the
- * chip; this one does not, because it is the unremarkable case. */
+/** The engine `buildSwapNode` assumes when a served profile matches none of
+ * the node's reported `profiles[]` (its join-miss fallback). No longer
+ * special-cased on the chip — `engineBadge` is unconditional now (ruling
+ * 2026-08-18) — so this constant's only remaining job is that fallback. */
 const SPARK_DEFAULT_ENGINE = "vllm";
 
 function statusOf(lifecycle: LifecycleMap, key: string, fallback: LifecycleStatus): LifecycleStatus {
@@ -244,6 +246,7 @@ function tenantPlacement(
     if (tenant.state !== "loaded" || !tenant.model) return null;
     return {
       id: key, name: tenant.model, bytes: tenant.footprint ?? null, engine: "lemonade",
+      engineBadge: "lemonade",
       kind: "model", stale: false, status: statusOf(lifecycle, key, "serving"),
       pinned, priority, idleSeconds: tenant.idle_s ?? null, settingsDrift: driftOf(lifecycle, key),
     };
@@ -253,6 +256,7 @@ function tenantPlacement(
     if (tenant.state === "parked" || !tenant.model) return null;
     return {
       id: key, name: tenant.model, bytes: tenant.footprint ?? null, engine: "hipfire",
+      engineBadge: "hipfire",
       kind: "model", stale: false,
       status: statusOf(lifecycle, key, tenant.state === "loading" ? "warming" : "serving"),
       pinned, priority,
@@ -264,10 +268,19 @@ function tenantPlacement(
   }
 
   // Any other kind (comfyui today) holds VRAM whether or not it is
-  // mid-render, and has no model identity of its own, so it is always
-  // present and always an "engine" — named by the RESOURCE now (the old
-  // code hardcoded the literal "comfyui" here, back when resource name and
-  // kind name were the same fact by construction).
+  // mid-render, and has no model identity of its own, so when it earns a
+  // chip at all it is always an "engine" — named by the RESOURCE now (the
+  // old code hardcoded the literal "comfyui" here, back when resource name
+  // and kind name were the same fact by construction).
+  //
+  // Ruling 2026-08-18: an engine with nothing to show earns no chip at all
+  // (chipVisibility.ts's `engineChipVisible`) — except a failure/transition
+  // status, which must stay visible. comfyui's "busy"/queue>0 is its own
+  // "something's happening" reading, the opposite of sglang-omni's
+  // busy|idle-is-resident one (see chipVisibility.ts's comment).
+  if (!engineChipVisible(tenant.engine, tenant.state, tenant.queue ?? null, lifecycle[key]?.status)) {
+    return null;
+  }
   return {
     id: key, name: resource, bytes: null, engine: tenant.engine,
     kind: "engine", stale: false, status: statusOf(lifecycle, key, "idle"),
@@ -401,12 +414,15 @@ function noIntentStatus(state: string): LifecycleStatus {
 
 /** One declared remote engine's chip.
  *
- * ALWAYS present, unlike the local `tenantPlacement`'s load-verb arms: the
- * lifecycle words that matter most here — `down`, `parked`, `quarantined`,
- * `warming` — are all states in which nothing is loaded (app/lifecycle.py:76-89),
- * so a card that dropped its chip when the engine stopped serving could
- * never show them. The comfyui-kind arm above takes the same "always an
- * engine, no model identity of its own" shape for the same reason.
+ * Unconditional in THIS function — same "always an engine, no model
+ * identity of its own" shape the comfyui-kind arm above takes — but its only
+ * caller, `remoteEngineResources`, now gates the tenant through
+ * `engineChipVisible` before ever reaching here (ruling 2026-08-18: a
+ * model-less engine earns no card, `down`/`quarantined`/`warming` excepted).
+ * Kept unconditional here rather than threading the filter through this
+ * function too, because Task 3's per-GPU regroup is what moves the check to
+ * where it belongs (a per-chip filter, not a per-tenant one) — this function
+ * stays the same shape either way.
  *
  * `settingsDrift` is deliberately NOT carried: DriftCard's Settings target
  * is the NODE's configurable engine (a swap node's vllm — App.tsx's catalog
@@ -492,23 +508,34 @@ function remoteEngineResources(
   kinds: EngineKindsResponse | null,
   stale: boolean,
 ): DeckResource[] {
-  return tenants.map((tenant) => ({
-    id: tenant.resource,
-    label: tenant.resource,
-    // The node's OWN GPU list (the node-observer's, which is what this card
-    // already meters) — never `world.gpus`, which is this box's, and never a
-    // second source for one fact.
-    capacity: gpuCapacity(entry.gpus, tenant.gpu_index),
-    controls: [],
-    remoteEngine: {
-      nodeId: entry.id,
-      resource: tenant.resource,
-      kind: tenant.engine,
-      state: tenant.state,
-      verbs: remoteEngineVerbs(kinds, tenant.engine, tenant.state, stale),
-    },
-    placements: [remoteEnginePlacement(tenant, state.lifecycle, state.policy, stale)],
-  }));
+  // Interim: ruling 2026-08-18 hides a model-less engine's whole CARD here
+  // (GPU meter, verbs, everything) rather than just its chip — Task 3's
+  // per-GPU regroup is what rewrites this call site to filter only the chip
+  // and keep the meter. Same function as the comfyui arm above, applied to
+  // the remote half of the world snapshot.
+  return tenants
+    .filter((tenant) =>
+      engineChipVisible(
+        tenant.engine, tenant.state, tenant.queue ?? null,
+        state.lifecycle[remoteKey(tenant)]?.status,
+      ))
+    .map((tenant) => ({
+      id: tenant.resource,
+      label: tenant.resource,
+      // The node's OWN GPU list (the node-observer's, which is what this
+      // card already meters) — never `world.gpus`, which is this box's, and
+      // never a second source for one fact.
+      capacity: gpuCapacity(entry.gpus, tenant.gpu_index),
+      controls: [],
+      remoteEngine: {
+        nodeId: entry.id,
+        resource: tenant.resource,
+        kind: tenant.engine,
+        state: tenant.state,
+        verbs: remoteEngineVerbs(kinds, tenant.engine, tenant.state, stale),
+      },
+      placements: [remoteEnginePlacement(tenant, state.lifecycle, state.policy, stale)],
+    }));
 }
 
 /** app/node_observer.py's status vocabulary -> the board's. `unconfigured`
@@ -752,11 +779,7 @@ function buildSwapNode(
                 bytes: null,
                 status: lc?.status ?? (endpointOk ? "serving" : "down"),
                 engine,
-                // Which engine the node is actually serving, but only when
-                // it is not the one it usually serves — a "vllm" badge on
-                // every chip is noise, a "ds4" badge is the answer to a
-                // question the operator would otherwise have to look up.
-                engineBadge: engine === SPARK_DEFAULT_ENGINE ? undefined : engine,
+                engineBadge: engine,
                 kind: "model",
                 stale,
                 settingsDrift: driftOf(lifecycle, slotKey),

@@ -314,12 +314,17 @@ describe("buildNodes", () => {
   });
 
   it("keeps a drained ComfyUI queue distinct from an unreadable one", () => {
-    const zero = buildNodes(stateWith(), {})[0].resources.find((r) => r.id === "img")!.placements
+    // Chip visibility (Task 2 ruling) is forced via `state: "busy"` in both
+    // cases, so what is under test stays the QUEUE field's own distinction
+    // (0 vs null) rather than whether the chip shows at all — that is
+    // chipVisibility.test.ts's job.
+    const s = stateWith();
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 0, idle_s: 12 };
+    const zero = buildNodes(s, {})[0].resources.find((r) => r.id === "img")!.placements
       .find((p) => p.engine === "comfyui");
     expect(zero?.queue).toBe(0);
 
-    const s = stateWith();
-    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "unknown", queue: null, idle_s: null };
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: null, idle_s: null };
     const unknown = buildNodes(s, {})[0].resources.find((r) => r.id === "img")!.placements
       .find((p) => p.engine === "comfyui");
     expect(unknown?.queue).toBeNull();
@@ -327,23 +332,35 @@ describe("buildNodes", () => {
 
   it("names a non-model engine placement after its RESOURCE, not a hardcoded kind literal", () => {
     // Two comfyui-kind resources would otherwise both render "comfyui" —
-    // the resource name is what tells them apart on screen.
+    // the resource name is what tells them apart on screen. `state: "busy"`
+    // (rather than the default fixture's idle/queue-0) keeps the chip
+    // visible under the Task 2 ruling — this test is about the NAME, not
+    // visibility.
     const s = stateWith();
-    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "idle", queue: 0, idle_s: 12 };
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 3, idle_s: 12 };
     const [local] = buildNodes(s, {});
     const img = local.resources.find((r) => r.id === "img")!.placements
       .find((p) => p.engine === "comfyui");
     expect(img?.name).toBe("img");
   });
 
-  it("never badges a local tenant with its own engine name", () => {
-    // The badge answers "what is this node running that it usually isn't".
-    // On the local box each resource IS its declared kind, so there is no
-    // such question and no badge.
-    const [local] = buildNodes(stateWith(), {});
-    for (const r of local.resources) {
-      for (const p of r.placements) expect(p.engineBadge).toBeUndefined();
-    }
+  it("badges every local model chip with its own engine name, unconditionally", () => {
+    // Superseded ruling (2026-08-18): the badge used to answer "what is this
+    // node running that it usually isn't", so a local resource — always its
+    // own declared kind — never carried one. It is unconditional now: every
+    // model chip names its engine, local or remote alike, so nothing on the
+    // board depends on tribal knowledge of "the usual engine" to read what a
+    // chip is running.
+    const s = stateWith();
+    s.world.tenants["gguf-a"] = {
+      engine: "lemonade", gpu_index: 3, state: "loaded", model: "qwen.gguf",
+      footprint: 9_000_000_000, idle_s: 4,
+    };
+    const [local] = buildNodes(s, {});
+    const agent = local.resources.find((r) => r.id === "agent")!.placements[0];
+    const gguf = local.resources.find((r) => r.id === "gguf-a")!.placements[0];
+    expect(agent.engineBadge).toBe("hipfire");
+    expect(gguf.engineBadge).toBe("lemonade");
   });
 
   it("takes a placement's status from the lifecycle view", () => {
@@ -668,11 +685,15 @@ describe("buildNodes — swap nodes", () => {
     expect(boxa.status).toBe("unreachable");
   });
 
-  it("badges a non-default engine and stays silent about the default one", () => {
+  it("badges the spark placement with its own engine name, unconditionally, default engine included", () => {
+    // Superseded ruling (2026-08-18): the badge used to stay silent for
+    // SPARK_DEFAULT_ENGINE ("vllm" is unremarkable) and only appear for a
+    // non-default engine like "ds4". It is unconditional now — see the
+    // local-tenant equivalent above.
     const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const vllm = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
     expect(vllm.resources[0].placements[0].engine).toBe("vllm");
-    expect(vllm.resources[0].placements[0].engineBadge).toBeUndefined();
+    expect(vllm.resources[0].placements[0].engineBadge).toBe("vllm");
 
     const ds4 = buildNodes(s, {
       boxa: sparkStatus({
@@ -994,12 +1015,13 @@ describe("buildNodes — declared remote engines", () => {
     // Only reachable on a deck with NO intent store, where the whole
     // lifecycle view is `{}` (app/routers/__init__.py:136-137) — so these
     // are derive_status's own no-intent arms, not a second derivation.
+    // Both rows here are RESIDENT states (busy|idle), so the Task 2
+    // visibility filter never enters into it — the down/unknown rows this
+    // table used to carry moved to the test below, because those are
+    // NOT resident and (with no intent store to force a failure status) the
+    // card no longer renders at all.
     ["idle", "unmanaged"],
     ["busy", "unmanaged"],
-    ["down", "idle"],
-    // The engine we failed to LOOK at observes reachable: False
-    // (app/observe.py:320-321), which is `unreachable`, never `down`.
-    ["unknown", "unreachable"],
   ])("with an empty lifecycle view, %s falls back to %s", (state, expected) => {
     const s = zetaState({
       remoteTenants: { "zeta/song-lab": remoteTenant({ state }) },
@@ -1013,20 +1035,39 @@ describe("buildNodes — declared remote engines", () => {
     expect(card.remoteEngine!.state).toBe(state);
   });
 
-  it("keeps the chip while the engine is not resident — that is where down/parked/quarantined live", () => {
-    // The status vocabulary requirement 1 names is only ever observable on a
-    // NOT-loaded engine (app/lifecycle.py:76-89), so a card that dropped its
-    // chip when the engine went down could never show it.
+  it.each(["down", "unknown"] as const)(
+    "with an empty lifecycle view, a non-resident %s engine renders no card at all",
+    (state) => {
+      // Task 2 ruling: with no intent store, "down"/"unknown" derive to
+      // idle/unreachable (noIntentStatus) — neither is in the
+      // ALWAYS_VISIBLE failure set, and the engine itself is not resident,
+      // so the whole card disappears (the interim filter in
+      // `remoteEngineResources` drops the tenant entirely, not just its
+      // chip). This used to assert the derived status; there is nothing
+      // left on the board to read it off.
+      const s = zetaState({
+        remoteTenants: { "zeta/song-lab": remoteTenant({ state }) },
+        lifecycle: {},
+      });
+      const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+      expect(zeta.resources.find((r) => r.id === "song-lab")).toBeUndefined();
+    },
+  );
+
+  it("keeps the chip via an ALWAYS_VISIBLE lifecycle status even while the engine is not resident", () => {
+    // quarantined is a failure the operator must still be able to see, even
+    // though a quarantined engine typically has nothing loaded — the
+    // approved exception to the "no model, no chip" ruling.
     const s = zetaState({
       remoteTenants: {
         "zeta/song-lab": remoteTenant({ state: "down", busy_requests: null, idle_s: null }),
       },
-      lifecycle: { "zeta/song-lab": lifecycleEntry({ status: "parked" }) },
+      lifecycle: { "zeta/song-lab": lifecycleEntry({ status: "quarantined" }) },
     });
     const card = buildNodes(s, {}, OMNI_KINDS)
       .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
     expect(card.placements).toHaveLength(1);
-    expect(card.placements[0].status).toBe("parked");
+    expect(card.placements[0].status).toBe("quarantined");
     expect(card.placements[0].name).toBe("song-lab");
     expect(card.placements[0].kind).toBe("engine");
     // No idle reading at all on this record — absent, never a fabricated 0.
@@ -1034,6 +1075,21 @@ describe("buildNodes — declared remote engines", () => {
     expect(card.remoteEngine!.verbs).toEqual([
       { verb: "load", disabled: false }, { verb: "unload", disabled: true },
     ]);
+  });
+
+  it("hides a parked-but-not-resident remote engine — parked is not in the ALWAYS_VISIBLE failure set", () => {
+    // Superseded ruling: this used to be grouped with down/quarantined as
+    // "the chip must survive". Parked is the resource's intentional empty
+    // state (an operator unloaded it), not a failure, so under the Task 2
+    // ruling it is exactly the case the whole redesign exists to hide.
+    const s = zetaState({
+      remoteTenants: {
+        "zeta/song-lab": remoteTenant({ state: "down", busy_requests: null, idle_s: null }),
+      },
+      lifecycle: { "zeta/song-lab": lifecycleEntry({ status: "parked" }) },
+    });
+    const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+    expect(zeta.resources.find((r) => r.id === "song-lab")).toBeUndefined();
   });
 
   it("an unavailable busy indicator reads BUSY, exactly as the backend already read it", () => {
