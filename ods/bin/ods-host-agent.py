@@ -15,6 +15,7 @@ import argparse
 import atexit
 import base64
 import collections
+import contextlib
 import hashlib
 import importlib
 import importlib.util
@@ -8889,80 +8890,81 @@ class AgentHandler(BaseHTTPRequestHandler):
             if lemonade_backup is not None:
                 lemonade_yaml.write_text(lemonade_backup, encoding="utf-8")
 
-        try:
-            lemonade_backup = lemonade_yaml.read_text(encoding="utf-8") if lemonade_yaml.exists() else None
+        with _deck_bracket(env_pre, "local/hipfire"):
+            try:
+                lemonade_backup = lemonade_yaml.read_text(encoding="utf-8") if lemonade_yaml.exists() else None
 
-            env_txn.update({"HIPFIRE_MODEL": model_file, "HIPFIRE_ACTIVE": "true"})
-            if lemonade_yaml.exists():
-                _write_lemonade_config(INSTALL_DIR, env_pre.get("GGUF_FILE", ""))
+                env_txn.update({"HIPFIRE_MODEL": model_file, "HIPFIRE_ACTIVE": "true"})
+                if lemonade_yaml.exists():
+                    _write_lemonade_config(INSTALL_DIR, env_pre.get("GGUF_FILE", ""))
 
-            _compose_recreate_hipfire()
+                _compose_recreate_hipfire()
 
-            # Health-gate: /health returns 503 until the model is resident.
-            # A cold MQ4 load takes minutes (manifest health_timeout: 300).
-            port = env_pre.get("HIPFIRE_PORT", "11435") or "11435"
-            health_url = f"http://127.0.0.1:{port}/health"
-            logger.info("Waiting for hipfire health at %s", health_url)
-            healthy = False
-            time.sleep(5)
-            for attempt in range(60):
-                try:
-                    result = subprocess.run(
-                        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                         "--max-time", "5", health_url],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if result.stdout.strip() == "200":
-                        healthy = True
-                        logger.info("hipfire healthy after %d attempts", attempt + 1)
-                        break
-                except subprocess.TimeoutExpired:
-                    pass
-                if attempt % 6 == 0:
-                    logger.info("hipfire health attempt %d", attempt + 1)
+                # Health-gate: /health returns 503 until the model is resident.
+                # A cold MQ4 load takes minutes (manifest health_timeout: 300).
+                port = env_pre.get("HIPFIRE_PORT", "11435") or "11435"
+                health_url = f"http://127.0.0.1:{port}/health"
+                logger.info("Waiting for hipfire health at %s", health_url)
+                healthy = False
                 time.sleep(5)
+                for attempt in range(60):
+                    try:
+                        result = subprocess.run(
+                            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                             "--max-time", "5", health_url],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        if result.stdout.strip() == "200":
+                            healthy = True
+                            logger.info("hipfire healthy after %d attempts", attempt + 1)
+                            break
+                    except subprocess.TimeoutExpired:
+                        pass
+                    if attempt % 6 == 0:
+                        logger.info("hipfire health attempt %d", attempt + 1)
+                    time.sleep(5)
 
-            if healthy:
-                # LiteLLM reads its config once at boot — restart to pick up
-                # routing. An unchecked failure here would report "activated"
-                # while every client still talks to the old routing.
-                result = subprocess.run(["docker", "restart", "ods-litellm"],
-                                        capture_output=True, text=True, timeout=60)
-                if result.returncode != 0:
-                    raise RuntimeError(
-                        "LiteLLM restart failed after hipfire came up healthy: "
-                        + ((result.stderr or result.stdout) or "").strip()
-                    )
-                committed = True
-                json_response(self, 200, {"status": "activated", "model_id": model_id, "engine": "hipfire"})
-            else:
-                logger.warning("hipfire activation failed — rolling back")
-                restore_backups()
-                _compose_recreate_hipfire()
-                json_response(self, 500, {"error": "hipfire health check failed — rolled back to previous model", "rolled_back": True})
-        except Exception as exc:
-            if committed:
-                json_response(self, 500, {"error": f"hipfire model activation failed: {exc}"})
-                return
-            logger.exception("hipfire activation failed — rolling back")
-            rolled_back = False
-            try:
-                restore_backups()
-                # Restoring the files is not enough: the container may already
-                # be recreated on the new pin (or be down entirely). Recreate
-                # on the restored pin so runtime state matches the files, and
-                # give LiteLLM a best-effort restart so a half-applied restart
-                # from the commit path cannot leave it stopped.
-                _compose_recreate_hipfire()
-                rolled_back = True
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                logger.exception("Rollback failed during hipfire-activate failure handling")
-            try:
-                subprocess.run(["docker", "restart", "ods-litellm"],
-                               capture_output=True, timeout=60)
-            except (OSError, subprocess.SubprocessError):
-                logger.exception("LiteLLM restart failed during hipfire-activate rollback")
-            json_response(self, 500, {"error": f"hipfire model activation failed: {exc}", "rolled_back": rolled_back})
+                if healthy:
+                    # LiteLLM reads its config once at boot — restart to pick up
+                    # routing. An unchecked failure here would report "activated"
+                    # while every client still talks to the old routing.
+                    result = subprocess.run(["docker", "restart", "ods-litellm"],
+                                            capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        raise RuntimeError(
+                            "LiteLLM restart failed after hipfire came up healthy: "
+                            + ((result.stderr or result.stdout) or "").strip()
+                        )
+                    committed = True
+                    json_response(self, 200, {"status": "activated", "model_id": model_id, "engine": "hipfire"})
+                else:
+                    logger.warning("hipfire activation failed — rolling back")
+                    restore_backups()
+                    _compose_recreate_hipfire()
+                    json_response(self, 500, {"error": "hipfire health check failed — rolled back to previous model", "rolled_back": True})
+            except Exception as exc:
+                if committed:
+                    json_response(self, 500, {"error": f"hipfire model activation failed: {exc}"})
+                    return
+                logger.exception("hipfire activation failed — rolling back")
+                rolled_back = False
+                try:
+                    restore_backups()
+                    # Restoring the files is not enough: the container may already
+                    # be recreated on the new pin (or be down entirely). Recreate
+                    # on the restored pin so runtime state matches the files, and
+                    # give LiteLLM a best-effort restart so a half-applied restart
+                    # from the commit path cannot leave it stopped.
+                    _compose_recreate_hipfire()
+                    rolled_back = True
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    logger.exception("Rollback failed during hipfire-activate failure handling")
+                try:
+                    subprocess.run(["docker", "restart", "ods-litellm"],
+                                   capture_output=True, timeout=60)
+                except (OSError, subprocess.SubprocessError):
+                    logger.exception("LiteLLM restart failed during hipfire-activate rollback")
+                json_response(self, 500, {"error": f"hipfire model activation failed: {exc}", "rolled_back": rolled_back})
 
     def _handle_model_delete(self):
         """Delete a downloaded GGUF model file."""
@@ -12451,6 +12453,78 @@ def _log_env_rollback(restored: dict) -> None:
             f"{key}={cur!r}->{old!r}" for key, (old, cur) in restored.items()
         ),
     )
+
+
+# Window during which the Model Deck stands down for one deliberate teardown.
+# Above hipfire's manifest health_timeout (300) so a normal cold MQ4 load
+# never races its own hold expiring, and well under app.holds.MAX_HOLD_TTL_S.
+_DECK_BRACKET_TTL_S = 360
+
+
+def _deck_base_url(env: dict) -> str:
+    """Where the Model Deck answers. Loopback only — it binds 127.0.0.1."""
+    port = (env.get("MODEL_DECK_PORT") or "").strip() or "3015"
+    return f"http://127.0.0.1:{port}"
+
+
+def _deck_call(env: dict, method: str, path: str, payload: dict | None = None) -> bool:
+    """Tell the deck something. Returns whether it heard us.
+
+    BEST-EFFORT BY CONTRACT. A deck that is down, slow, restarting, or newly
+    installed without these routes must never block an operator changing
+    models through the dashboard — that path worked for months before the
+    deck existed and must keep working when it is gone. Every failure is
+    logged and swallowed; the worst case is the pre-bracket behaviour.
+
+    The lifecycle routes take no auth (see the router's docstring), so no
+    token is threaded here.
+    """
+    url = f"{_deck_base_url(env)}{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    try:
+        request = urllib_request.Request(url, data=data, headers=headers, method=method)
+        with urllib_request.urlopen(request, timeout=5) as response:
+            if 200 <= response.status < 300:
+                return True
+            logger.warning("Deck %s %s answered %s (continuing)",
+                           method, path, response.status)
+            return False
+    except (OSError, urllib_error.URLError, ValueError):
+        logger.warning("Deck %s %s failed (continuing)", method, path, exc_info=True)
+        return False
+
+
+@contextlib.contextmanager
+def _deck_bracket(env: dict, key: str, ttl_s: int = _DECK_BRACKET_TTL_S):
+    """Announce a deliberate teardown of `key`, then record what came back.
+
+    Wrap any host-agent action that stops or recreates an engine container.
+    Without this the deck reads the resulting absence as a death and fires
+    lifecycle-restore — harmless only while it holds no desired model for
+    the key, and an actual fight the moment it does. See
+    ~/notes/model-deck-dashboard-actuation-bracket.md.
+
+    ADOPT RUNS ON THE WAY OUT WHATEVER HAPPENED, including after a rollback:
+    adopt records what is ACTUALLY serving, so a successful activation
+    records the new model and a rolled-back one records the old. Either way
+    the deck ends up agreeing with reality, which is the entire goal.
+
+    Wrap the rollback too, not just the forward path — `_do_hipfire_activate`
+    recreates the container a SECOND time when it rolls back, and that
+    absence needs announcing exactly as much as the first one.
+    """
+    _deck_call(env, "POST", f"/api/lifecycle/expect-absence/{key}", {"ttl_s": ttl_s})
+    adopted = False
+    try:
+        yield
+        adopted = _deck_call(env, "POST", f"/api/lifecycle/adopt/{key}")
+    finally:
+        if not adopted:
+            # Either the body raised, or adopt was refused (409 — the engine
+            # did not answer, so nothing could be recorded). Release rather
+            # than leave the reconciler standing down for the full TTL.
+            _deck_call(env, "DELETE", f"/api/lifecycle/expect-absence/{key}")
 
 
 def _compose_recreate_hipfire():
