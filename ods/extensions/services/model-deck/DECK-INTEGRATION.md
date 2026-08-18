@@ -75,7 +75,7 @@ stays human-only (structural omission made explicit)"
 (`app/engine_kinds.py:758-759`). The verbs
 are dispatched as `_hipfire_park` (`app/routers/control.py:441`) /
 `_hipfire_resume` (`app/routers/control.py:453`), wired into `_HANDLERS` as
-`("hipfire", "park")` / `("hipfire", "resume")` (`app/routers/control.py:475-476`).
+`("hipfire", "park")` / `("hipfire", "resume")` (`app/routers/control.py:478-479`).
 
 Every kind also needs `restore(client, model)` for post-restart
 reconciliation. *hipfire:* `_HipfireAdapter.restore`
@@ -235,7 +235,7 @@ model-selection state written by the dashboard's activation path
 `ods/bin/ods-host-agent.py:8898`). The deck *also* models this resource's
 load state, independently, in its own intent store (`IntentStore`,
 `app/intent.py:55`), recorded under the `local_key("hipfire")` key by
-`_hipfire_park`/`_hipfire_resume` (`app/routers/control.py:447,461`) and
+`_hipfire_park`/`_hipfire_resume` (`app/routers/control.py:447,464`) and
 by `_deck_bracket`'s `adopt` call (item 5). These are two records of the
 same fact, written by two different actors, and nothing declares that
 relationship or reconciles them against each other.

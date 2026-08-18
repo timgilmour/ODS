@@ -229,11 +229,29 @@ def test_commit_is_what_earns_the_adopt(calls):
     ]
 
 
-def test_an_exception_after_commit_still_adopts(calls):
-    """Committed means the engine was PROVED serving. If the body then blows
-    up (json_response failing after the health gate and the LiteLLM restart
-    both passed), the new model really is up and the deck should record it —
-    the exception is about reporting, not about what is running."""
+def test_an_exception_after_commit_still_fails_open(calls):
+    """commit() only arms the adopt — it does not run it. `yield handle` sits
+    between `commit()` and the `if handle.committed:` adopt call
+    (`ods/bin/ods-host-agent.py:12608`); an exception raised in the body
+    unwinds straight past that `if` into `finally`, so adopt never fires and
+    the hold is released instead. Committed-then-raised fails open exactly
+    like never-committed does.
+
+    That is safe: a missed adopt leaves the deck merely unrecorded about a
+    resource that in fact came up — the pre-branch state, never a false
+    park. A false park (recording state="unloaded" for something running)
+    is the failure this branch exists to prevent; an unrecorded-but-running
+    resource is not that.
+
+    This path is not reachable in `_do_hipfire_activate` today: its `except`
+    handler returns early once `committed` is true
+    (`ods-host-agent.py:8964-8966`) instead of re-raising, so the caller
+    never lets an exception escape the body after commit(). That early
+    return is load-bearing for this test's safety argument — if it were
+    ever removed, a proved-serving activation could still lose its adopt
+    here, and the resource would sit unmanaged (not falsely parked, but
+    invisible to the deck) until some other actuation happened to adopt it.
+    """
     with pytest.raises(RuntimeError):
         with agent._deck_bracket({}, "local/hipfire") as bracket:
             bracket.commit()

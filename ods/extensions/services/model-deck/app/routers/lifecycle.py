@@ -149,12 +149,17 @@ def adopt(key: str, request: Request) -> dict:
     if record.get("transitioning"):
         # A BOOT IN FLIGHT IS NOT A PARK. `transitioning` is app.observe's
         # own word for "neither loaded nor dead" — hipfire's container-up-
-        # health-not-200, lemonade's in-flight load, a swap node mid-swap —
-        # and every one of them reports reachable=True with loaded=False.
-        # Without this guard adopt writes state="unloaded" actor="operator"
-        # for them: the strongest possible "the operator deliberately parked
-        # this", which derive_status reads as `parked` and plan_reconcile
-        # (app/reconcile.py, acts only on `down`) then skips forever. One
+        # health-not-200 and lemonade's in-flight load both report
+        # reachable=True with loaded=False. A swap node mid-swap does not
+        # share that shape: observe_spark computes `loaded` and
+        # `transitioning` independently (app/observe.py:261-268), so a swap
+        # slot can be loaded=True, transitioning=True — this guard keys on
+        # `transitioning` rather than `loaded` precisely so it also catches
+        # that case. Without this guard adopt writes state="unloaded"
+        # actor="operator" for any of them: the strongest possible "the
+        # operator deliberately parked this", which derive_status reads as
+        # `parked` and plan_reconcile (app/reconcile.py, acts only on
+        # `down`) then skips forever. One
         # adopt fired at the wrong moment would permanently disable the
         # restore machinery this whole subsystem exists to provide — the
         # 2026-08-03 26-hour hipfire failure, written into intent.json on
