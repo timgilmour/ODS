@@ -1,8 +1,6 @@
 # deck-gate — Model Deck browser-gate harness
 
 Spec: `~/notes/designs/2026-08-17-model-deck-browser-gate-harness-design.md`
-Ledger (rulings R1-R17, task-by-task history):
-`.superpowers/sdd/2026-08-17-model-deck-browser-gate-harness-plan/progress.md`
 
 `deck-gate` runs headless Chrome (`playwright-core`, `channel: "chrome"` — the system
 `google-chrome`, no vendored browser download) against the Model Deck UI and asserts real
@@ -40,15 +38,31 @@ deterministic and needs nothing running — no deck, no network, no GPU. This is
 E1 gate item lives (`smoke.gate.mjs`, `e1-engines.gate.mjs`, `e1-board.gate.mjs`).
 
 **Tier 2 (fidelity, `--live`)** is strictly **read-only** against a real deck and proves
-the fixture tier's fixtures haven't quietly rotted. It re-reads `/api/state`,
-`/api/nodes`, `/api/sets`, `/api/storage/state`, `/api/facts`, `/api/facts/drift`, and
-`/api/events`, extracts key sets (`shape`) and the observed enum-token inventory
+the fixture tier's fixtures haven't quietly rotted. `readLive` (`capture.mjs`) re-reads
+exactly five routes — `/api/state`, `/api/engine-kinds`, `/api/nodes`, `/api/events?n=500`,
+and `/openapi.json` — extracts key sets (`shape`) and the observed enum-token inventory
 (`tokens`), and checks that everything **live** now shows is already **known** to the
 committed `fixtures/e1-seeded-triple/vocabulary.json` — one-directionally (see below). It
 never diffs values (`/api/state` churns constantly — VRAM, queue depths,
 `last_healthy_ts` — and a gate that reddens because VRAM moved is a gate people stop
 reading), and it never writes anything. `fidelity.gate.mjs`'s `compare()` is a pure
 function with no I/O, unit-tested with no deck required; `run()` is the only impure part.
+
+Two things follow from that route list that are easy to miss, and matter more than the list
+itself:
+
+- **`/api/sets` and `/api/storage/state` are NOT re-read by tier 2 at all**, even though both
+  are heavily pinned in the tier-1 fixtures (the cold-GGUF optgroup, the saved-set
+  round-trip). Nothing checks those fixtures against reality — that is exactly the
+  fixture-rot the two-tier design exists to prevent, and it is currently a real gap, not a
+  covered one.
+- **`/openapi.json` makes up roughly 95% of the committed shape fixture** and is otherwise
+  unmentioned by name anywhere in this doc. One consequence follows directly: **adding any
+  backend endpoint will redden tier 2** (a new path in the live schema that the committed
+  fixture has never seen) **until `--capture` is re-run.** That is defensible behaviour —
+  reality moved, the fixture hasn't caught up — but it is the most likely way this gate
+  first goes red in ordinary use, and an operator hitting it cold needs to know that's what
+  happened rather than suspect a real regression.
 
 Why two tiers at all, in one sentence: a fixture-only harness is blind to the bug class
 that has recurred five times on this project — a value copied from the mockup's vocabulary
@@ -98,11 +112,14 @@ than at some confusing runtime symptom three items later.
 
 ## Timer-polled routes can only carry constant responses (R12)
 
-`App.tsx`'s `POL_MS = 3000` polling loop re-fetches `/api/state`, `/api/storage/state`,
-`/api/facts`, and `/api/facts/drift` on a plain interval, unconditionally, regardless of
-what the operator clicked. `/api/nodes` and `/api/sets` are different: they only refetch
-inside an explicit `afterMutate` / on-mount reload path, i.e. causally, in response to an
-action.
+`App.tsx`'s `POLL_MS = 3000` polling loop re-fetches `/api/state` and `/api/storage/state`
+on a plain interval, unconditionally, regardless of what the operator clicked. `/api/facts`
+and `/api/facts/drift` are one step removed from that: App only bumps a `refreshTrigger`
+counter unconditionally on every tick; the actual `getFacts()`/`getFactsDrift()` fetch is
+`ModelDetailDrawer`'s own effect, keyed on that counter (~:150-169) — so it fires on that
+same clock, but only while the drawer happens to be mounted. `/api/nodes` and `/api/sets`
+are different again: they only refetch inside an explicit `afterMutate` / on-mount reload
+path, i.e. causally, in response to an action.
 
 **A scripted state transition on a polled route advances on the clock, not the click.** If
 you script `/api/state` to return a 3-row policy first and a 4-row policy second, hoping to
@@ -186,10 +203,17 @@ of making the absence check pass by finding nothing at all.
 
 Playwright's `:has-text()` is a **substring** match, not exact — `:has-text("Load")` matches
 a button literally labelled `Unload` (`"Unload".includes("Load")` is true). This bit a gate
-on this branch during Task 9's own drafting (caught and fixed before commit). Prefer
-`:text-is()` for exact text, and where a selector's uniqueness isn't obvious on sight, call
-`assertUnique` (used throughout `e1-board.gate.mjs`) so a collision throws loudly instead of
-silently matching the wrong element or an unintended extra one.
+on this branch during Task 9's own drafting (caught and fixed before commit), and again on a
+selector that only stopped being unique once an ArmedButton with "Park" as a substring of its
+own label (`"Force park"`) rendered alongside the plain button it was checking (T9, review fix
+wave — `e1-board.gate.mjs`'s Force-park sequence). Prefer `:text-is()` for exact text, and
+where a selector's uniqueness isn't obvious on sight, call `assertUnique` so a collision
+throws loudly instead of silently matching the wrong element or an unintended extra one.
+`assertUnique` itself is `makeAssertUnique(gateName)` (`lib/dom.mjs`), imported and bound to
+the calling gate's own name — `e1-board.gate.mjs` and `e1-engines.gate.mjs` both do
+`const assertUnique = makeAssertUnique("<gate name>");` near the top of the file. It is not
+a bare importable `assertUnique`; a third gate should hoist through `makeAssertUnique`, not
+copy the closure body a third time.
 
 ## `--capture` unions, it never silently shrinks (R17)
 
@@ -231,9 +255,13 @@ which is not a repeatable plan.
    same `unreachable` != `down` distinction). The cost: a field **removed** from inside a
    node-dependent section is indistinguishable from "that node simply isn't present this
    run" — both just shrink live's key list at that path, which the one-directional rule lets
-   through by design. Unconditional sections (`node`, the `lifecycle` key set — structurally
-   present regardless of topology) get required-key assertions that claw part of this back;
-   the rest is a known hole, not a solved problem.
+   through by design. `UNCONDITIONAL_SHAPE_PATHS` (`fidelity.gate.mjs`) claws part of this
+   back for exactly two paths, both structurally present regardless of topology: the
+   TOP-LEVEL `/api/state` key set (in which `lifecycle` is one key NAME among seven, not a
+   contents check) and `/api/state.node`'s own key set. Nothing asserts the keys *inside* a
+   lifecycle entry (`/api/state.lifecycle.<resource>`'s own shape) — that stays covered only
+   by the general one-directional rule, i.e. not required-present at all; the rest is a known
+   hole, not a solved problem.
 
 2. **Item 4's board-card re-derivation is not asserted, by ruling R12.** The E1 checklist's
    own wording for item 4 says the new engine "appears as a board card" — but that card is
@@ -243,6 +271,18 @@ which is not a repeatable plan.
    new row appearing in the engines list (fed causally by `/api/nodes`). The board's own
    re-derivation of a newly declared engine from `/api/state` stays ungated by this harness.
    Both gaps are named here rather than papered over with a check that would pass either way.
+
+3. **Nothing verifies add/forget end-to-end against the real backend.** The design's own
+   accepted gap (D3), restated here because it is the coverage boundary that actually
+   matters: the live tier is strictly read-only (D3), so it never dispatches a POST/DELETE
+   at all — every add/edit/forget flow this harness exercises (E1 items 4, 6, 7, 9-11) is
+   proven only against the stub's scripted responses. That proves UI **dispatch** (the right
+   request, with the right body); it proves nothing about backend **behaviour** — whether
+   the real `POST /api/nodes` actually accepts that request or persists the result. A shape
+   difference between the real route and the stub is what the tier-2 fidelity check is for;
+   a purely behavioural difference is not caught anywhere in this harness. This is accepted,
+   not overlooked, and end-to-end behavioural proof against a live box is `deck-drill`'s job,
+   not this one's.
 
 ## Playwright and the production image
 

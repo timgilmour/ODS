@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createResults } from "./lib/check.mjs";
+import { reportingRun } from "./lib/check.mjs";
 import { launch } from "./lib/browser.mjs";
-import { isTrulyDisabled, textsOf } from "./lib/dom.mjs";
+import { isTrulyDisabled, makeAssertUnique, textsOf } from "./lib/dom.mjs";
 import { startStub } from "./stub-server.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -179,34 +179,24 @@ export const name = "e1-board";
  * number"; a fixture where GPU 1 read 0 could not distinguish "the real
  * total" from "a split that happened to floor to zero." */
 
-async function assertUnique(page, selector, what) {
-  const n = await page.locator(selector).count();
-  if (n !== 1) {
-    throw new Error(
-      `e1-board gate: expected exactly 1 ${what} (selector ${selector}), found ${n}. ` +
-        `A selector that matches zero elements can make a check pass vacuously; one ` +
-        `that matches more than expected can assert against the wrong element.`,
-    );
-  }
-}
+const assertUnique = makeAssertUnique("e1-board");
 
+// R15 (controller ruling): `reportingRun` (lib/check.mjs) owns the
+// try/catch that attaches whatever checks already ran to a mid-run throw as
+// `err.partialRows` — `results` would otherwise be local to this function
+// and vanish with an uncaught exception, and run.mjs (the caller) has no
+// other way to recover the PASS/FAIL rows already printed to the console.
+// Without that attachment, run.mjs's report degrades into one synthetic
+// "gate threw" row with none of the real checks behind it — exactly the gap
+// that forced this task's original item-9 RED proof into a hand-saved
+// terminal capture before this existed.
 export async function run() {
-  const results = createResults();
-  const scenario = JSON.parse(
-    await readFile(join(HERE, "fixtures/e1-board/scenario.json"), "utf8"),
-  );
-  const stub = await startStub({ scenario, distDir: join(HERE, "../dist"), port: 0 });
-  const { browser, page, consoleErrors } = await launch();
-  try {
-    // R15 (controller ruling): this inner try/catch exists purely so a
-    // throw mid-run does not lose the checks already gathered. `results` is
-    // local to this function and would otherwise vanish with an uncaught
-    // exception — createResults().check() already printed each PASS/FAIL to
-    // the console as it ran, but run.mjs (the caller) has no way to recover
-    // that once this function throws past its `return results`. Attaching
-    // it to the error lets run.mjs still write a real report file instead
-    // of nothing, which is exactly the gap that forced this task's original
-    // item-9 RED proof into a hand-saved terminal capture.
+  return reportingRun(async (results) => {
+    const scenario = JSON.parse(
+      await readFile(join(HERE, "fixtures/e1-board/scenario.json"), "utf8"),
+    );
+    const stub = await startStub({ scenario, distDir: join(HERE, "../dist"), port: 0 });
+    const { browser, page, consoleErrors } = await launch();
     try {
       await page.goto(stub.url, { waitUntil: "networkidle" });
 
@@ -374,8 +364,16 @@ export async function run() {
       // attribute (model/armed.ts), so this is proved by REQUEST COUNT
       // across two clicks on the SAME ArmedButton instance, not by reading
       // any disabled/armed styling.
-      await assertUnique(page, '.resource-panel:has-text("hipfire") .tenant-actions button:has-text("Park")', "hipfire's Park button");
-      await page.click('.resource-panel:has-text("hipfire") .tenant-actions button:has-text("Park")');
+      // T9 (review fix wave): `:has-text("Park")` is a case-insensitive
+      // SUBSTRING match, and the Force-park ArmedButton (labels.forcePark =
+      // "Force park") renders INSIDE this same `.tenant-actions` once the
+      // 409 below arms it — "Force park".includes("Park") is true, so that
+      // selector would then match BOTH buttons. It is unique only here,
+      // before the 409 fires; `:text-is("Park")` (exact — labels.park is
+      // literally "Park") is used instead, matching the precedent this file
+      // already sets for the Load/Unload collision further down.
+      await assertUnique(page, '.resource-panel:has-text("hipfire") .tenant-actions button:text-is("Park")', "hipfire's Park button");
+      await page.click('.resource-panel:has-text("hipfire") .tenant-actions button:text-is("Park")');
       await page.waitForSelector('.resource-panel:has-text("hipfire") .ui-banner-body:has-text("host agent is busy")');
 
       const parkAfterPlainClick = stub
@@ -696,13 +694,9 @@ export async function run() {
         unexpectedConsoleErrors.length === 0,
         unexpectedConsoleErrors.join(" | "),
       );
-    } catch (err) {
-      err.partialRows = results.rows();
-      throw err;
+    } finally {
+      await browser.close();
+      await stub.stop();
     }
-  } finally {
-    await browser.close();
-    await stub.stop();
-  }
-  return results;
+  });
 }

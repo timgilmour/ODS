@@ -1351,7 +1351,11 @@ them** — they exercise different halves of the stack:
 Both share the same shape deliberately (exit codes `0`/`1`/`2`, `-k` selection, a
 `~/notes/evidence/deck-<name>s/` report directory) — that convergence is intentional.
 Shared *code* between them is not: `deck-drill` has no idea what a browser is, and
-`deck-gate` never calls a backend route directly outside its stub.
+`deck-gate` never **writes** to a backend route outside its stub (`--live`'s fidelity check
+does call the live deck directly, but GET-only — see `ui/gates/README.md`'s "two tiers"
+section) and never exercises backend *behaviour* at all, written or read: the add/forget
+flows it clicks through are proven only against the stub's scripted responses, never against
+a real box actually accepting or persisting anything.
 
 `playwright-core` is a **devDependency of `ui/` only** and must never resolve inside the
 built container — verify with:

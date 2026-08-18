@@ -47,7 +47,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createResults } from "./lib/check.mjs";
+import { reportingRun } from "./lib/check.mjs";
 import { extract, readLive } from "./capture.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -214,14 +214,15 @@ export async function run({ deckUrl }) {
   const payloads = await readLive(deckUrl);
   const live = extract(payloads);
 
-  const results = createResults();
-  try {
+  // R15 (controller ruling): `reportingRun` (lib/check.mjs) attaches
+  // whatever checks already ran to a mid-run throw as `err.partialRows` —
+  // the same contract every other gate uses. Nothing above this point (the
+  // `--deck-url` precondition, the live read, the fixture read) is eligible
+  // for that attachment: there is no `results` accumulator yet when any of
+  // those can throw, same as before this helper existed.
+  return reportingRun(async (results) => {
     for (const row of compare(live, committed)) {
       results.check(row.name, row.ok, row.detail);
     }
-  } catch (err) {
-    err.partialRows = results.rows();
-    throw err;
-  }
-  return results;
+  });
 }
