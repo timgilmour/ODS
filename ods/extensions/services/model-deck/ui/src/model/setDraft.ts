@@ -17,7 +17,7 @@ export const EXTRA_PREFIX = "extra.";
  * table (:129-134) crossed with each kind's `human_verbs()`
  * (app/engine_kinds.py — lemonade :234, comfyui :494, hipfire :627), the
  * SAME verb-generic rule `Ephemeral`'s validator enforces server-side
- * (app/sets.py:194-204). `KNOWN_KINDS` (app/engine_kinds.py:90-94) is a
+ * (app/sets.py:194-204). `KNOWN_KINDS` (app/engine_kinds.py:177-192) is a
  * closed backend enum today (lemonade/comfyui/hipfire) — a real fourth kind
  * needs a new entry here, same as `nodes.ts`'s `tenantPlacement` and
  * `PlacementActions.tsx` branch on the same three.
@@ -230,7 +230,7 @@ export function draftedFootprintBytes(
   hipfireFootprintBytes: number,
 ): number {
   // Kind literals: same closed backend enum as KIND_DRAFT_SPEC above
-  // (KNOWN_KINDS, app/engine_kinds.py:90-94).
+  // (KNOWN_KINDS, app/engine_kinds.py:177-192).
   if (tenant.engine === "lemonade") {
     if (choice === "loaded") return pickedFileBytes;
     if (choice === "unloaded") return 0;

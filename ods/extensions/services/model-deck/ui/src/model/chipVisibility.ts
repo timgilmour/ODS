@@ -19,7 +19,7 @@ import type { LifecycleStatus } from "../api";
 const ALWAYS_VISIBLE: ReadonlySet<LifecycleStatus> = new Set(["down", "quarantined", "warming"]);
 
 /**
- * `kind` branches on the closed backend enum (`app/engine_kinds.py:90-94`),
+ * `kind` branches on the closed backend enum (`app/engine_kinds.py:177-192`),
  * same as `setDraft.ts`'s `KIND_DRAFT_SPEC` — a new kind needs a branch here
  * too.
  */

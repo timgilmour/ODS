@@ -21,7 +21,7 @@ import ArmedButton from "../ui/ArmedButton";
  *
  * Branches on `world.tenants[resource].engine` (the resource's declared
  * KIND), never on `resource` itself — `KNOWN_KINDS`
- * (app/engine_kinds.py:90-94) is the closed backend enum this mirrors, the
+ * (app/engine_kinds.py:177-192) is the closed backend enum this mirrors, the
  * same posture `nodes.ts`'s `tenantPlacement` and `setDraft.ts`'s
  * `KIND_DRAFT_SPEC` take. Every verb dispatches through Task 7's generic
  * `POST /api/tenants/{resource}/{verb}` route, so a resource can be named
