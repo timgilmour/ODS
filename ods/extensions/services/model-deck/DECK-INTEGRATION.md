@@ -31,7 +31,7 @@ docstring for the full surface).
 *hipfire:* the `"hipfire": {"connection": {"container": True}, ...}` entry
 in `KNOWN_KINDS` (`app/engine_kinds.py:182`), paired with `_HipfireAdapter`
 (`app/engine_kinds.py:757`) and registered in the kind-to-adapter map as
-`"hipfire": _HipfireAdapter()` (`app/engine_kinds.py:1280`).
+`"hipfire": _HipfireAdapter()` (`app/engine_kinds.py:1298`).
 
 ## 2. Be observable
 
@@ -44,9 +44,9 @@ produce for a declared-but-unreachable engine.
 *hipfire:* the deck dials the container directly over HTTP on port 11435
 (`_HIPFIRE_PORT = 11435`, `app/engine_kinds.py:112`), used to build the
 health/stats URLs in `_HipfireAdapter.build_client`
-(`app/engine_kinds.py:850,854`). `_HipfireAdapter.observe`
-(`app/engine_kinds.py:761`) reads `client.status()` and, while running,
-`client.stats()`; `_HipfireAdapter.unknown()` (`app/engine_kinds.py:788`)
+(`app/engine_kinds.py:866,870`). `_HipfireAdapter.observe`
+(`app/engine_kinds.py:777`) reads `client.status()` and, while running,
+`client.stats()`; `_HipfireAdapter.unknown()` (`app/engine_kinds.py:804`)
 returns the matching failure shape.
 
 ## 3. Be actuable
@@ -59,8 +59,8 @@ in the codebase today:
   `execute_load`/`execute_unload`/`execute_free` directly on the adapter —
   see `_LemonadeAdapter.execute_unload` (`app/engine_kinds.py:445`) and
   `.execute_load` (`app/engine_kinds.py:555`) for the shape. sglang-omni's
-  `_SglangOmniAdapter` (`app/engine_kinds.py:871`) implements the same pair
-  (`:1133,1224`) and its `arbiter_verbs()` (`:991`) returns
+  `_SglangOmniAdapter` (`app/engine_kinds.py:889`) implements the same pair
+  (`:1151,1242`) and its `arbiter_verbs()` (`:1009`) returns
   `frozenset({"unload"})` — the deck's own idle/contention arbiter can act
   on it unprompted, which is exactly the exposure that matters for item 5
   below.
@@ -69,7 +69,7 @@ in the codebase today:
   `app/routers/control.py`'s `_HANDLERS` table.
 
 *hipfire:* `_HipfireAdapter.arbiter_verbs()` returns an empty frozenset
-(`app/engine_kinds.py:814-818`) — park/resume are deliberately human-only,
+(`app/engine_kinds.py:830-831`) — park/resume are deliberately human-only,
 never automatic, per the class's own docstring: "no arbiter verb — park
 stays human-only (structural omission made explicit)"
 (`app/engine_kinds.py:758-759`). The verbs
@@ -79,7 +79,7 @@ are dispatched as `_hipfire_park` (`app/routers/control.py:441`) /
 
 Every kind also needs `restore(client, model)` for post-restart
 reconciliation. *hipfire:* `_HipfireAdapter.restore`
-(`app/engine_kinds.py:862`) calls `client.resume()` — **dispatch-only, and
+(`app/engine_kinds.py:878`) calls `client.resume()` — **dispatch-only, and
 deliberately records nothing.** `restore` runs when the deck is
 reconciling a resource back to an *already-recorded* intent; if it also
 called `intent_store.record(...)`, a restore triggered by the deck's own
@@ -133,24 +133,56 @@ deliberate change.
 
 Any surface outside the deck (a dashboard route, a CLI command, an
 installer script) that tears down or recreates an engine's container must
-bracket that action: announce an `expect-absence` hold before, and
-`adopt` what is actually running after, no matter how the action ended
-(success, failure, or rollback).
+bracket that action: announce an `expect-absence` hold before the teardown
+— every teardown, including a rollback's second one — and `adopt` after it,
+**if and only if the new state is proved to be serving**. Ending any other
+way (failure, rollback, a crash) releases the hold and records nothing.
 
 *hipfire:* `ods-host-agent.py`'s dashboard "activate model" path,
 `_do_hipfire_activate` (`ods/bin/ods-host-agent.py:8849`), wraps its `.env`
 rewrite and container recreate in `_deck_bracket(env_pre, "local/hipfire")`
 (`ods/bin/ods-host-agent.py:8894`, context manager defined at
-`ods/bin/ods-host-agent.py:12522`). The bracket calls
+`ods/bin/ods-host-agent.py:12574`, its handle at `:12538`). The bracket calls
 `POST /api/lifecycle/expect-absence/{key}` before the teardown
-(`app/routers/lifecycle.py:82`) and `POST /api/lifecycle/adopt/{key}` on
-the way out — on the success path *and* on a rollback, since
-`_do_hipfire_activate` recreates the container a second time when it rolls
-back and that absence needs announcing exactly as much as the first one
-(`app/routers/lifecycle.py:113`). This is provably live: the deck's
-`intent.json` records `"local/hipfire": {..., "actor": "operator", ...}` —
-that `actor` value is what `adopt` writes, meaning a real dashboard
-activation went through the bracket, not around it.
+(`app/routers/lifecycle.py:87`), and the yielded handle's `renew()` re-arms
+that hold before the rollback's second recreate. `POST
+/api/lifecycle/adopt/{key}` (`app/routers/lifecycle.py:117`) fires on exit
+only when the body called `commit()`, which `_do_hipfire_activate` does at
+exactly one point: after `/health` returned 200 *and* the LiteLLM restart
+succeeded. Otherwise the bracket DELETEs the hold and adopts nothing.
+
+⚠ **Adopt is not "record whatever is there" — it needs proof of serving.**
+The tempting shortcut is to adopt unconditionally, reasoning that adopt
+records what is actually running so a rollback simply records the old
+model. That is false, and it was a real defect on this branch. The rollback
+path is `restore_backups()` + `_compose_recreate_hipfire()`, which returns
+as soon as `docker compose up -d` does — there is no health gate, and a
+cold load takes minutes. The container is therefore *up but loading*, which
+is REACHABLE, so adopt's unreachable guard does not fire; the record it
+writes is `state="unloaded", actor="operator"` — the strongest possible
+"the operator deliberately parked this". `derive_status` then reports
+`parked`, `plan_reconcile` acts only on `down` (`app/reconcile.py:31,45`),
+and the deck never restores hipfire again — not after a crash, not after a
+reboot. One failed activation would permanently disable the machinery built
+for the 2026-08-03 26-hour outage. The route now refuses a mid-transition
+adopt as well (`app/routers/lifecycle.py`, beside the unreachable 409), but
+the caller must not ask in the first place: after a rollback there is
+nothing to adopt.
+
+This is provably live: the deck's `intent.json` records
+`"local/hipfire": {..., "actor": "operator", ...}` — that `actor` value is
+what `adopt` writes, meaning a real dashboard activation went through the
+bracket, not around it.
+
+⚠ **The watcher's existing host-agent busy gate does NOT cover this.**
+`Watcher.tick` already skips a whole tick while `hostagent.lifecycle()`
+reports an active operation (`app/arbiter.py:850-857`), which looks like it
+would suppress the restore on its own. It does not, for a one-line reason:
+the probe is gated on `real_work` (`app/arbiter.py:848`), computed from
+**arbitration** actions only, and `_reconcile_pass` runs *after* that gate
+— its restores never set `real_work`, so a tick whose only work is a
+lifecycle restore never asks the host-agent whether it is busy. The bracket
+is what covers reconciliation; the busy gate covers arbitration.
 
 ⚠ **Hold keys are node-qualified — `local/hipfire`, never bare
 `"hipfire"`.** `local_key()` (`app/observe.py:55`) produces the
@@ -161,8 +193,8 @@ does not mean every store in the system is node-qualified: the live
 running system today — check which one a given store uses before assuming
 the other.
 
-⚠ **`_recreate_llama_server` (`ods/bin/ods-host-agent.py:13066`) has the
-same deck-blind shape hipfire's activation path had, it is CURRENT — not a
+⚠ **`_recreate_llama_server` (`ods/bin/ods-host-agent.py:13128`) has the
+same deck-blind shape hipfire's activation path had; it is CURRENT — not a
 future risk — and this branch deliberately left it unbracketed.**
 llama-server is not a hypothetical future addition to the deck: it is
 *already* deck-managed today, declared under the `lemonade` kind. The
@@ -173,7 +205,7 @@ only the one-time seed default, per
 `ods/extensions/services/model-deck/README.md:50`). `_recreate_llama_server`
 stops and recreates that same `ods-llama-server` container — called from
 the live dashboard activation path at `ods/bin/ods-host-agent.py:8002`,
-`:8468-8477`, `:12628`, `:12639` — with no `_deck_bracket` anywhere in any
+`:8468-8477`, `:12690`, `:12701` — with no `_deck_bracket` anywhere in any
 of those call sites.
 
 This is a **strictly larger exposure than hipfire's was**, not an

@@ -457,7 +457,10 @@ def _hipfire_resume(deck, resource: str, kind: str, body: dict | None,
     # model=None, not a name: hipfire is single-model and the Deck does not
     # choose that model (it comes from the litellm route table, app/state.py).
     # None reads as "loaded, no opinion which model"; recording a name the
-    # Deck cannot observe would manufacture permanent drift.
+    # Deck cannot observe would manufacture permanent drift. The same
+    # invariant, stated once for writers that do NOT hardcode a kind:
+    # `_HipfireAdapter.deck_pins_model = False` (app/engine_kinds.py), which
+    # is what app.routers.lifecycle's adopt consults.
     deck["intent_store"].record(
         local_key(resource), state="loaded", model=None, engine=kind
     )

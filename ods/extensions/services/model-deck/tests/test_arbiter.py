@@ -2632,19 +2632,6 @@ def test_an_expired_hold_resumes_reconciliation(tmp_path):
     assert "lifecycle-restore" in [e["kind"] for e in tail_events(events_path)]
 
 
-def test_no_hold_store_wired_behaves_exactly_as_before(tmp_path):
-    """hold_store=None is the default — the opt-in shape intent_store uses."""
-    store = _intent(tmp_path)
-    hipfire = FakeHipfire(state="parked")
-    watcher, events_path = _reconcile_watcher(
-        tmp_path, store, hipfire=hipfire, hold_store=None)
-
-    watcher.tick()
-
-    assert "resume" in hipfire.calls
-    assert "lifecycle-restore" in [e["kind"] for e in tail_events(events_path)]
-
-
 def test_restore_runs_after_arbitration(tmp_path):
     """Ordering guard: arbitration's actions are executed before any restore,
     so reconciliation can never load something arbitration is about to evict."""

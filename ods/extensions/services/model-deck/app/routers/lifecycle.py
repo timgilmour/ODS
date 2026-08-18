@@ -9,10 +9,14 @@ actuator outside the deck (host-agent's dashboard activate path) announcing
 that a resource is about to go away on purpose, so the reconciler does not
 read a deliberate teardown as a death. It too actuates nothing.
 
-Adopting an UNREACHABLE resource is refused (409) rather than recorded: an
-observation we failed to make is not evidence of anything, and the record it
+Adopting an UNREACHABLE or MID-TRANSITION resource is refused (409) rather
+than recorded: neither an observation we failed to make nor one taken while
+the engine is still coming up is evidence of anything, and the record either
 would write ("unloaded") is a park nobody asked for — the reconciler would
-then correctly refuse to restore it forever.
+then correctly refuse to restore it forever. The transitioning half is the
+one that bites in practice: a container that is up but not yet serving IS
+reachable, so the unreachable guard alone let a mid-recreate hipfire be
+recorded as a deliberate park.
 
 No auth, matching the rest of the deck. Keys contain a slash
 (``local/hipfire``), hence the ``:path`` converters.
@@ -21,6 +25,7 @@ No auth, matching the rest of the deck. Keys contain a slash
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 
+from app.engine_kinds import ENGINE_KINDS
 from app.holds import DEFAULT_HOLD_TTL_S, MAX_HOLD_TTL_S
 from app.observe import engine_for
 from app.routers import build_observations, build_world_snapshot
@@ -141,15 +146,58 @@ def adopt(key: str, request: Request) -> dict:
             detail=f"{key!r} did not answer; adopting would record a state "
                    "nobody observed")
 
+    if record.get("transitioning"):
+        # A BOOT IN FLIGHT IS NOT A PARK. `transitioning` is app.observe's
+        # own word for "neither loaded nor dead" — hipfire's container-up-
+        # health-not-200, lemonade's in-flight load, a swap node mid-swap —
+        # and every one of them reports reachable=True with loaded=False.
+        # Without this guard adopt writes state="unloaded" actor="operator"
+        # for them: the strongest possible "the operator deliberately parked
+        # this", which derive_status reads as `parked` and plan_reconcile
+        # (app/reconcile.py, acts only on `down`) then skips forever. One
+        # adopt fired at the wrong moment would permanently disable the
+        # restore machinery this whole subsystem exists to provide — the
+        # 2026-08-03 26-hour hipfire failure, written into intent.json on
+        # purpose. It would also route around _hipfire_park's default-route
+        # guard (app/engines/hipfire.py), parking a resource the deck's own
+        # park route would have refused to park.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{key!r} is mid-transition; adopting would record a park "
+                   "from a boot in flight")
+
+    # A kind the deck does not pin records model=None — "loaded, no opinion
+    # which model" — whoever adopts it. hipfire is single-model and its model
+    # comes from the LiteLLM route table, not from the deck, which is why
+    # `_hipfire_park`/`_hipfire_resume` (app/routers/control.py) and
+    # `_HipfireAdapter.restore` (app/engine_kinds.py) all hold the same
+    # invariant. Recording the observed NAME here instead would make hipfire's
+    # intent mean different things depending on which actuator wrote last, and
+    # would manufacture permanent drift the moment a later activation's adopt
+    # is skipped (drift is report-only — app/sets.py). `engine` can be a kind
+    # with no adapter row ("spark", a swap-node slot), where the model IS the
+    # deck's opinion and must be kept: getattr's default carries that case.
+    adapter = ENGINE_KINDS.get(engine)
+    model = record["model"] if getattr(adapter, "deck_pins_model", True) else None
+
     deck["intent_store"].record(
         key,
         state="loaded" if record["loaded"] else "unloaded",
-        model=record["model"],
+        model=model,
         engine=engine,
     )
     # Adoption is the announced window closing: the deck now knows what is
     # actually running, so there is nothing left to protect from the
-    # reconciler. Deliberately AFTER record() and after the 409 above — a
-    # refused adopt concluded nothing and must leave the hold standing.
+    # reconciler. Deliberately AFTER record() and after both 409s above — a
+    # refused adopt concluded nothing, so this route leaves the hold standing
+    # and lets the CALLER decide what to do about it.
+    #
+    # That is a preference, not a guarantee, and its only caller in the system
+    # today overrides it: `_deck_bracket` (ods/bin/ods-host-agent.py) DELETEs
+    # the hold in its `finally` whenever it did not adopt, because a
+    # best-effort bracket must fail open — a host-agent that cannot conclude
+    # anything must not leave the reconciler standing down for the full TTL.
+    # The invariant this route actually keeps is the narrow one: adopt itself
+    # never releases a hold it did not earn.
     deck["hold_store"].release(key)
     return {"key": key, "adopted": record}

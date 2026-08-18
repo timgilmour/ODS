@@ -78,7 +78,16 @@ def test_refuses_a_ttl_outside_the_band(bad):
     assert store.held("local/hipfire") is False
 
 
-def test_default_ttl_exceeds_a_cold_load():
-    """hipfire's manifest budgets health_timeout: 300 for a cold MQ4 load."""
-    assert DEFAULT_HOLD_TTL_S > 300.0
+def test_default_ttl_covers_a_whole_bracket_not_just_a_cold_load():
+    """The property that matters is the BRACKET's duration, not one load.
+
+    A cold MQ4 load alone is health_timeout: 300, but the host-agent holds
+    across its entire activate path — recreate, a health loop that can run
+    ~600 s, and a second recreate if it rolls back (measured ~305 s typical,
+    up to ~605 s). 360 cleared the load and not the bracket, so a normal
+    activation could race its own hold expiring. Pinned to the host-agent's
+    own `_DECK_BRACKET_TTL_S`, which this default must not silently fall
+    below when `_recreate_llama_server` becomes the second caller.
+    """
+    assert DEFAULT_HOLD_TTL_S >= 600.0
     assert DEFAULT_HOLD_TTL_S <= MAX_HOLD_TTL_S

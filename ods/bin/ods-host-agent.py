@@ -8891,7 +8891,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             if lemonade_backup is not None:
                 lemonade_yaml.write_text(lemonade_backup, encoding="utf-8")
 
-        with _deck_bracket(env_pre, "local/hipfire") as renew_hold:
+        with _deck_bracket(env_pre, "local/hipfire") as deck_bracket:
             try:
                 lemonade_backup = lemonade_yaml.read_text(encoding="utf-8") if lemonade_yaml.exists() else None
 
@@ -8937,6 +8937,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                             + ((result.stderr or result.stdout) or "").strip()
                         )
                     committed = True
+                    # The ONE place the deck is told to adopt. Everything the
+                    # bracket needs is now proved: the container came back,
+                    # /health returned 200 (the model is resident), and
+                    # LiteLLM is routing to it. Note the ordering that makes
+                    # this correct — the restart above raising leaves
+                    # `committed` False, the `except` below rolls back, and no
+                    # commit ever happened, so nothing is adopted.
+                    deck_bracket.commit()
                     json_response(self, 200, {"status": "activated", "model_id": model_id, "engine": "hipfire"})
                 else:
                     logger.warning("hipfire activation failed — rolling back")
@@ -8944,13 +8952,15 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # (60 attempts of curl --max-time 5 + sleep 5, worse if
                     # the subprocess timeout=10 fires). Re-arm the hold
                     # before this second recreate so it does not race the
-                    # first hold's TTL expiring mid-rollback.
-                    renew_hold()
+                    # first hold's TTL expiring mid-rollback. No commit on
+                    # this path: the rollback recreate is not health-gated,
+                    # so nothing is serving to adopt.
+                    deck_bracket.renew()
                     restore_backups()
                     _compose_recreate_hipfire()
                     json_response(self, 500, {"error": "hipfire health check failed — rolled back to previous model", "rolled_back": True})
             except Exception as exc:
-                renew_hold()
+                deck_bracket.renew()
                 if committed:
                     json_response(self, 500, {"error": f"hipfire model activation failed: {exc}"})
                     return
@@ -12470,7 +12480,7 @@ def _log_env_rollback(restored: dict) -> None:
 # subprocess timeout=10 fires — and an unhealthy result then runs a SECOND
 # _compose_recreate_hipfire() for rollback on top of that. 600 leaves the
 # bracket's initial hold covering the ordinary run and sits under
-# app.holds.MAX_HOLD_TTL_S (900); `_deck_bracket`'s yielded `renew` call
+# app.holds.MAX_HOLD_TTL_S (900); the yielded handle's `renew()`
 # re-arms a fresh window immediately before the rollback recreate so the
 # pathological case is never actually bounded by this constant alone.
 _DECK_BRACKET_TTL_S = 600
@@ -12493,7 +12503,7 @@ def _deck_call(env: dict, method: str, path: str, payload: dict | None = None) -
 
     NEVER RAISES. THIS IS RELIED UPON, not just a nicety: `_deck_bracket`
     calls this as the *first statement* of `_do_hipfire_activate`'s
-    `except Exception as exc:` handler (via the yielded `renew` closure),
+    `except Exception as exc:` handler (via the yielded handle's `renew()`),
     ahead of `restore_backups()`. A raise here would replace the original
     exception and skip the rollback entirely, leaving the box half-applied.
     Every failure mode — network, HTTP protocol, and a payload that fails to
@@ -12508,14 +12518,56 @@ def _deck_call(env: dict, method: str, path: str, payload: dict | None = None) -
         headers = {"Content-Type": "application/json"} if data is not None else {}
         request = urllib_request.Request(url, data=data, headers=headers, method=method)
         with urllib_request.urlopen(request, timeout=5) as response:
-            if 200 <= response.status < 300:
-                return True
-            logger.warning("Deck %s %s answered %s (continuing)",
-                           method, path, response.status)
-            return False
+            return 200 <= response.status < 300
+    except urllib_error.HTTPError as exc:
+        # A REFUSAL, not a fault. urlopen raises HTTPError for every 4xx/5xx,
+        # so this is the only branch a non-2xx can reach — checking
+        # response.status after urlopen returns is dead code. 409 is routine
+        # here: adopt refuses an unreachable or mid-transition resource by
+        # design, which is the bracket working, not failing. Logged without a
+        # traceback for that reason; the broad tuple below keeps exc_info
+        # because those really are unexpected.
+        logger.warning("Deck %s %s answered %s (continuing)",
+                       method, path, exc.code)
+        return False
     except (OSError, urllib_error.URLError, ValueError, TypeError, http.client.HTTPException):
         logger.warning("Deck %s %s failed (continuing)", method, path, exc_info=True)
         return False
+
+
+class _DeckBracketHandle:
+    """What a bracketed body may say to the deck: `renew()` and `commit()`.
+
+    Two explicit statements, deliberately separate, because they answer
+    different questions. `renew()` says "I am still working, keep standing
+    down". `commit()` says "the thing I set out to do is now SERVING" — and
+    only a committed bracket adopts on the way out.
+    """
+
+    def __init__(self, env: dict, key: str, ttl_s: int):
+        self._env = env
+        self._key = key
+        self._ttl_s = ttl_s
+        self.committed = False
+
+    def renew(self):
+        """Re-issue the same expect-absence hold with the same TTL.
+
+        The TTL bounds a stuck actuator, not an entire long operation — call
+        this immediately before a second teardown (e.g. the rollback
+        recreate) so it gets a fresh window regardless of how long the
+        preceding health-gate ran. Never calling it, or dying before calling
+        it, just lets the original hold expire — fail-open is unaffected.
+        """
+        _deck_call(self._env, "POST",
+                   f"/api/lifecycle/expect-absence/{self._key}",
+                   {"ttl_s": self._ttl_s})
+
+    def commit(self):
+        """Declare that the new state is up and SERVING — the only thing
+        that earns an adopt on exit. Call it at the exact point the body
+        proves health, never optimistically."""
+        self.committed = True
 
 
 @contextlib.contextmanager
@@ -12528,36 +12580,46 @@ def _deck_bracket(env: dict, key: str, ttl_s: int = _DECK_BRACKET_TTL_S):
     the key, and an actual fight the moment it does. See
     ~/notes/model-deck-dashboard-actuation-bracket.md.
 
-    ADOPT RUNS ON THE WAY OUT WHATEVER HAPPENED, including after a rollback:
-    adopt records what is ACTUALLY serving, so a successful activation
-    records the new model and a rolled-back one records the old. Either way
-    the deck ends up agreeing with reality, which is the entire goal.
+    ADOPT ONLY ON PROOF OF SERVING. The bracket adopts on the way out if and
+    only if the body called `commit()`; otherwise it releases the hold and
+    records nothing. An earlier version adopted unconditionally, reasoning
+    that adopt records what is actually serving so a rollback would simply
+    record the old model. That is false: the rollback path is
+    `restore_backups()` + `_compose_recreate_hipfire()`, which returns as
+    soon as `up -d` does, with no health gate — NOTHING IS SERVING YET. The
+    deck sees a container that is up but loading, which is reachable, so the
+    adopt route's unreachable guard would not fire and the record written
+    would be state="unloaded" actor="operator": a deliberate park, which
+    parks hipfire against the reconciler permanently. (The route now refuses
+    a mid-transition adopt too — belt and braces — but the caller must not
+    ask in the first place: an adopt after a rollback has nothing to adopt.)
 
     Wrap the rollback too, not just the forward path — `_do_hipfire_activate`
     recreates the container a SECOND time when it rolls back, and that
     absence needs announcing exactly as much as the first one.
 
-    Yields a zero-argument `renew` callable that re-issues the same
-    expect-absence hold with the same TTL. The TTL bounds a stuck actuator,
-    not an entire long operation — call `renew()` immediately before a
-    second teardown (e.g. the rollback recreate) so it gets a fresh window
-    regardless of how long the preceding health-gate ran. If the caller
-    never calls it, or dies before calling it, the original hold simply
-    expires on its own — fail-open is unaffected.
+    Yields a `_DeckBracketHandle` exposing `renew()` and `commit()`.
     """
-    def renew():
-        _deck_call(env, "POST", f"/api/lifecycle/expect-absence/{key}", {"ttl_s": ttl_s})
-
-    renew()
+    handle = _DeckBracketHandle(env, key, ttl_s)
+    handle.renew()
     adopted = False
     try:
-        yield renew
-        adopted = _deck_call(env, "POST", f"/api/lifecycle/adopt/{key}")
+        yield handle
+        if handle.committed:
+            adopted = _deck_call(env, "POST", f"/api/lifecycle/adopt/{key}")
     finally:
         if not adopted:
-            # Either the body raised, or adopt was refused (409 — the engine
-            # did not answer, so nothing could be recorded). Release rather
-            # than leave the reconciler standing down for the full TTL.
+            # The body raised, or it never committed (rollback, or an early
+            # return before the health gate closed), or adopt was refused
+            # (409 — the engine did not answer or is still coming up, so
+            # nothing could be recorded).
+            #
+            # RELEASING HERE DELIBERATELY OVERRIDES the adopt route's stated
+            # preference — it leaves a refused adopt's hold standing so the
+            # caller can decide (app/routers/lifecycle.py). This caller has
+            # decided: fail open. A best-effort bracket that concluded
+            # nothing must not leave the deck's reconciler standing down for
+            # the full TTL over an activation that is already finished.
             _deck_call(env, "DELETE", f"/api/lifecycle/expect-absence/{key}")
 
 

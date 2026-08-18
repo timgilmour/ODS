@@ -29,10 +29,19 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-# A cold MQ4 load on hipfire takes minutes; its manifest budgets
-# health_timeout: 300. The default sits above that so a normal activation
-# never races its own hold expiring.
-DEFAULT_HOLD_TTL_S: float = 360.0
+# Sized for a WHOLE BRACKET, not a single load — the distinction 360 got
+# wrong. A cold MQ4 load on hipfire takes minutes (its manifest budgets
+# health_timeout: 300), but the thing being held is the host-agent's entire
+# activate path: recreate, then a health loop that runs up to ~600 s (60
+# attempts of `curl --max-time 5` + `sleep 5`, worse when the subprocess
+# timeout fires), and an unhealthy result then runs a SECOND recreate for
+# the rollback on top of that. Measured ~305 s typical, up to ~605 s. A
+# default that only cleared a cold load would leave a normal activation
+# racing its own hold expiring, which is exactly what the hold exists to
+# prevent. Matches `_DECK_BRACKET_TTL_S` in ods/bin/ods-host-agent.py (the
+# only caller that passes its own today) and stays under MAX_HOLD_TTL_S so
+# the bracket's mid-run renewal is what covers the pathological tail.
+DEFAULT_HOLD_TTL_S: float = 600.0
 # Ceiling. Past this, an actuator is not announcing an absence, it is
 # disabling the reconciler — which is what POST /api/lifecycle/auto is for.
 MAX_HOLD_TTL_S: float = 900.0

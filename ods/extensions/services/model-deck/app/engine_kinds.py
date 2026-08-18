@@ -758,6 +758,22 @@ class _HipfireAdapter:
     """hipfire-kind: container lifecycle (park/resume), no arbiter verb —
     park stays human-only (structural omission made explicit)."""
 
+    # THE DECK DOES NOT CHOOSE THIS KIND'S MODEL, so nothing may record one
+    # as its intent. hipfire is single-model and which model it serves comes
+    # from the LiteLLM route table (`observe` above reads it out of `ctx`),
+    # not from any deck decision — `None` reads as "loaded, no opinion which
+    # model" in app.lifecycle.derive_status, and a NAME would report drift
+    # for a perfectly healthy engine the moment somebody re-pinned it through
+    # the dashboard. `_hipfire_park`/`_hipfire_resume` (app/routers/control.py)
+    # and `restore` below already hold this invariant by hand; this attribute
+    # is what lets a GENERIC writer — app.routers.lifecycle's adopt, whose
+    # observation does carry the observed name — honour it without knowing
+    # the string "hipfire". Absent on every other adapter (and on kinds with
+    # no adapter row at all, e.g. "spark"), where the model IS the deck's
+    # opinion; readers default it to True, the same optional-attribute shape
+    # `warming` uses.
+    deck_pins_model = False
+
     def observe(self, client, mem: dict, now: float, ctx: dict) -> dict:
         # Moved VERBATIM from app.state.World._snapshot_hipfire (app/state.py,
         # pre-Task-3 lines 213-232). `routes` and `resource` (for the
@@ -862,8 +878,10 @@ class _HipfireAdapter:
     def restore(self, client, model: str | None) -> None:
         """The REAL restore call for a hipfire-kind resource: resume its
         container (app/engines/hipfire.py:162). `model` is unused
-        (hipfire's intent always carries model=None) — kept for signature
-        parity with lemonade-kind's restore above. Moved from
+        (hipfire's intent always carries model=None — the invariant
+        `deck_pins_model = False` at the top of this class states once, for
+        every writer) — kept for signature parity with lemonade-kind's
+        restore above. Moved from
         Watcher._restore's hipfire branch (E1 Task 6)."""
         client.resume()
 
