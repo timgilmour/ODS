@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # telemetry is CONSUMED from dashboard-api, never rebuilt) ---
     dashboard_api_url: str = "http://dashboard-api:3002"
     dashboard_api_key: str = Field(default="", validation_alias="DASHBOARD_API_KEY")
+    # Fallback for the STOCK install, where DASHBOARD_API_KEY is unset:
+    # dashboard-api mints a random key into this file on first start, and
+    # /api/gpu/detailed requires a bearer, so a deck that cannot read it 401s
+    # forever. Same file the dashboard's own nginx entrypoint reads
+    # (extensions/services/dashboard/entrypoint.sh:5-20), reached through the
+    # ro ${ODS_DATA_DIR}:/ods-data mount in compose.yaml. Absent/unreadable ⇒
+    # no header, exactly as before (app/telemetry.py's _auth_headers).
+    dashboard_api_key_file: str = "/ods-data/dashboard-api-key.txt"
 
     # --- LiteLLM ---
     litellm_url: str = "http://litellm:4000"

@@ -24,15 +24,29 @@ dead dashboard-api must not be hammered on every poll.
 
 from __future__ import annotations
 
+import logging
 import time
+from pathlib import Path
 
 import httpx
 
 from app.gpu import MIN_VRAM_BYTES
 
+_log = logging.getLogger(__name__)
+
 # Every key from dashboard-api's IndividualGPU that the deck re-serves.
+#
+# The three `*_available` booleans are NOT optional garnish: dashboard-api
+# emits a required numeric PLUS its flag, and on a sensor it could not read it
+# sends the value 0 with the flag False (dashboard-api/gpu.py:172 —
+# `temperature_available=temp > 0`; node-agent/models.py:23-38 declares the
+# same triple). Carrying the number without the flag turns "we failed to read
+# this sensor" into a real 0 degC / 0% / 0 MB-used reading, which is exactly
+# what the board would then meter. The fold back into a nullable reading
+# happens once, UI-side, in ui/src/model/nodes.ts's `statsOf`/`gpuCapacity`.
 _ALLOWED = ("index", "uuid", "name", "memory_used_mb", "memory_total_mb",
-            "memory_percent", "utilization_percent", "temperature_c", "power_w")
+            "memory_percent", "utilization_percent", "temperature_c", "power_w",
+            "memory_usage_available", "utilization_available", "temperature_available")
 # assigned_services deliberately NOT carried: it is the install-time
 # GPU_ASSIGNMENT_JSON_B64 config, not an observation (dashboard-api gpu.py:560),
 # and the deck's own world observation is the engine-attribution authority.
@@ -84,8 +98,8 @@ class LocalTelemetry:
 
     def __init__(self, settings, *, clock=time.monotonic, client=None) -> None:
         self._url = settings.dashboard_api_url
-        self._headers = ({"Authorization": f"Bearer {settings.dashboard_api_key}"}
-                         if settings.dashboard_api_key else {})
+        self._key = settings.dashboard_api_key
+        self._key_file = Path(settings.dashboard_api_key_file)
         self._clock = clock
         # Real client built lazily-but-once here, not per call — mirrors
         # every other engine client's constructor (e.g.
@@ -96,6 +110,41 @@ class LocalTelemetry:
         self._ttl_s = 5.0
         self._cached: list[dict] | None = None
         self._fetched_at: float | None = None
+        # Whether the LAST fetch failed, so a failure is logged once per state
+        # CHANGE rather than once per 5 s poll (see `gpus`). None = nothing
+        # fetched yet, so the first failure of the process still logs.
+        self._failing: bool | None = None
+
+    def _auth_headers(self) -> dict[str, str]:
+        """The bearer ``/api/gpu/detailed`` REQUIRES — dashboard-api's
+        ``security.py`` has no unauthenticated path — from the env var if the
+        install sets one, else from the key FILE dashboard-api mints on a
+        stock install.
+
+        Without the file arm, a stock install (``DASHBOARD_API_KEY`` unset)
+        401s forever: dashboard-api generates a random key into
+        ``/data/dashboard-api-key.txt`` and nothing else ever learns it. The
+        dashboard's own nginx entrypoint reads exactly that file
+        (extensions/services/dashboard/entrypoint.sh:5-20); this is the same
+        fallback over the deck's ro ``/ods-data`` mount (compose.yaml).
+
+        Read PER FETCH (so at most once per TTL window) rather than once at
+        construction, because the two containers start together: on a fresh
+        box the file does not exist yet when the deck builds its client, and
+        a construction-time read would leave the deck 401ing until someone
+        restarted it. A missing or unreadable file means no header at all —
+        the same request this made before the fallback existed.
+        """
+        if self._key:
+            return {"Authorization": f"Bearer {self._key}"}
+        try:
+            key = self._key_file.read_text().strip()
+        except OSError:
+            # Narrow I/O-boundary catch (repo CLAUDE.md): unmounted /ods-data,
+            # a dashboard-api that has not written the file yet, or a
+            # permission refusal all mean the same thing — no key here.
+            return {}
+        return {"Authorization": f"Bearer {key}"} if key else {}
 
     def gpus(self) -> list[dict] | None:
         if not self._url:
@@ -104,19 +153,33 @@ class LocalTelemetry:
         if self._fetched_at is not None and now < self._fetched_at + self._ttl_s:
             return self._cached
         try:
-            resp = self._client.get("/api/gpu/detailed", headers=self._headers)
+            resp = self._client.get("/api/gpu/detailed", headers=self._auth_headers())
             resp.raise_for_status()
             rows = resp.json()["gpus"]
             if not isinstance(rows, list):
                 raise TypeError("gpus is not a list")
             result = _qualified(rows)
-        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             # Narrow I/O-boundary catch (repo CLAUDE.md): transport failure,
             # a non-list "gpus", a missing "gpus" key, or a non-JSON body
             # all degrade to the same "no telemetry right now" answer — the
             # board already renders null gracefully, and this is a
             # best-effort observation, not a control path.
+            #
+            # Tolerated ⇒ LOGGED (same rule). Once per STATE CHANGE, not once
+            # per poll: /api/state is polled every few seconds by every open
+            # tab, so an unconditional line here would bury the log in
+            # thousands of identical entries a day. A 401 in particular used
+            # to be completely silent — a stock install whose
+            # DASHBOARD_API_KEY is unset (see `_auth_headers`) showed an
+            # empty stats block and said nothing, anywhere, ever.
+            if not self._failing:
+                _log.warning("local GPU telemetry unavailable: dashboard-api %s "
+                             "%s: %s", self._url, type(exc).__name__, exc)
+            self._failing = True
             result = None
+        else:
+            self._failing = False
         # A failed fetch is cached too (see module docstring) — the TTL
         # clock is what re-tries, not this branch.
         self._cached = result

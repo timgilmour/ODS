@@ -39,6 +39,13 @@ services:
     volumes:
       - ./data/model-deck:/data:z
       - ./data/models:/gguf-store:ro,z
+      # Read-only view of the stack data dir, for ONE file: the API key
+      # dashboard-api mints into dashboard-api-key.txt on a stock install
+      # (DASHBOARD_API_KEY unset). /api/gpu/detailed requires a bearer, so
+      # without this the local GPU telemetry pass-through 401s forever. The
+      # dashboard's nginx entrypoint reads the same file from its own mount
+      # (extensions/services/dashboard/entrypoint.sh:5-20).
+      - ${ODS_DATA_DIR:-./data}:/ods-data:ro
       # Whole-/sys ro mount: /sys/class/drm entries are symlinks into
       # /sys/devices, so binding the class dir alone leaves them dangling.
       - /sys:/sysfs:ro

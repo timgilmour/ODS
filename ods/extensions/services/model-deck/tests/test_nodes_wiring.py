@@ -16,11 +16,29 @@ def _fresh_deck():
     main_module._deck_by_settings_id.clear()
 
 
+class _FakeTelemetry:
+    """Stand-in for app.telemetry.LocalTelemetry — the FakeTelemetry idiom
+    tests/test_api.py:118 states outright ("no real create_app() build should
+    ever let a test hit dashboard-api over the network"). `_app` installs one
+    with no rows by default: without it, every test here that calls
+    /api/state fires a live GET at http://dashboard-api:3002 and passes only
+    because the connection error degrades to None."""
+
+    def __init__(self, rows=None):
+        self._rows = rows
+
+    def gpus(self):
+        return self._rows
+
+
 def _app(monkeypatch, **env):
     monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")  # test_api.py idiom
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    return main_module.create_app()
+    app = main_module.create_app()
+    # Default stub; a test that asserts on telemetry replaces it.
+    app.state.deck["telemetry"] = _FakeTelemetry(None)
+    return app
 
 
 def test_seed_runs_at_build_local_label_from_env(monkeypatch):
@@ -84,14 +102,6 @@ def test_nodes_block_shape_without_observer(monkeypatch):
     # entry) — the env seed stamps "swap" here because a credential is set.
     assert nodes["local"]["control"] == "none"
     assert nodes["sparky"]["control"] == "swap"
-
-
-class _FakeTelemetry:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def gpus(self):
-        return self._rows
 
 
 class _FakeNodeObserver:
