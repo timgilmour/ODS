@@ -113,6 +113,16 @@ def test_deck_base_url_reads_the_configured_port():
     assert agent._deck_base_url({"MODEL_DECK_PORT": ""}) == "http://127.0.0.1:3015"
 
 
+def test_deck_call_survives_an_unserializable_payload():
+    """json.dumps raises TypeError on a payload it cannot serialize (e.g. a
+    bare object()). _deck_call must never raise — a raise here would replace
+    whatever exception is in flight and, called from the bracket's `except`
+    handler, would skip the rollback entirely. No stubbing: the real
+    json.dumps does the raising."""
+    assert agent._deck_call({}, "POST", "/api/lifecycle/expect-absence/local/hipfire",
+                             {"bad": object()}) is False
+
+
 def test_deck_call_survives_http_client_exceptions(monkeypatch):
     """http.client.HTTPException (e.g. BadStatusLine, InvalidURL) is not an
     OSError or a ValueError. A deck answering with garbage — or a malformed

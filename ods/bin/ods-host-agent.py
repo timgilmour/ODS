@@ -12491,6 +12491,14 @@ def _deck_call(env: dict, method: str, path: str, payload: dict | None = None) -
     deck existed and must keep working when it is gone. Every failure is
     logged and swallowed; the worst case is the pre-bracket behaviour.
 
+    NEVER RAISES. THIS IS RELIED UPON, not just a nicety: `_deck_bracket`
+    calls this as the *first statement* of `_do_hipfire_activate`'s
+    `except Exception as exc:` handler (via the yielded `renew` closure),
+    ahead of `restore_backups()`. A raise here would replace the original
+    exception and skip the rollback entirely, leaving the box half-applied.
+    Every failure mode — network, HTTP protocol, and a payload that fails to
+    serialize — is caught and turned into a logged `False`.
+
     The lifecycle routes take no auth (see the router's docstring), so no
     token is threaded here.
     """
@@ -12505,7 +12513,7 @@ def _deck_call(env: dict, method: str, path: str, payload: dict | None = None) -
             logger.warning("Deck %s %s answered %s (continuing)",
                            method, path, response.status)
             return False
-    except (OSError, urllib_error.URLError, ValueError, http.client.HTTPException):
+    except (OSError, urllib_error.URLError, ValueError, TypeError, http.client.HTTPException):
         logger.warning("Deck %s %s failed (continuing)", method, path, exc_info=True)
         return False
 
