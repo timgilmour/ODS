@@ -1850,6 +1850,208 @@ def test_adopt_an_unreachable_resource_is_refused(tmp_path, monkeypatch):
     assert store.get() == {}
 
 
+def test_adopt_a_transitioning_resource_is_refused(tmp_path, monkeypatch):
+    """A boot in flight is not evidence of a park — the same reasoning as the
+    unreachable 409 above, for the state that actually bites.
+
+    hipfire's "loading" (container up, /health not yet 200 —
+    app/engines/hipfire.py:104) is REACHABLE, so the unreachable guard does
+    not fire. Without this one, the bracket's adopt on a mid-recreate hipfire
+    recorded state="unloaded" actor="operator" — a deliberate park the deck's
+    own park route would have refused (app/engines/hipfire.py's default-route
+    guard) — which makes derive_status say "parked", plan_reconcile skip it,
+    and the restore machinery never fire for hipfire again. That is the
+    2026-08-03 26-hour failure, written into intent.json on purpose.
+    """
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    deck["intent_store"] = store
+    deck["hipfire"] = FakeHipfire(state="loading")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 409
+    assert store.get() == {}
+
+
+def test_a_refused_transitioning_adopt_leaves_the_hold_alone(tmp_path, monkeypatch):
+    """Same posture as the unreachable refusal: a 409 concluded nothing, so
+    the announced window must survive for the caller (or the TTL) to end."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+    deck["hipfire"] = FakeHipfire(state="loading")
+    client = TestClient(app)
+    client.post("/api/lifecycle/expect-absence/local/hipfire", json={"ttl_s": 60})
+
+    resp = client.post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 409
+    assert deck["hold_store"].held("local/hipfire") is True
+
+
+def test_adopt_a_parked_resource_records_a_park_with_no_model(tmp_path, monkeypatch):
+    """The park case adopt SHOULD record — reachable, settled, not loaded.
+
+    Contrast with the transitioning refusal above: a parked hipfire answered
+    and said "nothing is serving", which is an observation, not a gap in one.
+    The model must be None: hipfire is single-model and the Deck does not
+    choose that model, so recording a name it cannot observe would manufacture
+    permanent drift (app/routers/control.py's `_hipfire_resume`,
+    app/engine_kinds.py's `_HipfireAdapter.restore`).
+    """
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    deck["intent_store"] = store
+    deck["hipfire"] = FakeHipfire(state="parked")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 200
+    record = store.get()["local/hipfire"]
+    assert record["state"] == "unloaded"
+    assert record["model"] is None
+    assert record["engine"] == "hipfire"
+
+
+def test_adopt_records_no_model_for_a_kind_the_deck_does_not_pin(tmp_path, monkeypatch):
+    """I1: hipfire's intent carries model=None WHOEVER wrote it.
+
+    The live deck observes hipfire.model = "qwen3.8-27b.mq4" (it reads the
+    LiteLLM route table), so this is not vacuous — adopt has a name in hand
+    and must still record None, exactly as park/resume do. Otherwise hipfire's
+    intent means different things depending on which actuator wrote last, and
+    a later activation whose adopt is skipped leaves intent pinned to the old
+    name against an observation reporting the new one: `drifted`, forever,
+    because drift is report-only.
+    """
+    app, deck = make_app(tmp_path, monkeypatch)
+    store = IntentStore(tmp_path / "intent.json")
+    deck["intent_store"] = store
+    deck["hipfire"] = FakeHipfire(state="running")
+    deck["litellm"] = FakeLiteLLM(default="qwen3.8-27b.mq4",
+                                  hipfire="qwen3.8-27b.mq4")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 200
+    assert resp.json()["adopted"]["model"] == "qwen3.8-27b.mq4"
+    assert store.get()["local/hipfire"]["model"] is None
+
+
+def test_adopt_keeps_the_model_where_the_deck_does_choose_it(tmp_path, monkeypatch):
+    """The other side of I1's predicate: a swap-node slot's model IS the
+    deck's opinion, so adopt must keep recording it. Guards against the fix
+    being written as a blanket model=None."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    spark = FakeSpark()
+    # Identity is the PROFILE (translate_spark_status reads swap_status),
+    # not serving.model — set it away from the fixture default so this test
+    # can actually see a name being carried through
+    # ([[defaults-that-hide-bugs]]). state "done" keeps boot_in_flight False,
+    # so this is a SETTLED slot, not a transitioning one.
+    spark._status["swap_status"] = {"state": "done", "profile": "mm27b"}
+    wire_swap_node(deck, "boxa", spark, label="Box Alpha")
+
+    resp = TestClient(app).post("/api/lifecycle/adopt/boxa/slot0")
+
+    assert resp.status_code == 200
+    assert resp.json()["adopted"]["model"] == "mm27b"
+    assert deck["intent_store"].get()["boxa/slot0"]["model"] == "mm27b"
+
+
+def test_expect_absence_holds_the_key(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).post("/api/lifecycle/expect-absence/local/hipfire",
+                                json={"ttl_s": 60})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"key": "local/hipfire", "held": True, "ttl_s": 60}
+    assert deck["hold_store"].held("local/hipfire") is True
+
+
+def test_expect_absence_defaults_its_ttl(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).post("/api/lifecycle/expect-absence/local/hipfire",
+                                json={})
+
+    assert resp.status_code == 200
+    assert resp.json()["ttl_s"] == 600
+
+
+def test_expect_absence_refuses_a_bad_ttl(tmp_path, monkeypatch):
+    """Refuse, never coerce — the StrictBool posture from AutoBody.
+
+    "60" and True are the coercion cases: pydantic's lax mode would accept
+    both as durations. 0/-5/100000 are the band cases.
+    """
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    for bad in ["60", True, 0, -5, 100000]:
+        resp = client.post("/api/lifecycle/expect-absence/local/hipfire",
+                           json={"ttl_s": bad})
+        assert resp.status_code == 422, f"{bad!r} was accepted"
+
+    assert deck["hold_store"].held("local/hipfire") is False
+
+
+def test_delete_expect_absence_releases(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    client.post("/api/lifecycle/expect-absence/local/hipfire", json={"ttl_s": 60})
+
+    resp = client.delete("/api/lifecycle/expect-absence/local/hipfire")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"key": "local/hipfire", "held": False, "released": True}
+    assert deck["hold_store"].held("local/hipfire") is False
+
+
+def test_delete_expect_absence_is_idempotent(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).delete("/api/lifecycle/expect-absence/local/hipfire")
+
+    assert resp.status_code == 200
+    assert resp.json()["released"] is False
+
+
+def test_adopt_releases_the_hold(tmp_path, monkeypatch):
+    """The bracket's close: adopting the new truth ends the announced window."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+    deck["hipfire"] = FakeHipfire(state="running")
+    client = TestClient(app)
+    client.post("/api/lifecycle/expect-absence/local/hipfire", json={"ttl_s": 60})
+
+    resp = client.post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 200
+    assert deck["hold_store"].held("local/hipfire") is False
+
+
+def test_a_refused_adopt_leaves_the_hold_alone(tmp_path, monkeypatch):
+    """409 on unreachable: nothing was recorded, so nothing is concluded.
+
+    The hold must survive so the caller's own DELETE (or the TTL) ends it,
+    rather than this route silently re-arming the reconciler against an
+    engine still mid-recreate. Mirrors the existing
+    test_adopt_an_unreachable_resource_is_refused.
+    """
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+    deck["hipfire"] = _UnreachableHipfire()
+    client = TestClient(app)
+    client.post("/api/lifecycle/expect-absence/local/hipfire", json={"ttl_s": 60})
+
+    resp = client.post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 409
+    assert deck["hold_store"].held("local/hipfire") is True
+
+
 def test_adopt_a_swap_nodes_slot(tmp_path, monkeypatch):
     """N1 T12: adopt's engine_for lookup now threads the live control:"swap"
     id-set through, so a non-legacy swap node's slot key (never the frozen

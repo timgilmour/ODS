@@ -342,6 +342,8 @@ deck's *scope of attention*, not a lever on the engines themselves.
 | `GET` | `/api/state` | The `lifecycle` block: per-resource `{status, reason, intent, observed, last_healthy_ts}` |
 | `POST` | `/api/lifecycle/quarantine/{key}/clear` | Release a quarantine so the reconciler will try again (404 if the key has no intent) |
 | `POST` | `/api/lifecycle/adopt/{key}` | Record what is *already* running as the intent. Bookkeeping only — never loads, unloads, or restarts anything |
+| `POST` | `/api/lifecycle/expect-absence/{key}` | Announce that `key` is about to go away deliberately (`{"ttl_s": int}`, strict, bounded). Suppresses restore for that key until the TTL expires or someone releases it. Records and actuates nothing |
+| `DELETE` | `/api/lifecycle/expect-absence/{key}` | End an announced absence early. Idempotent |
 | `GET` | `/api/lifecycle/auto` | Whether the reconciler may act |
 | `POST` | `/api/lifecycle/auto` | Turn automation on/off (`{"enabled": bool}`, strict). Off stops the Deck acting; it unloads nothing |
 
@@ -712,7 +714,9 @@ Three things release a quarantine:
 
 `POST /api/lifecycle/adopt/{key}` records the resource's *current observed* state as its intent, turning an `unmanaged` resource into a managed one. It changes bookkeeping only and must never load, unload, or restart anything — adoption that actuates would make "start managing this" a dangerous button, and nobody would press it.
 
-Adopting an **unreachable** resource is refused with **409**: an observation we failed to make is not evidence, and the record it would write (`state: "unloaded"`) is a park nobody asked for — after which the reconciler would correctly refuse to restore it forever.
+Adopting an **unreachable** or **mid-transition** resource is refused with **409**: neither an observation we failed to make nor one taken while the engine is still coming up is evidence, and the record either would write (`state: "unloaded"`) is a park nobody asked for — after which the reconciler would correctly refuse to restore it forever. The mid-transition half is the one that bites: a container that is up but not yet serving *is* reachable, so the unreachable guard alone let a mid-recreate hipfire be recorded as a deliberate park.
+
+Adoption records `model: null` for kinds the deck does not pin (hipfire, whose model comes from the LiteLLM route table, not from any deck decision — `_HipfireAdapter.deck_pins_model`). Recording the observed *name* there would make the resource's intent mean different things depending on which actuator wrote last, and would report permanent `drifted` the moment somebody re-pinned it outside the deck.
 
 ### The automation toggle
 
@@ -753,7 +757,7 @@ Unit rows cover intent, status derivation, reconcile planning, observation, the 
 
 **19.** `down` is the only status that acts. State the deck did not author (`drifted`, `unexpected`, `unmanaged`) is reported, never corrected.
 
-**20.** A failed observation is never treated as an absence: `unreachable` retains the last-known intent and is not actionable, and adoption of an unreachable resource is refused (409).
+**20.** A failed observation is never treated as an absence: `unreachable` retains the last-known intent and is not actionable, and adoption of an unreachable — or mid-transition — resource is refused (409). A boot in flight is not evidence of a park.
 
 **21.** A resource is restored at most `FAILURE_BUDGET` (2) consecutive times before it is quarantined and left alone for an operator.
 

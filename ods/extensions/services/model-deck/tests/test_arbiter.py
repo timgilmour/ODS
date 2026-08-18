@@ -805,7 +805,7 @@ def _settings(**overrides):
 def _make_watcher(
     tmp_path, world, registry, policy, lemonade=None, comfy=None, read_gpus=None,
     heal_suppressor=None, hostagent=None, catalog=None, hipfire=None,
-    intent_store=None, node_clients=None, node_observers=None, auto=True,
+    intent_store=None, hold_store=None, node_clients=None, node_observers=None, auto=True,
     characteristics_store=None,
     gguf_dir=None, clock=None, on_derive=None, engine_exec=None,
     configurable_engines=None, provenance_store=None, dockerctl=None,
@@ -841,6 +841,7 @@ def _make_watcher(
         hostagent=hostagent,
         catalog=catalog,
         intent_store=intent_store,
+        hold_store=hold_store,
         node_clients=node_clients,
         node_observers=node_observers,
         characteristics_store=characteristics_store,
@@ -2546,6 +2547,89 @@ def test_reconcile_pass_is_a_noop_without_an_intent_store(tmp_path):
     watcher.tick()
 
     assert hipfire.calls == []
+
+
+def test_a_held_key_is_not_restored(tmp_path):
+    """An announced absence is not a death.
+
+    The mirror of test_tick_restores_a_down_resource above: identical setup,
+    one hold, opposite outcome.
+    """
+    from app.holds import HoldStore
+
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    holds = HoldStore()
+    holds.hold("local/hipfire", 60.0)
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, hipfire=hipfire, hold_store=holds)
+
+    watcher.tick()
+
+    assert "resume" not in hipfire.calls
+    assert "lifecycle-restore" not in [e["kind"] for e in tail_events(events_path)]
+
+
+def test_a_held_key_charges_no_failure_and_leaves_no_stamp(tmp_path):
+    """A skipped restore is a non-action — matches the cooldown skip.
+
+    Seed `_restore_unverified` so the failure-budget charge path (arbiter.py
+    :1317-1321) is live for this key: without that seed, a first tick can
+    never reach the charge (it's populated only by a previous
+    `_execute_restore`), and the `failures`/`quarantined` assertions below
+    would pass identically whether the hold guard exists or not. Review
+    finding (Task 2 fix round): the RED proof lives in task-2-report.md.
+    """
+    from app.holds import HoldStore
+
+    store = _intent(tmp_path)
+    holds = HoldStore()
+    holds.hold("local/hipfire", 60.0)
+    watcher, _events_path = _reconcile_watcher(
+        tmp_path, store, hold_store=holds)
+    watcher._restore_unverified.add("local/hipfire")
+
+    watcher.tick()
+
+    assert "local/hipfire" not in watcher._restore_last_attempt_at
+    assert store.get()["local/hipfire"].get("failures", 0) == 0
+    assert store.get()["local/hipfire"].get("quarantined") is not True
+
+
+def test_a_hold_protects_only_its_own_key(tmp_path):
+    """Not a blanket amnesty: another key's hold does not cover hipfire."""
+    from app.holds import HoldStore
+
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    holds = HoldStore()
+    holds.hold("local/lemonade", 60.0)
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, hipfire=hipfire, hold_store=holds)
+
+    watcher.tick()
+
+    assert "resume" in hipfire.calls
+    assert "lifecycle-restore" in [e["kind"] for e in tail_events(events_path)]
+
+
+def test_an_expired_hold_resumes_reconciliation(tmp_path):
+    """Fail open: a crashed actuator cannot silence the deck forever."""
+    from app.holds import HoldStore
+
+    now = [1000.0]
+    store = _intent(tmp_path)
+    hipfire = FakeHipfire(state="parked")
+    holds = HoldStore(clock=lambda: now[0])
+    holds.hold("local/hipfire", 60.0)
+    watcher, events_path = _reconcile_watcher(
+        tmp_path, store, hipfire=hipfire, hold_store=holds)
+
+    now[0] += 61.0  # nobody ever released it
+    watcher.tick()
+
+    assert "resume" in hipfire.calls
+    assert "lifecycle-restore" in [e["kind"] for e in tail_events(events_path)]
 
 
 def test_restore_runs_after_arbitration(tmp_path):
