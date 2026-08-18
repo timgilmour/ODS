@@ -10,6 +10,7 @@ import types
 
 import httpx
 
+from app.gpu import MIN_VRAM_BYTES
 from app.telemetry import LocalTelemetry
 
 _GPU_ROW = {
@@ -116,3 +117,60 @@ def test_unconfigured_url_returns_none_without_fetch():
 
     assert telemetry.gpus() is None
     assert client.calls == []
+
+
+# --- index vocabulary -------------------------------------------------------
+# dashboard-api enumerates every DRM card it can see, iGPUs included (live
+# autarch: index 2 is a 2048 MB 0x13c0 display GPU). The deck's own
+# app.gpu.read_gpus excludes anything under MIN_VRAM_BYTES and RE-SEQUENCES
+# what survives (app/gpu.py:33, :110-113 — an excluded card "does not consume
+# a slot"), so world.gpus holds 0,1 for the same box. The UI joins the two
+# lists on that number (ui/src/model/nodes.ts's statsOf), so this pass-through
+# has to speak world.gpus' vocabulary or a card's temp/power/name silently
+# describes a different GPU.
+
+def _row(index, total_mb, **over):
+    return {**_GPU_ROW, "index": index, "memory_total_mb": total_mb, **over}
+
+
+def test_drops_sub_threshold_rows_and_resequences_survivors():
+    client = FakeClient(FakeResponse(payload={"gpus": [
+        _row(0, 32624, uuid="disc-a"),
+        _row(1, 32624, uuid="disc-b"),
+        _row(2, 2048, uuid="igpu"),      # the live autarch iGPU: excluded
+    ]}))
+
+    rows = LocalTelemetry(_settings(), client=client).gpus()
+
+    assert [r["index"] for r in rows] == [0, 1]
+    assert [r["uuid"] for r in rows] == ["disc-a", "disc-b"]
+
+
+def test_resequences_when_the_igpu_enumerates_first():
+    # The case the raw index would get WRONG: with the small card at raw 0,
+    # a straight pass-through would put the first discrete's readings on the
+    # deck's GPU 1 and leave GPU 0 showing the iGPU's.
+    client = FakeClient(FakeResponse(payload={"gpus": [
+        _row(0, 2048, uuid="igpu"),
+        _row(1, 32624, uuid="disc-a", temperature_c=71),
+        _row(2, 32624, uuid="disc-b", temperature_c=29),
+    ]}))
+
+    rows = LocalTelemetry(_settings(), client=client).gpus()
+
+    assert [(r["index"], r["uuid"], r["temperature_c"]) for r in rows] == [
+        (0, "disc-a", 71), (1, "disc-b", 29)]
+
+
+def test_qualifying_bar_is_the_deck_s_own_constant():
+    # Not a literal 4 GiB re-typed here: exactly-at-the-bar qualifies and one
+    # byte under does not, both read off app.gpu.MIN_VRAM_BYTES.
+    at_bar = MIN_VRAM_BYTES // (1024 * 1024)
+    client = FakeClient(FakeResponse(payload={"gpus": [
+        _row(0, at_bar - 1, uuid="under"),
+        _row(1, at_bar, uuid="at"),
+    ]}))
+
+    rows = LocalTelemetry(_settings(), client=client).gpus()
+
+    assert [(r["index"], r["uuid"]) for r in rows] == [(0, "at")]
