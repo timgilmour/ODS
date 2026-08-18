@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # --- ComfyUI ---
     comfyui_url: str = "http://comfyui:8188"
 
+    # --- Dashboard API (local GPU telemetry pass-through; ontology ruling:
+    # telemetry is CONSUMED from dashboard-api, never rebuilt) ---
+    dashboard_api_url: str = "http://dashboard-api:3002"
+    dashboard_api_key: str = Field(default="", validation_alias="DASHBOARD_API_KEY")
+
     # --- LiteLLM ---
     litellm_url: str = "http://litellm:4000"
     litellm_key: str = Field(default="", validation_alias="LITELLM_KEY")

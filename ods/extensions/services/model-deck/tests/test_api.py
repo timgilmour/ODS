@@ -115,6 +115,20 @@ class FakeComfy:
             raise self.fail
 
 
+class FakeTelemetry:
+    """Stand-in for app.telemetry.LocalTelemetry: no real create_app() build
+    should ever let a test hit dashboard-api over the network. Defaults to
+    None (the pre-telemetry local "gpus" value) so every existing test's
+    /api/state assertions stay byte-identical; a test asserting pass-through
+    itself constructs one with `rows=`."""
+
+    def __init__(self, rows=None):
+        self._rows = rows
+
+    def gpus(self):
+        return self._rows
+
+
 class FakeHipfire:
     def __init__(self, state="running", busy_error=None):
         self.calls = []  # mutating only: "park" / "resume"
@@ -352,6 +366,7 @@ def make_app(tmp_path, monkeypatch):
             "litellm": FakeLiteLLM(default="extra.model.gguf"),
             "registry": FakeRegistry(),
             "read_gpus": FakeReadGpus(),
+            "telemetry": FakeTelemetry(),
             "policy_store": PolicyStore(tmp_path / "policy.json",
                                         declared_defaults=_get_declared_policy_defaults),
             "set_store": SetStore(tmp_path / "sets"),

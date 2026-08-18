@@ -10,6 +10,11 @@ services:
       # removed 2026-07-22 (ops-first; LAN path still behind Authelia).
       - LEMONADE_API_KEY=${LEMONADE_API_KEY:-}
       - LITELLM_KEY=${LITELLM_KEY:-}
+      # Local GPU telemetry pass-through (app/telemetry.py) — dashboard-api's
+      # own auth credential; no URL override, dashboard-api's compose DNS
+      # name + port (docker-compose.base.yml:202) is the same on every
+      # install, exactly like comfyui_url/litellm_url above.
+      - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}
       - HOST_AGENT_KEY=${ODS_AGENT_KEY:-} # live installs name the agent key ODS_AGENT_KEY
       # What this box is called on the deck board. Unset ⇒ "local".
       - MODEL_DECK_NODE_LABEL=${MODEL_DECK_NODE_LABEL:-local}

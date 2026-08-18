@@ -86,6 +86,59 @@ def test_nodes_block_shape_without_observer(monkeypatch):
     assert nodes["sparky"]["control"] == "swap"
 
 
+class _FakeTelemetry:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def gpus(self):
+        return self._rows
+
+
+class _FakeNodeObserver:
+    """Stand-in for app.node_observer.NodeObserver: a fixed snapshot, no
+    thread. Used here only to prove telemetry doesn't touch the remote
+    (node-agent) arm of _nodes_block, which stays sourced from THIS."""
+
+    def __init__(self, snap):
+        self._snap = snap
+
+    def snapshot(self):
+        return self._snap
+
+
+def test_local_gpus_come_from_telemetry_remote_gpus_are_untouched(monkeypatch):
+    app = _app(monkeypatch,
+               MODEL_DECK_SPARK_NODE_URL="http://192.168.1.7:7720",
+               MODEL_DECK_SPARK_SERVING_URL="http://192.168.1.7:8000",
+               ODS_REMOTE_NODE_KEYS=json.dumps({"sparky": "spark-key"}))
+    deck = app.state.deck
+    local_rows = [{"index": 0, "name": "Local GPU"}]
+    remote_rows = [{"index": 0, "name": "Remote GPU"}]
+    deck["telemetry"] = _FakeTelemetry(local_rows)
+    deck["node_observer"] = _FakeNodeObserver({
+        "sparky": {"status": "online", "last_seen": "t", "gpus": remote_rows,
+                   "serving": None, "error": None},
+    })
+
+    with TestClient(app) as c:
+        nodes = {n["id"]: n for n in c.get("/api/state").json()["nodes"]}
+
+    # Local: from app.telemetry, NOT the (empty, for "local") observer snap.
+    assert nodes["local"]["gpus"] == local_rows
+    # Remote: still from the node observer, untouched by telemetry wiring.
+    assert nodes["sparky"]["gpus"] == remote_rows
+
+
+def test_local_gpus_is_none_when_telemetry_fetch_fails(monkeypatch):
+    app = _app(monkeypatch, MODEL_DECK_NODE_LABEL="autarch")
+    app.state.deck["telemetry"] = _FakeTelemetry(None)
+
+    with TestClient(app) as c:
+        nodes = {n["id"]: n for n in c.get("/api/state").json()["nodes"]}
+
+    assert nodes["local"]["gpus"] is None
+
+
 def test_state_200s_with_a_malformed_element_in_nodes_json(monkeypatch):
     # _nodes_block (app/routers/status.py) indexes entry["label"]/
     # entry["agent_kind"] directly, trusting NodeStore's element-level
