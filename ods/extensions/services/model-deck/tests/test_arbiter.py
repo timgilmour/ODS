@@ -2571,7 +2571,15 @@ def test_a_held_key_is_not_restored(tmp_path):
 
 
 def test_a_held_key_charges_no_failure_and_leaves_no_stamp(tmp_path):
-    """A skipped restore is a non-action — matches the cooldown skip."""
+    """A skipped restore is a non-action — matches the cooldown skip.
+
+    Seed `_restore_unverified` so the failure-budget charge path (arbiter.py
+    :1317-1321) is live for this key: without that seed, a first tick can
+    never reach the charge (it's populated only by a previous
+    `_execute_restore`), and the `failures`/`quarantined` assertions below
+    would pass identically whether the hold guard exists or not. Review
+    finding (Task 2 fix round): the RED proof lives in task-2-report.md.
+    """
     from app.holds import HoldStore
 
     store = _intent(tmp_path)
@@ -2579,6 +2587,7 @@ def test_a_held_key_charges_no_failure_and_leaves_no_stamp(tmp_path):
     holds.hold("local/hipfire", 60.0)
     watcher, _events_path = _reconcile_watcher(
         tmp_path, store, hold_store=holds)
+    watcher._restore_unverified.add("local/hipfire")
 
     watcher.tick()
 

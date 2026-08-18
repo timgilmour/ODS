@@ -69,7 +69,13 @@ class HoldStore:
         if until is None:
             return False
         if self._clock() >= until:
-            del self._until[key]
+            # pop, not del (Task 2 fix round, ordered ahead of the next task
+            # wiring the HTTP router path onto this same object): a
+            # concurrent hold()/release() from a request thread could drop
+            # this key between the get above and the del, which would raise
+            # KeyError. pop(key, None) tolerates it already being gone —
+            # same outcome, no race.
+            self._until.pop(key, None)
             return False
         return True
 
