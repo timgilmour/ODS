@@ -170,17 +170,15 @@ export default function ResourcePanel({
               world={world}
               models={models}
               // Whether THIS control already has a chip on this card — the
-              // per-control question, not the card-level one
-              // (resourceHasOwnPlacement, used by ModelDetailDrawer for a
-              // different question about the card a clicked chip sits on).
-              // A shared GPU can carry two controls and one chip: an
-              // unloaded resource's row must not read as "has a chip"
-              // just because a co-resident neighbour's does. A parked
-              // hipfire-kind resource deliberately has none, and then the
-              // control row is the only thing that can say what state it
-              // is in. nodes.ts's controlHasPlacement is the one function
-              // both this row and its card-level counterpart key off of, so
-              // the two questions can't independently drift.
+              // per-control question, and the only real "has a placement"
+              // question the board has (ModelDetailDrawer's own call site
+              // has already proved its answer and passes the literal; see
+              // nodes.ts's controlHasPlacement). A shared GPU can carry two
+              // controls and one chip: an unloaded resource's row must not
+              // read as "has a chip" just because a co-resident neighbour's
+              // does. A parked hipfire-kind resource deliberately has none,
+              // and then the control row is the only thing that can say what
+              // state it is in.
               hasPlacement={controlHasPlacement(resource, control)}
               coldGgufs={coldGgufs}
               onRefresh={onRefresh}

@@ -1303,7 +1303,7 @@ describe("buildNodes — declared remote engines", () => {
 
 // ---------------------------------------------------------------------------
 // Per-GPU telemetry (this wave) — `nodes[].gpus`, the ONE telemetry shape
-// every node speaks: a node-agent entry's own probe (node-agent/models.py:23-31)
+// every node speaks: a node-agent entry's own probe (node-agent/models.py:23-37)
 // for a remote box, app/telemetry.py's pass-through of dashboard-api's
 // IndividualGPU rows (dashboard-api/models.py:129-143) for the local one,
 // attached to the LOCAL entry by app/routers/status.py's _nodes_block.
@@ -1358,11 +1358,24 @@ describe("buildNodes — GPU telemetry on local cards", () => {
     expect(local.resources.every((r) => r.stats === undefined)).toBe(true);
   });
 
-  it("leaves stats absent for a GPU the telemetry does not cover", () => {
-    const partial = { ...localTelemetryEntry, gpus: [localTelemetryEntry.gpus![0]] };
-    const [local] = buildNodes(stateWith({ nodes: [partial] }), {});
-    expect(gpuCard(local, 2).stats!.utilizationPercent).toBe(97);
-    expect(gpuCard(local, 3).stats).toBeUndefined();
+  it("leaves stats absent for a GPU a REMOTE node's telemetry does not cover", () => {
+    // The remote arm keeps this case: `cardIndices` unions the reported GPUs
+    // with the indices visible declared engines name, so a card can exist for
+    // an index the probe never covered. (The LOCAL arm no longer has this
+    // case — a short local list is a cross-sensor disagreement and drops
+    // wholesale; see the count-guard tests below.)
+    const partial: DeckNodeEntry = {
+      ...zetaEntry,
+      gpus: [{ index: 4, name: "GB10", memory_used_mb: 62_000, memory_total_mb: 122_880,
+               utilization_percent: 41, temperature_c: 63, power_w: 88.25 }],
+    };
+    const s = stateWith({
+      nodes: [localEntry, partial],
+      remoteTenants: { "zeta/song-lab": remoteTenant({ gpu_index: 9 }) },
+    });
+    const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+    expect(gpuCard(zeta, 4).stats!.utilizationPercent).toBe(41);
+    expect(gpuCard(zeta, 9).stats).toBeUndefined();
   });
 
   it("reads a remote node's telemetry off its own entry, temperature and power included", () => {
@@ -1371,17 +1384,132 @@ describe("buildNodes — GPU telemetry on local cards", () => {
       gpus: [
         { index: 4, name: "GB10", memory_used_mb: 62_000, memory_total_mb: 122_880,
           utilization_percent: 41, temperature_c: 63, power_w: 88.25 },
-        // A node-agent that reports neither reading (the fields are optional
-        // on the wire) must render "—", not a fabricated 0.
+        // The REAL failed-sensor payload: `temperature_c` and
+        // `utilization_percent` are REQUIRED fields in both producers
+        // (node-agent/models.py:23-37, dashboard-api/models.py:129-143), so a
+        // reading that could not be taken arrives as 0 WITH its flag false
+        // (dashboard-api/gpu.py:172 `temperature_available=temp > 0`). Both
+        // must render "—", never the 0 that is on the wire.
         { index: 5, name: "GB10", memory_used_mb: 1_024, memory_total_mb: 122_880,
-          utilization_percent: 0 },
+          utilization_percent: 0, utilization_available: false,
+          temperature_c: 0, temperature_available: false, power_w: null },
       ],
     };
     const zeta = buildNodes(stateWith({ nodes: [localEntry, hot] }), {}).find((n) => n.id === "zeta")!;
     expect(gpuCard(zeta, 4).stats).toEqual({
       name: "GB10", utilizationPercent: 41, temperatureC: 63, powerW: 88.25 });
     expect(gpuCard(zeta, 5).stats).toEqual({
-      name: "GB10", utilizationPercent: 0, temperatureC: null, powerW: null });
+      name: "GB10", utilizationPercent: null, temperatureC: null, powerW: null });
+  });
+
+  it("reads an OLDER node-agent's omitted fields as no reading too", () => {
+    // The one case an omitted `temperature_c` is honest: a node-agent
+    // predating the availability triple (and the fields themselves). Absent
+    // means "no verdict offered", read as available — so an omitted READING
+    // is still null, and a present one is still a reading.
+    const legacy: DeckNodeEntry = {
+      ...zetaEntry,
+      gpus: [{ index: 4, name: "GB10", memory_used_mb: 62_000,
+               memory_total_mb: 122_880, utilization_percent: 41 }],
+    };
+    const zeta = buildNodes(stateWith({ nodes: [localEntry, legacy] }), {})
+      .find((n) => n.id === "zeta")!;
+    expect(gpuCard(zeta, 4).stats).toEqual({
+      name: "GB10", utilizationPercent: 41, temperatureC: null, powerW: null });
+    expect(gpuCard(zeta, 4).capacity).toEqual({
+      used: 62_000 * 1024 * 1024, total: 122_880 * 1024 * 1024 });
+  });
+
+  it("folds the availability flags on the LOCAL entry's telemetry too", () => {
+    // Same producer convention, the other arm: dashboard-api sends the
+    // required number plus its flag, and a false flag means the number is
+    // filler. Its own gpu.py:172 is the live case (an AMD card whose hwmon
+    // temp read came back 0).
+    const dark: DeckNodeEntry = {
+      ...localTelemetryEntry,
+      gpus: localTelemetryEntry.gpus!.map((g) => ({
+        ...g, utilization_percent: 0, utilization_available: false,
+        temperature_c: 0, temperature_available: false,
+      })),
+    };
+    const [local] = buildNodes(stateWith({ nodes: [dark] }), {});
+    expect(gpuCard(local, 2).stats).toEqual({
+      name: "AMD Radeon AI PRO R9700", utilizationPercent: null,
+      temperatureC: null, powerW: 214.5 });
+    // The meter is world.gpus' own observation and is untouched by any of it.
+    expect(gpuCard(local, 2).capacity).toEqual({
+      used: 22_100_000_000, total: 34_000_000_000 });
+  });
+
+  it("meters a remote GPU as UNKNOWN when its memory read was unavailable", () => {
+    // A remote card's capacity comes from the SAME row as its stats, so an
+    // unread VRAM figure would otherwise draw a confident empty bar. Null =
+    // hatched (unknown), never a fabricated 0-used.
+    const unread: DeckNodeEntry = {
+      ...zetaEntry,
+      gpus: [{ index: 4, name: "GB10", memory_used_mb: 0, memory_total_mb: 122_880,
+               utilization_percent: 41, memory_usage_available: false }],
+    };
+    const zeta = buildNodes(stateWith({ nodes: [localEntry, unread] }), {})
+      .find((n) => n.id === "zeta")!;
+    expect(gpuCard(zeta, 4).capacity).toBeNull();
+    // The other readings still render — one dead sensor is not all of them.
+    expect(gpuCard(zeta, 4).stats!.utilizationPercent).toBe(41);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cross-sensor count guard (F7). world.gpus is the deck's OWN sysfs read
+// (app/gpu.py) and the local telemetry is dashboard-api's rocm/nvidia-smi
+// enumeration, joined POSITIONALLY. app/telemetry.py's `_qualified` aligns the
+// divergence we know about; nothing can prove the two enumerations match, so a
+// length disagreement drops the telemetry rather than sliding every card's
+// readings onto its neighbour.
+// ---------------------------------------------------------------------------
+
+describe("buildNodes — local telemetry cross-sensor guard", () => {
+  it("keeps the stats when both sensors enumerate the same number of GPUs", () => {
+    const [local] = buildNodes(stateWith({ nodes: [localTelemetryEntry] }), {});
+    expect(gpuCard(local, 2).stats!.temperatureC).toBe(71);
+    expect(gpuCard(local, 3).stats!.temperatureC).toBe(29);
+  });
+
+  it("drops local telemetry WHOLESALE when the two enumerations disagree", () => {
+    // dashboard-api sees one card the deck sees two of (or vice versa): its
+    // row for index 2 may describe either GPU, so neither card may show it.
+    // Capacity — the deck's own observation — is unaffected.
+    const short = { ...localTelemetryEntry, gpus: [localTelemetryEntry.gpus![0]] };
+    const [local] = buildNodes(stateWith({ nodes: [short] }), {});
+    expect(local.resources.every((r) => r.stats === undefined)).toBe(true);
+    expect(gpuCard(local, 2).capacity).toEqual({
+      used: 22_100_000_000, total: 34_000_000_000 });
+  });
+
+  it("drops it when telemetry reports MORE GPUs than the deck sees", () => {
+    // The live autarch shape if `_qualified` ever stopped filtering: an iGPU
+    // dashboard-api enumerates and app.gpu.read_gpus excludes.
+    const extra = {
+      ...localTelemetryEntry,
+      gpus: [...localTelemetryEntry.gpus!,
+             { index: 4, name: "AMD iGPU", memory_used_mb: 100,
+               memory_total_mb: 2_048, utilization_percent: 0 }],
+    };
+    const [local] = buildNodes(stateWith({ nodes: [extra] }), {});
+    expect(local.resources.every((r) => r.stats === undefined)).toBe(true);
+  });
+
+  it("leaves a REMOTE node's stats alone — one list is both its sensors", () => {
+    // A remote card's capacity and stats come from the same `entry.gpus`
+    // row, so there is no second enumeration to disagree with and no guard
+    // to apply: zeta reports one GPU while this box has two.
+    const one: DeckNodeEntry = {
+      ...zetaEntry,
+      gpus: [{ index: 4, name: "GB10", memory_used_mb: 62_000,
+               memory_total_mb: 122_880, utilization_percent: 41, temperature_c: 63 }],
+    };
+    const zeta = buildNodes(stateWith({ nodes: [localTelemetryEntry, one] }), {})
+      .find((n) => n.id === "zeta")!;
+    expect(gpuCard(zeta, 4).stats!.temperatureC).toBe(63);
   });
 
   it("carries a swap node's telemetry onto the card its serving slot rides", () => {
@@ -1425,11 +1553,11 @@ describe("buildNodes — local per-GPU card composition", () => {
 });
 
 describe("controlHasPlacement", () => {
-  it("answers per CONTROL where the card-level question cannot: one GPU, two resources", () => {
-    // A shared GPU card carries both controls. `resourceHasOwnPlacement` (the
-    // card-level question the drawer still asks) says "something is on this
-    // card"; PlacementActions needs "does THIS control have a chip", or the
-    // unloaded neighbour's control row stops naming itself.
+  it("answers per CONTROL where a card-level question cannot: one GPU, two resources", () => {
+    // A shared GPU card carries both controls. A card-level "is anything on
+    // this card" cannot serve a control row: PlacementActions needs "does
+    // THIS control have a chip", or the unloaded neighbour's row stops
+    // naming itself.
     const s = stateWith();
     s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 1, idle_s: 0 };
     const [local] = buildNodes(s, {});

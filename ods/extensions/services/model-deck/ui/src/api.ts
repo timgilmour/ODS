@@ -190,7 +190,7 @@ export interface NodeIdentity {
  * unconfigured); null = not yet observed (routers/status.py _nodes_block). */
 export type NodeAgentStatus = "online" | "offline" | "error" | "unconfigured" | null;
 
-/** node-agent IndividualGPU (node-agent/models.py:23-31), the fields the
+/** node-agent IndividualGPU (node-agent/models.py:23-37), the fields the
  * board renders. Extra fields arrive and are ignored.
  *
  * ONE shape for every node's telemetry: a node-agent entry's `gpus` come
@@ -199,11 +199,23 @@ export type NodeAgentStatus = "online" | "offline" | "error" | "unconfigured" | 
  * (dashboard-api/models.py:129-143, allowed keys at app/telemetry.py's
  * `_ALLOWED`) — attached by `app/routers/status.py`'s `_nodes_block`.
  *
- * The four fields below are OPTIONAL because a producer may legitimately
- * send none of them: `power_w` is `Optional[float]` in BOTH models
- * (dashboard-api/models.py:138, node-agent/models.py:32), and an older
- * node-agent predates the block entirely. Absent means "no reading", which
- * the board renders as "—" — never a fabricated 0. */
+ * Optional here does NOT mean optional upstream. Only `power_w` is genuinely
+ * `Optional[float]` in both producers (dashboard-api/models.py:138,
+ * node-agent/models.py:32); `temperature_c`, `utilization_percent` and the
+ * memory numbers are REQUIRED fields both models always send. They are typed
+ * loosely for two honest reasons:
+ *
+ *  1. The availability fold. A producer that failed to read a sensor still
+ *     has to send the required number, so it sends 0 and says so in the
+ *     matching `*_available` flag (dashboard-api/gpu.py:172 —
+ *     `temperature_available=temp > 0`). `model/nodes.ts`'s `statsOf` folds
+ *     flag into value, and a `null` reading is what comes out.
+ *  2. Older producers. A node-agent predating the availability triple sends
+ *     the numbers without the flags, and one predating the whole `gpus`
+ *     block sends nothing at all.
+ *
+ * Absent or null means "no reading", which the board renders as "—" — never
+ * a fabricated 0. */
 export interface NodeGpu {
   index: number;
   name: string;
@@ -214,6 +226,13 @@ export interface NodeGpu {
   power_w?: number | null;
   memory_percent?: number | null;
   uuid?: string;
+  /** The producer's own verdict on whether each reading was TAKEN. `false`
+   * means the number beside it is filler, not an observation — see the fold
+   * above. Absent (an older producer) means "no verdict offered", which is
+   * read as available, exactly as both models' `= True` defaults do. */
+  memory_usage_available?: boolean;
+  utilization_available?: boolean;
+  temperature_available?: boolean;
 }
 
 /** app/routers/status.py's `_nodes_block` — one entry per registered node,

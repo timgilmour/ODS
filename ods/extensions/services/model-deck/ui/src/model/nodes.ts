@@ -384,14 +384,31 @@ function cardIndices(reported: number[], declared: number[]): number[] {
  *
  * Every field is `?? null`: the wire's absent and its explicit null are the
  * same fact here ("no reading"), and collapsing them once, here, is what
- * lets `GpuStats` be four plain nullable numbers. */
+ * lets `GpuStats` be four plain nullable numbers.
+ *
+ * The AVAILABILITY FOLD happens here too, and it is the reason this cannot
+ * be a plain field copy. Both producers declare `temperature_c` and
+ * `utilization_percent` REQUIRED (dashboard-api/models.py:129-143,
+ * node-agent/models.py:23-37), so a sensor they could not read still has to
+ * put a number on the wire: they send 0 and say so in the matching flag
+ * (dashboard-api/gpu.py:172 — `temperature_available=temp > 0`,
+ * `utilization_available=bool(gpu_busy_str)`). Reading the number without
+ * the flag renders a failed sensor as a real 0 °C / 0 % — a fabricated
+ * reading, which is the one thing this whole file's null-vs-zero discipline
+ * exists to prevent. `=== false` deliberately, not falsy: an older producer
+ * predating the flags omits them, and absent means "no verdict offered",
+ * which both models' own `= True` defaults read as available.
+ *
+ * `power_w` needs no flag — it is genuinely `Optional[float]` upstream, so
+ * its absence already says it. */
 function statsOf(gpus: NodeGpu[] | null | undefined, index: number): GpuStats | undefined {
   const gpu = (gpus ?? []).find((g) => g.index === index);
   if (!gpu) return undefined;
   return {
     name: gpu.name ?? null,
-    utilizationPercent: gpu.utilization_percent ?? null,
-    temperatureC: gpu.temperature_c ?? null,
+    utilizationPercent:
+      gpu.utilization_available === false ? null : (gpu.utilization_percent ?? null),
+    temperatureC: gpu.temperature_available === false ? null : (gpu.temperature_c ?? null),
     powerW: gpu.power_w ?? null,
   };
 }
@@ -407,7 +424,29 @@ function localNode(state: StateResponse): DeckNode {
   // the deck's own observation) — this is the display garnish beside it, and
   // reading it off the same block every remote node uses is what keeps ONE
   // telemetry shape on the wire.
-  const telemetry = (state.nodes ?? []).find((e) => e.agent_kind === "local")?.gpus ?? null;
+  const reported = (state.nodes ?? []).find((e) => e.agent_kind === "local")?.gpus ?? null;
+  // CROSS-SENSOR GUARD. The join below is POSITIONAL — a card's stats are
+  // looked up by the index its `world.gpus` capacity came from — and the two
+  // lists are taken by DIFFERENT sensors: `world.gpus` is the deck's own
+  // sysfs read (app/gpu.py's read_gpus), the telemetry is dashboard-api's
+  // rocm-smi/nvidia-smi enumeration. `app/telemetry.py`'s `_qualified`
+  // aligns the one divergence we know about (it drops sub-MIN_VRAM_BYTES
+  // cards and re-sequences, so an iGPU cannot shift the numbering), but
+  // alignment is not proof: neither list carries anything the other can be
+  // checked against, and a card the deck sees and dashboard-api does not
+  // (driver reset, a card in a state one reader skips) would silently slide
+  // every subsequent GPU's temperature and power onto its neighbour.
+  //
+  // Equal LENGTHS is the one falsifiable check available, so a mismatch
+  // drops the local telemetry wholesale — no stats beats misattributed
+  // stats, and a missing stats block is a state the board already renders
+  // ("—" per field). It cannot catch a same-length permutation; `uuid` is
+  // carried through the pass-through precisely so a future join can verify
+  // identity rather than count. Local only: a remote node's capacity and
+  // stats come from ONE list (`entry.gpus`), so there is no second
+  // enumeration there to disagree with.
+  const telemetry =
+    reported && reported.length === world.gpus.length ? reported : null;
   return {
     id: state.node.id,
     label: state.node.label,
@@ -452,7 +491,7 @@ function localNode(state: StateResponse): DeckNode {
 // seen through `world.remote_tenants` and given a card with verbs.
 // ---------------------------------------------------------------------------
 
-/** node-agent reports MB (its `IndividualGPU`, node-agent/models.py:23-31);
+/** node-agent reports MB (its `IndividualGPU`, node-agent/models.py:23-37);
  * the board's meters speak bytes (World.gpus). ONE conversion, shared by the
  * bare-GPU cards and the engine cards — two copies of a units conversion is
  * how the next units bug gets in (app/node_clients.py:54 says the same about
@@ -460,9 +499,14 @@ function localNode(state: StateResponse): DeckNode {
  * nothing the node reported renders hatched, never a fabricated 0/0. */
 function gpuCapacity(gpus: NodeGpu[] | null, index: number): DeckResource["capacity"] {
   const gpu = (gpus ?? []).find((g) => g.index === index);
-  return gpu
-    ? { used: gpu.memory_used_mb * 1024 * 1024, total: gpu.memory_total_mb * 1024 * 1024 }
-    : null;
+  // `memory_usage_available: false` is the producer saying it could NOT read
+  // this card's VRAM, and the required `memory_used_mb` beside it is filler
+  // (the same 0-plus-flag convention `statsOf` folds — dashboard-api/gpu.py's
+  // GPUInfo). Metering that 0 would draw a confident empty bar for a GPU
+  // nobody measured, on the one number this card treats as authoritative.
+  // Unknown capacity renders hatched, which is the honest answer.
+  if (!gpu || gpu.memory_usage_available === false) return null;
+  return { used: gpu.memory_used_mb * 1024 * 1024, total: gpu.memory_total_mb * 1024 * 1024 };
 }
 
 /** app/observe.py:31's `node_key` — the one backend function that builds
@@ -620,7 +664,16 @@ function remoteNodeCards(
   stale: boolean,
 ): { resources: DeckResource[]; hiddenEngines: RemoteEngineControl[] } {
   const tenants = remoteTenantsOf(state.world, entry.id);
-  const visible = tenants.filter((t) => remoteChipVisible(t, state.lifecycle));
+  // ONE partition pass, because `remoteChipVisible`'s own docstring promises
+  // the question is asked exactly once per tenant — a second `filter` for the
+  // hidden half would evaluate it twice and make that claim false, which is
+  // how "the single authority" quietly becomes two evaluations that a future
+  // stateful/expensive rule could disagree between.
+  const visible: RemoteTenant[] = [];
+  const hidden: RemoteTenant[] = [];
+  for (const tenant of tenants) {
+    (remoteChipVisible(tenant, state.lifecycle) ? visible : hidden).push(tenant);
+  }
   const resources = cardIndices(
     (entry.gpus ?? []).map((g) => g.index),
     visible.map((t) => t.gpu_index),
@@ -644,9 +697,7 @@ function remoteNodeCards(
   });
   return {
     resources,
-    hiddenEngines: tenants
-      .filter((t) => !remoteChipVisible(t, state.lifecycle))
-      .map((t) => engineControl(entry.id, t, kinds, stale)),
+    hiddenEngines: hidden.map((t) => engineControl(entry.id, t, kinds, stale)),
   };
 }
 
@@ -771,25 +822,17 @@ export function findPlacement(nodes: DeckNode[], id: string): PlacementSpot | nu
   return null;
 }
 
-/** Whether a CARD carries any managed (non-external) placement at all — the
- * card-level question. `ModelDetailDrawer` asks it about the card a chip it
- * has open sits on, where the answer is about the card and not about one
- * control.
- *
- * Per-GPU cards made this the WRONG question for `ResourcePanel`'s control
- * rows (a card can carry two controls and one chip), which is what
- * `controlHasPlacement` below is for. Both live here, so the two call sites
- * can never independently drift on what "has a placement" means — the
- * fix-loop finding this replaced was exactly that: a tautological
- * re-derivation at one call site and a real one at the other. */
-export function resourceHasOwnPlacement(resource: DeckResource): boolean {
-  return resource.placements.some((p) => p.kind !== "external");
-}
-
-/** Whether ONE control on a card has its own chip there. The per-control
- * half of the question above, and the one a control row needs: on a shared
+/** Whether ONE control on a card has its own chip there — the board's ONLY
+ * "has a placement" question, and the one a control row needs: on a shared
  * GPU an unloaded resource's row is the only thing on screen naming it, and
  * a co-resident neighbour's chip must not answer for it.
+ *
+ * There is deliberately no card-level counterpart. `ModelDetailDrawer` used
+ * to ask one about the card its open chip sits on, but that call site had
+ * already proved the answer: it reaches `PlacementActions` only through a
+ * control whose `local/<control>` key MATCHED the open placement's id, so any
+ * such function could only answer true. It passes the literal now, and this
+ * one function has a single call site with a real question behind it.
  *
  * Keyed on the PLACEMENT ID rather than on the placement's `name` or
  * `engine`: `local/<resource>` is the lifecycle key `tenantPlacement` builds

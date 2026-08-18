@@ -26,7 +26,6 @@ import { labels, messages } from "../model/messages";
 import {
   isSwapSlotId,
   nodeIdOfPlacement,
-  resourceHasOwnPlacement,
   type DeckResource,
   type Placement,
 } from "../model/nodes";
@@ -629,12 +628,13 @@ export default function ModelDetailDrawer({
                   resource={tenantControl}
                   world={world}
                   models={models}
-                  // Shared with ResourcePanel's identical question via
-                  // nodes.ts's resourceHasOwnPlacement — one function, so
-                  // the two call sites can't disagree (fix-loop finding:
-                  // this used to re-derive the same fact a different,
-                  // tautological way).
-                  hasPlacement={resourceHasOwnPlacement(placedOn.resource)}
+                  // Literal true, and provably so: `tenantControl` above is
+                  // non-null only because a control's `local/<control>` key
+                  // MATCHED this placement's id, which is a non-external
+                  // local placement sitting on this very card. Any function
+                  // asked here could only re-derive that match and answer
+                  // true — a tautology dressed as a check.
+                  hasPlacement
                   coldGgufs={coldGgufs}
                   onRefresh={onRefresh}
                 />
