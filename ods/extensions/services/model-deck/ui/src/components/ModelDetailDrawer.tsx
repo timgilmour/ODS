@@ -27,7 +27,6 @@ import {
   isSwapSlotId,
   nodeIdOfPlacement,
   resourceHasOwnPlacement,
-  SPARK_CONTROL,
   type DeckResource,
   type Placement,
 } from "../model/nodes";
@@ -306,19 +305,20 @@ export default function ModelDetailDrawer({
     }
   }
 
-  // A local resource control belonging to THIS placement. E1: one card per
-  // declared resource now (not per GPU), so `controls` carries at most one
-  // non-spark entry — the resource's own name. That control still belongs
-  // to the RESOURCE, not to any one chip on its card — a card can also
-  // carry EXTERNAL process placements sharing the same GPU (nodes.ts's
-  // externals-claim logic), and this placement might be one of those, not
-  // the resource's own tenant. Offering Load/Unload/Park/etc under an
-  // external PID's drawer would be nonsensical (fix-loop finding: the
-  // `.controls` check alone doesn't know which chip is open), so gate on
-  // `placement.kind !== "external"` too.
+  // The local resource control belonging to THIS placement — matched by
+  // PLACEMENT ID, which is the control's own lifecycle key
+  // (`local/<resource>`, app/observe.py's node_key), never "the card's only
+  // non-spark control". A card is a GPU now (2026-08-18 ruling) and carries
+  // every resource declared on that GPU, so picking the first one would
+  // offer a CO-RESIDENT resource's Load/Unload/Park under this chip's
+  // drawer — the wrong engine, actuated with no error anywhere. The same
+  // match also settles the two cases the old first-non-spark scan needed
+  // extra guards for: an EXTERNAL pid's chip (`external/<pid>`) and a swap
+  // slot's (`<node>/slot0`) match no `local/<control>` key, so neither gets
+  // tenant verbs. `placement.kind` is kept as a belt-and-braces guard.
   const tenantControl =
     placedOn && placement.kind !== "external"
-      ? (placedOn.resource.controls.find((c) => c !== SPARK_CONTROL) ?? null)
+      ? (placedOn.resource.controls.find((c) => `local/${c}` === placement.id) ?? null)
       : null;
   // A swap node's slot key is a fixed convention backend-side
   // (app/observe.py:slot_key, mirrored in nodes.ts's isSwapSlotId).

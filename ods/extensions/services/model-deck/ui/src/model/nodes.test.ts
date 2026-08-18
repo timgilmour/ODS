@@ -11,12 +11,17 @@ import type {
   SparkStatus,
   StateResponse,
 } from "../api";
+import { remoteEngineVerbs } from "./engineVerbs";
 import {
   buildNodes,
+  controlHasPlacement,
   findPlacement,
   isSwapSlotId,
   nodeIdOfPlacement,
   swapNodes,
+  type DeckNode,
+  type DeckResource,
+  type Placement,
 } from "./nodes";
 
 // Fixture rule (design §7, binding): generalization fixtures set AWAY from
@@ -101,6 +106,19 @@ function stateWith(
   };
 }
 
+/** The board is per-GPU: one card per GPU index, id `gpu<index>`. */
+function gpuCard(node: DeckNode, index: number): DeckResource {
+  return node.resources.find((r) => r.id === `gpu${index}`)!;
+}
+
+/** A local resource's own chip, wherever its GPU card is. Placement ids are
+ * UNCHANGED by the per-GPU regroup (`local/<resource>` — app/observe.py's
+ * node_key), which is exactly what makes this lookup possible: the lifecycle
+ * join, the drawer and drift targeting all key on the same string. */
+function localChip(node: DeckNode, resource: string): Placement | undefined {
+  return node.resources.flatMap((r) => r.placements).find((p) => p.id === `local/${resource}`);
+}
+
 describe("buildNodes", () => {
   it("returns nothing before the first successful poll", () => {
     expect(buildNodes(null, {})).toEqual([]);
@@ -113,10 +131,11 @@ describe("buildNodes", () => {
     expect(local.status).toBe("reachable");
   });
 
-  it("local card renders every declared resource, none hardcoded", () => {
-    // The brief's Step-1 test, verbatim shape: resources come straight off
-    // the payload map, keyed by their own resource name — never a fixed
-    // triple, never a per-GPU card.
+  it("local card renders one card per GPU, carrying every declared resource's controls", () => {
+    // Reworked from "renders every declared resource, none hardcoded" (E1's
+    // per-resource cards): the board is per-GPU now, so the "none hardcoded"
+    // guarantee moved onto `controls` — every declared resource still
+    // appears, on the card for the GPU it is declared on.
     const nodes = buildNodes(
       stateWith({
         tenants: {
@@ -134,29 +153,50 @@ describe("buildNodes", () => {
       {},
     );
     const local = nodes.find((n) => n.id === "local")!;
-    expect(local.resources.map((r) => r.id)).toEqual(["gguf-a", "img"]);
+    expect(local.resources.map((r) => r.id)).toEqual(["gpu2", "gpu3"]);
+    expect(gpuCard(local, 2).controls).toEqual(["gguf-a"]);
+    expect(gpuCard(local, 3).controls).toEqual(["img"]);
   });
 
-  it("empty declaration renders an empty local card, not unknowns", () => {
+  it("declaring nothing still renders the box's GPUs — they are the telemetry surface", () => {
+    // Reworked: E1's per-resource board rendered NO cards for an empty
+    // declaration. A GPU card always shows now (design ruling 2: "GPU cards
+    // ALWAYS show, even empty"), carrying its meter and no controls.
     const nodes = buildNodes(stateWith({ tenants: {}, policy: {} }), {});
     const local = nodes.find((n) => n.id === "local")!;
-    expect(local.resources).toEqual([]);
+    expect(local.resources.map((r) => r.id)).toEqual(["gpu2", "gpu3"]);
+    expect(local.resources.every((r) => r.controls.length === 0)).toBe(true);
+    expect(local.resources.every((r) => r.placements.length === 0)).toBe(true);
   });
 
-  it("makes one resource per declared engine, ordered by gpu_index then resource name", () => {
+  it("renders nothing at all when the box reports no GPUs and declares nothing", () => {
+    const nodes = buildNodes(stateWith({ tenants: {}, policy: {}, gpus: [] }), {});
+    expect(nodes.find((n) => n.id === "local")!.resources).toEqual([]);
+  });
+
+  it("makes one card per GPU, ordered by index, with each GPU's declared resources in board order", () => {
     const [local] = buildNodes(stateWith(), {});
-    expect(local.resources.map((r) => r.id)).toEqual(["agent", "gguf-a", "img"]);
-    expect(local.resources[0].label).toBe("agent");
+    expect(local.resources.map((r) => r.id)).toEqual(["gpu2", "gpu3"]);
+    expect(local.resources[0].label).toBe("GPU 2");
     expect(local.resources[0].capacity).toEqual({ used: 22_100_000_000, total: 34_000_000_000 });
+    expect(gpuCard(local, 2).controls).toEqual(["agent"]);
+    // Two resources share GPU 3 — sortedResourceEntries' order (gpu_index
+    // then resource NAME) is what orders the controls within a card.
+    expect(gpuCard(local, 3).controls).toEqual(["gguf-a", "img"]);
   });
 
-  it("reports unknown capacity, not a fabricated zero, when a resource's gpu_index matches no live GPU", () => {
+  it("still cards a declared resource's GPU when the live GPU list has no such index, capacity unknown", () => {
+    // Controls must never vanish because of a world/declaration
+    // inconsistency: the card appears, its meter reads unknown (not a
+    // fabricated 0/0), and "agent" keeps its verbs.
     const s = stateWith({ gpus: [DEFAULT_GPUS[1]] }); // GPU 2 (agent's) dropped
     const [local] = buildNodes(s, {});
-    expect(local.resources.find((r) => r.id === "agent")!.capacity).toBeNull();
+    expect(local.resources.map((r) => r.id)).toEqual(["gpu2", "gpu3"]);
+    expect(gpuCard(local, 2).capacity).toBeNull();
+    expect(gpuCard(local, 2).controls).toEqual(["agent"]);
   });
 
-  it("renders as many cards as are declared — design §5's 'zero, three, or five', proven at five", () => {
+  it("carries as many declared resources as exist onto their GPUs' cards — §5's five, on two GPUs", () => {
     const tenants: Record<string, ResourceTenant> = {
       "gguf-a": { engine: "lemonade", gpu_index: 2, state: "unloaded", model: null, footprint: null, idle_s: null },
       "gguf-b": { engine: "lemonade", gpu_index: 3, state: "unloaded", model: null, footprint: null, idle_s: null },
@@ -171,12 +211,14 @@ describe("buildNodes", () => {
       }),
       {},
     );
-    expect(local.resources.map((r) => r.id)).toEqual(["gguf-a", "img", "agent", "agent2", "gguf-b"]);
+    expect(local.resources.map((r) => r.id)).toEqual(["gpu2", "gpu3"]);
+    expect(gpuCard(local, 2).controls).toEqual(["gguf-a", "img"]);
+    expect(gpuCard(local, 3).controls).toEqual(["agent", "agent2", "gguf-b"]);
   });
 
   it("shows the resource's placement when it is occupying its slot", () => {
     const [local] = buildNodes(stateWith(), {});
-    const agent = local.resources.find((r) => r.id === "agent")!;
+    const agent = gpuCard(local, 2);
     expect(agent.placements.map((p) => p.name)).toEqual(["Qwen3.6-35B-A3B-heretic-NVFP4"]);
     expect(agent.placements[0].engine).toBe("hipfire");
     expect(agent.placements[0].bytes).toBe(21_400_000_000);
@@ -184,14 +226,12 @@ describe("buildNodes", () => {
 
   it("keeps a model identity verbatim", () => {
     const [local] = buildNodes(stateWith(), {});
-    expect(local.resources.find((r) => r.id === "agent")!.placements[0].name).toBe(
-      "Qwen3.6-35B-A3B-heretic-NVFP4",
-    );
+    expect(localChip(local, "agent")!.name).toBe("Qwen3.6-35B-A3B-heretic-NVFP4");
   });
 
   it("omits an unloaded tenant rather than showing an empty chip", () => {
     const [local] = buildNodes(stateWith(), {});
-    expect(local.resources.find((r) => r.id === "gguf-a")!.placements).toEqual([]);
+    expect(localChip(local, "gguf-a")).toBeUndefined();
   });
 
   it("omits a load in flight the same as unloaded (no chip mid-load)", () => {
@@ -203,15 +243,15 @@ describe("buildNodes", () => {
       engine: "lemonade", gpu_index: 3, state: "loading", model: null, footprint: null, idle_s: null,
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources.find((r) => r.id === "gguf-a")!.placements).toEqual([]);
+    expect(localChip(local, "gguf-a")).toBeUndefined();
   });
 
-  it("keeps an unloaded tenant's controls on its resource", () => {
+  it("keeps an unloaded tenant's control on its GPU's card", () => {
     // The empty-slot case: no chip, but a load-verb kind's Load dropdown
-    // still has to render somewhere, so the resource carries the control.
+    // still has to render somewhere, so the GPU card carries the control.
     const [local] = buildNodes(stateWith(), {});
-    expect(local.resources.find((r) => r.id === "gguf-a")!.controls).toEqual(["gguf-a"]);
-    expect(local.resources.find((r) => r.id === "agent")!.controls).toEqual(["agent"]);
+    expect(gpuCard(local, 3).controls).toContain("gguf-a");
+    expect(gpuCard(local, 2).controls).toEqual(["agent"]);
   });
 
   it("shows a loaded tenant", () => {
@@ -221,9 +261,7 @@ describe("buildNodes", () => {
       model: "qwen2.5-14b-instruct-4k-q4_k_m.gguf", footprint: 9_500_000_000, idle_s: 4,
     };
     const [local] = buildNodes(s, {});
-    expect(
-      local.resources.find((r) => r.id === "gguf-a")!.placements.map((p) => p.name),
-    ).toContain("qwen2.5-14b-instruct-4k-q4_k_m.gguf");
+    expect(localChip(local, "gguf-a")!.name).toBe("qwen2.5-14b-instruct-4k-q4_k_m.gguf");
   });
 
   it("omits a parked hipfire-kind resource", () => {
@@ -232,30 +270,33 @@ describe("buildNodes", () => {
       engine: "hipfire", gpu_index: 2, state: "parked", model: null, footprint: 0, queue_depth: null,
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources.find((r) => r.id === "agent")!.placements).toEqual([]);
+    expect(localChip(local, "agent")).toBeUndefined();
+    // The card and its control survive the empty chip — that empty space is
+    // where the serving-slot dropzone shows.
+    expect(gpuCard(local, 2).controls).toEqual(["agent"]);
   });
 
   it("surfaces an external process as its own placement", () => {
     const s = stateWith();
     s.world.externals = [{ pid: 4242, gpu: 2, bytes: 1_200_000_000 }];
     const [local] = buildNodes(s, {});
-    const agent = local.resources.find((r) => r.id === "agent")!;
-    const external = agent.placements.find((p) => p.kind === "external");
+    const external = gpuCard(local, 2).placements.find((p) => p.kind === "external");
     expect(external?.bytes).toBe(1_200_000_000);
     expect(external?.status).toBe("unmanaged");
   });
 
-  it("attributes a shared GPU's external to only the FIRST resource card on it, never both", () => {
-    // gguf-a and img both sit on GPU 3 — an external there must not render
-    // twice (once per co-located card), double-counting one fact.
+  it("attaches a shared GPU's external to that GPU's card exactly once", () => {
+    // Reworked from "attributes a shared GPU's external to only the FIRST
+    // resource card on it": gguf-a and img share GPU 3, and with one card
+    // per GPU there is no longer a set of co-located cards to double-count
+    // across — the first-card-claim bookkeeping is gone, and the external
+    // simply belongs to its GPU.
     const s = stateWith();
     s.world.externals = [{ pid: 99, gpu: 3, bytes: 2_000_000_000 }];
     const [local] = buildNodes(s, {});
-    const gguf = local.resources.find((r) => r.id === "gguf-a")!;
-    const img = local.resources.find((r) => r.id === "img")!;
-    const onGguf = gguf.placements.some((p) => p.kind === "external");
-    const onImg = img.placements.some((p) => p.kind === "external");
-    expect(onGguf).not.toBe(onImg); // exactly one of the two, never neither, never both
+    const externals = local.resources.flatMap((r) =>
+      r.placements.filter((p) => p.kind === "external").map((p) => [r.id, p.id]));
+    expect(externals).toEqual([["gpu3", "external/99"]]);
   });
 
   it("carries each tenant's policy onto its placement", () => {
@@ -268,9 +309,8 @@ describe("buildNodes", () => {
       footprint: 9_000_000_000, idle_s: 4,
     };
     const [local] = buildNodes(s, {});
-    const agent = local.resources.find((r) => r.id === "agent")!.placements[0];
-    const gguf = local.resources.find((r) => r.id === "gguf-a")!.placements
-      .find((p) => p.engine === "lemonade");
+    const agent = localChip(local, "agent")!;
+    const gguf = localChip(local, "gguf-a");
 
     expect(agent.pinned).toBe(true);
     expect(agent.priority).toBe(3);
@@ -281,19 +321,19 @@ describe("buildNodes", () => {
   it("marks hipfire busy when a turn is in flight, and not otherwise", () => {
     // Predicts the park refusal BEFORE the click: hipfire's single admission
     // slot is what makes park/apply 409 without force.
-    const idle = buildNodes(stateWith(), {})[0].resources.find((r) => r.id === "agent")!.placements[0];
+    const idle = localChip(buildNodes(stateWith(), {})[0], "agent")!;
     expect(idle.busy).toBe(false);
 
     const s = stateWith();
     s.world.tenants.agent = { ...s.world.tenants.agent, queue_depth: 2 };
-    const busy = buildNodes(s, {})[0].resources.find((r) => r.id === "agent")!.placements[0];
+    const busy = localChip(buildNodes(s, {})[0], "agent")!;
     expect(busy.busy).toBe(true);
   });
 
   it("treats a missing hipfire queue reading as not busy", () => {
     const s = stateWith();
     s.world.tenants.agent = { ...s.world.tenants.agent, queue_depth: null };
-    const placement = buildNodes(s, {})[0].resources.find((r) => r.id === "agent")!.placements[0];
+    const placement = localChip(buildNodes(s, {})[0], "agent")!;
     expect(placement.busy).toBe(false);
   });
 
@@ -301,9 +341,8 @@ describe("buildNodes", () => {
     const s = stateWith();
     s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 3, idle_s: 0 };
     const [local] = buildNodes(s, {});
-    const img = local.resources.find((r) => r.id === "img")!.placements
-      .find((p) => p.engine === "comfyui");
-    const agent = local.resources.find((r) => r.id === "agent")!.placements[0];
+    const img = localChip(local, "img");
+    const agent = localChip(local, "agent")!;
 
     expect(img?.queue).toBe(3);
     expect(img?.idleSeconds).toBe(0);
@@ -320,13 +359,11 @@ describe("buildNodes", () => {
     // chipVisibility.test.ts's job.
     const s = stateWith();
     s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 0, idle_s: 12 };
-    const zero = buildNodes(s, {})[0].resources.find((r) => r.id === "img")!.placements
-      .find((p) => p.engine === "comfyui");
+    const zero = localChip(buildNodes(s, {})[0], "img");
     expect(zero?.queue).toBe(0);
 
     s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: null, idle_s: null };
-    const unknown = buildNodes(s, {})[0].resources.find((r) => r.id === "img")!.placements
-      .find((p) => p.engine === "comfyui");
+    const unknown = localChip(buildNodes(s, {})[0], "img");
     expect(unknown?.queue).toBeNull();
   });
 
@@ -339,8 +376,7 @@ describe("buildNodes", () => {
     const s = stateWith();
     s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 3, idle_s: 12 };
     const [local] = buildNodes(s, {});
-    const img = local.resources.find((r) => r.id === "img")!.placements
-      .find((p) => p.engine === "comfyui");
+    const img = localChip(local, "img");
     expect(img?.name).toBe("img");
   });
 
@@ -357,8 +393,8 @@ describe("buildNodes", () => {
       footprint: 9_000_000_000, idle_s: 4,
     };
     const [local] = buildNodes(s, {});
-    const agent = local.resources.find((r) => r.id === "agent")!.placements[0];
-    const gguf = local.resources.find((r) => r.id === "gguf-a")!.placements[0];
+    const agent = localChip(local, "agent")!;
+    const gguf = localChip(local, "gguf-a")!;
     expect(agent.engineBadge).toBe("hipfire");
     expect(gguf.engineBadge).toBe("lemonade");
   });
@@ -376,7 +412,7 @@ describe("buildNodes", () => {
       },
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources.find((r) => r.id === "agent")!.placements[0].status).toBe("drifted");
+    expect(localChip(local, "agent")!.status).toBe("drifted");
   });
 
   it("carries settings drift onto a placement from the lifecycle view", () => {
@@ -402,7 +438,7 @@ describe("buildNodes", () => {
       },
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources.find((r) => r.id === "agent")!.placements[0].settingsDrift).toEqual(drift);
+    expect(localChip(local, "agent")!.settingsDrift).toEqual(drift);
   });
 
   it("leaves settingsDrift undefined when the lifecycle entry carries none", () => {
@@ -418,7 +454,7 @@ describe("buildNodes", () => {
       },
     };
     const [local] = buildNodes(s, {});
-    expect(local.resources.find((r) => r.id === "agent")!.placements[0].settingsDrift).toBeUndefined();
+    expect(localChip(local, "agent")!.settingsDrift).toBeUndefined();
   });
 });
 
@@ -516,9 +552,13 @@ describe("buildNodes — swap nodes", () => {
     // serving-slot resource when configured" test; a broken
     // `else if (endpointOk) status = "reachable"` must fail this suite.
     expect(a.status).toBe("reachable");
-    // Same for the resource shape — "slot0"/"Serving slot" was previously
-    // asserted directly rather than only implied by findPlacement's lookup.
-    expect(a.resources.map((r) => r.label)).toEqual(["Serving slot"]);
+    // Reworked: the slot is no longer a card of its own. A swap node renders
+    // one card per GPU it reports (boxa reports one), and the serving slot's
+    // chip and profile picker ride the FIRST of them — the sparky collapse
+    // this wave exists for. The placement ids below are unchanged by that.
+    expect(a.resources.map((r) => r.id)).toEqual(["gpu0"]);
+    expect(a.resources.map((r) => r.label)).toEqual(["GPU 0"]);
+    expect(a.resources[0].controls).toEqual(["spark"]);
     expect(a.resources[0].placements[0].id).toBe("boxa/slot0");
     expect(b.resources[0].placements[0].id).toBe("boxb/slot0");
     expect(a.resources[0].placements[0].name).toBe("heretic");
@@ -528,10 +568,20 @@ describe("buildNodes — swap nodes", () => {
     expect(b.resources[0].placements).toHaveLength(1);
   });
 
-  it("reports unknown capacity rather than zero", () => {
+  it("meters the swap node's own reported GPU, and reports unknown rather than zero when it reports none", () => {
+    // Reworked: the old serving-slot card had no meter at all ("Spark reports
+    // no VRAM figures to the deck"), because it was not a GPU card. It IS one
+    // now — the node-agent's own reading (MB -> bytes) — and the unknown case
+    // is the node that reported no GPUs at all.
     const s = stateWith({ nodes: [localEntry, boxaEntry] });
     const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
-    expect(boxa.resources[0].capacity).toBeNull();
+    expect(boxa.resources[0].capacity).toEqual({
+      used: 4096 * 1024 * 1024, total: 49152 * 1024 * 1024 });
+
+    const blind = stateWith({ nodes: [localEntry, { ...boxaEntry, gpus: null }] });
+    const dark = buildNodes(blind, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(dark.resources).toHaveLength(1);
+    expect(dark.resources[0].capacity).toBeNull();
   });
 
   it("control decides, data never does: a control:'none' entry never gets swap controls, even carrying serving data and a servingByNode entry", () => {
@@ -842,7 +892,8 @@ describe("findPlacement", () => {
     // which verbs (if any) that placement gets.
     const spot = findPlacement(nodes, "local/agent");
     expect(spot?.node.id).toBe("local");
-    expect(spot?.resource.id).toBe("agent");
+    // The card is the GPU's now — the placement id it is found by is not.
+    expect(spot?.resource.id).toBe("gpu2");
     expect(spot?.placement.name).toBe("Qwen3.6-35B-A3B-heretic-NVFP4");
     expect(spot?.resource.controls).toContain("agent");
   });
@@ -850,7 +901,7 @@ describe("findPlacement", () => {
   it("finds a swap node's slot on the remote node", () => {
     const spot = findPlacement(nodes, "boxa/slot0");
     expect(spot?.node.id).toBe("boxa");
-    expect(spot?.resource.id).toBe("slot0");
+    expect(spot?.resource.id).toBe("gpu0");
     expect(spot?.placement.name).toBe("heretic");
   });
 
@@ -963,13 +1014,15 @@ function zetaState(
 }
 
 describe("buildNodes — declared remote engines", () => {
-  it("gives a node-agent entry's declared engine its own card, named by the resource", () => {
+  it("puts a node-agent entry's declared engine on its GPU's card, chip and verbs together", () => {
+    // Reworked from "gives a declared engine its own card": the standalone
+    // engine card is what showed sparky a 110 GB meter belonging to the
+    // serving model. The engine's chip and its verbs ride the GPU card now.
     const zeta = buildNodes(zetaState(), {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
-    const card = zeta.resources.find((r) => r.id === "song-lab")!;
-    expect(card.label).toBe("song-lab");
-    // Capacity comes from the node's OWN gpu list (the one observedNode
-    // already meters), matched on the declared gpu_index and converted MB
-    // -> bytes exactly as the bare-GPU cards are.
+    const card = gpuCard(zeta, 4);
+    expect(card.label).toBe("GPU 4");
+    // Capacity comes from the node's OWN gpu list, matched on the declared
+    // gpu_index and converted MB -> bytes.
     expect(card.capacity).toEqual({
       used: 62_000 * 1024 * 1024, total: 122_880 * 1024 * 1024 });
     // The local-world control dispatch must NEVER fire for a remote card
@@ -977,27 +1030,33 @@ describe("buildNodes — declared remote engines", () => {
     // card, so a remote card reading `world.tenants[control]` would describe
     // the wrong machine).
     expect(card.controls).toEqual([]);
-    expect(card.remoteEngine).toEqual({
+    expect(card.remoteEngines).toEqual([{
       nodeId: "zeta", resource: "song-lab", kind: "sglang-omni", state: "idle",
       verbs: [{ verb: "load", disabled: true }, { verb: "unload", disabled: false }],
-    });
+    }]);
+    expect(card.placements.map((p) => p.id)).toEqual(["zeta/song-lab"]);
   });
 
-  it("the engine's card replaces its GPU's bare meter; a GPU with no engine keeps one", () => {
+  it("every reported GPU keeps its card; the engine's GPU is not claimed away", () => {
+    // Reworked from "the engine's card replaces its GPU's bare meter": GPU
+    // cards always show (design ruling 2), so GPU 4 keeps its own card AND
+    // carries the engine, instead of being suppressed in favour of one.
     const zeta = buildNodes(zetaState(), {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
-    expect(zeta.resources.map((r) => r.id)).toEqual(["gpu5", "song-lab"]);
+    expect(zeta.resources.map((r) => r.id)).toEqual(["gpu4", "gpu5"]);
+    expect(gpuCard(zeta, 5).remoteEngines).toEqual([]);
+    expect(gpuCard(zeta, 5).placements).toEqual([]);
   });
 
   it("reports unknown capacity rather than zero when the declared GPU is not in the node's list", () => {
     const s = zetaState({
       remoteTenants: { "zeta/song-lab": remoteTenant({ gpu_index: 9 }) },
     });
-    const card = buildNodes(s, {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
-    expect(card.capacity).toBeNull();
-    // ...and no GPU card is suppressed by a declaration that matches none.
-    expect(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!
-      .resources.map((r) => r.id)).toEqual(["gpu4", "gpu5", "song-lab"]);
+    const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
+    // The declared index still earns a card — an engine whose gpu_index the
+    // node never reported must not vanish with it.
+    expect(zeta.resources.map((r) => r.id)).toEqual(["gpu4", "gpu5", "gpu9"]);
+    expect(gpuCard(zeta, 9).capacity).toBeNull();
+    expect(gpuCard(zeta, 9).remoteEngines!.map((c) => c.resource)).toEqual(["song-lab"]);
   });
 
   it("renders the lifecycle's word, never a re-derived one", () => {
@@ -1005,8 +1064,7 @@ describe("buildNodes — declared remote engines", () => {
       const s = zetaState({
         lifecycle: { "zeta/song-lab": lifecycleEntry({ status }) },
       });
-      const card = buildNodes(s, {}, OMNI_KINDS)
-        .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+      const card = gpuCard(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
       expect(card.placements[0].status).toBe(status);
     }
   });
@@ -1027,30 +1085,37 @@ describe("buildNodes — declared remote engines", () => {
       remoteTenants: { "zeta/song-lab": remoteTenant({ state }) },
       lifecycle: {},
     });
-    const card = buildNodes(s, {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
     expect(card.placements[0].status).toBe(expected);
     // The engine's own word is untouched by that fallback — it is a
     // different vocabulary, carried for the verbs beside the chip.
-    expect(card.remoteEngine!.state).toBe(state);
+    expect(card.remoteEngines![0].state).toBe(state);
   });
 
   it.each(["down", "unknown"] as const)(
-    "with an empty lifecycle view, a non-resident %s engine renders no card at all",
+    "with an empty lifecycle view, a non-resident %s engine loses its CHIP, not its GPU card",
     (state) => {
-      // Task 2 ruling: with no intent store, "down"/"unknown" derive to
-      // idle/unreachable (noIntentStatus) — neither is in the
-      // ALWAYS_VISIBLE failure set, and the engine itself is not resident,
-      // so the whole card disappears (the interim filter in
-      // `remoteEngineResources` drops the tenant entirely, not just its
-      // chip). This used to assert the derived status; there is nothing
-      // left on the board to read it off.
+      // Reworked twice: Task 2's interim filter dropped the whole card (a
+      // GPU meter disappearing with an idle engine). Now the visibility rule
+      // is applied exactly once, per CHIP: the GPU card and its meter stay,
+      // the chip and its verbs go, and the engine moves to the node's
+      // hiddenEngines — the header menu's source, so it can still be loaded.
       const s = zetaState({
         remoteTenants: { "zeta/song-lab": remoteTenant({ state }) },
         lifecycle: {},
       });
       const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
-      expect(zeta.resources.find((r) => r.id === "song-lab")).toBeUndefined();
+      expect(zeta.resources.map((r) => r.id)).toEqual(["gpu4", "gpu5"]);
+      expect(gpuCard(zeta, 4).capacity).toEqual({
+        used: 62_000 * 1024 * 1024, total: 122_880 * 1024 * 1024 });
+      expect(gpuCard(zeta, 4).placements).toEqual([]);
+      expect(gpuCard(zeta, 4).remoteEngines).toEqual([]);
+      expect(zeta.hiddenEngines).toEqual([{
+        nodeId: "zeta", resource: "song-lab", kind: "sglang-omni", state,
+        verbs: remoteEngineVerbs(OMNI_KINDS, "sglang-omni", state, false),
+      }]);
+      // The point of listing it: load is offerable on a reachable node.
+      expect(zeta.hiddenEngines![0].verbs.find((v) => v.verb === "load")!.disabled).toBe(false);
     },
   );
 
@@ -1064,15 +1129,14 @@ describe("buildNodes — declared remote engines", () => {
       },
       lifecycle: { "zeta/song-lab": lifecycleEntry({ status: "quarantined" }) },
     });
-    const card = buildNodes(s, {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
     expect(card.placements).toHaveLength(1);
     expect(card.placements[0].status).toBe("quarantined");
     expect(card.placements[0].name).toBe("song-lab");
     expect(card.placements[0].kind).toBe("engine");
     // No idle reading at all on this record — absent, never a fabricated 0.
     expect(card.placements[0].idleSeconds).toBeNull();
-    expect(card.remoteEngine!.verbs).toEqual([
+    expect(card.remoteEngines![0].verbs).toEqual([
       { verb: "load", disabled: false }, { verb: "unload", disabled: true },
     ]);
   });
@@ -1089,7 +1153,9 @@ describe("buildNodes — declared remote engines", () => {
       lifecycle: { "zeta/song-lab": lifecycleEntry({ status: "parked" }) },
     });
     const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
-    expect(zeta.resources.find((r) => r.id === "song-lab")).toBeUndefined();
+    expect(gpuCard(zeta, 4).placements).toEqual([]);
+    expect(gpuCard(zeta, 4).remoteEngines).toEqual([]);
+    expect(zeta.hiddenEngines!.map((c) => c.resource)).toEqual(["song-lab"]);
   });
 
   it("an unavailable busy indicator reads BUSY, exactly as the backend already read it", () => {
@@ -1103,9 +1169,8 @@ describe("buildNodes — declared remote engines", () => {
         "zeta/song-lab": remoteTenant({ state: "busy", busy_requests: null }),
       },
     });
-    const card = buildNodes(s, {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
-    expect(card.remoteEngine!.state).toBe("busy");
+    const card = gpuCard(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
+    expect(card.remoteEngines![0].state).toBe("busy");
     // Neither chip fact is borrowed from a kind that means something else by
     // it: `busy` carries hipfire's park-refusal copy (labels.inUseTitle) and
     // this kind has no queue concept at all. Absent renders nothing.
@@ -1114,8 +1179,7 @@ describe("buildNodes — declared remote engines", () => {
   });
 
   it("badges the kind: a remote card has no 'usual engine' for it to be unremarkable against", () => {
-    const card = buildNodes(zetaState(), {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(buildNodes(zetaState(), {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
     expect(card.placements[0].engine).toBe("sglang-omni");
     expect(card.placements[0].engineBadge).toBe("sglang-omni");
   });
@@ -1127,8 +1191,7 @@ describe("buildNodes — declared remote engines", () => {
     const s = zetaState({
       policy: { ...DEFAULT_POLICY, "song-lab": { priority: 7, pinned: true, idle_ttl: 600 } },
     });
-    const card = buildNodes(s, {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
     expect(card.placements[0].pinned).toBe(true);
     expect(card.placements[0].priority).toBe(7);
     expect(card.placements[0].idleSeconds).toBe(42);
@@ -1139,26 +1202,24 @@ describe("buildNodes — declared remote engines", () => {
     // is missing — the poll that reads policy.json a moment before the
     // declaration lands. An absent row must not blank the board.
     const s = zetaState({ policy: { ...DEFAULT_POLICY } });
-    const card = buildNodes(s, {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
     expect(card.placements[0].pinned).toBeUndefined();
     expect(card.placements[0].priority).toBeUndefined();
   });
 
-  it("an unreachable node keeps its engine card, marks it stale, and withholds every verb", () => {
+  it("an unreachable node keeps its engine chip, marks it stale, and withholds every verb", () => {
     const s = zetaState({ nodes: [localEntry, { ...zetaEntry, status: "offline" }] });
     const zeta = buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!;
-    const card = zeta.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(zeta, 4);
     expect(zeta.status).toBe("unreachable");
     expect(card.placements[0].stale).toBe(true);
-    expect(card.remoteEngine!.verbs.every((v) => v.disabled)).toBe(true);
+    expect(card.remoteEngines![0].verbs.every((v) => v.disabled)).toBe(true);
   });
 
   it("renders the card with no verbs at all until the kinds catalog lands", () => {
-    const card = buildNodes(zetaState(), {}, null)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(buildNodes(zetaState(), {}, null).find((n) => n.id === "zeta")!, 4);
     expect(card.placements).toHaveLength(1);
-    expect(card.remoteEngine!.verbs).toEqual([]);
+    expect(card.remoteEngines![0].verbs).toEqual([]);
   });
 
   it("never carries settings drift on a remote engine placement", () => {
@@ -1173,8 +1234,7 @@ describe("buildNodes — declared remote engines", () => {
         }),
       },
     });
-    const card = buildNodes(s, {}, OMNI_KINDS)
-      .find((n) => n.id === "zeta")!.resources.find((r) => r.id === "song-lab")!;
+    const card = gpuCard(buildNodes(s, {}, OMNI_KINDS).find((n) => n.id === "zeta")!, 4);
     expect(card.placements[0].settingsDrift).toBeUndefined();
   });
 
@@ -1187,18 +1247,20 @@ describe("buildNodes — declared remote engines", () => {
       },
     });
     const nodes = buildNodes(s, {}, OMNI_KINDS);
-    expect(nodes.find((n) => n.id === "zeta")!.resources.map((r) => r.id))
-      .toEqual(["gpu5", "song-lab"]);
-    expect(nodes.find((n) => n.id === "hera")!.resources.map((r) => r.id))
-      .toEqual(["mixdown"]);
+    const zeta = nodes.find((n) => n.id === "zeta")!;
+    const hera = nodes.find((n) => n.id === "hera")!;
+    expect(gpuCard(zeta, 4).remoteEngines!.map((c) => c.resource)).toEqual(["song-lab"]);
+    expect(gpuCard(zeta, 5).remoteEngines).toEqual([]);
+    // hera reports one GPU (index 0) and declares mixdown on it.
+    expect(hera.resources.map((r) => r.id)).toEqual(["gpu0"]);
+    expect(gpuCard(hera, 0).remoteEngines!.map((c) => c.resource)).toEqual(["mixdown"]);
   });
 
-  it("a swap node's declared engines join its serving slot, which is untouched", () => {
-    // The one live topology: the box that swaps vLLM profiles is also the
-    // box an sglang-omni engine gets declared on, and buildNodes routes a
-    // control:"swap" entry down the swap path — so the engine cards have to
-    // be built there too or the feature is invisible on the only node that
-    // uses it.
+  it("a swap node's slot and its declared engines share ONE card — the sparky collapse", () => {
+    // The one live topology, and the defect that started this wave: sparky
+    // rendered the serving slot and a standalone omni card whose meter showed
+    // the SERVING model's 110 GB. One GB10, one card: the slot's chip and
+    // profile picker, the engine's chip and verbs, one meter.
     const s = stateWith({
       nodes: [localEntry, boxaEntry],
       remoteTenants: {
@@ -1207,11 +1269,12 @@ describe("buildNodes — declared remote engines", () => {
     });
     const boxa = buildNodes(s, { boxa: sparkStatus() }, OMNI_KINDS)
       .find((n) => n.id === "boxa")!;
-    expect(boxa.resources.map((r) => r.id)).toEqual(["slot0", "song-lab"]);
-    expect(boxa.resources[0].controls).toEqual(["spark"]);
-    expect(boxa.resources[0].placements[0].id).toBe("boxa/slot0");
-    const card = boxa.resources[1];
-    expect(card.remoteEngine!.nodeId).toBe("boxa");
+    expect(boxa.resources.map((r) => r.id)).toEqual(["gpu0"]);
+    const card = boxa.resources[0];
+    expect(card.controls).toEqual(["spark"]);
+    // Slot chip first, then the engines declared on that GPU.
+    expect(card.placements.map((p) => p.id)).toEqual(["boxa/slot0", "boxa/song-lab"]);
+    expect(card.remoteEngines![0].nodeId).toBe("boxa");
     // The swap node's own GPU list is the meter source here too.
     expect(card.capacity).toEqual({ used: 4096 * 1024 * 1024, total: 49152 * 1024 * 1024 });
   });
@@ -1225,14 +1288,263 @@ describe("buildNodes — declared remote engines", () => {
     expect(zeta.resources.map((r) => r.id)).toEqual(["gpu4", "gpu5"]);
     expect(zeta.resources.every((r) => r.controls.length === 0)).toBe(true);
     expect(zeta.resources.every((r) => r.placements.length === 0)).toBe(true);
-    expect(zeta.resources.every((r) => r.remoteEngine === undefined)).toBe(true);
+    expect(zeta.resources.every((r) => r.remoteEngines!.length === 0)).toBe(true);
+    expect(zeta.hiddenEngines).toEqual([]);
   });
 
   it("the placement id is the lifecycle key, so the detail drawer can re-derive it", () => {
     const nodes = buildNodes(zetaState(), {}, OMNI_KINDS);
     const spot = findPlacement(nodes, "zeta/song-lab")!;
     expect(spot.node.id).toBe("zeta");
-    expect(spot.resource.id).toBe("song-lab");
+    expect(spot.resource.id).toBe("gpu4");
     expect(spot.placement.name).toBe("song-lab");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-GPU telemetry (this wave) — `nodes[].gpus`, the ONE telemetry shape
+// every node speaks: a node-agent entry's own probe (node-agent/models.py:23-31)
+// for a remote box, app/telemetry.py's pass-through of dashboard-api's
+// IndividualGPU rows (dashboard-api/models.py:129-143) for the local one,
+// attached to the LOCAL entry by app/routers/status.py's _nodes_block.
+// ---------------------------------------------------------------------------
+
+// Deliberately NOT the same numbers as DEFAULT_GPUS' bytes: capacity stays
+// world.gpus' fact and stats stay telemetry's, and a fixture where the two
+// agreed could not tell one being read for the other ([[defaults-that-hide-bugs]]).
+const localTelemetryEntry: DeckNodeEntry = {
+  ...localEntry,
+  gpus: [
+    { index: 2, name: "AMD Radeon AI PRO R9700", memory_used_mb: 21_000,
+      memory_total_mb: 32_624, memory_percent: 64.4, utilization_percent: 97,
+      temperature_c: 71, power_w: 214.5, uuid: "gpu-uuid-2" },
+    { index: 3, name: "AMD Radeon AI PRO R9700", memory_used_mb: 190,
+      memory_total_mb: 32_624, memory_percent: 0.6, utilization_percent: 0,
+      temperature_c: 29, power_w: null, uuid: "gpu-uuid-3" },
+  ],
+};
+
+describe("buildNodes — GPU telemetry on local cards", () => {
+  it("maps the LOCAL registry entry's telemetry onto each GPU card", () => {
+    const [local] = buildNodes(stateWith({ nodes: [localTelemetryEntry, heraEntry] }), {});
+    expect(gpuCard(local, 2).stats).toEqual({
+      name: "AMD Radeon AI PRO R9700",
+      utilizationPercent: 97,
+      temperatureC: 71,
+      powerW: 214.5,
+    });
+    // Absent, never zero: dashboard-api's own power_w is Optional
+    // (dashboard-api/models.py:138), and "0.0W" would be a reading it never took.
+    expect(gpuCard(local, 3).stats!.powerW).toBeNull();
+    // Capacity is still world.gpus' bytes — telemetry is display garnish and
+    // never the meter's source.
+    expect(gpuCard(local, 2).capacity).toEqual({
+      used: 22_100_000_000, total: 34_000_000_000 });
+  });
+
+  it("leaves stats absent when the local entry reports no telemetry at all", () => {
+    // The dashboard-api-unreachable case: `gpus: null` for local exactly as
+    // for a dark remote. The meter still reads, the stats block renders none.
+    const [local] = buildNodes(stateWith({ nodes: [localEntry] }), {});
+    expect(gpuCard(local, 2).stats).toBeUndefined();
+    expect(gpuCard(local, 2).capacity).toEqual({
+      used: 22_100_000_000, total: 34_000_000_000 });
+  });
+
+  it("leaves stats absent when the payload carries no nodes block at all", () => {
+    // Every pre-registry fixture and every deck polled before the block
+    // landed: absence is representable, and it is not an error.
+    const [local] = buildNodes(stateWith(), {});
+    expect(local.resources.every((r) => r.stats === undefined)).toBe(true);
+  });
+
+  it("leaves stats absent for a GPU the telemetry does not cover", () => {
+    const partial = { ...localTelemetryEntry, gpus: [localTelemetryEntry.gpus![0]] };
+    const [local] = buildNodes(stateWith({ nodes: [partial] }), {});
+    expect(gpuCard(local, 2).stats!.utilizationPercent).toBe(97);
+    expect(gpuCard(local, 3).stats).toBeUndefined();
+  });
+
+  it("reads a remote node's telemetry off its own entry, temperature and power included", () => {
+    const hot: DeckNodeEntry = {
+      ...zetaEntry,
+      gpus: [
+        { index: 4, name: "GB10", memory_used_mb: 62_000, memory_total_mb: 122_880,
+          utilization_percent: 41, temperature_c: 63, power_w: 88.25 },
+        // A node-agent that reports neither reading (the fields are optional
+        // on the wire) must render "—", not a fabricated 0.
+        { index: 5, name: "GB10", memory_used_mb: 1_024, memory_total_mb: 122_880,
+          utilization_percent: 0 },
+      ],
+    };
+    const zeta = buildNodes(stateWith({ nodes: [localEntry, hot] }), {}).find((n) => n.id === "zeta")!;
+    expect(gpuCard(zeta, 4).stats).toEqual({
+      name: "GB10", utilizationPercent: 41, temperatureC: 63, powerW: 88.25 });
+    expect(gpuCard(zeta, 5).stats).toEqual({
+      name: "GB10", utilizationPercent: 0, temperatureC: null, powerW: null });
+  });
+
+  it("carries a swap node's telemetry onto the card its serving slot rides", () => {
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(boxa.resources[0].stats).toEqual({
+      name: "RTX 6000", utilizationPercent: 10, temperatureC: null, powerW: null });
+  });
+});
+
+describe("buildNodes — local per-GPU card composition", () => {
+  it("puts each declared resource's chip on the card for the GPU it runs on", () => {
+    // The wave's load-bearing local case: 2 GPUs, 3 resources, one of them
+    // co-resident. A loaded hipfire chip on its own GPU; on the shared one an
+    // unloaded lemonade (control, no chip) beside an idle comfyui (also no
+    // chip — Task 2's ruling), so the card is a meter with two control rows.
+    const [local] = buildNodes(stateWith({ nodes: [localTelemetryEntry] }), {});
+    expect(local.resources.map((r) => r.id)).toEqual(["gpu2", "gpu3"]);
+    expect(gpuCard(local, 2).placements.map((p) => p.id)).toEqual(["local/agent"]);
+    expect(gpuCard(local, 3).controls).toEqual(["gguf-a", "img"]);
+    expect(gpuCard(local, 3).placements).toEqual([]);
+  });
+
+  it("puts two visible co-resident chips on the one card, in board order", () => {
+    const s = stateWith();
+    s.world.tenants["gguf-a"] = {
+      engine: "lemonade", gpu_index: 3, state: "loaded", model: "qwen.gguf",
+      footprint: 9_000_000_000, idle_s: 4,
+    };
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 2, idle_s: 0 };
+    const [local] = buildNodes(s, {});
+    expect(gpuCard(local, 3).placements.map((p) => p.id))
+      .toEqual(["local/gguf-a", "local/img"]);
+  });
+
+  it("never carries remoteEngines on a local card — nothing remote is declared there", () => {
+    const [local] = buildNodes(stateWith(), {});
+    expect(local.resources.every((r) => r.remoteEngines === undefined)).toBe(true);
+    expect(local.hiddenEngines).toBeUndefined();
+  });
+});
+
+describe("controlHasPlacement", () => {
+  it("answers per CONTROL where the card-level question cannot: one GPU, two resources", () => {
+    // A shared GPU card carries both controls. `resourceHasOwnPlacement` (the
+    // card-level question the drawer still asks) says "something is on this
+    // card"; PlacementActions needs "does THIS control have a chip", or the
+    // unloaded neighbour's control row stops naming itself.
+    const s = stateWith();
+    s.world.tenants.img = { engine: "comfyui", gpu_index: 3, state: "busy", queue: 1, idle_s: 0 };
+    const [local] = buildNodes(s, {});
+    const shared = gpuCard(local, 3);
+    expect(shared.controls).toEqual(["gguf-a", "img"]);
+    expect(controlHasPlacement(shared, "gguf-a")).toBe(false); // unloaded: no chip
+    expect(controlHasPlacement(shared, "img")).toBe(true);     // busy: a chip
+  });
+
+  it("ignores an external process sharing the same card", () => {
+    // An external pid's placement is `external/<pid>`, never `local/<control>`,
+    // so it can never be mistaken for a control's own chip.
+    const s = stateWith();
+    s.world.externals = [{ pid: 99, gpu: 3, bytes: 2_000_000_000 }];
+    const [local] = buildNodes(s, {});
+    expect(controlHasPlacement(gpuCard(local, 3), "gguf-a")).toBe(false);
+  });
+
+  it("is false for a control that is not on the card at all", () => {
+    const [local] = buildNodes(stateWith(), {});
+    expect(controlHasPlacement(gpuCard(local, 2), "gguf-a")).toBe(false);
+  });
+});
+
+describe("buildNodes — swap node per-GPU composition", () => {
+  const withOmni = (overrides: Partial<RemoteTenant> = {}) => stateWith({
+    nodes: [localEntry, boxaEntry],
+    remoteTenants: {
+      "boxa/song-lab": remoteTenant({ node_id: "boxa", gpu_index: 0, ...overrides }),
+    },
+  });
+
+  it("hides a non-resident engine's chip while keeping the slot's card intact", () => {
+    // The live sparky case this wave fixes: omni declared, nothing loaded on
+    // it, Nemotron serving. One card, one meter, the serving chip — and omni
+    // in hiddenEngines so the header menu can still load it.
+    const boxa = buildNodes(
+      withOmni({ state: "down", busy_requests: null, idle_s: null }),
+      { boxa: sparkStatus() }, OMNI_KINDS,
+    ).find((n) => n.id === "boxa")!;
+    const card = boxa.resources[0];
+    expect(boxa.resources.map((r) => r.id)).toEqual(["gpu0"]);
+    expect(card.placements.map((p) => p.id)).toEqual(["boxa/slot0"]);
+    expect(card.remoteEngines).toEqual([]);
+    expect(card.controls).toEqual(["spark"]);
+    expect(boxa.hiddenEngines).toEqual([{
+      nodeId: "boxa", resource: "song-lab", kind: "sglang-omni", state: "down",
+      verbs: [{ verb: "load", disabled: false }, { verb: "unload", disabled: true }],
+    }]);
+  });
+
+  it("withholds a hidden engine's verbs while the node is dark, and still lists it", () => {
+    // Task 5's menu renders from this list on an unreachable node too: the
+    // engine is still declared, and the disabled-ness travels with the verb
+    // rather than being re-decided at the menu.
+    const s = withOmni({ state: "unknown" });
+    s.lifecycle = {
+      "boxa/slot0": lifecycleEntry({
+        status: "unreachable",
+        observed: { reachable: false, loaded: false, model: null, transitioning: false },
+      }),
+    };
+    const boxa = buildNodes(s, { boxa: sparkStatus() }, OMNI_KINDS).find((n) => n.id === "boxa")!;
+    expect(boxa.status).toBe("unreachable");
+    expect(boxa.hiddenEngines!.map((c) => c.resource)).toEqual(["song-lab"]);
+    expect(boxa.hiddenEngines![0].verbs.every((v) => v.disabled)).toBe(true);
+  });
+
+  it("falls back to ONE card, capacity unknown, when the node reports no GPUs — slot and engines intact", () => {
+    const s = withOmni();
+    s.nodes = [localEntry, { ...boxaEntry, gpus: null }];
+    const boxa = buildNodes(s, { boxa: sparkStatus() }, OMNI_KINDS).find((n) => n.id === "boxa")!;
+    expect(boxa.resources).toHaveLength(1);
+    expect(boxa.resources[0].capacity).toBeNull();
+    expect(boxa.resources[0].stats).toBeUndefined();
+    expect(boxa.resources[0].controls).toEqual(["spark"]);
+    expect(boxa.resources[0].placements.map((p) => p.id))
+      .toEqual(["boxa/slot0", "boxa/song-lab"]);
+    expect(boxa.resources[0].remoteEngines!.map((c) => c.resource)).toEqual(["song-lab"]);
+  });
+
+  it("keeps the serving slot's card even when the node reports neither GPUs nor engines", () => {
+    // Nothing to name a GPU card after, and the profile picker still has to
+    // render: the slot keeps its own card, exactly as before this wave.
+    const s = stateWith({ nodes: [localEntry, { ...boxaEntry, gpus: null }] });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(boxa.resources.map((r) => r.id)).toEqual(["slot0"]);
+    expect(boxa.resources[0].label).toBe("Serving slot");
+    expect(boxa.resources[0].controls).toEqual(["spark"]);
+    expect(boxa.resources[0].placements[0].id).toBe("boxa/slot0");
+  });
+
+  it("puts the slot on the node's FIRST GPU card and engines on their own", () => {
+    // A two-GPU swap node: spark reports no gpu_index for the slot, so it
+    // rides the first card by convention; the engine rides its declared one.
+    const twoGpu: DeckNodeEntry = {
+      ...boxaEntry,
+      gpus: [
+        { index: 0, name: "RTX 6000", memory_used_mb: 4096, memory_total_mb: 49152,
+          utilization_percent: 10 },
+        { index: 1, name: "RTX 6000", memory_used_mb: 8192, memory_total_mb: 49152,
+          utilization_percent: 20 },
+      ],
+    };
+    const s = stateWith({
+      nodes: [localEntry, twoGpu],
+      remoteTenants: {
+        "boxa/song-lab": remoteTenant({ node_id: "boxa", gpu_index: 1 }),
+      },
+    });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }, OMNI_KINDS).find((n) => n.id === "boxa")!;
+    expect(boxa.resources.map((r) => r.id)).toEqual(["gpu0", "gpu1"]);
+    expect(gpuCard(boxa, 0).controls).toEqual(["spark"]);
+    expect(gpuCard(boxa, 0).placements.map((p) => p.id)).toEqual(["boxa/slot0"]);
+    expect(gpuCard(boxa, 1).controls).toEqual([]);
+    expect(gpuCard(boxa, 1).placements.map((p) => p.id)).toEqual(["boxa/song-lab"]);
   });
 });

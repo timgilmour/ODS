@@ -130,17 +130,16 @@ export default function ResourcePanel({
         ))
       )}
 
-      {/* A DECLARED REMOTE engine's controls (Task 10b). Outside the `stale`
-          gate below on purpose: an unreachable node's engine card keeps
-          showing what it last knew AND the engine's own state word, while
+      {/* The DECLARED REMOTE engines whose chips ride this GPU card (Task
+          10b) — several, since one GPU can carry more than one. Outside the
+          `stale` gate below on purpose: an unreachable node's card keeps
+          showing what it last knew AND each engine's own state word, while
           every verb arrives already disabled — nodes.ts folds staleness into
           the verb list itself (model/engineVerbs.ts), so the disabled-ness
-          travels with the button rather than being re-decided here.
-          `remoteEngine` and a non-empty `controls` are mutually exclusive by
-          construction (nodes.ts). */}
-      {resource.remoteEngine && (
-        <RemoteEngineActions control={resource.remoteEngine} onRefresh={onRefresh} />
-      )}
+          travels with the button rather than being re-decided here. */}
+      {resource.remoteEngines?.map((control) => (
+        <RemoteEngineActions key={control.resource} control={control} onRefresh={onRefresh} />
+      ))}
 
       {!stale &&
         resource.controls.map((control) =>
@@ -149,10 +148,10 @@ export default function ResourcePanel({
               <SparkSwap key={control} nodeId={nodeId} spark={spark} onChanged={onRefresh} />
             )
           ) : (
-            // Any non-spark control is a local resource's own name (E1:
-            // nodes.ts's DeckResource.controls carries exactly `[resource]`
-            // for a declared local resource — never an unrecognized
-            // string), so no narrowing guard is needed here anymore.
+            // Any non-spark control is a local resource's own name
+            // (nodes.ts's DeckResource.controls carries the resources
+            // DECLARED on this GPU — never an unrecognized string), so no
+            // narrowing guard is needed here anymore.
             <PlacementActions
               key={control}
               resource={control}

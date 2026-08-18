@@ -191,13 +191,29 @@ export interface NodeIdentity {
 export type NodeAgentStatus = "online" | "offline" | "error" | "unconfigured" | null;
 
 /** node-agent IndividualGPU (node-agent/models.py:23-31), the fields the
- * board renders. Extra fields arrive and are ignored. */
+ * board renders. Extra fields arrive and are ignored.
+ *
+ * ONE shape for every node's telemetry: a node-agent entry's `gpus` come
+ * from that box's own probe, and the LOCAL entry's from `app/telemetry.py`'s
+ * pass-through of dashboard-api's identically-named `IndividualGPU` rows
+ * (dashboard-api/models.py:129-143, allowed keys at app/telemetry.py's
+ * `_ALLOWED`) — attached by `app/routers/status.py`'s `_nodes_block`.
+ *
+ * The four fields below are OPTIONAL because a producer may legitimately
+ * send none of them: `power_w` is `Optional[float]` in BOTH models
+ * (dashboard-api/models.py:138, node-agent/models.py:32), and an older
+ * node-agent predates the block entirely. Absent means "no reading", which
+ * the board renders as "—" — never a fabricated 0. */
 export interface NodeGpu {
   index: number;
   name: string;
   memory_used_mb: number;
   memory_total_mb: number;
   utilization_percent: number;
+  temperature_c?: number | null;
+  power_w?: number | null;
+  memory_percent?: number | null;
+  uuid?: string;
 }
 
 /** app/routers/status.py's `_nodes_block` — one entry per registered node,

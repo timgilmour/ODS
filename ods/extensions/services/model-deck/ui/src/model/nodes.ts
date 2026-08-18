@@ -1,12 +1,15 @@
 /**
  * The board's data model — and the seam this whole redesign hangs off.
  *
- * Everything the board renders is a `DeckNode[]`. The local box is one GPU
- * set plus whatever engines are DECLARED on it (E1: zero, three, or five —
- * spec §5) — one card per declared resource, never a fixed lemonade/comfyui/
- * hipfire triple — plus a special-cased spark. When a real node registry
- * lands, THIS FILE should be the only one that changes. If a registry change
- * forces edits in components, the seam was drawn in the wrong place.
+ * Everything the board renders is a `DeckNode[]`. A node is its GPUs: ONE
+ * card per GPU (2026-08-18 ruling — "GPU cards ALWAYS show, even empty; they
+ * are the telemetry surface"), carrying that GPU's meter and stats plus
+ * whatever is DECLARED on it — the local box's resources (E1: zero, three or
+ * five, spec §5), a swap node's serving slot, a remote node's declared
+ * engines. The card is the GPU; the declarations ride it. When a real node
+ * registry lands, THIS FILE should be the only one that changes. If a
+ * registry change forces edits in components, the seam was drawn in the
+ * wrong place.
  *
  * Pure: no React, no fetch, no clock. Everything is a function of its inputs.
  *
@@ -25,12 +28,14 @@
  * not a per-component guard.
  *
  * Task 10b is the first surface to need that fix, and takes it as
- * prescribed: a DECLARED REMOTE engine's card carries `remoteEngine`
- * (`RemoteEngineControl` below) — its own node id, its own resource name and
- * its own verbs, decided here — and leaves `controls` EMPTY, so the
- * local-world dispatch in ResourcePanel/ModelDetailDrawer can never fire for
- * it. The landmine stays dormant: no remote card reads `world`, `models` or
- * `coldGgufs` for anything.
+ * prescribed: a DECLARED REMOTE engine rides its GPU card as a
+ * `RemoteEngineControl` (`DeckResource.remoteEngines` below) — its own node
+ * id, its own resource name and its own verbs, decided here — and never as a
+ * TENANT control, so the local-world dispatch in ResourcePanel/
+ * ModelDetailDrawer can never fire for it. A remote card's `controls` hold
+ * at most `SPARK_CONTROL`, which is dispatched separately. The landmine
+ * stays dormant: no remote card reads `world`, `models` or `coldGgufs` for
+ * anything.
  */
 
 import type {
@@ -152,28 +157,60 @@ export interface RemoteEngineControl {
   verbs: EngineVerb[];
 }
 
+/** A GPU's live readings, as the GPU Monitor format shows them (design §D):
+ * hardware name, utilization, temperature, power. DISPLAY GARNISH — the
+ * meter's `capacity` stays the authoritative memory fact (backend-observed
+ * bytes), and nothing here is ever an actuation input.
+ *
+ * Every field is `number | null` rather than optional: the board renders
+ * exactly one thing for "no reading" ("—", GPUCard.jsx's own unavailable
+ * pattern), so folding absent and null together HERE means no component has
+ * to check two of them. `null` is a reading the producer did not take; the
+ * whole object being absent means the node reported no telemetry at all. */
+export interface GpuStats {
+  name: string | null;
+  utilizationPercent: number | null;
+  temperatureC: number | null;
+  powerW: number | null;
+}
+
+/** One GPU's card — the board's unit since the 2026-08-18 per-GPU ruling.
+ * Named `DeckResource` still because a card is what a placement lands ON;
+ * what changed is that the thing is a GPU rather than a declared resource. */
 export interface DeckResource {
+  /** `gpu<index>` for a GPU card (`slot0` only for a swap node that reported
+   * no GPUs at all — see `buildSwapNode`). React key, never a lifecycle key:
+   * PLACEMENT ids are what the lifecycle view, the drawer and drift
+   * targeting join on, and those are unchanged by the per-GPU regroup. */
   id: string;
   label: string;
   /** null means "capacity is unknown", which renders as a hatched track —
    * distinct from a real zero. An unreachable node reports null, never 0. */
   capacity: { used: number; total: number } | null;
+  /** This GPU's telemetry, when its node reported any. Absent means none
+   * arrived (dashboard-api down for the local box, an older node-agent, a
+   * test fixture with no `nodes` block) — so `resource.stats &&` is a
+   * complete check at every call site. */
+  stats?: GpuStats;
   placements: Placement[];
-  /** Which control surfaces belong to this resource. For a local resource
-   * this is `[resource]` (its own declared name — dispatched through Task
-   * 7's generic `/api/tenants/{resource}/{verb}` route); for a swap node's
-   * slot it is `[SPARK_CONTROL]`; observe-only cards carry none. This
-   * exists because an EMPTY resource still needs its verbs: a load-verb
-   * kind's Load dropdown has to render on a resource with nothing loaded,
-   * and there is no placement to hang it off. Keeping it here rather than
-   * letting components re-derive it is what keeps node-specific knowledge
-   * inside this file. */
+  /** Which control surfaces belong to this card. For a local GPU card these
+   * are the resources DECLARED on that GPU, in board order (`sortedResource
+   * Entries`) — dispatched through Task 7's generic
+   * `/api/tenants/{resource}/{verb}` route; ONE card can carry several now
+   * (two resources sharing a GPU), which is what `controlHasPlacement`
+   * exists to ask per-control. A swap node's first card carries
+   * `[SPARK_CONTROL]`; observe-only cards carry none. This exists because an
+   * EMPTY resource still needs its verbs: a load-verb kind's Load dropdown
+   * has to render with nothing loaded, and there is no placement to hang it
+   * off. Keeping it here rather than letting components re-derive it is what
+   * keeps node-specific knowledge inside this file. */
   controls: string[];
-  /** Set on (and only on) a DECLARED REMOTE engine's card — see
-   * `RemoteEngineControl`. Absent everywhere else, so
-   * `resource.remoteEngine &&` is a complete check at every call site, and
-   * mutually exclusive with a non-empty `controls` by construction. */
-  remoteEngine?: RemoteEngineControl;
+  /** The DECLARED REMOTE engines whose chips ride this GPU card — see
+   * `RemoteEngineControl`. Present (possibly empty) on every card built for
+   * a registry node-agent entry, absent on the local box's cards, where
+   * nothing remote is ever declared. Only engines whose chip is VISIBLE
+   * appear; the rest are the node's `hiddenEngines`. */
+  remoteEngines?: RemoteEngineControl[];
 }
 
 export interface DeckNode {
@@ -191,6 +228,15 @@ export interface DeckNode {
   /** The model the node reports serving, when the deck holds no placement
    * for it — observe-only cards; placement-bearing nodes leave it unset. */
   servingLine?: string;
+  /** The engines DECLARED on this node whose chip the visibility rule hides
+   * (nothing loaded, no failure to show) — everything the board would
+   * otherwise render nowhere at all, which is how a declared-but-unloaded
+   * engine became unloadable. Present (possibly empty) on every node built
+   * from a registry node-agent entry; absent on the local node, which
+   * declares nothing remote. Task 5's node-header "Load engine…" menu is
+   * the surface: the verbs travel with the entry, already disabled when the
+   * node is dark. */
+  hiddenEngines?: RemoteEngineControl[];
 }
 
 /** The control surface every swap node's serving slot exposes — the value
@@ -226,7 +272,7 @@ function driftOf(lifecycle: LifecycleMap, key: string): SettingsDrift | undefine
  * where the "serving slot" dropzone shows.
  *
  * Branches on `tenant.engine` (the resource's declared KIND), never on the
- * resource's NAME — `KNOWN_KINDS` (app/engine_kinds.py:90-94) is the closed
+ * resource's NAME — `KNOWN_KINDS` (app/engine_kinds.py:177-192) is the closed
  * backend enum this mirrors; a resource can be named anything. Adding a
  * kind there needs a branch here too, same as `PlacementActions.tsx` and
  * `ui/src/model/setDraft.ts`'s `KIND_DRAFT_SPEC`. */
@@ -319,20 +365,49 @@ export function sortedResourceEntries(
   );
 }
 
+/** The GPU indices a node shows a card for: every GPU it REPORTS, plus every
+ * index something is DECLARED on that the report does not cover. The union
+ * rather than the report alone because a declaration whose gpu_index matches
+ * nothing live is a data inconsistency, and dropping the card would take the
+ * resource's CONTROLS off the board with it — the operator would lose the
+ * verbs for a resource the deck still manages. That card meters `null`
+ * (unknown), never a fabricated 0/0. */
+function cardIndices(reported: number[], declared: number[]): number[] {
+  return [...new Set([...reported, ...declared])].sort((a, b) => a - b);
+}
+
+/** One GPU's telemetry, from whichever `nodes[]` entry owns it (`NodeGpu` in
+ * api.ts documents the one-shape-for-every-node rule). `undefined` when the
+ * node reported nothing for that index at all — distinct from a row whose
+ * individual readings are null, and rendered differently (no stats block vs
+ * "—" per field).
+ *
+ * Every field is `?? null`: the wire's absent and its explicit null are the
+ * same fact here ("no reading"), and collapsing them once, here, is what
+ * lets `GpuStats` be four plain nullable numbers. */
+function statsOf(gpus: NodeGpu[] | null | undefined, index: number): GpuStats | undefined {
+  const gpu = (gpus ?? []).find((g) => g.index === index);
+  if (!gpu) return undefined;
+  return {
+    name: gpu.name ?? null,
+    utilizationPercent: gpu.utilization_percent ?? null,
+    temperatureC: gpu.temperature_c ?? null,
+    powerW: gpu.power_w ?? null,
+  };
+}
+
 function localNode(state: StateResponse): DeckNode {
   const { world, lifecycle, policy } = state;
-  // One card per DECLARED resource (spec §5: zero, three, or five), ordered
-  // by gpu_index then resource name — never a fixed triple, never one card
-  // per physical GPU (two resources may share a GPU; each still gets its
-  // own card, the design this task's brief test pins).
+  // Declared resources in board order (spec §5: zero, three, or five),
+  // gpu_index then resource name — the order they take on their GPU's card.
   const sorted = sortedResourceEntries(world.tenants);
-  // An external process is attributed to the FIRST resource card on its
-  // GPU (in the sorted order above) rather than every card sharing that
-  // GPU — otherwise two co-located resources would each show the same
-  // external pid, double-counting one fact. Best-effort either way (see
-  // app/state.py's own externals docstring); this just avoids the
-  // duplicate-rendering failure mode a naive per-resource filter would add.
-  const externalsClaimed = new Set<number>();
+  // The LOCAL registry entry's telemetry: app/telemetry.py's pass-through of
+  // dashboard-api's `/api/gpu/detailed`, attached by app/routers/status.py's
+  // `_nodes_block` local arm. `world.gpus` stays the capacity source (bytes,
+  // the deck's own observation) — this is the display garnish beside it, and
+  // reading it off the same block every remote node uses is what keeps ONE
+  // telemetry shape on the wire.
+  const telemetry = (state.nodes ?? []).find((e) => e.agent_kind === "local")?.gpus ?? null;
   return {
     id: state.node.id,
     label: state.node.label,
@@ -340,30 +415,32 @@ function localNode(state: StateResponse): DeckNode {
     // definition. A failed poll is an App-level error, not a node state.
     status: "reachable",
     lastSeen: null,
-    resources: sorted.map(([resource, tenant]) => {
-      const gpu = world.gpus.find((g) => g.index === tenant.gpu_index);
-      const placement = tenantPlacement(resource, tenant, lifecycle, policy);
-      const claimExternals = !externalsClaimed.has(tenant.gpu_index);
-      if (claimExternals) externalsClaimed.add(tenant.gpu_index);
+    resources: cardIndices(
+      world.gpus.map((g) => g.index),
+      sorted.map(([, tenant]) => tenant.gpu_index),
+    ).map((index) => {
+      const gpu = world.gpus.find((g) => g.index === index);
+      // Every resource declared on THIS GPU. The GPU name rides `stats`;
+      // composing it into a title is a rendering concern, not this file's.
+      const declared = sorted.filter(([, tenant]) => tenant.gpu_index === index);
       return {
-        id: resource,
-        label: resource,
-        // Unknown, not zero: a resource whose declared gpu_index matches no
-        // entry in the live world.gpus (a data inconsistency) reports
-        // capacity unknown rather than a fabricated 0/0.
+        id: `gpu${index}`,
+        label: `GPU ${index}`,
         capacity: gpu ? { used: gpu.used, total: gpu.total } : null,
-        // A local resource's only control is itself (PlacementActions
-        // dispatches its verbs by resource name, per Task 7's generic
-        // `/api/tenants/{resource}/{verb}` route) — one element, always
-        // present, even for an empty/unloaded resource: the Load dropdown
-        // (or Free/Park button) has to render somewhere with no placement
-        // to hang it off.
-        controls: [resource],
+        stats: statsOf(telemetry, index),
+        // Always present, even for an empty/unloaded resource: the Load
+        // dropdown (or Free/Park button) has to render somewhere with no
+        // placement to hang it off.
+        controls: declared.map(([resource]) => resource),
         placements: [
-          ...(placement ? [placement] : []),
-          ...(claimExternals
-            ? world.externals.filter((e) => e.gpu === tenant.gpu_index).map(externalPlacement)
-            : []),
+          ...declared
+            .map(([resource, tenant]) => tenantPlacement(resource, tenant, lifecycle, policy))
+            .filter((p): p is Placement => p !== null),
+          // An external process belongs to its GPU, full stop. The old
+          // per-resource board had to pick ONE of the cards sharing a GPU to
+          // avoid double-counting one pid; with one card per GPU that
+          // bookkeeping has nothing left to decide.
+          ...world.externals.filter((e) => e.gpu === index).map(externalPlacement),
         ],
       };
     }),
@@ -415,14 +492,12 @@ function noIntentStatus(state: string): LifecycleStatus {
 /** One declared remote engine's chip.
  *
  * Unconditional in THIS function — same "always an engine, no model
- * identity of its own" shape the comfyui-kind arm above takes — but its only
- * caller, `remoteEngineResources`, now gates the tenant through
- * `engineChipVisible` before ever reaching here (ruling 2026-08-18: a
- * model-less engine earns no card, `down`/`quarantined`/`warming` excepted).
- * Kept unconditional here rather than threading the filter through this
- * function too, because Task 3's per-GPU regroup is what moves the check to
- * where it belongs (a per-chip filter, not a per-tenant one) — this function
- * stays the same shape either way.
+ * identity of its own" shape the comfyui-kind arm above takes. Its caller
+ * (`remoteNodeCards`) splits the node's tenants through `engineChipVisible`
+ * FIRST and only builds a chip for the visible ones (ruling 2026-08-18: a
+ * model-less engine earns no chip, `down`/`quarantined`/`warming` excepted).
+ * That split is the single application of the visibility rule on the remote
+ * half: hidden engines never reach here, and never reach a card at all.
  *
  * `settingsDrift` is deliberately NOT carried: DriftCard's Settings target
  * is the NODE's configurable engine (a swap node's vllm — App.tsx's catalog
@@ -497,45 +572,82 @@ function remoteTenantsOf(world: StateResponse["world"], nodeId: string): RemoteT
     .sort((a, b) => a.gpu_index - b.gpu_index || a.resource.localeCompare(b.resource));
 }
 
-/** One card per declared remote engine — the remote counterpart of
- * `localNode`'s per-resource cards, and the ONLY thing on the board that
- * carries `remoteEngine`. `controls` stays empty: those dispatch against the
- * LOCAL box's world (see this file's header). */
-function remoteEngineResources(
+/** One declared remote engine's control surface. The SAME construction for
+ * a visible engine (on its GPU card) and a hidden one (in the node's
+ * `hiddenEngines`) — one function, so the header menu can never offer a
+ * different verb list than the card would have. */
+function engineControl(
+  nodeId: string,
+  tenant: RemoteTenant,
+  kinds: EngineKindsResponse | null,
+  stale: boolean,
+): RemoteEngineControl {
+  return {
+    nodeId,
+    resource: tenant.resource,
+    kind: tenant.engine,
+    state: tenant.state,
+    verbs: remoteEngineVerbs(kinds, tenant.engine, tenant.state, stale),
+  };
+}
+
+/** THE visibility question for the remote half, asked exactly once per
+ * tenant (in `remoteNodeCards`) — `engineChipVisible` is the single
+ * authority, and nothing downstream re-filters. */
+function remoteChipVisible(tenant: RemoteTenant, lifecycle: LifecycleMap): boolean {
+  return engineChipVisible(
+    tenant.engine, tenant.state, tenant.queue ?? null,
+    lifecycle[remoteKey(tenant)]?.status,
+  );
+}
+
+/** A registry node-agent entry's GPU cards — one per GPU it reports, plus
+ * any index a VISIBLE declared engine names that the report does not cover
+ * (`cardIndices`) — and, beside them, the engines whose chip is hidden.
+ *
+ * Shared by `observedNode` and `buildSwapNode`: both are the same box seen
+ * through the same probe, and the only difference between them is the
+ * serving slot the swap path lays on top.
+ *
+ * A HIDDEN engine's gpu_index earns no card of its own, unlike a local
+ * resource's: a hidden engine contributes no chip and no controls, so a card
+ * conjured for it would be an empty meter for a GPU the node never reported.
+ * The engine is not lost — it is in `hiddenEngines`, with its verbs. */
+function remoteNodeCards(
   entry: DeckNodeEntry,
-  tenants: RemoteTenant[],
   state: StateResponse,
   kinds: EngineKindsResponse | null,
   stale: boolean,
-): DeckResource[] {
-  // Interim: ruling 2026-08-18 hides a model-less engine's whole CARD here
-  // (GPU meter, verbs, everything) rather than just its chip — Task 3's
-  // per-GPU regroup is what rewrites this call site to filter only the chip
-  // and keep the meter. Same function as the comfyui arm above, applied to
-  // the remote half of the world snapshot.
-  return tenants
-    .filter((tenant) =>
-      engineChipVisible(
-        tenant.engine, tenant.state, tenant.queue ?? null,
-        state.lifecycle[remoteKey(tenant)]?.status,
-      ))
-    .map((tenant) => ({
-      id: tenant.resource,
-      label: tenant.resource,
-      // The node's OWN GPU list (the node-observer's, which is what this
-      // card already meters) — never `world.gpus`, which is this box's, and
-      // never a second source for one fact.
-      capacity: gpuCapacity(entry.gpus, tenant.gpu_index),
+): { resources: DeckResource[]; hiddenEngines: RemoteEngineControl[] } {
+  const tenants = remoteTenantsOf(state.world, entry.id);
+  const visible = tenants.filter((t) => remoteChipVisible(t, state.lifecycle));
+  const resources = cardIndices(
+    (entry.gpus ?? []).map((g) => g.index),
+    visible.map((t) => t.gpu_index),
+  ).map((index) => {
+    const onGpu = visible.filter((t) => t.gpu_index === index);
+    return {
+      id: `gpu${index}`,
+      label: `GPU ${index}`,
+      // The node's OWN GPU list (the node-observer's) — never `world.gpus`,
+      // which is this box's, and never a second source for one fact.
+      capacity: gpuCapacity(entry.gpus, index),
+      stats: statsOf(entry.gpus, index),
+      // Empty: a tenant control dispatches against the LOCAL box's world
+      // (this file's header). `buildSwapNode` adds SPARK_CONTROL, which does
+      // not.
       controls: [],
-      remoteEngine: {
-        nodeId: entry.id,
-        resource: tenant.resource,
-        kind: tenant.engine,
-        state: tenant.state,
-        verbs: remoteEngineVerbs(kinds, tenant.engine, tenant.state, stale),
-      },
-      placements: [remoteEnginePlacement(tenant, state.lifecycle, state.policy, stale)],
-    }));
+      remoteEngines: onGpu.map((t) => engineControl(entry.id, t, kinds, stale)),
+      placements: onGpu.map((t) =>
+        remoteEnginePlacement(t, state.lifecycle, state.policy, stale)),
+    };
+  });
+  return {
+    resources,
+    hiddenEngines: tenants
+      .filter((t) => !remoteChipVisible(t, state.lifecycle))
+      .map((t) => engineControl(entry.id, t, kinds, stale)),
+  };
 }
 
 /** app/node_observer.py's status vocabulary -> the board's. `unconfigured`
@@ -548,18 +660,19 @@ const OBSERVED_STATUS: Record<string, NodeStatus> = {
   unconfigured: "unreachable",
 };
 
-/** A registry `node-agent` entry, rendered as its GPU meters plus one card
- * per engine it DECLARES (Task 10b). A node that declares nothing is
- * observe-only exactly as before — bare GPU cards, no controls, no
- * placements: this file has no verbs to give a box it only watches.
+/** A registry `node-agent` entry, rendered as one card per GPU it reports,
+ * each carrying whatever it DECLARES on that GPU (Task 10b's engines). A
+ * node that declares nothing is observe-only exactly as before — bare GPU
+ * cards, no controls, no placements: this file has no verbs to give a box it
+ * only watches.
  *
- * A GPU carrying a declared engine gets no bare card of its own: the
- * engine's card already meters that GPU, and two meters for one GPU would
- * report the same fact twice.
+ * A GPU carrying a declared engine keeps its card (it IS the card now): the
+ * standalone engine card the old code built instead is what showed sparky's
+ * omni a meter reading the serving model's VRAM.
  *
  * See OBSERVED_STATUS for the status mapping, and this file's header for why
- * an engine card's `controls` stays empty (the App.tsx prop-drilling
- * landmine this keeps dormant — a remote card carries `remoteEngine`
+ * an observed card's `controls` stays empty (the App.tsx prop-drilling
+ * landmine this keeps dormant — a remote card carries `remoteEngines`
  * instead, with its own node's data). */
 function observedNode(
   entry: DeckNodeEntry,
@@ -567,8 +680,8 @@ function observedNode(
   kinds: EngineKindsResponse | null,
 ): DeckNode {
   const status = (entry.status && OBSERVED_STATUS[entry.status]) || "unreachable";
-  const tenants = remoteTenantsOf(state.world, entry.id);
-  const claimed = new Set(tenants.map((t) => t.gpu_index));
+  const { resources, hiddenEngines } = remoteNodeCards(
+    entry, state, kinds, status === "unreachable");
   return {
     id: entry.id,
     label: entry.label,
@@ -576,17 +689,8 @@ function observedNode(
     lastSeen: entry.last_seen,
     detail: entry.error ?? undefined,
     servingLine: entry.serving?.model ?? undefined,
-    resources: [
-      ...(entry.gpus ?? []).filter((g) => !claimed.has(g.index)).map((g) => ({
-        id: `gpu${g.index}`,
-        label: `GPU ${g.index}`,
-        capacity: gpuCapacity(entry.gpus, g.index),
-        controls: [],     // observe-only: no verbs, no placements (spec §1) —
-        placements: [],   // which is also what keeps the App.tsx prop-drilling
-                          // landmine (this file's header) dormant.
-      })),
-      ...remoteEngineResources(entry, tenants, state, kinds, status === "unreachable"),
-    ],
+    resources,
+    hiddenEngines,
   };
 }
 
@@ -667,20 +771,34 @@ export function findPlacement(nodes: DeckNode[], id: string): PlacementSpot | nu
   return null;
 }
 
-/** Whether a resource currently carries its own (non-external) placement —
- * one card has at most one, E1's per-resource-card redesign (a shared GPU's
- * external process is a SEPARATE placement on the same card, never the
- * resource's own). This is the ONE fact two independent call sites need to
- * agree on: `ResourcePanel` uses it to decide whether `PlacementActions`'
- * bare state pill has to name the resource (no chip means the control row
- * is the only thing saying what it is), and `ModelDetailDrawer` uses the
- * identical question for the same component's `hasPlacement` prop when
- * it's reopened over that resource's own model chip. Collapsed to one
- * function so the two can never independently drift on what "has a
- * placement" means — the fix-loop finding this replaced was exactly that: a
- * tautological re-derivation at one call site and a real one at the other. */
+/** Whether a CARD carries any managed (non-external) placement at all — the
+ * card-level question. `ModelDetailDrawer` asks it about the card a chip it
+ * has open sits on, where the answer is about the card and not about one
+ * control.
+ *
+ * Per-GPU cards made this the WRONG question for `ResourcePanel`'s control
+ * rows (a card can carry two controls and one chip), which is what
+ * `controlHasPlacement` below is for. Both live here, so the two call sites
+ * can never independently drift on what "has a placement" means — the
+ * fix-loop finding this replaced was exactly that: a tautological
+ * re-derivation at one call site and a real one at the other. */
 export function resourceHasOwnPlacement(resource: DeckResource): boolean {
   return resource.placements.some((p) => p.kind !== "external");
+}
+
+/** Whether ONE control on a card has its own chip there. The per-control
+ * half of the question above, and the one a control row needs: on a shared
+ * GPU an unloaded resource's row is the only thing on screen naming it, and
+ * a co-resident neighbour's chip must not answer for it.
+ *
+ * Keyed on the PLACEMENT ID rather than on the placement's `name` or
+ * `engine`: `local/<resource>` is the lifecycle key `tenantPlacement` builds
+ * (app/observe.py's `node_key`), so it identifies the control exactly, while
+ * a name is the MODEL's identity and matches nothing for a chipless
+ * resource. External placements (`external/<pid>`) can never collide with
+ * it. */
+export function controlHasPlacement(resource: DeckResource, control: string): boolean {
+  return resource.placements.some((p) => p.id === `local/${control}`);
 }
 
 /** One swap node's serving-slot resource — buildNodes' registry loop calls
@@ -755,51 +873,57 @@ function buildSwapNode(
   const swapError = serving.swap_status?.state === "error" ? serving.swap_status.message : null;
   const detail = swapError || lc?.reason || undefined;
 
+  const slotPlacement: Placement | null = model
+    ? {
+        id: slotKey,
+        name: model,
+        profile: profile ?? undefined,
+        bytes: null,
+        status: lc?.status ?? (endpointOk ? "serving" : "down"),
+        engine,
+        engineBadge: engine,
+        kind: "model",
+        stale,
+        settingsDrift: driftOf(lifecycle, slotKey),
+      }
+    : null;
+
+  // This node's GPU cards, carrying the engines it DECLARES.
+  //
+  // `stale` is the SLOT's reachability, which is the node-agent's own
+  // (app/observe.py's observe_spark reads the same probe the declared
+  // engines' observations come through), so an engine on a dark box
+  // withholds its verbs exactly as the slot withholds the profile picker.
+  const { resources, hiddenEngines } = remoteNodeCards(entry, state, kinds, stale);
+  // A swap node that reported no GPUs (and declares no visible engine to
+  // name one) still needs somewhere to put the profile picker. Deliberately
+  // NOT a fabricated `gpu0`: the node named no index, and inventing one
+  // would put a GPU on the board that nothing observed. It is the serving
+  // slot's own card, exactly as before this wave — capacity unknown, not
+  // zero.
+  const cards: DeckResource[] = resources.length > 0
+    ? resources
+    : [{ id: "slot0", label: "Serving slot", capacity: null, controls: [], remoteEngines: [], placements: [] }];
+
   return {
     id: entry.id,
     label: entry.label,
     status,
     detail,
     lastSeen: lc?.last_healthy_ts ?? null,
-    resources: [
-      {
-        id: "slot0",
-        label: "Serving slot",
-        // Spark reports no VRAM figures to the deck — unknown, not zero.
-        capacity: null,
-        // The profile picker, which must render whether or not a model is
-        // currently serving.
-        controls: [SPARK_CONTROL],
-        placements: model
-          ? [
-              {
-                id: slotKey,
-                name: model,
-                profile: profile ?? undefined,
-                bytes: null,
-                status: lc?.status ?? (endpointOk ? "serving" : "down"),
-                engine,
-                engineBadge: engine,
-                kind: "model",
-                stale,
-                settingsDrift: driftOf(lifecycle, slotKey),
-              },
-            ]
-          : [],
-      },
-      // The slot is this node's SWAP surface; these are the engines it
-      // DECLARES. Separate cards, separate verbs, separate route. This card
-      // renders no BARE GPU cards at all (only observedNode does), so there
-      // is nothing here to suppress the way that function does — but the
-      // engine card still meters its GPU from this node's own list.
-      //
-      // `stale` is the SLOT's reachability, which is the node-agent's own
-      // (app/observe.py's observe_spark reads the same probe the declared
-      // engines' observations come through), so an engine card on a dark box
-      // withholds its verbs exactly as the slot withholds the profile picker.
-      ...remoteEngineResources(entry, remoteTenantsOf(state.world, entry.id),
-                               state, kinds, stale),
-    ],
+    // The slot rides the node's FIRST card. Spark reports no gpu_index for
+    // what it serves (app/engines/spark.py observes an endpoint, not a
+    // device), so there is no declared index to place it by — and the one
+    // live swap node is a single-GPU GB10, which is exactly the collapse
+    // this wave is for. Its chip leads the card, ahead of any engine chips.
+    resources: cards.map((card, i) => (i > 0 ? card : {
+      ...card,
+      // The profile picker, which must render whether or not a model is
+      // currently serving.
+      controls: [SPARK_CONTROL],
+      placements: [...(slotPlacement ? [slotPlacement] : []), ...card.placements],
+    })),
+    hiddenEngines,
   };
 }
 
