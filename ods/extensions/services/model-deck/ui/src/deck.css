@@ -174,6 +174,56 @@ input[type="password"] {
   background: var(--meter-red);
 }
 
+/* GpuStatsBlock (Task 4) — the GPU-Monitor-format stats row above each
+   card's VRAM meter. Reuses .ui-meter-track/.ui-meter-fill (the same
+   classes Meter renders into) for the util bar, and .ui-pill-* for the
+   temp tone — no new colors or classes for either. */
+.gpu-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: var(--space);
+}
+
+.gpu-stats-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+}
+
+.gpu-stats-label {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.gpu-stats-value {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.gpu-stats-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  font-size: 0.85rem;
+}
+
+.gpu-stats-power {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The panel title's hardware-name span (ResourcePanel — `resource.label` +
+   `resource.stats?.name`). Muted so the card's real identity, GPU <index>,
+   stays the visually dominant title text. */
+.gpu-name {
+  color: var(--text-dim);
+  font-weight: 400;
+  margin-left: 0.4rem;
+}
+
 /* ---------------------------------------------------------------- tenant card */
 
 .tenant-card {

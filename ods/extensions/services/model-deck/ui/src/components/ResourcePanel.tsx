@@ -1,6 +1,7 @@
 import type { ModelFile, SparkStatus, StorageUnit, World } from "../api";
 import { labels, messages } from "../model/messages";
-import { resourceHasOwnPlacement, SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
+import { controlHasPlacement, SPARK_CONTROL, type DeckResource, type Placement } from "../model/nodes";
+import GpuStatsBlock from "../ui/GpuStatsBlock";
 import Meter from "../ui/Meter";
 import ModelChip from "../ui/ModelChip";
 import Panel from "../ui/Panel";
@@ -97,7 +98,18 @@ export default function ResourcePanel({
   onRefresh: () => void;
 }) {
   return (
-    <Panel title={resource.label} className="resource-panel">
+    <Panel
+      title={
+        <>
+          {resource.label}
+          {resource.stats?.name && (
+            <span className="gpu-name">{resource.stats.name}</span>
+          )}
+        </>
+      }
+      className="resource-panel"
+    >
+      {resource.stats && <GpuStatsBlock stats={resource.stats} />}
       <Meter capacity={resource.capacity} />
 
       {resource.placements.length === 0 ? (
@@ -157,13 +169,19 @@ export default function ResourcePanel({
               resource={control}
               world={world}
               models={models}
-              // Whether this resource already has a chip on this card. A
-              // parked hipfire-kind resource deliberately has none, and then
-              // the control row is the only thing that can say what state
-              // it is in. Shared with ModelDetailDrawer's identical
-              // question via nodes.ts's resourceHasOwnPlacement — one
-              // function, so the two can't disagree.
-              hasPlacement={resourceHasOwnPlacement(resource)}
+              // Whether THIS control already has a chip on this card — the
+              // per-control question, not the card-level one
+              // (resourceHasOwnPlacement, used by ModelDetailDrawer for a
+              // different question about the card a clicked chip sits on).
+              // A shared GPU can carry two controls and one chip: an
+              // unloaded resource's row must not read as "has a chip"
+              // just because a co-resident neighbour's does. A parked
+              // hipfire-kind resource deliberately has none, and then the
+              // control row is the only thing that can say what state it
+              // is in. nodes.ts's controlHasPlacement is the one function
+              // both this row and its card-level counterpart key off of, so
+              // the two questions can't independently drift.
+              hasPlacement={controlHasPlacement(resource, control)}
               coldGgufs={coldGgufs}
               onRefresh={onRefresh}
             />
