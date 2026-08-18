@@ -193,34 +193,38 @@ does not mean every store in the system is node-qualified: the live
 running system today — check which one a given store uses before assuming
 the other.
 
-⚠ **`_recreate_llama_server` (`ods/bin/ods-host-agent.py:13128`) has the
-same deck-blind shape hipfire's activation path had; it is CURRENT — not a
-future risk — and this branch deliberately left it unbracketed.**
-llama-server is not a hypothetical future addition to the deck: it is
-*already* deck-managed today, declared under the `lemonade` kind. The
-declared `lemonade` resource's `connection.container` is literally
-`"ods-llama-server"` (live `~/ods/data/model-deck/nodes.json`;
-`app/settings.py:88`'s `lemonade_container: str = "ods-llama-server"` is
-only the one-time seed default, per
-`ods/extensions/services/model-deck/README.md:50`). `_recreate_llama_server`
-stops and recreates that same `ods-llama-server` container — called from
-the live dashboard activation path at `ods/bin/ods-host-agent.py:8002`,
-`:8468-8477`, `:12690`, `:12701` — with no `_deck_bracket` anywhere in any
-of those call sites.
+**`_do_model_activate`'s llama-server teardown is bracketed too** (the
+follow-up wave after this branch merged). llama-server is not a
+hypothetical future addition to the deck: it is *already* deck-managed
+today, declared under the `lemonade` kind. The declared `lemonade`
+resource's `connection.container` is literally `"ods-llama-server"` (live
+`~/ods/data/model-deck/nodes.json`; `app/settings.py:88`'s
+`lemonade_container: str = "ods-llama-server"` is only the one-time seed
+default, per `ods/extensions/services/model-deck/README.md:50`). Every
+runtime strategy that stops that container — compose stop+up
+(`_compose_restart_llama_server`) and inspect-and-recreate
+(`_recreate_llama_server`), on both the forward and rollback paths —
+is reached only from inside `_do_model_activate`'s
+`with _deck_bracket(persisted_env, "local/lemonade")` block, which wraps
+the handler's whole transaction try/except. `rollback_and_prove()` renews
+the hold as its first act; `deck_bracket.commit()` sits adjacent to the
+handler's own `committed = True`, after final runtime proof. The wiring
+is pinned structurally by the AST tests in
+`ods/tests/host_agent/test_deck_bracket.py` (which also record why: the
+handler's realistic states cannot be constructed in a unit test, so the
+placement facts are pinned instead).
 
-This is a **strictly larger exposure than hipfire's was**, not an
+This gap was a **strictly larger exposure than hipfire's**, not an
 equivalent one. `_LemonadeAdapter` implements `execute_load`/
 `execute_unload` (item 3 above, `app/engine_kinds.py:445,555`), so
 `lemonade` is arbiter-eligible: the deck's own automatic idle-release and
-contention arbiter can act on this resource unprompted. hipfire's park is
-human-only — the exposure there was operator-vs-deck, a one-off race
-between a person and the reconciler. Here the deck's own arbiter can fire
-*while* `_recreate_llama_server` is yanking the container out from under
-it, with nothing announcing the teardown either way. Closing this gap is
-deliberately out of scope for this branch — it fixed hipfire's actuation
-bracket only. Do not assume item 5 is satisfied fleet-wide because
-hipfire's path now is; `lemonade`'s dashboard path is the known, live,
-larger counter-example.
+contention arbiter can act on this resource unprompted (the live
+`intent.json` shows `local/lemonade` with `actor: "deck"` — the deck
+already idle-releases it in practice). hipfire's park is human-only — the
+exposure there was operator-vs-deck, a one-off race between a person and
+the reconciler. Here the deck's own arbiter could fire *while* the
+activation path was yanking the container out from under it, with nothing
+announcing the teardown either way.
 
 ## 6. Own its durable state honestly
 
@@ -268,13 +272,13 @@ claim every declared engine currently satisfies every item.
   `oci:sparky:ds4-spark`) read `verification="unknown"`, worse coverage
   than hipfire had going into this investigation. Having a `KNOWN_KINDS`
   entry does not imply a complete provenance record; check the artifact.
-- Item 5 (actuation-bracket): satisfied for hipfire's dashboard activation
-  path only. `lemonade`'s dashboard activation path
-  (`_recreate_llama_server`) is the known unbracketed, currently-live,
-  arbiter-eligible counter-example (see item 5's warning). Other
-  out-of-band actuators — installer scripts, manual `docker compose`
-  calls, a future extension's own control surface — have not been
-  audited by this branch and should be assumed unbracketed until checked.
+- Item 5 (actuation-bracket): satisfied for both dashboard activation
+  paths — hipfire's (`_do_hipfire_activate`) and lemonade's
+  (`_do_model_activate`, bracketed in the follow-up wave; see item 5).
+  Other out-of-band actuators — installer scripts (`bootstrap-upgrade.sh`
+  also stops llama-server), manual `docker compose` calls, a future
+  extension's own control surface — have not been audited and should be
+  assumed unbracketed until checked.
 - Item 6 (durable-state declaration): written here for hipfire only. No
   other engine's out-of-deck durable state has been inventoried as part of
   this branch.

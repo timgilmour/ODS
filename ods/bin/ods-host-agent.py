@@ -8014,6 +8014,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             """Restore config/runtime/dependents and prove the prior route."""
             nonlocal rollback_attempted
             rollback_attempted = True
+            # Re-arm the hold before the second teardown: the readiness wait
+            # that led here can consume most of the original TTL, and the
+            # restore below recreates the container again. Resolved at call
+            # time — every caller sits inside the bracket's with-block.
+            deck_bracket.renew()
             try:
                 restore_backups()
                 restore_previous_runtime()
@@ -8097,754 +8102,788 @@ class AgentHandler(BaseHTTPRequestHandler):
                 logger.exception("Failed to prove previous model route during rollback")
                 return False, str(rollback_exc)
 
-        try:
-            # Read current env BEFORE modification — needed for gpu_backend guard
-            env_pre = load_env(env_path)
-            gpu_backend = env_pre.get("GPU_BACKEND", "nvidia")
-            windows_host_lemonade = _is_windows_host_lemonade(env_pre)
-            windows_lemonade_managed = _windows_lemonade_is_managed(env_pre)
-            windows_native_llama = _is_windows_host_llama_server(env_pre)
-            lemonade_runtime = str(gpu_backend).lower() == "amd" and not windows_native_llama
-            same_lemonade_target = _runtime_model_identity_matches(
-                env_pre.get("GGUF_FILE"),
-                gguf_file=gguf_file,
-            )
-            lemonade_model_id = ""
-            windows_lemonade_already_serving = False
-            if windows_host_lemonade and same_lemonade_target:
-                lemonade_port = env_pre.get("AMD_INFERENCE_PORT", "8080") or "8080"
-                lemonade_model_id = _resolve_lemonade_model_id(
-                    env_pre,
-                    gguf_file,
-                    host="127.0.0.1",
-                    port=str(lemonade_port),
+        # The container strategies below stop ods-llama-server — the deck's
+        # declared, ARBITER-ELIGIBLE `lemonade` resource — and the except
+        # handler recreates it again on rollback. Bracket the whole
+        # transaction so neither teardown reads as a death: without the
+        # hold, idle-release/lifecycle-restore can act on the container
+        # mid-recreate with no operator involved. Same shape as
+        # _do_hipfire_activate; see _deck_bracket for the contract.
+        # ttl_s=900 (MAX_HOLD_TTL_S), not the 600 default: this handler's
+        # single longest stage — the readiness wait — can exceed 600s on its
+        # own, so even with the stage-boundary renew()s below each window
+        # must be sized to the largest single stage.
+        with _deck_bracket(persisted_env, "local/lemonade", ttl_s=900) as deck_bracket:
+            try:
+                # Read current env BEFORE modification — needed for gpu_backend guard
+                env_pre = load_env(env_path)
+                gpu_backend = env_pre.get("GPU_BACKEND", "nvidia")
+                windows_host_lemonade = _is_windows_host_lemonade(env_pre)
+                windows_lemonade_managed = _windows_lemonade_is_managed(env_pre)
+                windows_native_llama = _is_windows_host_llama_server(env_pre)
+                lemonade_runtime = str(gpu_backend).lower() == "amd" and not windows_native_llama
+                same_lemonade_target = _runtime_model_identity_matches(
+                    env_pre.get("GGUF_FILE"),
+                    gguf_file=gguf_file,
                 )
-                windows_lemonade_already_serving = _lemonade_completion_ready(
-                    "127.0.0.1",
-                    str(lemonade_port),
-                    gguf_file,
-                    lemonade_model_id,
-                )
-                if (
-                    windows_lemonade_already_serving
-                    and requested_context_length is not None
-                ):
-                    running_context = _query_lemonade_runtime_context_length(
+                lemonade_model_id = ""
+                windows_lemonade_already_serving = False
+                if windows_host_lemonade and same_lemonade_target:
+                    lemonade_port = env_pre.get("AMD_INFERENCE_PORT", "8080") or "8080"
+                    lemonade_model_id = _resolve_lemonade_model_id(
                         env_pre,
-                        expected_gguf_file=gguf_file,
-                        expected_model_id=lemonade_model_id,
-                    )
-                    windows_lemonade_already_serving = (
-                        running_context == requested_context_length
-                    )
-                if windows_lemonade_already_serving:
-                    logger.info(
-                        "Windows Lemonade is already serving %s; refreshing configs "
-                        "without restarting native Lemonade",
                         gguf_file,
+                        host="127.0.0.1",
+                        port=str(lemonade_port),
                     )
-            if lemonade_runtime and not lemonade_model_id:
-                # Keep the persisted route non-empty while a Lemonade activation
-                # is still proving readiness. A slow or interrupted restore must
-                # never strand dependents with LEMONADE_MODEL=.
-                lemonade_model_id = _resolve_lemonade_model_id(env_pre, gguf_file)
-            runtime_profile = _select_runtime_profile(model, env_pre)
-            runtime_env = {}
-            if runtime_profile:
-                if requested_context_length is None:
-                    try:
-                        context_length = int(runtime_profile.get("context_length") or context_length)
-                    except (TypeError, ValueError):
-                        pass
-                llama_server_image = runtime_profile.get("llama_server_image") or llama_server_image
-                runtime_env = runtime_profile.get("env") if isinstance(runtime_profile.get("env"), dict) else {}
-            recommended_context = _recommended_activation_context(model_id, model, env_pre)
-            if requested_context_length is None and recommended_context is not None:
-                context_length = recommended_context
-            if requested_context_length is not None:
-                context_length = requested_context_length
-            if tier_context_limit is not None:
-                context_length = min(int(context_length), tier_context_limit)
-
-            if gpu_backend == "apple":
-                apple_pid_file = INSTALL_DIR / "data" / ".llama-server.pid"
-                apple_llama_bin = INSTALL_DIR / "bin" / "llama-server"
-                apple_llama_log = INSTALL_DIR / "data" / "llama-server.log"
-                if not apple_llama_bin.is_file():
-                    raise RuntimeError(
-                        "llama-server binary not found - re-run installer"
+                    windows_lemonade_already_serving = _lemonade_completion_ready(
+                        "127.0.0.1",
+                        str(lemonade_port),
+                        gguf_file,
+                        lemonade_model_id,
                     )
-
-            if (
-                platform.system() == "Linux"
-                and str(gpu_backend).lower() == "nvidia"
-                and not windows_native_llama
-            ):
-                gpu_assignment_plan = _plan_nvidia_model_gpu_assignment(
-                    env_pre,
-                    model,
-                    target,
-                    context_length=context_length,
-                    runtime_profile=runtime_profile,
-                )
-            elif (
-                platform.system() == "Linux"
-                and str(gpu_backend).lower() == "amd"
-                and not windows_native_llama
-            ):
-                gpu_assignment_plan = _plan_amd_model_gpu_assignment(
-                    env_pre,
-                    model,
-                    target,
-                    context_length=context_length,
-                    runtime_profile=runtime_profile,
-                )
-
-            # Capture every mutable file and service state before the first write.
-            env_snapshot = _snapshot_text_file(env_path)
-            # A malformed install can leave models.ini as a directory; repair it
-            # before snapshotting so activation heals rather than refusing.
-            if models_ini.is_dir():
-                shutil.rmtree(models_ini)
-            ini_snapshot = _snapshot_text_file(models_ini)
-            lemonade_snapshot = _snapshot_text_file(lemonade_yaml)
-            litellm_local_snapshot = _snapshot_text_file(litellm_local_yaml)
-            litellm_switchboard_snapshot = _snapshot_text_file(litellm_switchboard_yaml)
-            model_router_endpoints_snapshot = _snapshot_text_file(model_router_endpoints)
-            activation_receipt_snapshot = _snapshot_text_file(activation_receipt)
-            # Persisted Hermes state is commonly UID-10000-owned. Capture it
-            # through the running container when host permissions deny access;
-            # activation must never claim success with an unpatched live route.
-            hermes_live_snapshot = _capture_hermes_live_config(hermes_live_config)
-            hermes_template_snapshot = _snapshot_text_file(hermes_template_config)
-            opencode_snapshot = _capture_opencode_config()
-            if opencode_snapshot is not None:
-                opencode_runtime_state = _capture_managed_opencode_state()
-            container_states = {
-                name: _capture_container_state(name)
-                for name in (
-                    "ods-litellm",
-                    "ods-hermes",
-                    "ods-openclaw",
-                    "ods-perplexica",
-                )
-            }
-            perplexica_snapshot = _capture_perplexica_config(
-                env_pre,
-                container_states["ods-perplexica"],
-            )
-            active_litellm_consumers = [
-                name
-                for name in ("ods-hermes", "ods-openclaw", "ods-perplexica")
-                if container_states[name]["running"]
-            ]
-            if (
-                opencode_runtime_state
-                and opencode_runtime_state.get("active")
-                and lemonade_runtime
-                and not windows_host_lemonade
-            ):
-                active_litellm_consumers.append("OpenCode")
-            if (
-                lemonade_runtime
-                and active_litellm_consumers
-                and not container_states["ods-litellm"]["running"]
-            ):
-                raise RuntimeError(
-                    "Active Lemonade consumers require LiteLLM, but ods-litellm is "
-                    f"stopped: {', '.join(active_litellm_consumers)}"
-                )
-
-            # Fail before the first write if a config changed while the other
-            # transaction snapshots and runtime states were being captured.
-            for path, snapshot in (
-                (env_path, env_snapshot),
-                (models_ini, ini_snapshot),
-                (lemonade_yaml, lemonade_snapshot),
-                (litellm_local_yaml, litellm_local_snapshot),
-                (litellm_switchboard_yaml, litellm_switchboard_snapshot),
-                (model_router_endpoints, model_router_endpoints_snapshot),
-                (hermes_template_config, hermes_template_snapshot),
-            ):
-                _assert_text_file_matches_snapshot(path, snapshot)
-            if hermes_live_snapshot.get("source") == "host":
-                _assert_text_file_matches_snapshot(
-                    hermes_live_config,
-                    hermes_live_snapshot,
-                )
-            if opencode_snapshot is not None:
-                for path, snapshot in opencode_snapshot["files"].items():
-                    _assert_text_file_matches_snapshot(path, snapshot)
-
-            # Update .env
-            mutation_started = True
-            if env_path.exists():
-                lines = str(env_snapshot.get("text") or "").splitlines()
-                updates = {
-                    "GGUF_FILE": gguf_file,
-                    "GGUF_URL": str(model.get("gguf_url") or ""),
-                    "GGUF_SHA256": str(model.get("gguf_sha256") or ""),
-                    "LLM_MODEL": llm_model_name,
-                    "LLM_MODEL_SIZE_MB": str(_model_weight_size_mb(model, target)),
-                    "CTX_SIZE": str(context_length),
-                    "MAX_CONTEXT": str(context_length),
-                    "MODEL_RUNTIME_PROFILE": runtime_profile.get("id", "") if runtime_profile else "",
-                    "MODEL_RUNTIME_PROFILE_LABEL": runtime_profile.get("label", "") if runtime_profile else "",
-                    "MODEL_RUNTIME_PROFILE_SOURCE": runtime_profile.get("source_url", "") if runtime_profile else "",
-                }
-                if gpu_assignment_plan:
-                    updates.update(gpu_assignment_plan["env_updates"])
-                if requested_tier:
-                    updates["TIER"] = requested_tier
-                if lemonade_runtime:
-                    updates["LEMONADE_MODEL"] = lemonade_model_id
-                # Loading a GGUF is an explicit engine choice: text routes back to
-                # llama-server/Lemonade. hipfire stays resident and reachable via
-                # the "hipfire" model name; activating its catalog entry flips back.
-                if (env_pre.get("ENABLE_HIPFIRE") or "").strip().lower() == "true":
-                    updates["HIPFIRE_ACTIVE"] = "false"
-                runtime_keys = {
-                    "LLAMA_PARALLEL",
-                    "LLAMA_ARG_FLASH_ATTN",
-                    "LLAMA_ARG_CACHE_TYPE_K",
-                    "LLAMA_ARG_CACHE_TYPE_V",
-                    "LLAMA_ARG_N_CPU_MOE",
-                    "LLAMA_ARG_NO_CACHE_PROMPT",
-                    "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS",
-                    "LLAMA_ARG_SPEC_TYPE",
-                    "LLAMA_ARG_SPEC_DRAFT_N_MAX",
-                }
+                    if (
+                        windows_lemonade_already_serving
+                        and requested_context_length is not None
+                    ):
+                        running_context = _query_lemonade_runtime_context_length(
+                            env_pre,
+                            expected_gguf_file=gguf_file,
+                            expected_model_id=lemonade_model_id,
+                        )
+                        windows_lemonade_already_serving = (
+                            running_context == requested_context_length
+                        )
+                    if windows_lemonade_already_serving:
+                        logger.info(
+                            "Windows Lemonade is already serving %s; refreshing configs "
+                            "without restarting native Lemonade",
+                            gguf_file,
+                        )
+                if lemonade_runtime and not lemonade_model_id:
+                    # Keep the persisted route non-empty while a Lemonade activation
+                    # is still proving readiness. A slow or interrupted restore must
+                    # never strand dependents with LEMONADE_MODEL=.
+                    lemonade_model_id = _resolve_lemonade_model_id(env_pre, gguf_file)
+                runtime_profile = _select_runtime_profile(model, env_pre)
+                runtime_env = {}
                 if runtime_profile:
-                    for key, value in runtime_env.items():
-                        if key in runtime_keys and value is not None:
-                            updates[key] = str(value)
-                else:
-                    updates.update({
-                        "LLAMA_PARALLEL": "1",
-                        "LLAMA_ARG_FLASH_ATTN": "auto",
-                        "LLAMA_ARG_CACHE_TYPE_K": "f16",
-                        "LLAMA_ARG_CACHE_TYPE_V": "f16",
-                    })
-                remove_keys = {
-                    "LLAMA_ARG_N_CPU_MOE",
-                    "LLAMA_ARG_NO_CACHE_PROMPT",
-                    "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS",
-                    "LLAMA_ARG_SPEC_TYPE",
-                    "LLAMA_ARG_SPEC_DRAFT_N_MAX",
+                    if requested_context_length is None:
+                        try:
+                            context_length = int(runtime_profile.get("context_length") or context_length)
+                        except (TypeError, ValueError):
+                            pass
+                    llama_server_image = runtime_profile.get("llama_server_image") or llama_server_image
+                    runtime_env = runtime_profile.get("env") if isinstance(runtime_profile.get("env"), dict) else {}
+                recommended_context = _recommended_activation_context(model_id, model, env_pre)
+                if requested_context_length is None and recommended_context is not None:
+                    context_length = recommended_context
+                if requested_context_length is not None:
+                    context_length = requested_context_length
+                if tier_context_limit is not None:
+                    context_length = min(int(context_length), tier_context_limit)
+
+                if gpu_backend == "apple":
+                    apple_pid_file = INSTALL_DIR / "data" / ".llama-server.pid"
+                    apple_llama_bin = INSTALL_DIR / "bin" / "llama-server"
+                    apple_llama_log = INSTALL_DIR / "data" / "llama-server.log"
+                    if not apple_llama_bin.is_file():
+                        raise RuntimeError(
+                            "llama-server binary not found - re-run installer"
+                        )
+
+                if (
+                    platform.system() == "Linux"
+                    and str(gpu_backend).lower() == "nvidia"
+                    and not windows_native_llama
+                ):
+                    gpu_assignment_plan = _plan_nvidia_model_gpu_assignment(
+                        env_pre,
+                        model,
+                        target,
+                        context_length=context_length,
+                        runtime_profile=runtime_profile,
+                    )
+                elif (
+                    platform.system() == "Linux"
+                    and str(gpu_backend).lower() == "amd"
+                    and not windows_native_llama
+                ):
+                    gpu_assignment_plan = _plan_amd_model_gpu_assignment(
+                        env_pre,
+                        model,
+                        target,
+                        context_length=context_length,
+                        runtime_profile=runtime_profile,
+                    )
+
+                # Capture every mutable file and service state before the first write.
+                env_snapshot = _snapshot_text_file(env_path)
+                # A malformed install can leave models.ini as a directory; repair it
+                # before snapshotting so activation heals rather than refusing.
+                if models_ini.is_dir():
+                    shutil.rmtree(models_ini)
+                ini_snapshot = _snapshot_text_file(models_ini)
+                lemonade_snapshot = _snapshot_text_file(lemonade_yaml)
+                litellm_local_snapshot = _snapshot_text_file(litellm_local_yaml)
+                litellm_switchboard_snapshot = _snapshot_text_file(litellm_switchboard_yaml)
+                model_router_endpoints_snapshot = _snapshot_text_file(model_router_endpoints)
+                activation_receipt_snapshot = _snapshot_text_file(activation_receipt)
+                # Persisted Hermes state is commonly UID-10000-owned. Capture it
+                # through the running container when host permissions deny access;
+                # activation must never claim success with an unpatched live route.
+                hermes_live_snapshot = _capture_hermes_live_config(hermes_live_config)
+                hermes_template_snapshot = _snapshot_text_file(hermes_template_config)
+                opencode_snapshot = _capture_opencode_config()
+                if opencode_snapshot is not None:
+                    opencode_runtime_state = _capture_managed_opencode_state()
+                container_states = {
+                    name: _capture_container_state(name)
+                    for name in (
+                        "ods-litellm",
+                        "ods-hermes",
+                        "ods-openclaw",
+                        "ods-perplexica",
+                    )
                 }
-                if gpu_assignment_plan:
-                    remove_keys.update(gpu_assignment_plan.get("env_removals") or [])
-                remove_keys.difference_update(updates)
-                # Only update LLAMA_SERVER_IMAGE on Docker backends.
-                # macOS runs llama-server natively (no Docker image to pull).
-                if llama_server_image and gpu_backend != "apple":
-                    updates["LLAMA_SERVER_IMAGE"] = llama_server_image
-                # Record priors for every key this inline write touches — both
-                # the upserted keys and the deleted ones — so rollback restores
-                # exactly this write-set. The write itself is unchanged (it also
-                # deletes stale keys, which _update_env_keys cannot express).
-                env_txn.record(set(updates) | remove_keys)
-                new_lines = []
-                seen = set()
-                for line in lines:
-                    key = line.split("=", 1)[0] if "=" in line and not line.startswith("#") else None
-                    if key and key in updates:
-                        new_lines.append(f"{key}={updates[key]}")
-                        seen.add(key)
-                    elif key and key in remove_keys:
-                        continue
+                perplexica_snapshot = _capture_perplexica_config(
+                    env_pre,
+                    container_states["ods-perplexica"],
+                )
+                active_litellm_consumers = [
+                    name
+                    for name in ("ods-hermes", "ods-openclaw", "ods-perplexica")
+                    if container_states[name]["running"]
+                ]
+                if (
+                    opencode_runtime_state
+                    and opencode_runtime_state.get("active")
+                    and lemonade_runtime
+                    and not windows_host_lemonade
+                ):
+                    active_litellm_consumers.append("OpenCode")
+                if (
+                    lemonade_runtime
+                    and active_litellm_consumers
+                    and not container_states["ods-litellm"]["running"]
+                ):
+                    raise RuntimeError(
+                        "Active Lemonade consumers require LiteLLM, but ods-litellm is "
+                        f"stopped: {', '.join(active_litellm_consumers)}"
+                    )
+
+                # Fail before the first write if a config changed while the other
+                # transaction snapshots and runtime states were being captured.
+                for path, snapshot in (
+                    (env_path, env_snapshot),
+                    (models_ini, ini_snapshot),
+                    (lemonade_yaml, lemonade_snapshot),
+                    (litellm_local_yaml, litellm_local_snapshot),
+                    (litellm_switchboard_yaml, litellm_switchboard_snapshot),
+                    (model_router_endpoints, model_router_endpoints_snapshot),
+                    (hermes_template_config, hermes_template_snapshot),
+                ):
+                    _assert_text_file_matches_snapshot(path, snapshot)
+                if hermes_live_snapshot.get("source") == "host":
+                    _assert_text_file_matches_snapshot(
+                        hermes_live_config,
+                        hermes_live_snapshot,
+                    )
+                if opencode_snapshot is not None:
+                    for path, snapshot in opencode_snapshot["files"].items():
+                        _assert_text_file_matches_snapshot(path, snapshot)
+
+                # Update .env
+                mutation_started = True
+                if env_path.exists():
+                    lines = str(env_snapshot.get("text") or "").splitlines()
+                    updates = {
+                        "GGUF_FILE": gguf_file,
+                        "GGUF_URL": str(model.get("gguf_url") or ""),
+                        "GGUF_SHA256": str(model.get("gguf_sha256") or ""),
+                        "LLM_MODEL": llm_model_name,
+                        "LLM_MODEL_SIZE_MB": str(_model_weight_size_mb(model, target)),
+                        "CTX_SIZE": str(context_length),
+                        "MAX_CONTEXT": str(context_length),
+                        "MODEL_RUNTIME_PROFILE": runtime_profile.get("id", "") if runtime_profile else "",
+                        "MODEL_RUNTIME_PROFILE_LABEL": runtime_profile.get("label", "") if runtime_profile else "",
+                        "MODEL_RUNTIME_PROFILE_SOURCE": runtime_profile.get("source_url", "") if runtime_profile else "",
+                    }
+                    if gpu_assignment_plan:
+                        updates.update(gpu_assignment_plan["env_updates"])
+                    if requested_tier:
+                        updates["TIER"] = requested_tier
+                    if lemonade_runtime:
+                        updates["LEMONADE_MODEL"] = lemonade_model_id
+                    # Loading a GGUF is an explicit engine choice: text routes back to
+                    # llama-server/Lemonade. hipfire stays resident and reachable via
+                    # the "hipfire" model name; activating its catalog entry flips back.
+                    if (env_pre.get("ENABLE_HIPFIRE") or "").strip().lower() == "true":
+                        updates["HIPFIRE_ACTIVE"] = "false"
+                    runtime_keys = {
+                        "LLAMA_PARALLEL",
+                        "LLAMA_ARG_FLASH_ATTN",
+                        "LLAMA_ARG_CACHE_TYPE_K",
+                        "LLAMA_ARG_CACHE_TYPE_V",
+                        "LLAMA_ARG_N_CPU_MOE",
+                        "LLAMA_ARG_NO_CACHE_PROMPT",
+                        "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS",
+                        "LLAMA_ARG_SPEC_TYPE",
+                        "LLAMA_ARG_SPEC_DRAFT_N_MAX",
+                    }
+                    if runtime_profile:
+                        for key, value in runtime_env.items():
+                            if key in runtime_keys and value is not None:
+                                updates[key] = str(value)
                     else:
-                        new_lines.append(line)
-                for key, val in updates.items():
-                    if key not in seen:
-                        new_lines.append(f"{key}={val}")
-                _atomic_write_text(env_path, "\n".join(new_lines) + "\n")
+                        updates.update({
+                            "LLAMA_PARALLEL": "1",
+                            "LLAMA_ARG_FLASH_ATTN": "auto",
+                            "LLAMA_ARG_CACHE_TYPE_K": "f16",
+                            "LLAMA_ARG_CACHE_TYPE_V": "f16",
+                        })
+                    remove_keys = {
+                        "LLAMA_ARG_N_CPU_MOE",
+                        "LLAMA_ARG_NO_CACHE_PROMPT",
+                        "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS",
+                        "LLAMA_ARG_SPEC_TYPE",
+                        "LLAMA_ARG_SPEC_DRAFT_N_MAX",
+                    }
+                    if gpu_assignment_plan:
+                        remove_keys.update(gpu_assignment_plan.get("env_removals") or [])
+                    remove_keys.difference_update(updates)
+                    # Only update LLAMA_SERVER_IMAGE on Docker backends.
+                    # macOS runs llama-server natively (no Docker image to pull).
+                    if llama_server_image and gpu_backend != "apple":
+                        updates["LLAMA_SERVER_IMAGE"] = llama_server_image
+                    # Record priors for every key this inline write touches — both
+                    # the upserted keys and the deleted ones — so rollback restores
+                    # exactly this write-set. The write itself is unchanged (it also
+                    # deletes stale keys, which _update_env_keys cannot express).
+                    env_txn.record(set(updates) | remove_keys)
+                    new_lines = []
+                    seen = set()
+                    for line in lines:
+                        key = line.split("=", 1)[0] if "=" in line and not line.startswith("#") else None
+                        if key and key in updates:
+                            new_lines.append(f"{key}={updates[key]}")
+                            seen.add(key)
+                        elif key and key in remove_keys:
+                            continue
+                        else:
+                            new_lines.append(line)
+                    for key, val in updates.items():
+                        if key not in seen:
+                            new_lines.append(f"{key}={val}")
+                    _atomic_write_text(env_path, "\n".join(new_lines) + "\n")
 
-            # Update models.ini
-            models_ini.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_text(
-                models_ini,
-                f"[{llm_model_name}]\n"
-                f"filename = {gguf_file}\n"
-                f"load-on-startup = true\n"
-                f"n-ctx = {context_length}\n",
-            )
-
-            # Switchboard runtime adapter (PR 2A): the non-Lemonade container
-            # llama paths stage+verify through one reconciler sequence. All
-            # other strategies keep their inline flow until PR 2B/2C.
-            switchboard_adapter = None
-            switchboard_capabilities = {
-                "chat": True,
-                "tools": bool(model.get("tools")),
-                "vision": bool(model.get("vision")),
-                "agentViable": _model_agent_viable(model, int(context_length)),
-            }
-
-            def _sb_wait_ready(_env, _gguf, _ctx, lemonade_model_id=""):
-                return _wait_for_model_readiness(
-                    _env,
-                    model_id=model_id,
-                    gguf_file=_gguf,
-                    llm_model_name=llm_model_name,
-                    lemonade_model_id=lemonade_model_id,
-                    return_proof=True,
-                    require_exact_context=requested_context_length is not None,
+                # Update models.ini
+                models_ini.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_text(
+                    models_ini,
+                    f"[{llm_model_name}]\n"
+                    f"filename = {gguf_file}\n"
+                    f"load-on-startup = true\n"
+                    f"n-ctx = {context_length}\n",
                 )
 
-            # Restart llama-server with the new model.
-            # Three strategies depending on platform / agent location:
-            # - apple (macOS): llama-server runs natively via Metal, not Docker.
-            #   Managed via PID file — SIGTERM the old process, launch new one.
-            # - _in_container (Docker Desktop / WSL2): docker inspect+run.
-            #   Compose can't be used because relative bind-mount paths resolve
-            #   to the agent container's filesystem, not the host.
-            # - Host-native Linux: docker compose stop+up, same as bootstrap-upgrade.sh.
-            env = load_env(env_path)
-            _in_container = bool(os.environ.get("ODS_HOST_INSTALL_DIR"))
+                # Switchboard runtime adapter (PR 2A): the non-Lemonade container
+                # llama paths stage+verify through one reconciler sequence. All
+                # other strategies keep their inline flow until PR 2B/2C.
+                switchboard_adapter = None
+                switchboard_capabilities = {
+                    "chat": True,
+                    "tools": bool(model.get("tools")),
+                    "vision": bool(model.get("vision")),
+                    "agentViable": _model_agent_viable(model, int(context_length)),
+                }
 
-            if windows_host_lemonade:
-                if windows_lemonade_managed and not windows_lemonade_already_serving:
-                    runtime_restart_strategy = "windows-lemonade"
-                    _restart_windows_lemonade(env)
-                elif not windows_lemonade_managed:
-                    logger.info(
-                        "Using externally managed Windows Lemonade without process restart"
+                def _sb_wait_ready(_env, _gguf, _ctx, lemonade_model_id=""):
+                    # On the switchboard path, restart and wait both happen
+                    # inside run_runtime_activation — this callback is the
+                    # only seam between them, so the renew keeping the hold
+                    # alive across the longest stage must live here.
+                    deck_bracket.renew()
+                    return _wait_for_model_readiness(
+                        _env,
+                        model_id=model_id,
+                        gguf_file=_gguf,
+                        llm_model_name=llm_model_name,
+                        lemonade_model_id=lemonade_model_id,
+                        return_proof=True,
+                        require_exact_context=requested_context_length is not None,
                     )
-            elif windows_native_llama:
-                runtime_restart_strategy = "windows-native-llama"
-                if _switchboard_adapters is not None:
-                    switchboard_adapter = _switchboard_adapters.NativeLlamaAdapter(
-                        restart=lambda _e: _restart_windows_native_llama_server(
-                            env_path, _e
-                        ),
-                        wait_ready=_sb_wait_ready,
-                        expected_gguf=gguf_file,
-                        context_length=int(context_length),
-                        capabilities=switchboard_capabilities,
-                    )
-                else:
-                    _restart_windows_native_llama_server(env_path, env)
-            elif gpu_backend == "apple":
-                # macOS: manage native llama-server process via PID file
-                if not all((apple_llama_bin, apple_llama_log, apple_pid_file)):
-                    raise RuntimeError("macOS native runtime preflight state is unavailable")
 
-                runtime_restart_strategy = "macos-native-llama"
-                if _switchboard_adapters is not None:
-                    switchboard_adapter = _switchboard_adapters.NativeLlamaAdapter(
-                        restart=lambda _e: _restart_macos_native_llama_server(
+                # Stage boundary: the config mutations above are done and the
+                # container teardown starts below — give it a full window.
+                deck_bracket.renew()
+
+                # Restart llama-server with the new model.
+                # Three strategies depending on platform / agent location:
+                # - apple (macOS): llama-server runs natively via Metal, not Docker.
+                #   Managed via PID file — SIGTERM the old process, launch new one.
+                # - _in_container (Docker Desktop / WSL2): docker inspect+run.
+                #   Compose can't be used because relative bind-mount paths resolve
+                #   to the agent container's filesystem, not the host.
+                # - Host-native Linux: docker compose stop+up, same as bootstrap-upgrade.sh.
+                env = load_env(env_path)
+                _in_container = bool(os.environ.get("ODS_HOST_INSTALL_DIR"))
+
+                if windows_host_lemonade:
+                    if windows_lemonade_managed and not windows_lemonade_already_serving:
+                        runtime_restart_strategy = "windows-lemonade"
+                        _restart_windows_lemonade(env)
+                    elif not windows_lemonade_managed:
+                        logger.info(
+                            "Using externally managed Windows Lemonade without process restart"
+                        )
+                elif windows_native_llama:
+                    runtime_restart_strategy = "windows-native-llama"
+                    if _switchboard_adapters is not None:
+                        switchboard_adapter = _switchboard_adapters.NativeLlamaAdapter(
+                            restart=lambda _e: _restart_windows_native_llama_server(
+                                env_path, _e
+                            ),
+                            wait_ready=_sb_wait_ready,
+                            expected_gguf=gguf_file,
+                            context_length=int(context_length),
+                            capabilities=switchboard_capabilities,
+                        )
+                    else:
+                        _restart_windows_native_llama_server(env_path, env)
+                elif gpu_backend == "apple":
+                    # macOS: manage native llama-server process via PID file
+                    if not all((apple_llama_bin, apple_llama_log, apple_pid_file)):
+                        raise RuntimeError("macOS native runtime preflight state is unavailable")
+
+                    runtime_restart_strategy = "macos-native-llama"
+                    if _switchboard_adapters is not None:
+                        switchboard_adapter = _switchboard_adapters.NativeLlamaAdapter(
+                            restart=lambda _e: _restart_macos_native_llama_server(
+                                env_path,
+                                apple_llama_bin,
+                                apple_llama_log,
+                                apple_pid_file,
+                            ),
+                            wait_ready=_sb_wait_ready,
+                            expected_gguf=gguf_file,
+                            context_length=int(context_length),
+                            capabilities=switchboard_capabilities,
+                        )
+                    else:
+                        _restart_macos_native_llama_server(
                             env_path,
                             apple_llama_bin,
                             apple_llama_log,
                             apple_pid_file,
-                        ),
-                        wait_ready=_sb_wait_ready,
-                        expected_gguf=gguf_file,
-                        context_length=int(context_length),
-                        capabilities=switchboard_capabilities,
-                    )
-                else:
-                    _restart_macos_native_llama_server(
-                        env_path,
-                        apple_llama_bin,
-                        apple_llama_log,
-                        apple_pid_file,
-                    )
-            elif _in_container:
-                override_image = (
-                    llama_server_image
-                    or env.get("LLAMA_SERVER_IMAGE")
-                    or (
-                        "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014"
-                        if gpu_backend == "nvidia"
-                        else ""
-                    )
-                )
-                runtime_restart_strategy = "container-llama"
-                if _switchboard_adapters is not None and not lemonade_runtime:
-                    _sb_override = override_image
-                    switchboard_adapter = _switchboard_adapters.ContainerLlamaAdapter(
-                        restart=lambda _e, _img=_sb_override: _recreate_llama_server(
-                            _e, override_image=_img
-                        ),
-                        wait_ready=_sb_wait_ready,
-                        expected_gguf=gguf_file,
-                        context_length=int(context_length),
-                        capabilities=switchboard_capabilities,
-                    )
-                else:
-                    _recreate_llama_server(env, override_image=override_image)
-            else:
-                runtime_restart_strategy = "compose-llama"
-                if _switchboard_adapters is not None and not lemonade_runtime:
-                    switchboard_adapter = _switchboard_adapters.ContainerLlamaAdapter(
-                        restart=_compose_restart_llama_server,
-                        wait_ready=_sb_wait_ready,
-                        expected_gguf=gguf_file,
-                        context_length=int(context_length),
-                        capabilities=switchboard_capabilities,
-                    )
-                else:
-                    _compose_restart_llama_server(env)
-
-            if lemonade_runtime:
-                lemonade_host, lemonade_port = _lemonade_runtime_address(env)
-                lemonade_model_id = _resolve_lemonade_model_id(
-                    env,
-                    gguf_file,
-                    host=lemonade_host,
-                    port=lemonade_port,
-                )
-                if not lemonade_model_id:
-                    raise RuntimeError(
-                        f"Could not resolve Lemonade model ID for {gguf_file}"
-                    )
-                if _switchboard_adapters is not None:
-                    switchboard_adapter = _switchboard_adapters.LemonadeAdapter(
-                        wait_ready=_sb_wait_ready,
-                        expected_gguf=gguf_file,
-                        context_length=int(context_length),
-                        lemonade_model_id=lemonade_model_id,
-                        capabilities=switchboard_capabilities,
-                    )
-
-            hermes_model_name = (
-                gguf_file
-                if windows_native_llama
-                else lemonade_model_id if lemonade_runtime else gguf_file
-            )
-            hermes_base_url = env_pre.get("HERMES_LLM_BASE_URL") or (
-                "http://litellm:4000/v1" if windows_host_lemonade else None
-            )
-
-            if switchboard_adapter is not None:
-                switchboard_run = _switchboard_reconciler.run_runtime_activation(
-                    switchboard_adapter, env
-                )
-                healthy = bool(switchboard_run["ok"])
-                if not healthy:
-                    logger.error(
-                        "switchboard runtime activation failed at %s: %s",
-                        switchboard_run.get("phase"),
-                        switchboard_run.get("detail"),
-                    )
-                    if switchboard_run.get("phase") == "stage":
-                        raise RuntimeError(
-                            str(switchboard_run.get("detail") or "runtime stage failed")
                         )
-            else:
-                runtime_identity = _wait_for_model_readiness(
-                    env,
-                    model_id=model_id,
-                    gguf_file=gguf_file,
-                    llm_model_name=llm_model_name,
-                    lemonade_model_id=lemonade_model_id,
-                    return_identity=True,
-                    require_exact_context=requested_context_length is not None,
-                )
-                healthy = bool(runtime_identity)
+                elif _in_container:
+                    override_image = (
+                        llama_server_image
+                        or env.get("LLAMA_SERVER_IMAGE")
+                        or (
+                            "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014"
+                            if gpu_backend == "nvidia"
+                            else ""
+                        )
+                    )
+                    runtime_restart_strategy = "container-llama"
+                    if _switchboard_adapters is not None and not lemonade_runtime:
+                        _sb_override = override_image
+                        switchboard_adapter = _switchboard_adapters.ContainerLlamaAdapter(
+                            restart=lambda _e, _img=_sb_override: _recreate_llama_server(
+                                _e, override_image=_img
+                            ),
+                            wait_ready=_sb_wait_ready,
+                            expected_gguf=gguf_file,
+                            context_length=int(context_length),
+                            capabilities=switchboard_capabilities,
+                        )
+                    else:
+                        _recreate_llama_server(env, override_image=override_image)
+                else:
+                    runtime_restart_strategy = "compose-llama"
+                    if _switchboard_adapters is not None and not lemonade_runtime:
+                        switchboard_adapter = _switchboard_adapters.ContainerLlamaAdapter(
+                            restart=_compose_restart_llama_server,
+                            wait_ready=_sb_wait_ready,
+                            expected_gguf=gguf_file,
+                            context_length=int(context_length),
+                            capabilities=switchboard_capabilities,
+                        )
+                    else:
+                        _compose_restart_llama_server(env)
 
-            if healthy:
                 if lemonade_runtime:
-                    # Post-readiness LEMONADE_MODEL refresh: record its prior
-                    # (idempotent — first-seen wins, so it defers to the prior
-                    # captured with the main write-set above) so a later failure
-                    # still rolls this key back with the rest.
-                    env_txn.record({"LEMONADE_MODEL"})
-                    _upsert_env_value(env_path, "LEMONADE_MODEL", lemonade_model_id)
-                    env["LEMONADE_MODEL"] = lemonade_model_id
-                    if lemonade_yaml.exists() or env.get("ODS_MODE") == "lemonade":
-                        _write_lemonade_config(
-                            INSTALL_DIR,
-                            gguf_file,
-                            lemonade_model_id,
+                    lemonade_host, lemonade_port = _lemonade_runtime_address(env)
+                    lemonade_model_id = _resolve_lemonade_model_id(
+                        env,
+                        gguf_file,
+                        host=lemonade_host,
+                        port=lemonade_port,
+                    )
+                    if not lemonade_model_id:
+                        raise RuntimeError(
+                            f"Could not resolve Lemonade model ID for {gguf_file}"
+                        )
+                    if _switchboard_adapters is not None:
+                        switchboard_adapter = _switchboard_adapters.LemonadeAdapter(
+                            wait_ready=_sb_wait_ready,
+                            expected_gguf=gguf_file,
+                            context_length=int(context_length),
+                            lemonade_model_id=lemonade_model_id,
+                            capabilities=switchboard_capabilities,
                         )
 
-                if windows_native_llama:
-                    _write_windows_native_litellm_config(INSTALL_DIR, gguf_file, env)
-
-                _render_model_router_runtime_configs(
-                    INSTALL_DIR,
-                    env,
-                    model=llm_model_name,
-                    gguf_file=gguf_file,
-                    lemonade_model_id=lemonade_model_id,
-                    context_length=int(context_length),
+                hermes_model_name = (
+                    gguf_file
+                    if windows_native_llama
+                    else lemonade_model_id if lemonade_runtime else gguf_file
+                )
+                hermes_base_url = env_pre.get("HERMES_LLM_BASE_URL") or (
+                    "http://litellm:4000/v1" if windows_host_lemonade else None
                 )
 
-                hermes_live_exists = bool(
-                    hermes_live_snapshot and hermes_live_snapshot.get("exists")
-                )
-                hermes_live_patched = False
-                hermes_live_verified = False
-                if hermes_live_exists:
-                    patched_live, hermes_live_patched = _patch_hermes_config_text(
-                        str(hermes_live_snapshot.get("text") or ""),
+                if switchboard_adapter is not None:
+                    switchboard_run = _switchboard_reconciler.run_runtime_activation(
+                        switchboard_adapter, env
+                    )
+                    healthy = bool(switchboard_run["ok"])
+                    if not healthy:
+                        logger.error(
+                            "switchboard runtime activation failed at %s: %s",
+                            switchboard_run.get("phase"),
+                            switchboard_run.get("detail"),
+                        )
+                        if switchboard_run.get("phase") == "stage":
+                            raise RuntimeError(
+                                str(switchboard_run.get("detail") or "runtime stage failed")
+                            )
+                else:
+                    # Stage boundary: the restart returned; the readiness
+                    # wait below is the longest single stage (~600s+ worst).
+                    deck_bracket.renew()
+                    runtime_identity = _wait_for_model_readiness(
+                        env,
+                        model_id=model_id,
+                        gguf_file=gguf_file,
+                        llm_model_name=llm_model_name,
+                        lemonade_model_id=lemonade_model_id,
+                        return_identity=True,
+                        require_exact_context=requested_context_length is not None,
+                    )
+                    healthy = bool(runtime_identity)
+
+                if healthy:
+                    # Stage boundary: readiness is proven; the dependent
+                    # restarts and health waits below (hermes, openclaw,
+                    # final proof) can consume another window before commit.
+                    deck_bracket.renew()
+                    if lemonade_runtime:
+                        # Post-readiness LEMONADE_MODEL refresh: record its prior
+                        # (idempotent — first-seen wins, so it defers to the prior
+                        # captured with the main write-set above) so a later failure
+                        # still rolls this key back with the rest.
+                        env_txn.record({"LEMONADE_MODEL"})
+                        _upsert_env_value(env_path, "LEMONADE_MODEL", lemonade_model_id)
+                        env["LEMONADE_MODEL"] = lemonade_model_id
+                        if lemonade_yaml.exists() or env.get("ODS_MODE") == "lemonade":
+                            _write_lemonade_config(
+                                INSTALL_DIR,
+                                gguf_file,
+                                lemonade_model_id,
+                            )
+
+                    if windows_native_llama:
+                        _write_windows_native_litellm_config(INSTALL_DIR, gguf_file, env)
+
+                    _render_model_router_runtime_configs(
+                        INSTALL_DIR,
+                        env,
+                        model=llm_model_name,
+                        gguf_file=gguf_file,
+                        lemonade_model_id=lemonade_model_id,
+                        context_length=int(context_length),
+                    )
+
+                    hermes_live_exists = bool(
+                        hermes_live_snapshot and hermes_live_snapshot.get("exists")
+                    )
+                    hermes_live_patched = False
+                    hermes_live_verified = False
+                    if hermes_live_exists:
+                        patched_live, hermes_live_patched = _patch_hermes_config_text(
+                            str(hermes_live_snapshot.get("text") or ""),
+                            hermes_model_name,
+                            base_url=hermes_base_url,
+                            context_length=context_length,
+                        )
+                        if hermes_live_patched:
+                            _write_hermes_live_config(
+                                hermes_live_config,
+                                patched_live,
+                                hermes_live_snapshot.get("source"),
+                                hermes_live_snapshot.get("mode"),
+                            )
+                        verified_live = _capture_hermes_live_config(hermes_live_config)
+                        hermes_live_verified = _hermes_config_matches(
+                            str(verified_live.get("text") or ""),
+                            hermes_model_name,
+                            hermes_base_url,
+                            int(context_length),
+                        )
+                        if not hermes_live_verified:
+                            raise RuntimeError(
+                                "Hermes persisted model route could not be verified"
+                            )
+                    hermes_template_patched = _patch_hermes_model_config(
+                        hermes_template_config,
                         hermes_model_name,
                         base_url=hermes_base_url,
                         context_length=context_length,
                     )
-                    if hermes_live_patched:
-                        _write_hermes_live_config(
-                            hermes_live_config,
-                            patched_live,
-                            hermes_live_snapshot.get("source"),
-                            hermes_live_snapshot.get("mode"),
-                        )
-                    verified_live = _capture_hermes_live_config(hermes_live_config)
-                    hermes_live_verified = _hermes_config_matches(
-                        str(verified_live.get("text") or ""),
-                        hermes_model_name,
-                        hermes_base_url,
-                        int(context_length),
+                    # A missing live file can be seeded from the patched template
+                    # on the next Hermes start. An existing file was verified above.
+                    hermes_patched = hermes_live_patched or (
+                        hermes_template_patched and not hermes_live_exists
                     )
-                    if not hermes_live_verified:
-                        raise RuntimeError(
-                            "Hermes persisted model route could not be verified"
-                        )
-                hermes_template_patched = _patch_hermes_model_config(
-                    hermes_template_config,
-                    hermes_model_name,
-                    base_url=hermes_base_url,
-                    context_length=context_length,
-                )
-                # A missing live file can be seeded from the patched template
-                # on the next Hermes start. An existing file was verified above.
-                hermes_patched = hermes_live_patched or (
-                    hermes_template_patched and not hermes_live_exists
-                )
-                hermes_config_mutated = hermes_live_patched or hermes_template_patched
+                    hermes_config_mutated = hermes_live_patched or hermes_template_patched
 
-                if opencode_snapshot is not None:
-                    opencode_model_id = (
-                        lemonade_model_id
-                        if windows_host_lemonade
-                        else gguf_file if windows_native_llama else llm_model_name
-                    )
-                    opencode_config_mutated = True
-                    _update_opencode_config(
-                        env,
-                        opencode_snapshot,
-                        opencode_model_id,
-                        int(context_length),
-                        display_name=llm_model_name,
-                    )
+                    if opencode_snapshot is not None:
+                        opencode_model_id = (
+                            lemonade_model_id
+                            if windows_host_lemonade
+                            else gguf_file if windows_native_llama else llm_model_name
+                        )
+                        opencode_config_mutated = True
+                        _update_opencode_config(
+                            env,
+                            opencode_snapshot,
+                            opencode_model_id,
+                            int(context_length),
+                            display_name=llm_model_name,
+                        )
 
-                # Restart dependent services so they pick up the new model
-                litellm_restart_attempted = container_states["ods-litellm"]["running"]
-                litellm_restarted = _restart_existing_container(
-                    "ods-litellm", container_states["ods-litellm"]
-                )
-                if litellm_restarted:
-                    _verify_litellm_route(env)
-                if hermes_patched:
-                    hermes_restart_attempted = container_states["ods-hermes"]["running"]
-                if hermes_patched and _restart_existing_container(
-                    "ods-hermes", container_states["ods-hermes"]
-                ):
-                    _verify_running_hermes_route(
-                        hermes_model_name,
-                        hermes_base_url,
-                        int(context_length),
+                    # Restart dependent services so they pick up the new model
+                    litellm_restart_attempted = container_states["ods-litellm"]["running"]
+                    litellm_restarted = _restart_existing_container(
+                        "ods-litellm", container_states["ods-litellm"]
                     )
-                    _wait_for_container_health("ods-hermes")
-                openclaw_recreate_attempted = container_states["ods-openclaw"]["running"]
-                openclaw_recreated = _recreate_openclaw_if_present(
-                    container_states["ods-openclaw"]
-                )
-                if perplexica_snapshot is not None:
-                    perplexica_mutated = True
-                    _update_perplexica_model(
+                    if litellm_restarted:
+                        _verify_litellm_route(env)
+                    if hermes_patched:
+                        hermes_restart_attempted = container_states["ods-hermes"]["running"]
+                    if hermes_patched and _restart_existing_container(
+                        "ods-hermes", container_states["ods-hermes"]
+                    ):
+                        _verify_running_hermes_route(
+                            hermes_model_name,
+                            hermes_base_url,
+                            int(context_length),
+                        )
+                        _wait_for_container_health("ods-hermes")
+                    openclaw_recreate_attempted = container_states["ods-openclaw"]["running"]
+                    openclaw_recreated = _recreate_openclaw_if_present(
+                        container_states["ods-openclaw"]
+                    )
+                    if perplexica_snapshot is not None:
+                        perplexica_mutated = True
+                        _update_perplexica_model(
+                            env,
+                            perplexica_snapshot,
+                            gguf_file=gguf_file,
+                            lemonade_model_id=lemonade_model_id,
+                        )
+                    if openclaw_recreated:
+                        _verify_openclaw_model_env(hermes_model_name)
+                        _wait_for_container_health("ods-openclaw")
+                    if opencode_snapshot is not None and opencode_runtime_state is not None:
+                        opencode_restarted = _restart_managed_opencode(opencode_runtime_state)
+
+                    final_runtime_proof = _wait_for_model_readiness(
                         env,
-                        perplexica_snapshot,
+                        model_id=model_id,
                         gguf_file=gguf_file,
+                        llm_model_name=llm_model_name,
                         lemonade_model_id=lemonade_model_id,
+                        attempts=6,
+                        initial_delay=0,
+                        interval=5,
+                        return_proof=True,
+                        require_exact_context=requested_context_length is not None,
                     )
-                if openclaw_recreated:
-                    _verify_openclaw_model_env(hermes_model_name)
-                    _wait_for_container_health("ods-openclaw")
-                if opencode_snapshot is not None and opencode_runtime_state is not None:
-                    opencode_restarted = _restart_managed_opencode(opencode_runtime_state)
-
-                final_runtime_proof = _wait_for_model_readiness(
-                    env,
-                    model_id=model_id,
-                    gguf_file=gguf_file,
-                    llm_model_name=llm_model_name,
-                    lemonade_model_id=lemonade_model_id,
-                    attempts=6,
-                    initial_delay=0,
-                    interval=5,
-                    return_proof=True,
-                    require_exact_context=requested_context_length is not None,
-                )
-                if not final_runtime_proof:
-                    raise RuntimeError(
-                        "Final runtime proof failed for activated model "
-                        f"{gguf_file}; rolling back to previous model"
-                    )
-                consumers = {
-                    "open-webui": "dynamic_route",
-                    "dashboard": "live_env",
-                    "litellm": (
-                        "restarted"
-                        if litellm_restarted
-                        else "stopped"
-                        if container_states["ods-litellm"]["exists"]
-                        else "not_installed"
-                    ),
-                    "hermes": (
-                        "restarted"
-                        if hermes_restart_attempted
-                        else "updated_for_next_start"
-                        if hermes_config_mutated
-                        else "unchanged"
-                    ),
-                    "openclaw": (
-                        "recreated"
-                        if openclaw_recreated
-                        else "stopped"
-                        if container_states["ods-openclaw"]["exists"]
-                        else "not_installed"
-                    ),
-                    "opencode": (
-                        "restarted"
-                        if opencode_restarted
-                        else "updated_for_next_start"
-                        if opencode_config_mutated
-                        else "not_installed"
-                    ),
-                    "perplexica": (
-                        "updated"
-                        if perplexica_mutated
-                        else "stopped"
-                        if container_states["ods-perplexica"]["exists"]
-                        else "not_installed"
-                    ),
-                }
-                _atomic_write_json(
-                    activation_receipt,
-                    {
-                        "schema": "ods.model-activation-receipt.v1",
-                        "status": "complete",
-                        "modelId": str(model_id),
-                        "llmModel": str(llm_model_name),
-                        "ggufFile": str(gguf_file),
-                        "runtimeModelId": str(final_runtime_proof.get("identity") or ""),
-                        "contextLength": int(final_runtime_proof.get("contextLength") or context_length),
-                        "contextVerified": final_runtime_proof.get("contextVerified") is True,
-                        "gpuAssignment": (
-                            {
-                                "changed": True,
-                                "previousGpus": gpu_assignment_plan["previous_gpus"],
-                                "activeGpus": gpu_assignment_plan["planned_gpus"],
-                                "requiredMiB": gpu_assignment_plan["required_mb"],
-                                "assignedMiB": gpu_assignment_plan["planned_capacity_mb"],
-                                "splitMode": gpu_assignment_plan["split_mode"],
-                                "tensorSplit": gpu_assignment_plan["tensor_split"],
-                            }
-                            if gpu_assignment_plan
-                            else {"changed": False}
+                    if not final_runtime_proof:
+                        raise RuntimeError(
+                            "Final runtime proof failed for activated model "
+                            f"{gguf_file}; rolling back to previous model"
+                        )
+                    consumers = {
+                        "open-webui": "dynamic_route",
+                        "dashboard": "live_env",
+                        "litellm": (
+                            "restarted"
+                            if litellm_restarted
+                            else "stopped"
+                            if container_states["ods-litellm"]["exists"]
+                            else "not_installed"
                         ),
-                        "consumers": consumers,
-                        "verifiedAt": str(final_runtime_proof.get("verifiedAt") or _iso_now()),
-                    },
-                )
-                committed = True  # system state is committed before the response write
-                if (
-                    _switchboard_state is not None
-                    and final_runtime_proof
-                    and final_runtime_proof.get("contextVerified") is True
-                ):
-                    # Observe mode: record the proven route after the existing
-                    # transaction committed. Failures are logged, never fatal,
-                    # and never alter activation behavior.
-                    try:
-                        verified_runtime_identity = str(
-                            final_runtime_proof.get("identity") or ""
-                        )
-                        verified_context_length = int(
-                            final_runtime_proof.get("contextLength") or 0
-                        )
-                        verified_capabilities = (
-                            (switchboard_run or {}).get("capabilities") or {}
-                        )
-                        _switchboard_state.record_verified_route(
-                            INSTALL_DIR / "data" / "model-state.json",
-                            catalog_id=str(model_id),
-                            runtime_model_id=verified_runtime_identity,
-                            backend_kind=(
-                                "lemonade" if lemonade_model_id else "llama-server"
+                        "hermes": (
+                            "restarted"
+                            if hermes_restart_attempted
+                            else "updated_for_next_start"
+                            if hermes_config_mutated
+                            else "unchanged"
+                        ),
+                        "openclaw": (
+                            "recreated"
+                            if openclaw_recreated
+                            else "stopped"
+                            if container_states["ods-openclaw"]["exists"]
+                            else "not_installed"
+                        ),
+                        "opencode": (
+                            "restarted"
+                            if opencode_restarted
+                            else "updated_for_next_start"
+                            if opencode_config_mutated
+                            else "not_installed"
+                        ),
+                        "perplexica": (
+                            "updated"
+                            if perplexica_mutated
+                            else "stopped"
+                            if container_states["ods-perplexica"]["exists"]
+                            else "not_installed"
+                        ),
+                    }
+                    _atomic_write_json(
+                        activation_receipt,
+                        {
+                            "schema": "ods.model-activation-receipt.v1",
+                            "status": "complete",
+                            "modelId": str(model_id),
+                            "llmModel": str(llm_model_name),
+                            "ggufFile": str(gguf_file),
+                            "runtimeModelId": str(final_runtime_proof.get("identity") or ""),
+                            "contextLength": int(final_runtime_proof.get("contextLength") or context_length),
+                            "contextVerified": final_runtime_proof.get("contextVerified") is True,
+                            "gpuAssignment": (
+                                {
+                                    "changed": True,
+                                    "previousGpus": gpu_assignment_plan["previous_gpus"],
+                                    "activeGpus": gpu_assignment_plan["planned_gpus"],
+                                    "requiredMiB": gpu_assignment_plan["required_mb"],
+                                    "assignedMiB": gpu_assignment_plan["planned_capacity_mb"],
+                                    "splitMode": gpu_assignment_plan["split_mode"],
+                                    "tensorSplit": gpu_assignment_plan["tensor_split"],
+                                }
+                                if gpu_assignment_plan
+                                else {"changed": False}
                             ),
-                            endpoint_id=(
-                                "lemonade-default"
-                                if lemonade_model_id
-                                else "llama-server-default"
-                            ),
-                            native_route=(lemonade_model_id or None),
-                            context_length=verified_context_length,
-                            capabilities=verified_capabilities,
-                            proof_identity=verified_runtime_identity,
+                            "consumers": consumers,
+                            "verifiedAt": str(final_runtime_proof.get("verifiedAt") or _iso_now()),
+                        },
+                    )
+                    # The ONE adopt-earning point: final runtime proof passed
+                    # and the receipt is written, so llama-server is provably
+                    # serving the routed model. deck_bracket.commit() stays
+                    # adjacent to the `committed` flag so the two can never
+                    # mean different things (pinned by test_deck_bracket).
+                    committed = True  # system state is committed before the response write
+                    deck_bracket.commit()
+                    if (
+                        _switchboard_state is not None
+                        and final_runtime_proof
+                        and final_runtime_proof.get("contextVerified") is True
+                    ):
+                        # Observe mode: record the proven route after the existing
+                        # transaction committed. Failures are logged, never fatal,
+                        # and never alter activation behavior.
+                        try:
+                            verified_runtime_identity = str(
+                                final_runtime_proof.get("identity") or ""
+                            )
+                            verified_context_length = int(
+                                final_runtime_proof.get("contextLength") or 0
+                            )
+                            verified_capabilities = (
+                                (switchboard_run or {}).get("capabilities") or {}
+                            )
+                            _switchboard_state.record_verified_route(
+                                INSTALL_DIR / "data" / "model-state.json",
+                                catalog_id=str(model_id),
+                                runtime_model_id=verified_runtime_identity,
+                                backend_kind=(
+                                    "lemonade" if lemonade_model_id else "llama-server"
+                                ),
+                                endpoint_id=(
+                                    "lemonade-default"
+                                    if lemonade_model_id
+                                    else "llama-server-default"
+                                ),
+                                native_route=(lemonade_model_id or None),
+                                context_length=verified_context_length,
+                                capabilities=verified_capabilities,
+                                proof_identity=verified_runtime_identity,
+                            )
+                        except Exception as exc:
+                            logger.warning("switchboard state record failed: %s", exc)
+                    elif _switchboard_state is not None:
+                        logger.info(
+                            "switchboard verified-state publication deferred for runtime %s",
+                            "lemonade" if lemonade_model_id else runtime_restart_strategy,
                         )
-                    except Exception as exc:
-                        logger.warning("switchboard state record failed: %s", exc)
-                elif _switchboard_state is not None:
-                    logger.info(
-                        "switchboard verified-state publication deferred for runtime %s",
-                        "lemonade" if lemonade_model_id else runtime_restart_strategy,
+                    json_response(
+                        self,
+                        200,
+                        {
+                            "status": "activated",
+                            "model_id": model_id,
+                            "llm_model": llm_model_name,
+                            "gguf_file": gguf_file,
+                            "tier": requested_tier,
+                            "context_length": int(context_length),
+                            "gpu_assignment_changed": bool(gpu_assignment_plan),
+                            "consumers": consumers,
+                        },
                     )
-                json_response(
-                    self,
-                    200,
-                    {
-                        "status": "activated",
-                        "model_id": model_id,
-                        "llm_model": llm_model_name,
-                        "gguf_file": gguf_file,
-                        "tier": requested_tier,
-                        "context_length": int(context_length),
-                        "gpu_assignment_changed": bool(gpu_assignment_plan),
-                        "consumers": consumers,
-                    },
-                )
-            else:
-                logger.warning("Model activation failed — rolling back")
-                rolled_back, rollback_error = rollback_and_prove()
-                error = (
-                    "Health check failed — rolled back to previous model"
-                    if rolled_back
-                    else (
-                        "Health check failed; previous model restoration could not be proved: "
-                        f"{rollback_error}"
+                else:
+                    logger.warning("Model activation failed — rolling back")
+                    rolled_back, rollback_error = rollback_and_prove()
+                    error = (
+                        "Health check failed — rolled back to previous model"
+                        if rolled_back
+                        else (
+                            "Health check failed; previous model restoration could not be proved: "
+                            f"{rollback_error}"
+                        )
                     )
-                )
-                payload = {"error": error, "rolled_back": rolled_back}
+                    payload = {"error": error, "rolled_back": rolled_back}
+                    if switchboard_run and not switchboard_run.get("ok"):
+                        payload["failure_phase"] = switchboard_run.get("phase")
+                        payload["failure_detail"] = switchboard_run.get("detail")
+                    json_response(
+                        self,
+                        500,
+                        payload,
+                    )
+
+            except Exception as exc:
+                rolled_back = False
+                rollback_error = ""
+                if not committed and mutation_started and not rollback_attempted:
+                    rolled_back, rollback_error = rollback_and_prove()
+                logger.exception("Model activation failed")
+                error = f"Model activation failed: {exc}"
+                if rollback_error:
+                    error += f"; rollback could not be proved: {rollback_error}"
+                payload = {"error": error}
+                if mutation_started:
+                    payload["rolled_back"] = rolled_back
                 if switchboard_run and not switchboard_run.get("ok"):
                     payload["failure_phase"] = switchboard_run.get("phase")
                     payload["failure_detail"] = switchboard_run.get("detail")
-                json_response(
-                    self,
-                    500,
-                    payload,
-                )
-
-        except Exception as exc:
-            rolled_back = False
-            rollback_error = ""
-            if not committed and mutation_started and not rollback_attempted:
-                rolled_back, rollback_error = rollback_and_prove()
-            logger.exception("Model activation failed")
-            error = f"Model activation failed: {exc}"
-            if rollback_error:
-                error += f"; rollback could not be proved: {rollback_error}"
-            payload = {"error": error}
-            if mutation_started:
-                payload["rolled_back"] = rolled_back
-            if switchboard_run and not switchboard_run.get("ok"):
-                payload["failure_phase"] = switchboard_run.get("phase")
-                payload["failure_detail"] = switchboard_run.get("detail")
-            json_response(self, 500, payload)
+                json_response(self, 500, payload)
 
     def _do_hipfire_activate(self, model_id: str, model: dict):
         """Activate a hipfire-engine model — called with _model_activate_lock held.
@@ -12473,16 +12512,25 @@ def _log_env_rollback(restored: dict) -> None:
     )
 
 
-# Window during which the Model Deck stands down for one deliberate teardown.
-# Must cover the WHOLE bracketed duration, not just a cold load: the health
-# loop alone is up to 60 * (curl --max-time 5 + sleep 5) plus an initial
-# sleep(5) — ~605s if curl always hits its own timeout, worse if the
-# subprocess timeout=10 fires — and an unhealthy result then runs a SECOND
-# _compose_recreate_hipfire() for rollback on top of that. 600 leaves the
-# bracket's initial hold covering the ordinary run and sits under
-# app.holds.MAX_HOLD_TTL_S (900); the yielded handle's `renew()`
-# re-arms a fresh window immediately before the rollback recreate so the
-# pathological case is never actually bounded by this constant alone.
+# Default window during which the Model Deck stands down for one deliberate
+# teardown. The TTL bounds a STUCK actuator, never the whole operation: any
+# caller whose bracketed span can outlive one window must renew() at its own
+# stage boundaries — the constant only has to cover the longest single
+# INTER-RENEW window, not the transaction.
+#
+# Sized for _do_hipfire_activate, this default's original consumer: its
+# health loop alone is up to 60 * (curl --max-time 5 + sleep 5) plus an
+# initial sleep(5) — ~605s if curl always hits its own timeout, worse if the
+# subprocess timeout=10 fires — and it renews immediately before the
+# rollback recreate, so 600 covers each of its windows and sits under
+# app.holds.MAX_HOLD_TTL_S (900).
+#
+# _do_model_activate does NOT use this default: its longest single stage
+# (the readiness wait) can exceed 600s by itself, so it passes ttl_s=900
+# and renews at every forward stage boundary — see the with-statement there
+# and test_deck_bracket's forward-stage pins. Do not reason from this
+# comment that 600 is safe for a new caller; size against the caller's
+# longest inter-renew window.
 _DECK_BRACKET_TTL_S = 600
 
 
