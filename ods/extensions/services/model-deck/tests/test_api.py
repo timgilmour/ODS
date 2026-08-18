@@ -1850,6 +1850,99 @@ def test_adopt_an_unreachable_resource_is_refused(tmp_path, monkeypatch):
     assert store.get() == {}
 
 
+def test_expect_absence_holds_the_key(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).post("/api/lifecycle/expect-absence/local/hipfire",
+                                json={"ttl_s": 60})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"key": "local/hipfire", "held": True, "ttl_s": 60}
+    assert deck["hold_store"].held("local/hipfire") is True
+
+
+def test_expect_absence_defaults_its_ttl(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).post("/api/lifecycle/expect-absence/local/hipfire",
+                                json={})
+
+    assert resp.status_code == 200
+    assert resp.json()["ttl_s"] == 360
+
+
+def test_expect_absence_refuses_a_bad_ttl(tmp_path, monkeypatch):
+    """Refuse, never coerce — the StrictBool posture from AutoBody.
+
+    "60" and True are the coercion cases: pydantic's lax mode would accept
+    both as durations. 0/-5/100000 are the band cases.
+    """
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    for bad in ["60", True, 0, -5, 100000]:
+        resp = client.post("/api/lifecycle/expect-absence/local/hipfire",
+                           json={"ttl_s": bad})
+        assert resp.status_code == 422, f"{bad!r} was accepted"
+
+    assert deck["hold_store"].held("local/hipfire") is False
+
+
+def test_delete_expect_absence_releases(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    client.post("/api/lifecycle/expect-absence/local/hipfire", json={"ttl_s": 60})
+
+    resp = client.delete("/api/lifecycle/expect-absence/local/hipfire")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"key": "local/hipfire", "held": False, "released": True}
+    assert deck["hold_store"].held("local/hipfire") is False
+
+
+def test_delete_expect_absence_is_idempotent(tmp_path, monkeypatch):
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    resp = TestClient(app).delete("/api/lifecycle/expect-absence/local/hipfire")
+
+    assert resp.status_code == 200
+    assert resp.json()["released"] is False
+
+
+def test_adopt_releases_the_hold(tmp_path, monkeypatch):
+    """The bracket's close: adopting the new truth ends the announced window."""
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+    deck["hipfire"] = FakeHipfire(state="running")
+    client = TestClient(app)
+    client.post("/api/lifecycle/expect-absence/local/hipfire", json={"ttl_s": 60})
+
+    resp = client.post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 200
+    assert deck["hold_store"].held("local/hipfire") is False
+
+
+def test_a_refused_adopt_leaves_the_hold_alone(tmp_path, monkeypatch):
+    """409 on unreachable: nothing was recorded, so nothing is concluded.
+
+    The hold must survive so the caller's own DELETE (or the TTL) ends it,
+    rather than this route silently re-arming the reconciler against an
+    engine still mid-recreate. Mirrors the existing
+    test_adopt_an_unreachable_resource_is_refused.
+    """
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["intent_store"] = IntentStore(tmp_path / "intent.json")
+    deck["hipfire"] = _UnreachableHipfire()
+    client = TestClient(app)
+    client.post("/api/lifecycle/expect-absence/local/hipfire", json={"ttl_s": 60})
+
+    resp = client.post("/api/lifecycle/adopt/local/hipfire")
+
+    assert resp.status_code == 409
+    assert deck["hold_store"].held("local/hipfire") is True
+
+
 def test_adopt_a_swap_nodes_slot(tmp_path, monkeypatch):
     """N1 T12: adopt's engine_for lookup now threads the live control:"swap"
     id-set through, so a non-legacy swap node's slot key (never the frozen
