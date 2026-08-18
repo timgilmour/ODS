@@ -121,6 +121,7 @@ def _build_deck(settings: Settings) -> dict:
     from app.engines.lemonade import LemonadeClient
     from app.engines.litellm import LiteLLMClient
     from app.gpu import read_gpus
+    from app.holds import HoldStore
     from app.intent import IntentStore
     from app.locations import LocationStore
     from app.mover import JobQueue, Mover
@@ -312,6 +313,10 @@ def _build_deck(settings: Settings) -> dict:
         # routers (which write it on every deliberate action) and — once the
         # reconcile pass lands — the watcher, which reads it.
         "intent_store": IntentStore(data_dir / "intent.json"),
+        # Announced absences, shared with the lifecycle router the same way
+        # policy_store and intent_store are. In-memory by design (app.holds):
+        # a deck restart forgets every hold and reconciles from observation.
+        "hold_store": HoldStore(),
         # The provenance ledger: where each artifact came from and what
         # version of it is here now. RECORDS ONLY — nothing converges to a
         # desired version (see Watcher._provenance_pass). Its history is a
@@ -464,6 +469,7 @@ def _build_watcher(settings: Settings):
         # write on every deliberate action; each swap node's slot (below) is
         # one of the reconciled resources.
         intent_store=deck["intent_store"],
+        hold_store=deck["hold_store"],
         # Per-node actuation clients + observation caches, shared with the
         # HTTP paths (one cache per node per process).
         node_clients=deck["node_clients"],

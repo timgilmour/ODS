@@ -579,6 +579,7 @@ class Watcher:
         hostagent=None,
         catalog=None,
         intent_store=None,
+        hold_store=None,
         node_clients=None,
         node_observers=None,
         characteristics_store=None,
@@ -650,6 +651,11 @@ class Watcher:
         # on every deliberate action). None disables the reconcile pass, which
         # is what every pre-lifecycle caller and unit test gets.
         self._intent_store = intent_store
+        # Announced absences (app.holds). None (the default) disables the
+        # guard entirely — same opt-in shape as characteristics_store /
+        # hostagent / intent_store above, so every existing caller and every
+        # unit test that predates the bracket keeps its exact behaviour.
+        self._hold_store = hold_store
         # Per-node actuation clients + observation caches (app.node_clients).
         # None (unit tests, pre-N1 callers) means no swap nodes: observation
         # emits no slot keys and the spark restore branch refuses.
@@ -1281,6 +1287,22 @@ class Watcher:
                 )
                 if load_in_flight is not None and load_in_flight():
                     continue
+
+            # An operator's own actuator announced this absence: host-agent's
+            # dashboard activate path brackets its container recreate (see
+            # bin/ods-host-agent.py's _deck_bracket). A declared teardown is
+            # not a death, so it is neither restored nor charged. Like the
+            # cooldown skip below, a skipped restore is a non-action: no
+            # event, no stamp, no failure. The hold is TTL-bounded and fails
+            # open (app.holds), so a crashed actuator cannot silence this
+            # pass indefinitely.
+            #
+            # Placed AFTER the load_in_flight guard and BEFORE the cooldown
+            # stamp deliberately: stamping here would make a held key serve
+            # out a cooldown it never spent, delaying the first legitimate
+            # restore after the hold expires.
+            if self._hold_store is not None and self._hold_store.held(key):
+                continue
 
             last = self._restore_last_attempt_at.get(key)
             now_mono = self._clock()
