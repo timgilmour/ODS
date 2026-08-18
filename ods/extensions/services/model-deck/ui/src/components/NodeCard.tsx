@@ -3,6 +3,7 @@ import { humanizeAge, labels, messages } from "../model/messages";
 import type { DeckNode, Placement } from "../model/nodes";
 import Banner from "../ui/Banner";
 import Panel from "../ui/Panel";
+import HeaderEngineMenu from "./HeaderEngineMenu";
 import ResourcePanel from "./ResourcePanel";
 import type { SettingsTarget } from "./SettingsModal";
 
@@ -49,6 +50,25 @@ export default function NodeCard({
   const unreachable = node.status === "unreachable";
   const age = humanizeAge(node.lastSeen);
 
+  // Engine-level entry: no model in context, so the panel opens with the two
+  // model-scoped tabs disabled. Rendered even while the node is unreachable
+  // — settings are the deck's declared intent, which is exactly what an
+  // operator wants to read when a node stops answering.
+  const settingsButton = settingsEngine ? (
+    <button
+      type="button"
+      title={labels.engineSettingsTitle}
+      onClick={() => onOpenSettings({ node: node.id, engine: settingsEngine, model: null })}
+    >
+      {labels.engineSettings}
+    </button>
+  ) : undefined;
+
+  // INTERIM SURFACE (Task 5) — see HeaderEngineMenu's own doc. Renders
+  // nothing itself when the node has no hidden declared engine with a
+  // usable load verb, so it is always safe to include here.
+  const menu = <HeaderEngineMenu hiddenEngines={node.hiddenEngines} onRefresh={onRefresh} />;
+
   return (
     // The whole node desaturates as ONE unit when unreachable, so it reads as
     // a box going quiet rather than as individually greyed-out widgets. Its
@@ -69,21 +89,10 @@ export default function NodeCard({
         </>
       }
       actions={
-        // Engine-level entry: no model in context, so the panel opens with
-        // the two model-scoped tabs disabled. Rendered even while the node is
-        // unreachable — settings are the deck's declared intent, which is
-        // exactly what an operator wants to read when a node stops answering.
-        settingsEngine ? (
-          <button
-            type="button"
-            title={labels.engineSettingsTitle}
-            onClick={() =>
-              onOpenSettings({ node: node.id, engine: settingsEngine, model: null })
-            }
-          >
-            {labels.engineSettings}
-          </button>
-        ) : undefined
+        <>
+          {menu}
+          {settingsButton}
+        </>
       }
     >
       {node.servingLine && (

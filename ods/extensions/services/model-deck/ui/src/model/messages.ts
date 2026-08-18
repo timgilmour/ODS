@@ -469,6 +469,13 @@ export const labels = {
    * lifecycle status — two different facts, one of which is the node's
    * live reading. */
   engineStateTitle: "what the node's agent reports about this engine right now",
+  /** `HeaderEngineMenu`'s per-engine button (Task 5) — the node-header
+   * INTERIM SURFACE for a DECLARED REMOTE engine that dropped off its GPU
+   * card entirely (nothing loaded, so no chip, so no `RemoteEngineActions`
+   * anywhere on screen). Names the resource, not the kind: the resource is
+   * what the operator declared and what the verb route addresses. */
+  loadEngine: (resource: string) => `Load ${resource}`,
+  loadEngineTitle: (resource: string) => `load ${resource} on this node`,
   free: "Free",
   comfyuiBlockedTitle: "ComfyUI is busy or has a non-empty queue",
   park: "Park",

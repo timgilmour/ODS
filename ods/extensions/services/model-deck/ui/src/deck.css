@@ -939,6 +939,24 @@ input[type="password"] {
 
 .node-card { margin-bottom: 0; }
 
+/* HeaderEngineMenu (Task 5) — same row layout as .tenant-actions, scoped
+   separately because this one sits in the node HEADER (.ui-panel-actions),
+   not a resource panel's body. */
+.node-header-engine-menu {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Same reasoning as .tenant-actions > .ui-banner below: the header row is
+   narrow, so a refusal's detail sentence needs the full card width rather
+   than shrinking to fit beside the load buttons. */
+.node-header-engine-menu > .ui-banner {
+  flex-basis: 100%;
+  flex-wrap: wrap;
+}
+
 .node-label { font-size: 1.25rem; font-weight: 700; }
 
 /* An observe-only card's one-line "what it's serving" fact, directly under
