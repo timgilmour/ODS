@@ -49,6 +49,12 @@ This table is hand-maintained and has drifted before. The runtime source of trut
 service's `manifest.yaml`, auto-discovered by `lib/service-registry.sh` — compare with
 `scripts/validate-manifests.sh` output when adding a service.
 
+Adding a new engine to **Model Deck** (the `model-deck` row above)? See
+[model-deck/DECK-INTEGRATION.md](services/model-deck/DECK-INTEGRATION.md) for the
+integration checklist — hipfire worked as the concrete example, including the item
+(actuation-bracket declaration) that "declared a kind + adapter + provenance" alone
+does not cover.
+
 ## Ports and .env
 
 Each service’s external port can be overridden in `.env` via the `external_port_env` field in its manifest (e.g. `WEBUI_PORT`, `OLLAMA_PORT`/`LLAMA_SERVER_PORT`). Defaults are in the table above and in `.env.example`.

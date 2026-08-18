@@ -1,0 +1,223 @@
+# Integrating an engine with the Model Deck
+
+A checklist for wiring a new engine into the Model Deck, with **hipfire** as
+the worked example throughout: every item names the file and symbol that
+satisfies it for hipfire *today*, so this document can be checked against
+the code and rots loudly instead of quietly.
+
+## Read this before item 1
+
+Items 1–4 below are what "looks integrated" means: a declared kind, an
+observable adapter, load/unload verbs, and a provenance record. **hipfire
+passed all four of these and was still being actuated behind the deck's
+back.** `ods/bin/ods-host-agent.py` contained zero references to the Model
+Deck; the dashboard's "activate model" path rewrote `.env` and recreated the
+hipfire container directly, and the deck learned about the resulting outage
+only by watching the engine vanish and firing a lifecycle-restore against an
+operator's own deliberate change. That is the actuation bracket this branch
+built (Tasks 1–4), and it is why items 5 and 6 exist. **A reader who
+completes only items 1–4 has reproduced exactly the situation this branch
+had to fix.** Do not stop at item 4.
+
+## 1. Declare the kind
+
+Add an entry to the kind table in `app/engine_kinds.py`'s `KNOWN_KINDS`
+dict, naming the engine's connection schema (which fields a declaration
+must/may carry) and whether it is `remote_capable` / `local_capable`. Pair
+it with an adapter class implementing the per-kind protocol
+(`observe`/`unknown`/`active`/`build_client`/... — see the module
+docstring for the full surface).
+
+*hipfire:* the `"hipfire": {"connection": {"container": True}, ...}` entry
+in `KNOWN_KINDS` (`app/engine_kinds.py:182`), paired with `_HipfireAdapter`
+(`app/engine_kinds.py:757`) and registered in the kind-to-adapter map as
+`"hipfire": _HipfireAdapter()` (`app/engine_kinds.py:1280`).
+
+## 2. Be observable
+
+The adapter's `observe` must report reachable / loaded / model (and
+whatever else its kind's state shape needs) so `derive_status` can classify
+the resource, and `unknown()` must return the exact shape `observe` returns
+on failure — the record a caller with no client at all still needs to
+produce for a declared-but-unreachable engine.
+
+*hipfire:* the deck dials the container directly over HTTP on port 11435
+(`_HIPFIRE_PORT = 11435`, `app/engine_kinds.py:112`), used to build the
+health/stats URLs in `_HipfireAdapter.build_client`
+(`app/engine_kinds.py:850,854`). `_HipfireAdapter.observe`
+(`app/engine_kinds.py:761`) reads `client.status()` and, while running,
+`client.stats()`; `_HipfireAdapter.unknown()` (`app/engine_kinds.py:788`)
+returns the matching failure shape.
+
+## 3. Be actuable
+
+The deck needs a way to change the engine's state, and a way to reconcile
+it back to a previously-recorded intent after a restart. Two shapes exist
+in the codebase today:
+
+- **Arbiter-eligible kinds** (lemonade, comfyui) implement
+  `execute_load`/`execute_unload`/`execute_free` directly on the adapter —
+  see `_LemonadeAdapter.execute_unload` (`app/engine_kinds.py:445`) and
+  `.execute_load` (`app/engine_kinds.py:555`) for the shape.
+- **Human-only kinds** expose their verbs through `human_verbs()` instead
+  of an arbiter verb, dispatched by `(kind, verb)` in
+  `app/routers/control.py`'s `_HANDLERS` table.
+
+*hipfire:* `_HipfireAdapter.arbiter_verbs()` returns an empty frozenset —
+park/resume are deliberately human-only, never automatic
+(`app/engine_kinds.py:814-818`, comment: "park stays human-only"). The verbs
+are dispatched as `_hipfire_park` (`app/routers/control.py:441`) /
+`_hipfire_resume` (`app/routers/control.py:453`), wired into `_HANDLERS` as
+`("hipfire", "park")` / `("hipfire", "resume")` (`app/routers/control.py:475-476`).
+
+Every kind also needs `restore(client, model)` for post-restart
+reconciliation. *hipfire:* `_HipfireAdapter.restore`
+(`app/engine_kinds.py:862`) calls `client.resume()` — **dispatch-only, and
+deliberately records nothing.** `restore` runs when the deck is
+reconciling a resource back to an *already-recorded* intent; if it also
+called `intent_store.record(...)`, a restore triggered by the deck's own
+reconciliation loop would re-stamp the intent as the deck's doing, silently
+overwriting whatever actor (`operator`, `deck`) actually caused the prior
+state. Compare `_hipfire_park`/`_hipfire_resume`, which *do* call
+`deck["intent_store"].record(...)` — those are actuation, not restore, and
+recording is the entire point of an actuation path.
+
+## 4. Record provenance
+
+Add an artifact to the provenance store with an `origin`, at least one
+`watch` source, and a verification mode, so the deck can classify what
+image/build is actually running and detect drift from upstream.
+
+*hipfire:* the artifact `oci:local:ods-hipfire` in the live provenance
+store (`~/ods/data/model-deck/provenance.json`) carries
+`role="engine"`, one `watch` source (`id="upstream"`, tracking
+`github.com/warpfront/hipfire`'s `master` against the pinned
+`HIPFIRE_REF`), and `current.verification="exact"`.
+
+⚠ **`origin.build` is hand-written prose, and nothing enforces that it
+stays true.** hipfire's `origin.build` field is a paragraph describing how
+the image is built — which Dockerfile, which upstream repo, which local
+patch is applied in the runtime stage. As of this writing (checked live
+against `~/ods/data/model-deck/provenance.json`) that field still says the
+build "applies the local `finish-reason.patch`" in the runtime stage.
+`extensions/services/hipfire/Dockerfile.amd:23` — the actual build the
+provenance record is describing — says the opposite in its own header
+comment: **"The finish-reason.patch is RETIRED. It patched cli/index.ts,
+which no longer exists; the Rust rewrite carries the terminal
+finish_reason rule natively."** The provenance record and the Dockerfile
+it describes have been contradicting each other since that rewrite, and
+nothing flagged it. **Nothing in the codebase diffs `origin.build`
+against the Dockerfile it describes.** Whoever changes `Dockerfile.amd`
+must remember to also edit this field by hand, and until they do, the
+record describes a build step that no longer exists. This is the same
+failure mode as a stale repo copy sitting next to a fetch nobody exercises:
+a hand-maintained description that nothing checks rots exactly like a
+stale artifact, just more quietly, because nothing fails loudly when it
+does.
+
+## 5. Declare who else may actuate it
+
+**This is the item that was missing, and it is what this branch (Tasks
+1–4) exists to fix.** Passing items 1–4 makes an engine "look integrated"
+while anything outside the deck can still stop, start, recreate, or
+re-pin it without the deck's knowledge — the deck then reads the resulting
+absence as a death and fires lifecycle-restore against an operator's own
+deliberate change.
+
+Any surface outside the deck (a dashboard route, a CLI command, an
+installer script) that tears down or recreates an engine's container must
+bracket that action: announce an `expect-absence` hold before, and
+`adopt` what is actually running after, no matter how the action ended
+(success, failure, or rollback).
+
+*hipfire:* `ods-host-agent.py`'s dashboard "activate model" path,
+`_do_hipfire_activate` (`ods/bin/ods-host-agent.py:8849`), wraps its `.env`
+rewrite and container recreate in `_deck_bracket(env_pre, "local/hipfire")`
+(`ods/bin/ods-host-agent.py:8894`, context manager defined at
+`ods/bin/ods-host-agent.py:12522`). The bracket calls
+`POST /api/lifecycle/expect-absence/{key}` before the teardown
+(`app/routers/lifecycle.py:82`) and `POST /api/lifecycle/adopt/{key}` on
+the way out — on the success path *and* on a rollback, since
+`_do_hipfire_activate` recreates the container a second time when it rolls
+back and that absence needs announcing exactly as much as the first one
+(`app/routers/lifecycle.py:113`). This is provably live: the deck's
+`intent.json` records `"local/hipfire": {..., "actor": "operator", ...}` —
+that `actor` value is what `adopt` writes, meaning a real dashboard
+activation went through the bracket, not around it.
+
+⚠ **Hold keys are node-qualified — `local/hipfire`, never bare
+`"hipfire"`.** `local_key()` (`app/observe.py:55`) produces the
+`"local/<resource>"` form the bracket and the intent store both use. This
+does not mean every store in the system is node-qualified: the live
+`intent.json` keys on `local/hipfire` and `sparky/slot0`, while
+`world.tenants` keys on the bare resource name. Both shapes coexist in the
+running system today — check which one a given store uses before assuming
+the other.
+
+⚠ **`_recreate_llama_server` (`ods/bin/ods-host-agent.py:13066`) has the
+same deck-blind shape as hipfire's activation path did, and this branch
+deliberately left it unbracketed.** It stops and recreates the llama-server
+container the same way `_do_hipfire_activate` stopped and recreated
+hipfire's, with no `_deck_bracket` around it. If llama-server ever becomes
+a deck-managed engine kind, this is the next item-5 gap to close — do not
+assume item 5 is satisfied fleet-wide because hipfire's path now is.
+
+## 6. Own its durable state honestly
+
+If anything other than the deck writes state that the deck *also* models,
+say so explicitly in this document. Duplication is survivable — undeclared
+duplication is not, because a reader has no way to know two things can
+disagree.
+
+*hipfire:* `.env`'s `HIPFIRE_MODEL` / `HIPFIRE_ACTIVE` keys are durable
+model-selection state written by the dashboard's activation path
+(`env_txn.update({"HIPFIRE_MODEL": model_file, "HIPFIRE_ACTIVE": "true"})`,
+`ods/bin/ods-host-agent.py:8898`). The deck *also* models this resource's
+load state, independently, in its own intent store (`IntentStore`,
+`app/intent.py:55`), recorded under the `local_key("hipfire")` key by
+`_hipfire_park`/`_hipfire_resume` (`app/routers/control.py:447,462`) and
+by `_deck_bracket`'s `adopt` call (item 5). These are two records of the
+same fact, written by two different actors, and nothing declares that
+relationship or reconciles them against each other.
+The actuation bracket (item 5) keeps the deck's *record* honest about what
+happened; it does **not** collapse this duplication — `.env` and the
+intent store can still independently disagree about which model is
+active, and nothing here notices if they do. Collapsing it — e.g. making
+the deck the single writer of `HIPFIRE_MODEL`, or making `.env` a read
+projection of the intent store — is deliberately out of scope for this
+branch. Say this plainly for any new engine, don't silently assume it away:
+if a config file, an installer script, or another service also persists
+model/engine state the deck models, name the field and the writer here,
+even if resolving the duplication is future work.
+
+## Fleet status (not universal — check before assuming)
+
+This checklist describes the shape of correct integration; it does not
+claim every declared engine currently satisfies every item.
+
+- Items 1–3 (kind declared, observable, actuable): satisfied by every
+  engine with a `KNOWN_KINDS` entry (lemonade, comfyui, hipfire,
+  sglang-omni) — that's what having an entry and an adapter means.
+- Item 4 (provenance): present but *uneven* in the live provenance store
+  (`~/ods/data/model-deck/provenance.json`). hipfire's artifact
+  (`oci:local:ods-hipfire`) and lemonade's (`oci:local:ods-lemonade-server`)
+  each carry one `watch` source and `verification="exact"`; comfyui's
+  local artifact (`oci:local:ignatberesnev/comfyui-gfx1151`) carries zero
+  watch sources — declared, but with no drift detection at all — and two
+  of the sparky images (`oci:sparky:aeon-7/comfyui-aeon-spark`,
+  `oci:sparky:ds4-spark`) read `verification="unknown"`, worse coverage
+  than hipfire had going into this investigation. Having a `KNOWN_KINDS`
+  entry does not imply a complete provenance record; check the artifact.
+- Item 5 (actuation-bracket): satisfied for hipfire's dashboard activation
+  path only. `_recreate_llama_server` is the known unbracketed sibling
+  (see item 5's warning). Other out-of-band actuators — installer scripts,
+  manual `docker compose` calls, a future extension's own control surface —
+  have not been audited by this branch and should be assumed unbracketed
+  until checked.
+- Item 6 (durable-state declaration): written here for hipfire only. No
+  other engine's out-of-deck durable state has been inventoried as part of
+  this branch.
+- The live gate (an end-to-end run proving the bracket holds under a real
+  dashboard activation against the running deck) has not been run as part
+  of this branch. The `intent.json` evidence cited under item 5 is from the
+  live system's prior activation, not a gate this branch executed.
