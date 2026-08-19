@@ -187,65 +187,22 @@ def _build_deck(settings: Settings) -> dict:
     # declaration instead of swap nodes' registry rows.
     local_clients = LocalClients(node_store, settings)
 
-    # E1 Task 6 (branch-blocking obligation carried from Task 3's review,
-    # "dual-HipfireClient cold busy-guard"): ALIAS the pre-E1 shared
-    # lemonade/comfy/hipfire instances above onto whatever `local_clients`
-    # builds for that SAME resource name, whenever it's actually declared.
-    # Closes the dual-instance gap: HipfireClient's own conversation-
-    # activity tracker is fed by every `stats()` call and read by
-    # `ensure_not_busy`'s recency check (app/engines/hipfire.py) — before
-    # this, World.snapshot's per-tick polls (Task 3, through
-    # `local_clients`) fed ONE HipfireClient instance while
-    # app.routers.control's park route and app.sets' apply() guarded
-    # busy-ness through a SEPARATE one built here, so the tracker
-    # ensure_not_busy actually consulted was always cold on a fresh deck
-    # start ("hipfire served a request 0s ago", falsely refused, until the
-    # window elapsed from the failed attempt). Extended past hipfire to
-    # lemonade/comfy too, for the analogous reason: LemonadeClient's own
-    # `_loads_in_flight` tracker (read by `load_in_flight()`, which
-    # World.snapshot's observe() AND Watcher._reconcile_pass's in-flight
-    # skip both consult) would have the identical split otherwise.
-    #
-    # Falls back to the settings-built instance above when the resource
-    # ISN'T declared (a brand-new, empty-declaration install, spec §1) — a
-    # real, always-present client regardless of declaration state; see
-    # tests/test_engines.py's
-    # test_build_deck_wires_hipfire_stats_url_and_activity_window, which
-    # pins exactly that for an undeclared box, and
-    # test_local_clients_alias_falls_back_when_nothing_is_declared
-    # alongside it, which pins the fallback explicitly.
-    #
-    # STALE CLAIM CORRECTED (E1 final-review item 4): this used to say every
-    # consumer of deck["lemonade"]/deck["comfy"]/deck["hipfire"] — naming
-    # app.routers.control's routes, app.routers.sets' apply(), and
-    # app.notify among them — needed this alias. False since T7/T8/T9: all
-    # three now resolve their client per-request through
-    # deck["local_clients"].client_for(resource) instead (grep confirms zero
-    # deck["lemonade"]/["comfy"]/["hipfire"] reads left in control.py,
-    # sets.py, or notify.py). The ONLY remaining reader is THIS FILE's own
-    # `_build_watcher` below, which still hands `lemonade=`/`comfy=`/
-    # `hipfire=` into the `Watcher(...)` constructor call — and even there
-    # it is production-dead: those three params exist solely to seed
-    # `app.arbiter._LegacyClients`, a fallback `Watcher` only builds when its
-    # `local_clients` constructor argument is `None` (see `Watcher.__init__`
-    # and `_LegacyClients`'s own docstring in app/arbiter.py), and
-    # `_build_watcher` below always passes the real `deck["local_clients"]`.
-    # Kept (not deleted) for that one caller's sake, and because the
-    # dual-instance bug this alias closes (see the paragraph above) is real
-    # regardless of whether anything still reads the aliased variable
-    # afterward — the alias's OTHER job, keeping World.snapshot's and this
-    # constructor's activity trackers on one shared instance, still matters.
-    # Deleting the aliases themselves is parked with c13, not this comment
-    # fix.
-    _declared_lemonade = local_clients.client_for("lemonade")
-    if _declared_lemonade is not None:
-        lemonade = _declared_lemonade
-    _declared_comfy = local_clients.client_for("comfyui")
-    if _declared_comfy is not None:
-        comfy = _declared_comfy
-    _declared_hipfire = local_clients.client_for("hipfire")
-    if _declared_hipfire is not None:
-        hipfire = _declared_hipfire
+    # deck["lemonade"]/["comfy"]/["hipfire"] below resolve to whatever
+    # `local_clients` builds for that DECLARED resource, falling back to the
+    # plain settings-built instance constructed above when nothing declares
+    # it (a brand-new, empty-declaration install). This selection is what
+    # keeps the busy-guard trackers on ONE shared instance per resource
+    # (E1 Task 6's dual-HipfireClient gap): World.snapshot polls through
+    # local_clients' cache, and these entries must be that same object.
+    # Pinned by tests/test_engines.py's
+    # test_local_clients_alias_closes_the_dual_hipfire_busy_guard_gap and
+    # test_local_clients_alias_falls_back_when_nothing_is_declared.
+    # (Ruling #4c deleted the old reassignment block; after #4b nothing in
+    # production reads these keys — they are kept for the pin tests and any
+    # future reader, with unchanged values.)
+    declared_lemonade = local_clients.client_for("lemonade")
+    declared_comfy = local_clients.client_for("comfyui")
+    declared_hipfire = local_clients.client_for("hipfire")
 
     from app.engines.spark import SparkClient
     from app.node_clients import (
@@ -301,9 +258,9 @@ def _build_deck(settings: Settings) -> dict:
         # for where settings.hipfire_gpu_index/lemonade_gpu_index still feed
         # the coexistence seed's gpu_index values, at seed time, not here).
         "world": World(),
-        "lemonade": lemonade,
-        "comfy": comfy,
-        "hipfire": hipfire,
+        "lemonade": declared_lemonade if declared_lemonade is not None else lemonade,
+        "comfy": declared_comfy if declared_comfy is not None else comfy,
+        "hipfire": declared_hipfire if declared_hipfire is not None else hipfire,
         "hostagent": hostagent,
         "litellm": litellm,
         "registry": Registry(_GGUF_DIR),

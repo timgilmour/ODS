@@ -86,10 +86,9 @@ class Settings(BaseSettings):
     dockerctl_url: str = "http://docker-ctl:2375"
 
     # --- Parking / arbitration ---
-    # hipfire_container still feeds the pre-E1 coexistence fallback client
-    # built every boot in app.main (deck["hipfire"], used when nothing
-    # declares a "hipfire"-named resource) as well as the one-time seed
-    # below — NOT seed-only, unlike lemonade_container/*_gpu_index below.
+    # hipfire_container feeds the one-time seed below and deck["hipfire"]
+    # (kept for the pin tests); after ruling #4c, production never reads
+    # deck["hipfire"] (all actuation routes through local_clients.client_for).
     hipfire_container: str = "ods-hipfire"
     # SEED ONLY since E1 (Task 9): fed `seed_engines_if_missing`'s
     # legacy-triple connection.container field (app/node_store.py:452) at
