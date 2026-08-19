@@ -23,6 +23,15 @@ export interface Message {
   action?: { label: string };
 }
 
+/** Format raw seconds as a human-readable duration: "15 min", "45 s", "1 h".
+ * Used by ttlValue (with seconds prefix) and ttlConsequence (without).
+ * Pure: same input always produces same output. */
+function humanDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.round(seconds / 60);
+  return minutes >= 60 ? `${Math.round(minutes / 60)} h` : `${minutes} min`;
+}
+
 export const messages = {
   nodeUnreachable: (label: string, age: string | null): Message => ({
     tone: "danger",
@@ -409,8 +418,7 @@ export const messages = {
   ttlValue: (seconds: number): string => {
     if (seconds <= 0) return "off";
     if (seconds < 60) return `${seconds} s`;
-    const minutes = Math.round(seconds / 60);
-    return `${seconds} s — ${minutes >= 60 ? `${Math.round(minutes / 60)} h` : `${minutes} min`}`;
+    return `${seconds} s — ${humanDuration(seconds)}`;
   },
 
   /** What this TTL will actually DO, which depends entirely on whether the
@@ -420,8 +428,7 @@ export const messages = {
    * reversibility nobody verified. */
   ttlConsequence: (seconds: number, demand: boolean | null): string => {
     if (seconds <= 0) return "never released automatically";
-    const duration = seconds < 60 ? `${seconds} s` : `${Math.round(seconds / 60) >= 60 ? `${Math.round(Math.round(seconds / 60) / 60)} h` : `${Math.round(seconds / 60)} min`}`;
-    const when = `released after ${duration} idle`;
+    const when = `released after ${humanDuration(seconds)} idle`;
     if (demand === null) return `${when} — reload behaviour unknown (kind catalog unavailable)`;
     return demand
       ? `${when} — the next request reloads it automatically`

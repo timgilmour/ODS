@@ -46,7 +46,7 @@ test("fields derive from the kinds payload, not literals", () => {
   const form = emptyForm(
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"],
     }]),
     "comfyui",
   );
@@ -57,7 +57,7 @@ test("save is blocked until required fields are filled", () => {
   const form = emptyForm(
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"],
     }]),
     "comfyui",
   );
@@ -291,7 +291,7 @@ describe("kindsFor", () => {
     },
     {
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"],
     },
     {
       kind: "hipfire", connection: { container: { required: true } },
