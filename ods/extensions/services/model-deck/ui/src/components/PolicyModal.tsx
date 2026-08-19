@@ -3,9 +3,11 @@ import {
   putPolicy,
   putStoragePolicy,
   updateLocation,
+  type EngineKindDef,
   type PolicyMap,
   type StorageState,
 } from "../api";
+import { demandFor } from "../model/engineForm";
 import { labels, messages } from "../model/messages";
 import { parseWatermark } from "../model/watermark";
 import Banner from "../ui/Banner";
@@ -17,6 +19,12 @@ interface PolicyModalProps {
    * omitted rather than shown disabled, matching StorageView's own
    * loading/absent handling. */
   storageState: StorageState | null;
+  /** The kinds catalog App already fetched (App.tsx's `engineKinds`) — null
+   * when that fetch failed, which renders as "unknown" rather than a
+   * guessed consequence. */
+  kinds: EngineKindDef[] | null;
+  /** resource -> declared kind (model/engineForm.ts's resourceKindMap). */
+  resourceKinds: Record<string, string>;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -36,7 +44,7 @@ function rankFor(rowIndex: number): number {
  * edited in place per row. Save PUTs the full resource->policy mapping and
  * closes; Cancel discards every local edit (nothing is written until
  * Save). */
-export default function PolicyModal({ policy, storageState, onClose, onSaved }: PolicyModalProps) {
+export default function PolicyModal({ policy, storageState, kinds, resourceKinds, onClose, onSaved }: PolicyModalProps) {
   const [order, setOrder] = useState<string[]>(
     () => Object.keys(policy).sort((a, b) => policy[b].priority - policy[a].priority),
   );
@@ -176,7 +184,7 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
             <th>rank</th>
             <th>tenant</th>
             <th>pinned</th>
-            <th>idle TTL (s)</th>
+            <th>idle TTL (s, 0 = off)</th>
             <th>reorder</th>
           </tr>
         </thead>
@@ -211,6 +219,12 @@ export default function PolicyModal({ policy, storageState, onClose, onSaved }: 
                     }))
                   }
                 />
+                <div className="field-hint">
+                  {messages.ttlConsequence(
+                    idleTtl[tenant],
+                    demandFor(kinds, resourceKinds[tenant] ?? ""),
+                  )}
+                </div>
               </td>
               <td className="policy-reorder">
                 <button

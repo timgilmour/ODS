@@ -24,6 +24,7 @@ import type {
   EngineKindDef,
   EngineKindsResponse,
   EnginePolicyDefaults,
+  ResourceTenant,
 } from "../api";
 import { labels } from "./messages";
 
@@ -226,4 +227,18 @@ export function demandFor(
 ): boolean | null {
   const entry = catalog?.find((k) => k.kind === kind);
   return entry ? entry.demand : null;
+}
+
+/** resource -> declared kind, from the world snapshot the app already
+ * holds. `engine` is stamped on every tenant regardless of kind
+ * (app/state.py's World.snapshot, mirrored in api.ts's ResourceTenant), so
+ * this needs no extra request. */
+export function resourceKindMap(
+  tenants: Record<string, ResourceTenant> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [resource, tenant] of Object.entries(tenants ?? {})) {
+    out[resource] = tenant.engine;
+  }
+  return out;
 }

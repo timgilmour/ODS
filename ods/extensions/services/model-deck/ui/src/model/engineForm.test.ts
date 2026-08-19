@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { DeclaredEngine, EngineKindsResponse } from "../api";
+import type { DeclaredEngine, EngineKindsResponse, ResourceTenant } from "../api";
 import { labels } from "./messages";
 import {
   canSave,
@@ -8,6 +8,7 @@ import {
   formErrors,
   formForEntry,
   kindsFor,
+  resourceKindMap,
   setField,
   sortedEngines,
   toPayload,
@@ -374,5 +375,23 @@ describe("demandFor", () => {
     // messages.ttlConsequence renders null as "unknown" on purpose.
     expect(demandFor(catalog, "nope")).toBe(null);
     expect(demandFor(null, "lemonade")).toBe(null);
+  });
+});
+
+describe("resourceKindMap", () => {
+  test("maps each policy row to its declared kind", () => {
+    // PolicyModal is keyed by RESOURCE; `demand` is per KIND. World.tenants
+    // stamps `engine` on every entry regardless of kind (app/state.py's
+    // World.snapshot), which is the join.
+    const tenants = {
+      lemonade: { engine: "lemonade" },
+      omni: { engine: "sglang-omni" },
+    } as unknown as Record<string, ResourceTenant>;
+
+    expect(resourceKindMap(tenants)).toEqual({
+      lemonade: "lemonade",
+      omni: "sglang-omni",
+    });
+    expect(resourceKindMap(undefined)).toEqual({});
   });
 });

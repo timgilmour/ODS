@@ -19,6 +19,7 @@ import SetBuilder from "./components/SetBuilder";
 import SettingsModal, { type SettingsTarget } from "./components/SettingsModal";
 import SetStrip from "./components/SetStrip";
 import StorageView from "./components/StorageView";
+import { resourceKindMap } from "./model/engineForm";
 import { labels, messages } from "./model/messages";
 import { buildNodes, findPlacement, swapNodes, type Placement } from "./model/nodes";
 import Banner from "./ui/Banner";
@@ -337,6 +338,8 @@ export default function App() {
         <PolicyModal
           policy={state.policy}
           storageState={storageState}
+          kinds={engineKinds?.kinds ?? null}
+          resourceKinds={resourceKindMap(state?.world?.tenants)}
           onClose={() => setPolicyModalOpen(false)}
           onSaved={refreshAll}
         />
