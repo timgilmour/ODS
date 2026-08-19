@@ -842,6 +842,21 @@ describe("buildNodes — swap nodes", () => {
     }).find((n) => n.id === "boxa")!;
     expect(boxa.resources[0].placements).toEqual([]);
   });
+
+  it("threads the swap node's serving warning too", () => {
+    // Build via the sparkStatus fixture — the value rides SparkStatus.serving.warning
+    // (app/routers/serving.py status passthrough).
+    const s = stateWith({ nodes: [localEntry, boxaEntry] });
+    const boxa = buildNodes(s, {
+      boxa: sparkStatus({ serving: { model: "heretic", endpoint_ok: true, container_status: "running", warning: "probe URL unset" } }),
+    }).find((n) => n.id === "boxa")!;
+    expect(boxa.warning).toBe("probe URL unset");
+
+    // Without a warning, leave node.warning undefined
+    const s2 = stateWith({ nodes: [localEntry, boxaEntry] });
+    const boxa2 = buildNodes(s2, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(boxa2.warning).toBeUndefined();
+  });
 });
 
 describe("isSwapSlotId", () => {
@@ -947,6 +962,23 @@ describe("buildNodes — registry nodes", () => {
     const hera = buildNodes(s, {}).find((n) => n.id === "hera")!;
     expect(hera.status).toBe(expected);
     expect(hera.detail).toBe("backend sentence");
+  });
+
+  it("threads the agent's serving warning onto an observe-only node", () => {
+    // The wire carries it verbatim (app/node_observer.py passes
+    // /v1/node/serving through; app/routers/status.py serves it) — the TS
+    // types were the only thing dropping the field.
+    const entry = { ...heraEntry,
+      serving: { model: "big-model", endpoint_ok: true,
+                 warning: "vllm profiles configured but NODE_SERVING_PROBE_URL unset" } };
+    const s = stateWith({ nodes: [localEntry, entry] });
+    const hera = buildNodes(s, {}).find((n) => n.id === "hera")!;
+    expect(hera.warning).toBe("vllm profiles configured but NODE_SERVING_PROBE_URL unset");
+
+    // Without a warning, leave node.warning undefined
+    const s2 = stateWith({ nodes: [localEntry, heraEntry] });
+    const hera2 = buildNodes(s2, {}).find((n) => n.id === "hera")!;
+    expect(hera2.warning).toBeUndefined();
   });
 
   it("a swap node's label always comes from the registry, never a hardcoded id", () => {

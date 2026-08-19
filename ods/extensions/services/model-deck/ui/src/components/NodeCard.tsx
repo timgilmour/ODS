@@ -113,6 +113,9 @@ export default function NodeCard({
         />
       )}
       {node.status === "warming" && <Banner message={messages.warmingFirstBoot()} />}
+      {node.warning && (
+        <Banner message={messages.nodeMisconfigured(node.label, node.warning)} />
+      )}
 
       <div className="node-resources">
         {node.resources.map((r) => (

@@ -252,7 +252,7 @@ export interface DeckNodeEntry {
   status: NodeAgentStatus;
   last_seen: string | null;
   gpus: NodeGpu[] | null;
-  serving: { model: string | null; endpoint_ok: boolean } | null;
+  serving: { model: string | null; endpoint_ok: boolean; warning?: string | null } | null;
   error: string | null;
 }
 
@@ -590,6 +590,8 @@ export interface SparkServing {
   model: string | null;
   endpoint_ok: boolean;
   container_status: string | null;
+  /** node-agent serving.py's PROBE_URL_WARNING, passed through verbatim (app/node_observer.py / routers/serving.py) — see messages.nodeMisconfigured. */
+  warning?: string | null;
 }
 
 export interface SparkSwapStatus {

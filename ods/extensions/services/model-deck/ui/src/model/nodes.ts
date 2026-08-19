@@ -228,6 +228,8 @@ export interface DeckNode {
   /** The model the node reports serving, when the deck holds no placement
    * for it — observe-only cards; placement-bearing nodes leave it unset. */
   servingLine?: string;
+  /** The agent's own sentence that its config blinds serving detection (probe URL unset) — amber wants-a-decision, not failure. */
+  warning?: string;
   /** The engines DECLARED on this node whose chip the visibility rule hides
    * (nothing loaded, no failure to show) — everything the board would
    * otherwise render nowhere at all, which is how a declared-but-unloaded
@@ -740,6 +742,7 @@ function observedNode(
     lastSeen: entry.last_seen,
     detail: entry.error ?? undefined,
     servingLine: entry.serving?.model ?? undefined,
+    warning: entry.serving?.warning ?? undefined,
     resources,
     hiddenEngines,
   };
@@ -953,6 +956,7 @@ function buildSwapNode(
     label: entry.label,
     status,
     detail,
+    warning: serving.serving.warning ?? undefined,
     lastSeen: lc?.last_healthy_ts ?? null,
     // The slot rides the node's FIRST card. Spark reports no gpu_index for
     // what it serves (app/engines/spark.py observes an endpoint, not a
