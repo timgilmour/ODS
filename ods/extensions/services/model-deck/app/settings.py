@@ -42,6 +42,15 @@ class Settings(BaseSettings):
 
     # --- ComfyUI ---
     comfyui_url: str = "http://comfyui:8188"
+    # SEED ONLY (Finding 1b, whole-branch review): fed
+    # `seed_engines_if_missing`'s legacy-triple connection.container field
+    # (app/node_store.py) at most once, on a fresh box's first boot, now
+    # that comfyui's connection schema accepts the field (app/engine_kinds.py
+    # KNOWN_KINDS) — same pattern as hipfire_container/lemonade_container
+    # above. An upgrading box's pre-existing comfyui entry gets the same
+    # value from `NodeStore.stamp_missing_comfyui_container`'s one-time
+    # migration instead.
+    comfyui_container: str = "ods-comfyui"
 
     # --- Dashboard API (local GPU telemetry pass-through; ontology ruling:
     # telemetry is CONSUMED from dashboard-api, never rebuilt) ---

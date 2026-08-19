@@ -34,6 +34,7 @@ def _settings(monkeypatch=None):
             lemonade_metrics_url="http://test-lemonade:9998/metrics",
             lemonade_container="test-ods-llama-server",
             comfyui_url="http://test-comfyui:9188",
+            comfyui_container="test-ods-comfyui",
             hipfire_container="test-ods-hipfire",
         )
     # Monkeypatch provided; set env vars and instantiate
@@ -43,6 +44,7 @@ def _settings(monkeypatch=None):
     monkeypatch.setenv("MODEL_DECK_LEMONADE_METRICS_URL", "http://test-lemonade:9998/metrics")
     monkeypatch.setenv("MODEL_DECK_LEMONADE_CONTAINER", "test-ods-llama-server")
     monkeypatch.setenv("MODEL_DECK_COMFYUI_URL", "http://test-comfyui:9188")
+    monkeypatch.setenv("MODEL_DECK_COMFYUI_CONTAINER", "test-ods-comfyui")
     monkeypatch.setenv("MODEL_DECK_HIPFIRE_CONTAINER", "test-ods-hipfire")
     return Settings()
 
@@ -780,6 +782,10 @@ def test_seed_engines_stamps_triple_when_legacy_records_exist(store, tmp_path):
     assert engines["lemonade"]["connection"]["container"] == settings.lemonade_container
     assert engines["lemonade"]["gpu_index"] == settings.lemonade_gpu_index
     assert engines["comfyui"]["connection"]["url"] == settings.comfyui_url
+    # Finding 1b (whole-branch review): the seed follows the
+    # hipfire_container/lemonade_container SEED-ONLY settings pattern for
+    # comfyui too, now that its schema accepts the field.
+    assert engines["comfyui"]["connection"]["container"] == settings.comfyui_container
     # Most easily-inverted mapping: comfyui uses lemonade_gpu_index, not hipfire_gpu_index
     assert engines["comfyui"]["gpu_index"] == settings.lemonade_gpu_index
     assert engines["hipfire"]["connection"]["container"] == settings.hipfire_container
