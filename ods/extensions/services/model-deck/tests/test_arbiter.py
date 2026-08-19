@@ -829,11 +829,22 @@ def _make_watcher(
     watcher = Watcher(
         settings=_settings(**sett),
         world=world,
-        lemonade=lemonade if lemonade is not None else FakeLemonade(),
-        comfy=comfy if comfy is not None else FakeComfy(),
-        hipfire=hipfire if hipfire is not None else object(),
         litellm=litellm if litellm is not None else object(),
         registry=registry,
+        # Ruling #4b: Watcher no longer builds a legacy fallback client map
+        # itself (_LegacyClients deleted) — callers that don't wire their own
+        # declaration-shaped local_clients= get an equivalent
+        # LocalClients-shaped fake built HERE, from the same
+        # lemonade=/comfy=/hipfire= keyword defaults the deleted class
+        # received verbatim, mapped onto the same legacy resource names.
+        local_clients=(
+            local_clients if local_clients is not None
+            else _FakeLocalClients({
+                "lemonade": lemonade if lemonade is not None else FakeLemonade(),
+                "comfyui": comfy if comfy is not None else FakeComfy(),
+                "hipfire": hipfire if hipfire is not None else object(),
+            })
+        ),
         policy_store=FakePolicyStore(policy, auto=auto),
         events_path=events_path,
         read_gpus=read_gpus if read_gpus is not None else RecordingReadGpus(),
@@ -855,10 +866,9 @@ def _make_watcher(
         # E1 Task 6: declaration-shaped watcher tests (two_gguf_watcher
         # below) wire a real node_store + a LocalClients-shaped fake here;
         # every other caller in this file leaves both None, which routes
-        # actuation through Watcher's own _LegacyClients fallback (built
-        # from the lemonade/comfy/hipfire clients above) instead.
+        # actuation through the _FakeLocalClients fallback built above
+        # instead (ruling #4b: Watcher itself no longer builds one).
         node_store=node_store,
-        local_clients=local_clients,
         # sglang-omni Task 6: the remote half of the tick's world. All
         # three None (every caller before that task) means "no remote
         # engines" — the remote half is skipped entirely, exactly as it is

@@ -533,28 +533,6 @@ def harvest_catalog_pair(engine_exec, characteristics_store, log, node, engine,
 # ===========================================================================
 
 
-class _LegacyClients:
-    """Fallback resource -> client map for callers that inject the
-    pre-LocalClients lemonade/comfy/hipfire clients directly (every unit
-    test in tests/test_arbiter.py written before this task, plus any other
-    caller that predates app.local_clients.LocalClients) instead of a real
-    one (E1 Task 6). Built ONCE in Watcher.__init__ when `local_clients`
-    isn't given — every per-tick actuation/pending/restore path in this
-    class stays KEYLESS (always routes through self._local_clients, never
-    self._lemonade/_comfy/_hipfire directly), and this is the ONE place the
-    legacy lemonade/comfyui/hipfire resource names get resolved, at
-    construction time, never inside the tick loop itself."""
-
-    def __init__(self, lemonade, comfy, hipfire) -> None:
-        self._map = {"lemonade": lemonade, "comfyui": comfy, "hipfire": hipfire}
-
-    def client_for(self, resource: str):
-        return self._map.get(resource)
-
-    def retire_absent(self, keep_resources) -> None:
-        pass  # nothing built lazily here to retire
-
-
 class Watcher:
     """Periodic arbiter loop. Owns one ``World`` and drives ``decide`` on a
     timer, executing actions against the engine clients and logging each.
@@ -567,11 +545,9 @@ class Watcher:
         self,
         settings,
         world,
-        lemonade,
-        comfy,
-        hipfire,
         litellm,
         registry,
+        local_clients,
         policy_store,
         events_path,
         read_gpus,
@@ -591,49 +567,35 @@ class Watcher:
         provenance_store=None,
         dockerctl=None,
         node_store=None,
-        local_clients=None,
         remote_engine_clients=None,
         node_agent_client_factory=None,
         remote_observer=None,
     ) -> None:
         self._settings = settings
         self._world = world
-        # `lemonade`/`comfy`/`hipfire` (the constructor PARAMETERS) are used
-        # below to build _LegacyClients when `local_clients` isn't given —
-        # see self._local_clients' own comment a few lines down. They are
-        # deliberately NOT stored as `self._lemonade`/`_comfy`/`_hipfire`
-        # (review fix, T6 round 2): no per-tick dispatch in this class reads
-        # those attributes anymore (E1 Task 6), and grep found no test or
-        # other caller reading them back off a Watcher instance either — a
-        # dead attribute that LOOKS load-bearing (three engine clients
-        # sitting right on `self`) is worse than none.
         self._litellm = litellm
         self._registry = registry
         self._policy_store = policy_store
         self._events_path = events_path
         self._read_gpus = read_gpus
         # Declaration + LocalClients (E1 Task 3/6): what the tick's
-        # World.snapshot call reads through, AND (as of Task 6) what every
+        # World.snapshot call reads through, AND what every
         # actuation/pending/restore path in this class resolves its
-        # per-resource client through too — the `lemonade`/`comfy`/`hipfire`
-        # constructor params above are used only to build _LegacyClients
-        # below (production never falls back to it: app.main._build_watcher
-        # always passes a real local_clients). `self._node_store is None`
+        # per-resource client through too. `local_clients` is now a plain
+        # required constructor argument — the pre-C4 `_LegacyClients`
+        # test-only fallback (built when `local_clients` was `None`) is
+        # deleted (ruling #4, C4b): production (app.main._build_watcher)
+        # always passed a real one, and the fallback existed solely to seed
+        # tests/test_arbiter.py's `_make_watcher` default, which now builds
+        # its own LocalClients-shaped fake directly instead (see
+        # `_FakeLocalClients` in that file). `self._node_store is None`
         # (every unit test that doesn't go through app.main._build_watcher,
         # unless it wires node_store= itself) means "no declared engines" —
         # the tick's own snapshot degrades to an empty `engines` list, same
         # as a genuinely fresh install with nothing declared yet (spec §1,
         # seed_engines_if_missing's docstring).
         self._node_store = node_store
-        # `local_clients=None` (most unit tests) falls back to a shim
-        # resolving the legacy lemonade/comfyui/hipfire resource names onto
-        # the clients this constructor was handed directly — see
-        # _LegacyClients' own docstring. This keeps _execute/_infer_pending/
-        # _restore themselves free of any resource-name literal.
-        self._local_clients = (
-            local_clients if local_clients is not None
-            else _LegacyClients(lemonade, comfy, hipfire)
-        )
+        self._local_clients = local_clients
         # Shared across the HTTP routers (set-apply, manual load/unload) via
         # the deck namespace; a standalone default keeps unit tests simple.
         self._heal_suppressor = (
@@ -806,9 +768,10 @@ class Watcher:
             if self._node_store is not None:
                 local = self._node_store.get("local")
                 engines = local.get("engines", []) if local is not None else []
-                # self._local_clients is never None (see __init__) — a
-                # legacy caller's _LegacyClients fallback simply has
-                # nothing lazily built to retire.
+                # self._local_clients is never None (required constructor
+                # argument since ruling #4b, see __init__) — a fake that
+                # builds nothing lazily (every unit test's default) simply
+                # has nothing to retire here.
                 self._local_clients.retire_absent({e["resource"] for e in engines})
             world = self._world.snapshot(
                 gpus, engines, self._local_clients, self._litellm, self._registry
@@ -948,10 +911,11 @@ class Watcher:
     def _kind_for(self, resource: str) -> str | None:
         """The declared kind for `resource`, keyless. `self._node_store is
         None` — every unit test that injects lemonade/comfy/hipfire
-        directly instead (see _LegacyClients above) — falls back to
-        treating `resource` AS its own kind name, which is exactly true
-        for that legacy triple (and for nothing else — an undeclared,
-        non-legacy resource correctly resolves to None either way).
+        directly instead (every unit test that doesn't wire a real
+        declaration) — falls back to treating `resource` AS its own kind
+        name, which is exactly true for that legacy triple (and for
+        nothing else — an undeclared, non-legacy resource correctly
+        resolves to None either way).
 
         Otherwise reads `self._tick_engines` — the ONE declaration
         snapshot tick() took for this whole actuation phase (review fix,

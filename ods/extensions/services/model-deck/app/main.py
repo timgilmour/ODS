@@ -446,9 +446,6 @@ def _build_watcher(settings: Settings):
     return Watcher(
         settings=deck["settings"],
         world=deck["world"],
-        lemonade=deck["lemonade"],
-        comfy=deck["comfy"],
-        hipfire=deck["hipfire"],
         litellm=deck["litellm"],
         registry=deck["registry"],
         # Declaration + LocalClients (Task 3, actuation added Task 6): what
@@ -457,10 +454,7 @@ def _build_watcher(settings: Settings):
         # precedent this follows). As of Task 6 this is ALSO what every
         # actuation/pending/restore path in the tick (_execute/
         # _infer_pending/_restore) resolves its per-resource client
-        # through — lemonade/comfy/hipfire above are handed in only to seed
-        # Watcher's _LegacyClients fallback (unused here: this real
-        # local_clients is always given, so that fallback never triggers in
-        # production).
+        # through.
         node_store=deck["node_store"],
         local_clients=deck["local_clients"],
         # The remote half of the tick's world: the same shared client map
