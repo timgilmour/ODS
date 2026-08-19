@@ -32,7 +32,8 @@ export const name = "e1-engines";
  * | GPU select's label    | `.engine-form label:has-text("GPU")`                         |
  * | Save                  | `.engine-form-actions .primary` (text `Save`)                |
  * | Cancel                | `.engine-form-actions button` (text `Cancel`, exact)         |
- * | Allowlist banner      | `.engine-form .ui-banner` (hasText "park allowlist")         |
+ * | Consent banner        | `.engine-form .ui-banner` (hasText "container verbs are      |
+ * |                        | opt-in per entry" — engineConsentNote; park_allowlist is gone)|
  * | Policy button         | `text="Policy"` (exact — App.tsx header)                     |
  * | Policy table rows     | `.policy-table .tenant-name`                                 |
  * | Row Edit button       | `.engine-row:has-text(RESOURCE) button:has-text("Edit")`     |
@@ -133,10 +134,13 @@ export async function run() {
         !kinds.includes("sglang-omni"),
         kinds.join(","),
       );
+      // The rulings wave (2026-08-19) deleted park_allowlist; the form's
+      // banner is now the per-entry consent note (messages.engineConsentNote,
+      // rendered NodesView.tsx's engine form in both Add and Edit modes).
       const banner = await page
-        .locator(".engine-form .ui-banner", { hasText: "park allowlist" })
+        .locator(".engine-form .ui-banner", { hasText: "container verbs are opt-in per entry" })
         .count();
-      results.check("item2: park-allowlist note is visible in Add mode", banner === 1, String(banner));
+      results.check("item2: per-entry container-consent note is visible in Add mode", banner === 1, String(banner));
 
       // Item 3 — Save disabled until required fields are filled. THE
       // :disabled trap: isTrulyDisabled uses el.matches(':disabled'), which is

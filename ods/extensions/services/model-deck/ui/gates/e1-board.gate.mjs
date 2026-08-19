@@ -59,8 +59,9 @@ export const name = "e1-board";
  *
  * | What                          | Selector / text                                          |
  * |-------------------------------|-----------------------------------------------------------|
- * | Resource card (Panel)         | `.resource-panel` (one per declared resource; title = the |
- * |                                | resource's own name, via `resource.label`)                 |
+ * | GPU card (Panel)              | `.resource-panel` (one per GPU since the 2026-08-18       |
+ * |                                | per-GPU ruling; title = `GPU <index>` via `resource.label`,|
+ * |                                | so a shared GPU renders ONE card carrying BOTH residents)  |
  * | Per-resource verb row         | `.tenant-actions` — ⚠SHARED with SparkSwap.tsx, which     |
  * |                                | renders the SAME class. The only DOM fact distinguishing   |
  * |                                | "PlacementActions dispatched" from "SparkSwap dispatched"  |
@@ -210,17 +211,20 @@ export async function run() {
       // Item 13 — ResourcePanel dispatches PlacementActions (verbs), not
       // SparkSwap, for a non-spark resource. This fixture declares no swap
       // node at all (state.nodes: []), so every one of the three declared
-      // resources is exactly the case this item is about.
+      // resources is exactly the case this item is about. Since the
+      // 2026-08-18 per-GPU ruling the board renders one card per GPU, not
+      // per resource: this fixture's triple (hipfire GPU0, lemonade GPU1,
+      // comfyui GPU1) yields TWO cards, and the shared GPU 1 card carries
+      // BOTH of its residents' verb rows.
       await page.waitForSelector(".resource-panel");
       const resourcePanelCount = await page.locator(".resource-panel").count();
       results.check(
-        "item13: one resource-panel card per declared resource (hipfire, lemonade, comfyui)",
-        resourcePanelCount === 3,
+        "item13: one resource-panel card per fixture GPU (hipfire on GPU 0; lemonade+comfyui share GPU 1)",
+        resourcePanelCount === 2,
         String(resourcePanelCount),
       );
-      await assertUnique(page, '.resource-panel:has-text("hipfire")', "hipfire's resource panel");
-      await assertUnique(page, '.resource-panel:has-text("lemonade")', "lemonade's resource panel");
-      await assertUnique(page, '.resource-panel:has-text("comfyui")', "comfyui's resource panel");
+      await assertUnique(page, '.resource-panel:has-text("GPU 0")', "GPU 0's card");
+      await assertUnique(page, '.resource-panel:has-text("GPU 1")', "GPU 1's card");
 
       // `.tenant-actions`/`.tenant-name` are SHARED with SparkSwap.tsx (see
       // header comment). The only DOM fact that tells the two apart is the
@@ -229,18 +233,30 @@ export async function run() {
       // not gated on `hasPlacement`). Plain `results.check` here (not
       // `assertUnique`+click — nothing below is clicked off these
       // selectors), so a regression that blanks this row out reads as a
-      // clean FAIL rather than a thrown exception.
-      for (const resource of ["hipfire", "lemonade", "comfyui"]) {
+      // clean FAIL rather than a thrown exception. Each card's row list is
+      // pinned SORTED: which rows ride which card is the ruling; their
+      // relative order within a card is not.
+      const cardRows = [
+        { card: "GPU 0", residents: ["hipfire"] },
+        { card: "GPU 1", residents: ["comfyui", "lemonade"] },
+      ];
+      for (const { card, residents } of cardRows) {
         const tenantNames = await textsOf(
           page,
-          `.resource-panel:has-text("${resource}") .tenant-actions .tenant-name`,
+          `.resource-panel:has-text("${card}") .tenant-actions .tenant-name`,
         );
         results.check(
-          `item13: ${resource}'s tenant-actions row is named "${resource}" (PlacementActions dispatched, not SparkSwap's literal "spark")`,
-          JSON.stringify(tenantNames) === JSON.stringify([resource]),
+          `item13: ${card}'s card carries exactly its residents' verb rows, each named by its own resource (${residents.join("+")}; PlacementActions dispatched, not SparkSwap's literal "spark")`,
+          JSON.stringify([...tenantNames].sort()) === JSON.stringify(residents),
           tenantNames.join(","),
         );
       }
+      const sparkNames = await page.locator('.tenant-actions .tenant-name:text-is("spark")').count();
+      results.check(
+        'item13: no verb row anywhere is named "spark" (fixture declares no swap node)',
+        sparkNames === 0,
+        String(sparkNames),
+      );
 
       // Kind-correct verbs actually render — sourced from GET
       // /api/engine-kinds' human_verbs (park/resume for hipfire, load/unload
