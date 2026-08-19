@@ -86,6 +86,14 @@ def test_validate_engines_requires_container_consent():
 def test_validate_engines_container_consent_must_be_bool():
     with pytest.raises(ValueError, match="container_consent"):
         validate_engines([_entry(container_consent="yes")])
+    # Review fix round 1 (Finding 2): non-bool TRUTHY/FALSY values must be
+    # refused too, not just the string case — a future truthiness refactor
+    # (e.g. `if not consent:` instead of `isinstance(consent, bool)`) would
+    # let 1/0 slip through as if they were True/False.
+    with pytest.raises(ValueError, match="container_consent"):
+        validate_engines([_entry(container_consent=1)])
+    with pytest.raises(ValueError, match="container_consent"):
+        validate_engines([_entry(container_consent=0)])
 
 
 def test_resource_shape_refused_when_slashy():

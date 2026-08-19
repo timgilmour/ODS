@@ -841,6 +841,25 @@ def test_stamp_missing_container_consent_defaults_false_except_triple(store, tmp
     assert store.stamp_missing_container_consent() is False  # idempotent
 
 
+def test_stamp_missing_container_consent_tolerates_a_null_engines_entry(store, tmp_path):
+    """Review fix round 1 (Finding 1, reproduced boot crash): a node entry
+    with `"engines": null` on disk is a shape this codebase explicitly
+    anticipates (`_heal_engines` heals it to [] on `_load`; the sibling
+    ownership-scan at node_store.py's `for engine in other.get("engines")
+    or []` already tolerates it) — but the migration ran BEFORE _load's
+    healing, at boot, unconditionally, so a hand-edited/corrupted
+    nodes.json that boots fine TODAY would hard-crash startup on
+    `for eng in entry.get("engines", [])` (the `{}`/list default only
+    applies when the key is ABSENT, not when it is present-and-None).
+    Must not crash, and a null `engines` has nothing to stamp -> no
+    write, `False`."""
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": None},
+    ])
+    assert store.stamp_missing_container_consent() is False
+
+
 # --- Task 7 fix round 1: the LOCAL direction of the run-location gate ------
 
 _LOCAL_ONLY_REFUSED_ENGINE = {

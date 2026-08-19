@@ -520,7 +520,7 @@ class NodeStore:
             for entry in data:
                 if not _well_formed(entry):
                     continue
-                for eng in entry.get("engines", []):
+                for eng in entry.get("engines") or []:
                     if not isinstance(eng, dict) or "container_consent" in eng:
                         continue
                     eng["container_consent"] = eng.get("resource") in (
