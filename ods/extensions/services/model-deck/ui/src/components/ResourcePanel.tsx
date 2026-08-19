@@ -105,6 +105,9 @@ export default function ResourcePanel({
           {resource.stats?.name && (
             <span className="gpu-name">{resource.stats.name}</span>
           )}
+          {resource.unmanaged && (
+            <span className="unmanaged-tag">{labels.unmanagedGpu}</span>
+          )}
         </>
       }
       className="resource-panel"

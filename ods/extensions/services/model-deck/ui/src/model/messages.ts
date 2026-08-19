@@ -475,6 +475,13 @@ export const labels = {
    * a notice: it carries no tone, so it is not a Message. */
   nothingPlaced: "nothing placed",
 
+  /** `DeckResource.unmanaged`'s marker (open-rulings #3) — a control-capable
+   * node's bare GPU card, no declared engine, nothing here for the deck to
+   * manage. Never shown on an observe-only node's cards (nodes.ts derives
+   * `unmanaged` at the model layer precisely so this label can't leak
+   * there). */
+  unmanagedGpu: "unmanaged",
+
   // Top-level chrome and navigation. `events` was the only tab that ever
   // came from here, which is precisely how a half-applied rule dies: the
   // next author copies whichever neighbour they happened to read first.

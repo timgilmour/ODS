@@ -169,6 +169,26 @@ describe("buildNodes", () => {
     expect(local.resources.every((r) => r.placements.length === 0)).toBe(true);
   });
 
+  it("marks a control-capable node's engine-less GPU unmanaged", () => {
+    // Partially-declared fixture on purpose: DEFAULT_TENANTS declares on
+    // BOTH default GPUs (2 and 3), which would prove nothing (open-rulings
+    // #3 binding constraint — a fully-declared fixture can't distinguish
+    // "unmanaged" from "just how every card in this fixture looks"). One
+    // declared GPU (2), one bare (3).
+    const s = stateWith({
+      tenants: {
+        "gguf-a": {
+          engine: "lemonade", gpu_index: 2, state: "loaded",
+          model: "a.gguf", footprint: 10, idle_s: 0,
+        },
+      },
+      policy: { "gguf-a": GENERIC_POLICY },
+    });
+    const local = buildNodes(s, {}).find((n) => n.id === "local")!;
+    expect(gpuCard(local, 2).unmanaged).toBeUndefined();
+    expect(gpuCard(local, 3).unmanaged).toBe(true);
+  });
+
   it("renders nothing at all when the box reports no GPUs and declares nothing", () => {
     const nodes = buildNodes(stateWith({ tenants: {}, policy: {}, gpus: [] }), {});
     expect(nodes.find((n) => n.id === "local")!.resources).toEqual([]);
@@ -949,6 +969,16 @@ describe("buildNodes — registry nodes", () => {
       used: 1024 * 1024 * 1024, total: 24576 * 1024 * 1024 });
     expect(hera.resources[0].controls).toEqual([]); // observe-only: no verbs
     expect(hera.resources[0].placements).toEqual([]); // and no placements
+  });
+
+  it("never marks observe-only nodes' cards unmanaged — they are observe-only, not unmanaged", () => {
+    // CONTROLLER RULING: an observe-only node's cards ALWAYS have zero
+    // controls (nothing here dispatches anything), so `unmanaged` must be
+    // derived from control-capability at the model layer, never from
+    // `controls.length === 0` — that would mislabel every card on this node.
+    const s = stateWith({ nodes: [localEntry, heraEntry] });
+    const hera = buildNodes(s, {}).find((n) => n.id === "hera")!;
+    expect(hera.resources.every((r) => r.unmanaged === undefined)).toBe(true);
   });
 
   it.each([

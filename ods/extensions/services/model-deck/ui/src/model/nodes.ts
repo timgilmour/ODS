@@ -211,6 +211,13 @@ export interface DeckResource {
    * nothing remote is ever declared. Only engines whose chip is VISIBLE
    * appear; the rest are the node's `hiddenEngines`. */
   remoteEngines?: RemoteEngineControl[];
+  /** True on a control-capable node's GPU card with no declared engine — the
+   * deck can see it but nothing manages it. NEVER set on observe-only nodes
+   * (their zero controls mean observe-only, not unmanaged) — open-rulings
+   * #3. Derived HERE, at the model layer: `ResourcePanel.tsx` must never
+   * infer this from `controls.length === 0`, because an observe-only card
+   * has zero controls everywhere and would mislabel every card on the node. */
+  unmanaged?: true;
 }
 
 export interface DeckNode {
@@ -473,6 +480,13 @@ function localNode(state: StateResponse): DeckNode {
         // dropdown (or Free/Park button) has to render somewhere with no
         // placement to hang it off.
         controls: declared.map(([resource]) => resource),
+        // The local box controls every GPU it owns, so a card with nothing
+        // DECLARED on it (empty `declared`, not merely nothing LOADED) is
+        // unmanaged rather than idle — the deck can see it, nothing manages
+        // it. `declared.length`, not `placements.length`: an unloaded
+        // lemonade-kind resource has a control and no chip, and must not
+        // read as unmanaged.
+        ...(declared.length === 0 ? { unmanaged: true as const } : {}),
         placements: [
           ...declared
             .map(([resource, tenant]) => tenantPlacement(resource, tenant, lifecycle, policy))
@@ -658,12 +672,23 @@ function remoteChipVisible(tenant: RemoteTenant, lifecycle: LifecycleMap): boole
  * A HIDDEN engine's gpu_index earns no card of its own, unlike a local
  * resource's: a hidden engine contributes no chip and no controls, so a card
  * conjured for it would be an empty meter for a GPU the node never reported.
- * The engine is not lost — it is in `hiddenEngines`, with its verbs. */
+ * The engine is not lost — it is in `hiddenEngines`, with its verbs.
+ *
+ * `controlCapable` (CONTROLLER RULING): whether the caller's node kind ever
+ * dispatches anything on this box at all — `buildSwapNode` passes `true`
+ * (its own SPARK_CONTROL is a real verb, even though this function's own
+ * cards never carry it), `observedNode` passes `false`. This is what lets
+ * an engine-less card be marked `unmanaged` on a swap node without ever
+ * deriving it from `controls.length === 0` here — a bare card from EITHER
+ * caller has empty `controls` by construction (line below), so that length
+ * can never tell the two kinds apart; only the caller's own declared
+ * capability can. */
 function remoteNodeCards(
   entry: DeckNodeEntry,
   state: StateResponse,
   kinds: EngineKindsResponse | null,
   stale: boolean,
+  controlCapable: boolean,
 ): { resources: DeckResource[]; hiddenEngines: RemoteEngineControl[] } {
   const tenants = remoteTenantsOf(state.world, entry.id);
   // ONE partition pass, because `remoteChipVisible`'s own docstring promises
@@ -692,6 +717,13 @@ function remoteNodeCards(
       // (this file's header). `buildSwapNode` adds SPARK_CONTROL, which does
       // not.
       controls: [],
+      // See the CONTROLLER RULING above `remoteNodeCards`: `unmanaged` needs
+      // BOTH the caller's control-capability and an empty declaration here —
+      // `controls: []` above is true on every remote card regardless of
+      // kind, so it alone could never gate this. The swap node's own
+      // serving-slot card is excluded further down, in `buildSwapNode`'s own
+      // map, where the slot is actually assembled.
+      ...(controlCapable && onGpu.length === 0 ? { unmanaged: true as const } : {}),
       remoteEngines: onGpu.map((t) => engineControl(entry.id, t, kinds, stale)),
       placements: onGpu.map((t) =>
         remoteEnginePlacement(t, state.lifecycle, state.policy, stale)),
@@ -733,8 +765,10 @@ function observedNode(
   kinds: EngineKindsResponse | null,
 ): DeckNode {
   const status = (entry.status && OBSERVED_STATUS[entry.status]) || "unreachable";
+  // controlCapable: false — this node is observe-only, dispatches nothing,
+  // so its cards must never carry `unmanaged` (CONTROLLER RULING).
   const { resources, hiddenEngines } = remoteNodeCards(
-    entry, state, kinds, status === "unreachable");
+    entry, state, kinds, status === "unreachable", false);
   return {
     id: entry.id,
     label: entry.label,
@@ -940,7 +974,12 @@ function buildSwapNode(
   // (app/observe.py's observe_spark reads the same probe the declared
   // engines' observations come through), so an engine on a dark box
   // withholds its verbs exactly as the slot withholds the profile picker.
-  const { resources, hiddenEngines } = remoteNodeCards(entry, state, kinds, stale);
+  // controlCapable: true — this node dispatches SPARK_CONTROL on itself
+  // (CONTROLLER RULING). The slot card's own exclusion happens below, in
+  // this function's `.map`, not here: `remoteNodeCards` builds the slot's
+  // card the same as any other bare card and cannot know yet which index
+  // `buildSwapNode` will turn into the serving slot.
+  const { resources, hiddenEngines } = remoteNodeCards(entry, state, kinds, stale, true);
   // A swap node that reported no GPUs (and declares no visible engine to
   // name one) still needs somewhere to put the profile picker. Deliberately
   // NOT a fabricated `gpu0`: the node named no index, and inventing one
@@ -963,13 +1002,23 @@ function buildSwapNode(
     // device), so there is no declared index to place it by — and the one
     // live swap node is a single-GPU GB10, which is exactly the collapse
     // this wave is for. Its chip leads the card, ahead of any engine chips.
-    resources: cards.map((card, i) => (i > 0 ? card : {
-      ...card,
-      // The profile picker, which must render whether or not a model is
-      // currently serving.
-      controls: [SPARK_CONTROL],
-      placements: [...(slotPlacement ? [slotPlacement] : []), ...card.placements],
-    })),
+    resources: cards.map((card, i) => {
+      if (i > 0) return card;
+      // The slot card is control-capable BY the picker below, so it is
+      // never unmanaged — regardless of what `remoteNodeCards` computed for
+      // it before knowing it would become the slot (research: "the swap
+      // node's serving-slot card is excluded"). Stripped explicitly rather
+      // than relied on to be absent, since a bare card with no engines on
+      // this same GPU index is exactly the shape `remoteNodeCards` marks.
+      const { unmanaged: _slotUnmanaged, ...bare } = card;
+      return {
+        ...bare,
+        // The profile picker, which must render whether or not a model is
+        // currently serving.
+        controls: [SPARK_CONTROL],
+        placements: [...(slotPlacement ? [slotPlacement] : []), ...card.placements],
+      };
+    }),
     hiddenEngines,
   };
 }

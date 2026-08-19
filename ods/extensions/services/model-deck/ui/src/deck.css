@@ -224,6 +224,21 @@ input[type="password"] {
   margin-left: 0.4rem;
 }
 
+/* The panel title's `unmanaged` marker (open-rulings #3 — ResourcePanel,
+   `resource.unmanaged`). Same muted-chip tokens as `.ui-pill-off`
+   (--chip-unloaded-bg/fg): both themes are already token-clean there, and a
+   second color pair for the same "nothing here" meaning would be a second
+   thing to keep in sync. */
+.unmanaged-tag {
+  margin-left: 0.4rem;
+  padding: 0 var(--space);
+  border-radius: var(--radius);
+  font-size: 0.85em;
+  font-weight: 400;
+  background: var(--chip-unloaded-bg);
+  color: var(--chip-unloaded-fg);
+}
+
 /* ---------------------------------------------------------------- tenant card */
 
 .tenant-card {
