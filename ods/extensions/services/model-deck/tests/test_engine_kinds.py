@@ -383,6 +383,21 @@ def test_comfy_adapter_active_verbs_and_demand():
     assert comfy.demand() is False
 
 
+def test_comfy_build_client_tolerates_the_new_optional_container_key():
+    """Finding 1's NOTE (whole-branch review): `_ComfyAdapter.build_client`
+    builds from `connection["url"]` alone and must not choke on the new
+    optional `container` key riding alongside it — verified directly rather
+    than only inferred from reading the adapter."""
+    from app.engine_kinds import ENGINE_KINDS
+    from app.engines.comfyui import ComfyClient
+
+    comfy = ENGINE_KINDS["comfyui"]
+    client = comfy.build_client(
+        {"url": "http://comfyui:8188", "container": "ods-comfyui"},
+        object(), None)
+    assert isinstance(client, ComfyClient)
+
+
 def test_hipfire_adapter_active_verbs_and_demand():
     from app.engine_kinds import ENGINE_KINDS
     hipfire = ENGINE_KINDS["hipfire"]
