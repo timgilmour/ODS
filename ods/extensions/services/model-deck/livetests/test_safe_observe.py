@@ -40,8 +40,8 @@ def test_s4_registry_matches_gguf_store(deck):
     listed = {m["file"] for m in models}
     on_disk = {p.name for p in GGUF_STORE.glob("*.gguf")}
     assert listed == on_disk
-    # Unmeasured footprints are the size×1.2 estimate (registry.observe is unwired in v1,
-    # so measured entries are possible only if something wrote registry.json by hand).
+    # Footprints are always the size×1.2 estimate (the measured-actuals half was deleted
+    # in ruling #4, so measured entries are no longer possible).
     for m in models:
         size = (GGUF_STORE / m["file"]).stat().st_size
         estimate = int(size * 1.2)

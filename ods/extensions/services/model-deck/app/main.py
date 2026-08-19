@@ -306,7 +306,7 @@ def _build_deck(settings: Settings) -> dict:
         "hipfire": hipfire,
         "hostagent": hostagent,
         "litellm": litellm,
-        "registry": Registry(data_dir / "registry.json", _GGUF_DIR),
+        "registry": Registry(_GGUF_DIR),
         "characteristics_store": CharacteristicsStore(data_dir / "characteristics.json"),
         "declared_store": DeclaredStore(data_dir / "declared.json"),
         # Human/UI-owned launch configuration (app.settings_store) — a
