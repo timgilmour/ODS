@@ -3,6 +3,7 @@ import type { DeclaredEngine, EngineKindsResponse } from "../api";
 import { labels } from "./messages";
 import {
   canSave,
+  demandFor,
   emptyForm,
   formErrors,
   formForEntry,
@@ -354,5 +355,24 @@ describe("kindsFor", () => {
     const before = JSON.parse(JSON.stringify(MIXED));
     kindsFor(MIXED, true);
     expect(MIXED).toEqual(before);
+  });
+});
+
+describe("demandFor", () => {
+  test("finds the demand flag for the kind being edited", () => {
+    // The form must not look up a kind by name; it asks the catalog it
+    // already holds for the picker.
+    const catalog = [
+      { kind: "lemonade", connection: {}, remote_capable: false, local_capable: true,
+        human_verbs: ["load", "unload"], demand: true },
+      { kind: "sglang-omni", connection: {}, remote_capable: true, local_capable: false,
+        human_verbs: ["free"], demand: false },
+    ];
+    expect(demandFor(catalog, "lemonade")).toBe(true);
+    expect(demandFor(catalog, "sglang-omni")).toBe(false);
+    // A kind the catalog does not carry is UNKNOWN, never a guessed false —
+    // messages.ttlConsequence renders null as "unknown" on purpose.
+    expect(demandFor(catalog, "nope")).toBe(null);
+    expect(demandFor(null, "lemonade")).toBe(null);
   });
 });

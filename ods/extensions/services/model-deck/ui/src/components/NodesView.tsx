@@ -18,6 +18,7 @@ import {
   type PolicyMap,
 } from "../api";
 import {
+  demandFor,
   emptyForm as emptyEngineForm,
   formErrors,
   formForEntry as engineFormForEntry,
@@ -777,6 +778,15 @@ function EngineFormPanel({
           value={form.idleTtl}
           onChange={(e) => setForm({ ...form, idleTtl: Number(e.target.value) })}
         />
+        <span className="field-value">{messages.ttlValue(form.idleTtl)}</span>
+        {/* The consequence, not the setting: 900 on lemonade is free and
+            saves ~70 W of idle burn; 900 on sglang-omni means a ~4 min
+            rebuild by hand (GF4). Same number, opposite meaning — the
+            distinction is the backend's `demand()`, never a kind literal
+            here. */}
+        <span className="field-hint">
+          {messages.ttlConsequence(form.idleTtl, demandFor(kinds.kinds, form.kind))}
+        </span>
       </label>
 
       {saveError && (

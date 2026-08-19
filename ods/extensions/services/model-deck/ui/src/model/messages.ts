@@ -903,7 +903,7 @@ export const labels = {
   engineSelectGpu: "select a GPU…",
   enginePinnedLabel: "Pinned",
   enginePriority: "Priority",
-  engineIdleTtl: "Idle TTL (seconds)",
+  engineIdleTtl: "Idle TTL (seconds, 0 = off)",
   /** A connection field's label is DERIVED from the payload's own field key
    * (GET /api/engine-kinds' `connection` map, e.g. "metrics_url") rather
    * than a per-field literal here — spec §5's "never a UI literal" applies

@@ -215,3 +215,15 @@ export function sortedEngines(engines: DeclaredEngine[]): DeclaredEngine[] {
     (a, b) => a.gpu_index - b.gpu_index || a.resource.localeCompare(b.resource),
   );
 }
+
+/** The `demand` flag for `kind`, or null when it cannot be known (catalog
+ * absent, or a kind it does not carry). Null is deliberately not `false`:
+ * messages.ttlConsequence renders unknown as unknown rather than promising
+ * a manual-reload consequence nobody verified. */
+export function demandFor(
+  catalog: EngineKindDef[] | null,
+  kind: string,
+): boolean | null {
+  const entry = catalog?.find((k) => k.kind === kind);
+  return entry ? entry.demand : null;
+}
