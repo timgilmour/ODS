@@ -7,7 +7,7 @@ import {
   type PolicyMap,
   type StorageState,
 } from "../api";
-import { demandFor } from "../model/engineForm";
+import { demandFor, idleReleaseFor } from "../model/engineForm";
 import { labels, messages } from "../model/messages";
 import { parseWatermark } from "../model/watermark";
 import Banner from "../ui/Banner";
@@ -223,6 +223,7 @@ export default function PolicyModal({ policy, storageState, kinds, resourceKinds
                   {messages.ttlConsequence(
                     idleTtl[tenant],
                     demandFor(kinds, resourceKinds[tenant] ?? ""),
+                    idleReleaseFor(kinds, resourceKinds[tenant] ?? ""),
                   )}
                 </div>
               </td>

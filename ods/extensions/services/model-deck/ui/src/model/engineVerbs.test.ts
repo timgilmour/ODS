@@ -22,6 +22,7 @@ function kindsPayload(
     local_capable: boolean;
     demand: boolean;
     human_verbs: string[];
+    idle_release: boolean;
   }[],
 ): EngineKindsResponse {
   return { kinds };
@@ -38,6 +39,7 @@ const WIDGET = kindsPayload([
     // `sorted(human_verbs())` (app/routers/nodes.py:502), and this module
     // must render the payload's order rather than re-sorting it.
     human_verbs: ["load", "unload"],
+    idle_release: true,
   },
   {
     kind: "gadget",
@@ -46,6 +48,7 @@ const WIDGET = kindsPayload([
     local_capable: false,
     demand: false,
     human_verbs: ["polish"],
+    idle_release: false,
   },
 ]);
 
@@ -114,6 +117,7 @@ describe("remoteEngineVerbs", () => {
         local_capable: false,
         demand: false,
         human_verbs: ["load", "unload"],
+        idle_release: true,
       },
     ]);
     expect(remoteEngineVerbs(live, "sglang-omni", "busy", false)).toEqual([

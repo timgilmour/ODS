@@ -396,22 +396,49 @@ describe("idle-TTL affordances", () => {
   });
 
   it("says nothing happens when the TTL is off", () => {
-    expect(messages.ttlConsequence(0, true)).toBe("never released automatically");
-    expect(messages.ttlConsequence(0, false)).toBe("never released automatically");
+    expect(messages.ttlConsequence(0, true, true)).toBe("never released automatically");
+    expect(messages.ttlConsequence(0, false, true)).toBe("never released automatically");
   });
 
   it("distinguishes an invisible release from a one-way one", () => {
     // THE point of the whole feature: same number, opposite meaning.
-    expect(messages.ttlConsequence(900, true)).toBe(
+    expect(messages.ttlConsequence(900, true, true)).toBe(
       "released after 15 min idle — the next request reloads it automatically");
-    expect(messages.ttlConsequence(900, false)).toBe(
+    expect(messages.ttlConsequence(900, false, true)).toBe(
       "released after 15 min idle — reload is MANUAL, nothing brings it back");
   });
 
   it("declines to claim a consequence it cannot know", () => {
     // The kinds catalog failed to load: say so rather than guessing a
     // reversibility the operator would rely on.
-    expect(messages.ttlConsequence(900, null)).toBe(
+    expect(messages.ttlConsequence(900, null, null)).toBe(
       "released after 15 min idle — reload behaviour unknown (kind catalog unavailable)");
+  });
+
+  it("says NOTHING happens when the kind has no idle rule at all — never the false MANUAL sentence", () => {
+    // hipfire: arbiter_verbs() is empty, idle_action is unconditionally
+    // None (app/engine_kinds.py's _HipfireAdapter). A nonzero TTL on it is
+    // a no-op, not a one-way release — the old text ("reload is MANUAL,
+    // nothing brings it back") falsely implied a rule that fires and simply
+    // never reloads.
+    expect(messages.ttlConsequence(900, false, false)).toBe(
+      "never released automatically (this kind has no idle rule)");
+  });
+
+  it("the no-idle-rule sentence wins regardless of the TTL value, including 0", () => {
+    expect(messages.ttlConsequence(0, false, false)).toBe(
+      "never released automatically (this kind has no idle rule)");
+  });
+});
+
+describe("humanDuration (via ttlValue) at half-hour boundaries", () => {
+  it("does not misstate 90 minutes as a flat 2 hours", () => {
+    // Regression: Math.round(90 / 60) rounded straight to 2 h, a 30-minute
+    // misstatement. 5400 s = 90 min = 1.5 h.
+    expect(messages.ttlValue(5400)).toBe("5400 s — 90 min");
+  });
+
+  it("still renders a whole number of hours cleanly at 2 h and above", () => {
+    expect(messages.ttlValue(7200)).toBe("7200 s — 2 h");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { DeclaredEngine, EngineKindsResponse, ResourceTenant } from "../api";
+import type { DeclaredEngine, EngineKindsResponse, RemoteTenant, ResourceTenant } from "../api";
 import { labels } from "./messages";
 import {
   canSave,
@@ -7,6 +7,7 @@ import {
   emptyForm,
   formErrors,
   formForEntry,
+  idleReleaseFor,
   kindsFor,
   resourceKindMap,
   setField,
@@ -18,15 +19,20 @@ import {
 
 // Fixture builder mirroring GET /api/engine-kinds's shape
 // ({"kinds": [{kind, connection, remote_capable, local_capable, demand,
-// human_verbs}, ...]}, app/routers/nodes.py:493-504) — never the live four
-// (lemonade/comfyui/hipfire/sglang-omni) except where a test's own pin
-// names them verbatim (this file's Step 1, and kindsFor's own pinned real-
-// payload test below); every other test uses invented kinds
-// ("widget"/"gadget") per the fixture rule, since this module treats `kind`
-// as opaque data, not a closed enum. `remote_capable`/`local_capable` are
-// spelled out on every fixture kind (never defaulted) so a reader never has
-// to guess which capability a given test kind carries — same posture the
-// WIDGET_GADGET comment below already takes for connection fields.
+// human_verbs, idle_release}, ...]}, app/routers/nodes.py:493-519) — never
+// the live four (lemonade/comfyui/hipfire/sglang-omni) except where a
+// test's own pin names them verbatim (this file's Step 1, and kindsFor's
+// own pinned real-payload test below); every other test uses invented
+// kinds ("widget"/"gadget") per the fixture rule, since this module treats
+// `kind` as opaque data, not a closed enum. `remote_capable`/`local_capable`
+// are spelled out on every fixture kind (never defaulted) so a reader never
+// has to guess which capability a given test kind carries — same posture
+// the WIDGET_GADGET comment below already takes for connection fields.
+// `idle_release` on a PINNED REAL kind must match the verified backend
+// truth (app/engine_kinds.py's arbiter_verbs(): lemonade/comfyui/
+// sglang-omni non-empty, hipfire empty) — a fabricated value there would
+// let a fixture-honesty defect hide the same way FINDING 5's human_verbs
+// slip did.
 function kindsPayload(
   kinds: {
     kind: string;
@@ -35,6 +41,7 @@ function kindsPayload(
     local_capable: boolean;
     demand: boolean;
     human_verbs: string[];
+    idle_release: boolean;
   }[],
 ): EngineKindsResponse {
   return { kinds };
@@ -48,7 +55,7 @@ test("fields derive from the kinds payload, not literals", () => {
   const form = emptyForm(
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"], idle_release: true,
     }]),
     "comfyui",
   );
@@ -59,7 +66,7 @@ test("save is blocked until required fields are filled", () => {
   const form = emptyForm(
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"], idle_release: true,
     }]),
     "comfyui",
   );
@@ -79,11 +86,11 @@ test("save is blocked until required fields are filled", () => {
 const WIDGET_GADGET = kindsPayload([
   {
     kind: "widget", connection: { host: { required: true }, note: { required: false } },
-    remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
+    remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"], idle_release: true,
   },
   {
     kind: "gadget", connection: { path: { required: true } },
-    remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"],
+    remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"], idle_release: false,
   },
 ]);
 
@@ -204,7 +211,7 @@ describe("canSave", () => {
     const noRequired = kindsPayload([
       {
         kind: "gizmo", connection: { note: { required: false } },
-        remote_capable: false, local_capable: true, demand: true, human_verbs: [],
+        remote_capable: false, local_capable: true, demand: true, human_verbs: [], idle_release: true,
       },
     ]);
     expect(canSave(emptyForm(noRequired, "gizmo"))).toBe(true);
@@ -289,19 +296,19 @@ describe("kindsFor", () => {
     {
       kind: "lemonade",
       connection: { url: { required: true }, metrics_url: { required: true }, container: { required: true } },
-      remote_capable: false, local_capable: true, demand: true, human_verbs: ["load", "unload"],
+      remote_capable: false, local_capable: true, demand: true, human_verbs: ["load", "unload"], idle_release: true,
     },
     {
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"], idle_release: true,
     },
     {
       kind: "hipfire", connection: { container: { required: true } },
-      remote_capable: false, local_capable: true, demand: false, human_verbs: ["park", "resume"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["park", "resume"], idle_release: false,
     },
     {
       kind: "sglang-omni", connection: { url: { required: true } },
-      remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"],
+      remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"], idle_release: true,
     },
   ]);
 
@@ -318,11 +325,11 @@ describe("kindsFor", () => {
   const MIXED = kindsPayload([
     {
       kind: "local-only", connection: {},
-      remote_capable: false, local_capable: true, demand: true, human_verbs: [],
+      remote_capable: false, local_capable: true, demand: true, human_verbs: [], idle_release: true,
     },
     {
       kind: "remote-only", connection: {},
-      remote_capable: true, local_capable: false, demand: false, human_verbs: [],
+      remote_capable: true, local_capable: false, demand: false, human_verbs: [], idle_release: false,
     },
     // A kind capable nowhere (the shape KNOWN_KINDS' own comment,
     // app/engine_kinds.py:175, says a real kind can never be — pinned here
@@ -330,7 +337,7 @@ describe("kindsFor", () => {
     // missing/false capability to "included").
     {
       kind: "capable-nowhere", connection: {},
-      remote_capable: false, local_capable: false, demand: false, human_verbs: [],
+      remote_capable: false, local_capable: false, demand: false, human_verbs: [], idle_release: false,
     },
   ]);
 
@@ -365,9 +372,14 @@ describe("demandFor", () => {
     // already holds for the picker.
     const catalog = [
       { kind: "lemonade", connection: {}, remote_capable: false, local_capable: true,
-        human_verbs: ["load", "unload"], demand: true },
+        human_verbs: ["load", "unload"], demand: true, idle_release: true },
+      // sglang-omni's REAL human_verbs (app/engine_kinds.py's
+      // _SglangOmniAdapter.human_verbs, ~line 1012-1016) is ["load",
+      // "unload"] — never "free" (that vocabulary belongs to comfyui).
+      // idle_release: true — its arbiter_verbs() is frozenset({"unload"})
+      // and idle_action has a real rule (:1025-1048).
       { kind: "sglang-omni", connection: {}, remote_capable: true, local_capable: false,
-        human_verbs: ["free"], demand: false },
+        human_verbs: ["load", "unload"], demand: false, idle_release: true },
     ];
     expect(demandFor(catalog, "lemonade")).toBe(true);
     expect(demandFor(catalog, "sglang-omni")).toBe(false);
@@ -379,19 +391,82 @@ describe("demandFor", () => {
 });
 
 describe("resourceKindMap", () => {
-  test("maps each policy row to its declared kind", () => {
-    // PolicyModal is keyed by RESOURCE; `demand` is per KIND. World.tenants
-    // stamps `engine` on every entry regardless of kind (app/state.py's
-    // World.snapshot), which is the join.
+  test("maps a local policy row to its declared kind", () => {
+    // PolicyModal is keyed by RESOURCE; `demand`/`idle_release` are per
+    // KIND. World.tenants stamps `engine` on every entry regardless of
+    // kind (app/state.py's World.snapshot), which is the join.
     const tenants = {
       lemonade: { engine: "lemonade" },
-      omni: { engine: "sglang-omni" },
     } as unknown as Record<string, ResourceTenant>;
 
-    expect(resourceKindMap(tenants)).toEqual({
+    expect(resourceKindMap(tenants)).toEqual({ lemonade: "lemonade" });
+    expect(resourceKindMap(undefined)).toEqual({});
+  });
+
+  test("also folds in REMOTE tenants — a remote-declared engine must not fall to the unknown path", () => {
+    // FINDING 1: app/state.py's World builds `world.tenants` from the
+    // LOCAL node alone, but PolicyModal's rows are seeded from the WHOLE
+    // registry — a remote-declared engine (the live sglang-omni `omni` on
+    // sparky, local_capable false: KNOWN_KINDS' own comment says it can
+    // NEVER be a local tenant) was joining only against `tenants` and
+    // always missed, falling to the `?? ""` path and rendering the false
+    // "kind catalog unavailable" text instead of the exact warning this
+    // whole feature exists to show.
+    //
+    // `omni` here is modeled as a REMOTE tenant (world.remote_tenants,
+    // keyed `<node>/<resource>` per app/observe.py's node_key) — the
+    // shape it can actually appear in, not the impossible local one the
+    // old fixture used.
+    const tenants = {
+      lemonade: { engine: "lemonade" },
+    } as unknown as Record<string, ResourceTenant>;
+    const remoteTenants = {
+      "sparky/omni": {
+        engine: "sglang-omni",
+        gpu_index: 0,
+        state: "idle",
+        node_id: "sparky",
+        resource: "omni",
+      },
+    } as unknown as Record<string, RemoteTenant>;
+
+    expect(resourceKindMap(tenants, remoteTenants)).toEqual({
       lemonade: "lemonade",
       omni: "sglang-omni",
     });
-    expect(resourceKindMap(undefined)).toEqual({});
+  });
+
+  test("a remote tenant with no local tenants at all still joins", () => {
+    const remoteTenants = {
+      "sparky/omni": { engine: "sglang-omni", gpu_index: 0, state: "idle",
+        node_id: "sparky", resource: "omni" },
+    } as unknown as Record<string, RemoteTenant>;
+
+    expect(resourceKindMap(undefined, remoteTenants)).toEqual({ omni: "sglang-omni" });
+  });
+
+  test("no remote_tenants argument at all still works — the join is additive, not required", () => {
+    const tenants = { lemonade: { engine: "lemonade" } } as unknown as Record<string, ResourceTenant>;
+    expect(resourceKindMap(tenants, undefined)).toEqual({ lemonade: "lemonade" });
+  });
+});
+
+describe("idleReleaseFor", () => {
+  test("finds the idle_release flag for the kind being edited — mirrors demandFor", () => {
+    const catalog = [
+      { kind: "lemonade", connection: {}, remote_capable: false, local_capable: true,
+        human_verbs: ["load", "unload"], demand: true, idle_release: true },
+      // hipfire: real idle_release is FALSE — arbiter_verbs() is empty,
+      // idle_action is unconditionally None (app/engine_kinds.py's
+      // _HipfireAdapter, ~line 830-844).
+      { kind: "hipfire", connection: {}, remote_capable: false, local_capable: true,
+        human_verbs: ["park", "resume"], demand: false, idle_release: false },
+    ];
+    expect(idleReleaseFor(catalog, "lemonade")).toBe(true);
+    expect(idleReleaseFor(catalog, "hipfire")).toBe(false);
+    // Unknown kind / no catalog: null, not a guessed false — same honest-
+    // unknown posture as demandFor.
+    expect(idleReleaseFor(catalog, "nope")).toBe(null);
+    expect(idleReleaseFor(null, "lemonade")).toBe(null);
   });
 });

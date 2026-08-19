@@ -23,13 +23,19 @@ export interface Message {
   action?: { label: string };
 }
 
-/** Format raw seconds as a human-readable duration: "15 min", "45 s", "1 h".
+/** Format raw seconds as a human-readable duration: "15 min", "45 s", "2 h".
  * Used by ttlValue (with seconds prefix) and ttlConsequence (without).
- * Pure: same input always produces same output. */
+ * Pure: same input always produces same output.
+ *
+ * The hours branch only engages at 120 min and above — below that, minutes
+ * stay minutes. Regression this guards: rounding straight to whole hours
+ * (`Math.round(minutes / 60)`) rendered 5400 s (90 min = 1.5 h) as a flat
+ * "2 h", a 30-minute misstatement of when the release actually happens. */
 function humanDuration(seconds: number): string {
   if (seconds < 60) return `${seconds} s`;
-  const minutes = Math.round(seconds / 60);
-  return minutes >= 60 ? `${Math.round(minutes / 60)} h` : `${minutes} min`;
+  const minutes = seconds / 60;
+  if (minutes < 120) return `${Math.round(minutes)} min`;
+  return `${Math.round(minutes / 60)} h`;
 }
 
 export const messages = {
@@ -422,11 +428,23 @@ export const messages = {
   },
 
   /** What this TTL will actually DO, which depends entirely on whether the
-   * kind can reload itself. `demand` comes from GET /api/engine-kinds
-   * (app/routers/nodes.py's list_engine_kinds), never from a kind name in
-   * this file. null = the catalog did not load; say so rather than imply a
-   * reversibility nobody verified. */
-  ttlConsequence: (seconds: number, demand: boolean | null): string => {
+   * kind can reload itself. `demand` and `idleRelease` come from GET
+   * /api/engine-kinds (app/routers/nodes.py's list_engine_kinds), never
+   * from a kind name in this file.
+   *
+   * `idleRelease === false` wins outright, REGARDLESS of `seconds`: that
+   * kind's `idle_action` is unconditionally None (hipfire —
+   * `arbiter_verbs()` is empty, "park stays human-only" per
+   * app/engine_kinds.py's _HipfireAdapter), so a nonzero TTL on it is a
+   * no-op, not a one-way release. The prior text ("reload is MANUAL,
+   * nothing brings it back") falsely implied a rule that fires and simply
+   * never reloads — there is no rule at all.
+   *
+   * null (catalog did not load, or this kind is absent from it) keeps the
+   * existing honest-unknown path, driven by `demand === null` exactly as
+   * before: say so rather than imply a reversibility nobody verified. */
+  ttlConsequence: (seconds: number, demand: boolean | null, idleRelease: boolean | null): string => {
+    if (idleRelease === false) return "never released automatically (this kind has no idle rule)";
     if (seconds <= 0) return "never released automatically";
     const when = `released after ${humanDuration(seconds)} idle`;
     if (demand === null) return `${when} — reload behaviour unknown (kind catalog unavailable)`;

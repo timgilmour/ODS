@@ -22,6 +22,7 @@ import {
   emptyForm as emptyEngineForm,
   formErrors,
   formForEntry as engineFormForEntry,
+  idleReleaseFor,
   kindsFor,
   setField as setEngineField,
   sortedEngines,
@@ -775,17 +776,24 @@ function EngineFormPanel({
         {labels.engineIdleTtl}
         <input
           type="number"
+          min={0}
+          step={1}
           value={form.idleTtl}
           onChange={(e) => setForm({ ...form, idleTtl: Number(e.target.value) })}
         />
         <span className="field-value">{messages.ttlValue(form.idleTtl)}</span>
         {/* The consequence, not the setting: 900 on lemonade is free and
             saves ~70 W of idle burn; 900 on sglang-omni means a ~4 min
-            rebuild by hand (GF4). Same number, opposite meaning — the
-            distinction is the backend's `demand()`, never a kind literal
-            here. */}
+            rebuild by hand (GF4). 900 on hipfire does NOTHING (no idle rule
+            at all — idle_release false). Same number, up to three different
+            meanings — the distinction is the backend's `demand()`/
+            `idle_release`, never a kind literal here. */}
         <span className="field-hint">
-          {messages.ttlConsequence(form.idleTtl, demandFor(kinds.kinds, form.kind))}
+          {messages.ttlConsequence(
+            form.idleTtl,
+            demandFor(kinds.kinds, form.kind),
+            idleReleaseFor(kinds.kinds, form.kind),
+          )}
         </span>
       </label>
 

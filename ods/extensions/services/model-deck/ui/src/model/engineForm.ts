@@ -24,6 +24,7 @@ import type {
   EngineKindDef,
   EngineKindsResponse,
   EnginePolicyDefaults,
+  RemoteTenant,
   ResourceTenant,
 } from "../api";
 import { labels } from "./messages";
@@ -229,16 +230,44 @@ export function demandFor(
   return entry ? entry.demand : null;
 }
 
+/** The `idle_release` flag for `kind` — whether a nonzero idle_ttl on this
+ * kind does anything at all — or null when it cannot be known (catalog
+ * absent, or a kind it does not carry). Same null-is-not-false posture as
+ * `demandFor` above, and the same catalog shape; kept as its own small
+ * selector rather than folded into `demandFor`'s return so every existing
+ * `demandFor` call site (and its tests) stays untouched. */
+export function idleReleaseFor(
+  catalog: EngineKindDef[] | null,
+  kind: string,
+): boolean | null {
+  const entry = catalog?.find((k) => k.kind === kind);
+  return entry ? entry.idle_release : null;
+}
+
 /** resource -> declared kind, from the world snapshot the app already
  * holds. `engine` is stamped on every tenant regardless of kind
  * (app/state.py's World.snapshot, mirrored in api.ts's ResourceTenant), so
- * this needs no extra request. */
+ * the LOCAL half needs no extra request.
+ *
+ * `remoteTenants` folds in `world.remote_tenants` (FINDING 1): app/state.py
+ * builds `world.tenants` from the LOCAL node alone, but a policy row can
+ * name a REMOTE-declared engine (sglang-omni is local_capable false — it
+ * can never appear in `tenants` at all, only here). Without this half, a
+ * remote engine's row always missed the join and fell to the `?? ""`
+ * fallback at every call site, rendering the false "kind catalog
+ * unavailable" text instead of the exact idle-release warning this join
+ * exists to produce. Each RemoteTenant record carries its own `resource`
+ * (api.ts), so no second parameter shape is needed beyond the map itself. */
 export function resourceKindMap(
   tenants: Record<string, ResourceTenant> | undefined,
+  remoteTenants?: Record<string, RemoteTenant>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [resource, tenant] of Object.entries(tenants ?? {})) {
     out[resource] = tenant.engine;
+  }
+  for (const t of Object.values(remoteTenants ?? {})) {
+    out[t.resource] = t.engine;
   }
   return out;
 }

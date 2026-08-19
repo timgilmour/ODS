@@ -1000,6 +1000,9 @@ const OMNI_KINDS: EngineKindsResponse = {
   kinds: [{
     kind: "sglang-omni", connection: { url: { required: true } },
     remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"],
+    // arbiter_verbs() is frozenset({"unload"}) and idle_action has a real
+    // rule (app/engine_kinds.py's _SglangOmniAdapter, ~lines 1009-1048).
+    idle_release: true,
   }],
 };
 

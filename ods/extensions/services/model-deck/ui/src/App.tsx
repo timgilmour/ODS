@@ -339,7 +339,7 @@ export default function App() {
           policy={state.policy}
           storageState={storageState}
           kinds={engineKinds?.kinds ?? null}
-          resourceKinds={resourceKindMap(state?.world?.tenants)}
+          resourceKinds={resourceKindMap(state?.world?.tenants, state?.world?.remote_tenants)}
           onClose={() => setPolicyModalOpen(false)}
           onSaved={refreshAll}
         />

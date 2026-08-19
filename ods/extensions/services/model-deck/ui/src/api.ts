@@ -1022,6 +1022,14 @@ export interface EngineKindDef {
    * false makes it one-way. Consumed by messages.ttlConsequence. */
   demand: boolean;
   human_verbs: string[];
+  /** Whether a nonzero idle_ttl on this kind DOES ANYTHING
+   * (`app.engine_kinds`'s per-kind `arbiter_verbs()` being non-empty,
+   * served at routers/nodes.py's list_engine_kinds — hipfire's is empty:
+   * its `idle_action` is unconditionally None, "park stays human-only").
+   * false means a TTL is inert, not merely one-way like `demand: false` —
+   * messages.ttlConsequence renders it as "never released automatically
+   * (this kind has no idle rule)" regardless of the TTL value. */
+  idle_release: boolean;
 }
 
 /** GET /api/engine-kinds's body (app/routers/nodes.py:476-504's
