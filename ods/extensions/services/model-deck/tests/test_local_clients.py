@@ -33,6 +33,7 @@ def _engine(**over):
                         "metrics_url": "http://gguf-a:8001/metrics",
                         "container": "ods-gguf-a"},
          "gpu_index": 2,
+         "container_consent": True,
          "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60}}
     e.update(over)
     return e

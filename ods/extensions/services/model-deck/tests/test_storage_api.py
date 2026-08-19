@@ -165,15 +165,18 @@ class FakeDockerCtl:
 _ENGINES = [
     {"resource": "hipfire", "kind": "hipfire",
      "connection": {"container": "ods-hipfire"}, "gpu_index": 0,
+     "container_consent": True,
      "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
     {"resource": "lemonade", "kind": "lemonade",
      "connection": {"url": "http://llama-server:8080",
                     "metrics_url": "http://llama-server:8001/metrics",
                     "container": "ods-llama-server"},
      "gpu_index": 1,
+     "container_consent": True,
      "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
     {"resource": "comfyui", "kind": "comfyui",
      "connection": {"url": "http://comfyui:8188"}, "gpu_index": 1,
+     "container_consent": True,
      "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
 ]
 

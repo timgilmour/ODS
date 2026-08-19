@@ -218,7 +218,7 @@ def validate_engines(engines: object, remote: bool = False) -> None:
         if not isinstance(e, dict):
             raise _bad("engine entry must be an object")
         extra = set(e) - {"resource", "kind", "connection", "gpu_index",
-                          "policy_defaults"}
+                          "policy_defaults", "container_consent"}
         if extra:
             raise _bad(f"engine entry has extra field(s): {sorted(extra)}")
         resource = e.get("resource")
@@ -279,6 +279,11 @@ def validate_engines(engines: object, remote: bool = False) -> None:
         gpu = e.get("gpu_index")
         if isinstance(gpu, bool) or not isinstance(gpu, int) or gpu < 0:
             raise _bad(f"{resource}: gpu_index must be a non-negative integer")
+        consent = e.get("container_consent")
+        if not isinstance(consent, bool):
+            raise _bad(f"{resource}: container_consent must be a boolean — "
+                       "explicit consent for the deck to stop/start this "
+                       "entry's container (docker_ctl's guard reads it live)")
         pol = e.get("policy_defaults")
         if not isinstance(pol, dict) or set(pol) != set(_POLICY_FIELDS):
             raise _bad(f"{resource}: policy_defaults must have exactly "

@@ -503,6 +503,33 @@ class NodeStore:
                 self._save(data)
             return changed
 
+    def stamp_missing_container_consent(self) -> bool:
+        """One-time upgrade (open-rulings #1): stamp `container_consent`
+        onto every declared engine entry that predates the field. The
+        legacy triple gets True — it IS the env allowlist's default, so
+        live behaviour is preserved across the migration — and every other
+        engine gets False (consent is explicit, refusal is the safe side).
+        Keyed on raw-file absence of the field per entry; a healed in-memory
+        default would look already-stamped, hence the raw read (the
+        stamp_missing_control pattern)."""
+        with self._lock:
+            data = load_json(self._path)
+            if not isinstance(data, list):
+                return False
+            changed = False
+            for entry in data:
+                if not _well_formed(entry):
+                    continue
+                for eng in entry.get("engines", []):
+                    if not isinstance(eng, dict) or "container_consent" in eng:
+                        continue
+                    eng["container_consent"] = eng.get("resource") in (
+                        "hipfire", "lemonade", "comfyui")
+                    changed = True
+            if changed:
+                self._save(data)
+            return changed
+
 
 def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
                     spark_node_url: str, spark_serving_url: str,
@@ -576,16 +603,19 @@ def seed_engines_if_missing(store: "NodeStore", settings, data_dir: Path) -> boo
         {"resource": "hipfire", "kind": "hipfire",
          "connection": {"container": settings.hipfire_container},
          "gpu_index": settings.hipfire_gpu_index,
+         "container_consent": True,
          "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
         {"resource": "lemonade", "kind": "lemonade",
          "connection": {"url": settings.lemonade_url,
                         "metrics_url": settings.lemonade_metrics_url,
                         "container": settings.lemonade_container},
          "gpu_index": settings.lemonade_gpu_index,
+         "container_consent": True,
          "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
         {"resource": "comfyui", "kind": "comfyui",
          "connection": {"url": settings.comfyui_url},
          "gpu_index": settings.lemonade_gpu_index,
+         "container_consent": True,
          "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
     ]
     store.update("local", {"engines": engines})

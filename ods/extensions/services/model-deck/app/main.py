@@ -178,6 +178,11 @@ def _build_deck(settings: Settings) -> dict:
     # presence proof is found (intent.json or policy.json naming legacy engines).
     # Env defaults are not proof an engine exists (coexistence, spec §6).
     seed_engines_if_missing(node_store, settings, data_dir)
+    # One-time consent stamp (open-rulings #1): an already-E1 box's
+    # pre-existing engines[] gains container_consent — triple True (it was
+    # the env allowlist's default), everything else False. A fresh box's
+    # seed above already carries the field, so this is a no-op there.
+    node_store.stamp_missing_container_consent()
 
     from app.local_clients import LocalClients
 

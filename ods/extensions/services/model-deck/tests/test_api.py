@@ -275,15 +275,18 @@ class FakeReadGpus:
 _ENGINES = [
     {"resource": "hipfire", "kind": "hipfire",
      "connection": {"container": "ods-hipfire"}, "gpu_index": 0,
+     "container_consent": True,
      "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
     {"resource": "lemonade", "kind": "lemonade",
      "connection": {"url": "http://llama-server:8080",
                     "metrics_url": "http://llama-server:8001/metrics",
                     "container": "ods-llama-server"},
      "gpu_index": 1,
+     "container_consent": True,
      "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
     {"resource": "comfyui", "kind": "comfyui",
      "connection": {"url": "http://comfyui:8188"}, "gpu_index": 1,
+     "container_consent": True,
      "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
 ]
 
@@ -444,6 +447,7 @@ _GGUF_A_ENTRY = {
                    "metrics_url": "http://gguf-a:8001/metrics",
                    "container": "ods-gguf-a"},
     "gpu_index": 2,
+    "container_consent": True,
     "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60},
 }
 
@@ -813,6 +817,7 @@ def test_unsupported_verb_405s_with_kind_named(tmp_path, monkeypatch):
     _declare_local(deck, [{"resource": "img", "kind": "comfyui",
                            "connection": {"url": "http://img:8188"},
                            "gpu_index": 2,
+                           "container_consent": True,
                            "policy_defaults": {"priority": 1, "pinned": False,
                                                "idle_ttl": 0}}])
     r = TestClient(app).post("/api/tenants/img/load", json={"model": "m"})
@@ -4168,6 +4173,7 @@ _REMOTE_ENGINE_BODY = {
                    "metrics_url": "http://gguf-r:8001/metrics",
                    "container": "ods-gguf-r"},
     "gpu_index": 4,
+    "container_consent": True,
     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 30},
 }
 
@@ -4285,6 +4291,7 @@ _REMOTE_OMNI_BODY = {
     "resource": "song-r", "kind": "sglang-omni",
     "connection": {"url": "http://127.0.0.1:8008"},
     "gpu_index": 4,
+    "container_consent": True,
     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
 }
 
@@ -5077,6 +5084,7 @@ def test_a_local_kind_sharing_a_verb_is_not_misrouted_by_the_verb_alone(
     _declare_local(deck, _ENGINES + [
         {"resource": "song-l", "kind": "songbox",
          "connection": {"url": "http://song-l:9000"}, "gpu_index": 3,
+         "container_consent": True,
          "policy_defaults": {"priority": 7, "pinned": False, "idle_ttl": 45}}])
     songbox = FakeHipfire()
     deck["song-l"] = songbox

@@ -528,6 +528,7 @@ def test_local_entry_accepts_validated_engines(store):
                                            "metrics_url": "http://gguf-a:8001/metrics",
                                            "container": "ods-gguf-a"},
                             "gpu_index": 3,
+                            "container_consent": True,
                             "policy_defaults": {"priority": 10, "pinned": False,
                                                 "idle_ttl": 60}}]})
     assert store.get("local")["engines"][0]["resource"] == "gguf-a"
@@ -615,6 +616,7 @@ _REMOTE_ENGINE = {
                    "metrics_url": "http://gguf-r:8001/metrics",
                    "container": "ods-gguf-r"},
     "gpu_index": 4,
+    "container_consent": True,
     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 30},
 }
 
@@ -802,6 +804,43 @@ def test_seed_engines_runs_once(store, tmp_path):
     assert store.get("local")["engines"] == []  # seed did NOT resurrect
 
 
+def test_seed_engines_stamps_container_consent_true_on_the_triple(store, tmp_path):
+    """The seeded triple IS today's env-default allowlist — consent true
+    preserves live behaviour across the allowlist->flag migration."""
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local"})
+    _legacy_intent(tmp_path)
+    settings = _settings()
+    seed_engines_if_missing(store, settings, tmp_path)
+    engines = {e["resource"]: e for e in store.get("local")["engines"]}
+    assert all(engines[r]["container_consent"] is True
+               for r in ("hipfire", "lemonade", "comfyui"))
+
+
+def test_stamp_missing_container_consent_defaults_false_except_triple(store, tmp_path):
+    """One-time upgrade for an already-E1 box: raw-file absence of the field
+    is the trigger (N1 stamp pattern); triple -> True, others -> False;
+    malformed entries untouched; second call is a no-op."""
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": [
+             {"resource": "hipfire", "kind": "hipfire",
+              "connection": {"container": "ods-hipfire"}, "gpu_index": 0,
+              "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
+             {"resource": "custom-thing", "kind": "lemonade",
+              "connection": {"url": "http://custom:8080",
+                             "metrics_url": "http://custom:8001/metrics",
+                             "container": "ods-custom"},
+              "gpu_index": 2,
+              "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60}},
+         ]},  # entries WITHOUT container_consent, written raw
+    ])
+    assert store.stamp_missing_container_consent() is True
+    engines = {e["resource"]: e for e in store.get("local")["engines"]}
+    assert engines["hipfire"]["container_consent"] is True
+    assert engines["custom-thing"]["container_consent"] is False
+    assert store.stamp_missing_container_consent() is False  # idempotent
+
+
 # --- Task 7 fix round 1: the LOCAL direction of the run-location gate ------
 
 _LOCAL_ONLY_REFUSED_ENGINE = {
@@ -848,6 +887,7 @@ _OMNI_ENGINE = {
     "resource": "song-r", "kind": "sglang-omni",
     "connection": {"url": "http://nimbus:8008"},
     "gpu_index": 4,
+    "container_consent": True,
     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
 }
 
@@ -858,6 +898,7 @@ def _local_gguf(resource="gguf-a"):
                            "metrics_url": f"http://{resource}:8001/metrics",
                            "container": f"ods-{resource}"},
             "gpu_index": 2,
+            "container_consent": True,
             "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60}}
 
 

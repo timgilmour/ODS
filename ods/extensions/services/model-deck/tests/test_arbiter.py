@@ -1038,12 +1038,14 @@ _TWO_GGUF_ENGINES = [
                     "metrics_url": "http://gguf-a:8081/metrics",
                     "container": "gguf-a"},
      "gpu_index": 2,
+     "container_consent": True,
      "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
     {"resource": "gguf-b", "kind": "lemonade",
      "connection": {"url": "http://gguf-b:8080",
                     "metrics_url": "http://gguf-b:8081/metrics",
                     "container": "gguf-b"},
      "gpu_index": 3,
+     "container_consent": True,
      "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
 ]
 
@@ -4920,6 +4922,7 @@ _OMNI_ENGINE = {
     "resource": "song-r", "kind": "sglang-omni",
     "connection": {"url": "http://nimbus:8008"},
     "gpu_index": 4,
+    "container_consent": True,
     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
 }
 
@@ -5524,6 +5527,7 @@ _OMNI_NEIGHBOUR = {
     "resource": "tune-r", "kind": "sglang-omni",
     "connection": {"url": "http://nimbus:8009"},
     "gpu_index": 5,
+    "container_consent": True,
     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120},
 }
 

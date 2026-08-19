@@ -15,6 +15,7 @@ def _entry(**over):
                         "metrics_url": "http://gguf-a:8001/metrics",
                         "container": "ods-gguf-a"},
          "gpu_index": 3,
+         "container_consent": True,
          "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60}}
     e.update(over)
     return e
@@ -73,6 +74,18 @@ def test_gpu_index_must_be_nonnegative_int():
 def test_policy_defaults_exact_fields():
     with pytest.raises(ValueError, match="policy_defaults"):
         validate_engines([_entry(policy_defaults={"priority": 1})])
+
+
+def test_validate_engines_requires_container_consent():
+    e = _entry()
+    del e["container_consent"]
+    with pytest.raises(ValueError, match="container_consent"):
+        validate_engines([e])
+
+
+def test_validate_engines_container_consent_must_be_bool():
+    with pytest.raises(ValueError, match="container_consent"):
+        validate_engines([_entry(container_consent="yes")])
 
 
 def test_resource_shape_refused_when_slashy():
@@ -498,6 +511,7 @@ def _omni_entry(**over):
     e = {"resource": "song-r", "kind": "sglang-omni",
          "connection": {"url": "http://127.0.0.1:8008"},
          "gpu_index": 4,
+         "container_consent": True,
          "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 120}}
     e.update(over)
     return e
