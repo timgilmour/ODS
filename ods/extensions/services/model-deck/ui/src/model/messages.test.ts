@@ -270,6 +270,28 @@ describe("labels", () => {
     );
   });
 
+  it("renders a model-mismatch warn reason with declared and resident models (ruling #2-C, app/sets.py:762-771)", () => {
+    // app/sets.py:762-771 — resource-tagged, carries declared/resident model
+    // identities in the step object.
+    const step = { step: "warn", reason: "model-mismatch", resource: "gguf-a", declared: "new.gguf", resident: "old.gguf" };
+    expect(labels.stepWarnReason("model-mismatch", "gguf-a", step)).toBe(
+      "gguf-a resident old.gguf, declared new.gguf — apply will not swap",
+    );
+    // Without a resource tag.
+    const stepNoResource = { step: "warn", reason: "model-mismatch", declared: "new.gguf", resident: "old.gguf" };
+    expect(labels.stepWarnReason("model-mismatch", undefined, stepNoResource)).toBe(
+      "resident old.gguf, declared new.gguf — apply will not swap",
+    );
+  });
+
+  it("falls back to 'unknown' for model identities when model-mismatch step lacks declared/resident keys", () => {
+    // A malformed step (missing declared or resident) still renders without crashing.
+    const malformed = { step: "warn", reason: "model-mismatch", resource: "gguf-a" };
+    expect(labels.stepWarnReason("model-mismatch", "gguf-a", malformed)).toBe(
+      "gguf-a resident unknown, declared unknown — apply will not swap",
+    );
+  });
+
   it("degrades an unrecognized warn reason to the raw code rather than inventing a sentence", () => {
     expect(labels.stepWarnReason("some-future-reason")).toBe("some-future-reason");
   });

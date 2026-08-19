@@ -46,6 +46,12 @@ describe("stepRow", () => {
     );
   });
 
+  it("renders a model-mismatch warn step with declared and resident models extracted from the step (ruling #2-C, app/sets.py:762-771)", () => {
+    const step = { step: "warn", reason: "model-mismatch", resource: "gguf-a", declared: "new.gguf", resident: "old.gguf" };
+    expect(stepRow(step, 0))
+      .toMatchObject({ label: "Warning", detail: "gguf-a resident old.gguf, declared new.gguf — apply will not swap" });
+  });
+
   it("renders an unrecognized warn reason verbatim rather than crashing", () => {
     expect(stepRow({ step: "warn", reason: "some-future-reason" }, 0).detail).toBe(
       "some-future-reason",

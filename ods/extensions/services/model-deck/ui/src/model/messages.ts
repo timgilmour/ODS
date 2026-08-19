@@ -12,7 +12,7 @@
  * humanized ages.
  */
 
-import type { Layer, SettingsKind, Widget } from "../api";
+import type { Layer, SettingsKind, Step, Widget } from "../api";
 
 export type Tone = "neutral" | "warning" | "danger";
 
@@ -583,10 +583,15 @@ export const labels = {
    * "unconfirmed" — that would be a fact the backend never asserted.
    * "no-model-to-load" (app/sets.py:758, resource-tagged): a "loaded" goal
    * on a load-verb resource named no model, live or in the set.
+   * "model-mismatch" (app/sets.py:762-771, resource-tagged, ruling #2-C):
+   * a resource is already loaded with a model, but the declared model differs
+   * from the resident one. The planner emits a warn (no actuation) so the
+   * operator knows about the drift. Declared and resident model names ride
+   * in the step object's declared/resident keys.
    * "durable-revert-unavailable" (app/sets.py:653, no resource — it is
    * about the DURABLE route, not a per-resource actuation): the previous-set
    * revert has no catalog id to re-activate the old default route with. */
-  stepWarnReason: (reason: string, resource?: string | null, step?: any): string => {
+  stepWarnReason: (reason: string, resource?: string | null, step?: Step): string => {
     switch (reason) {
       case "durable-revert-unavailable":
         return "durable revert unavailable — no catalog id to re-activate the previous model";
