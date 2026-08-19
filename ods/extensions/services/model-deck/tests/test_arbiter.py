@@ -3751,7 +3751,7 @@ def test_harvest_failed_dedup_resets_when_the_failure_kind_changes(tmp_path):
     watcher._derive_pass()  # EngineError again -> deduped
 
     watcher._engine_exec = _raises(
-        GuardError("container 'ods-hipfire' is not in the park allowlist"))
+        GuardError("container 'ods-hipfire' is not consented for deck control"))
     watcher._last_derive_at = None
     watcher._derive_pass()  # GuardError -> resets + logged
 
@@ -3770,7 +3770,7 @@ def test_harvest_survives_guarderror_when_the_engine_is_not_allowlisted(tmp_path
     BusyError failure."""
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
-                       engine_exec=_raises(GuardError("container 'ods-hipfire' is not in the park allowlist")),
+                       engine_exec=_raises(GuardError("container 'ods-hipfire' is not consented for deck control")),
                        configurable_engines=[(_LOCAL_NODE, "hipfire")])
 
     watcher._derive_pass()  # must not raise

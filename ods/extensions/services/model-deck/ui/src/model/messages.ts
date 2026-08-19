@@ -407,7 +407,7 @@ export const messages = {
   engineConsentNote: (): Message => ({
     tone: "neutral",
     title: "container verbs are opt-in per entry",
-    body: "load/unload/free reach the engine directly and work immediately regardless of this box; park, resume, and the storage-move restart hook go through Docker stop/start and refuse (409) unless it is checked.",
+    body: "load/unload/free reach the engine directly and work immediately regardless of this checkbox; park, resume, and the storage-move restart hook go through Docker stop/start and refuse (409) unless it is checked.",
   }),
 
   /** A duration for humans beside the raw seconds the API takes. 0 is a

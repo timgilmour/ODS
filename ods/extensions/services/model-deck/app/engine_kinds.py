@@ -14,8 +14,11 @@ from app/state.py's three `_snapshot_*` methods (see each adapter's
 `app.local_clients.LocalClients` used to hold directly (kind-name
 `if`/`elif` dispatch) — moved here because per-kind constructor knowledge
 is exactly what this module exists to hold; `LocalClients` now calls
-`ENGINE_KINDS[kind].build_client(connection, settings)` and holds no
-engine-kind-name literal anywhere. `idle_action`/`reclaimable` (arbiter
+`ENGINE_KINDS[kind].build_client(connection, settings, node_store)` and
+holds no engine-kind-name literal anywhere (`node_store` joined the call
+under open-rulings #1: only the hipfire adapter's DockerCtl needs a live
+consent source, every other kind accepts-and-ignores it — see each
+adapter's own `build_client` docstring). `idle_action`/`reclaimable` (arbiter
 generalization) and the actuator methods (execute_unload/execute_free/
 execute_load) are Task 5/6's additions to these same classes — this
 module is the one place every later task's per-kind logic lands, per its
