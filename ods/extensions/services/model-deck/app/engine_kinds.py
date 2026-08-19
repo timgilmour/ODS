@@ -156,6 +156,12 @@ def _within(ts: str | None, now: datetime | None, window_s: float) -> bool:
 # kind -> {"connection": {field -> required?}, "remote_capable": bool,
 #          "local_capable": bool}
 #
+# A field mapped to `False` is OPTIONAL, not unchecked (Finding 1): absent
+# is fine, but if the caller includes it, `validate_engines` still demands a
+# non-empty string — the same type check a required field gets, just not
+# gated on presence. comfyui's `container` is the first (and, today, only)
+# user of this half of the mechanism.
+#
 # WHERE each kind may RUN, declared in BOTH directions and enforced by
 # `validate_engines` below (the deck's registry write gate reaches it
 # through app/node_store.py's `_validate`/`_heal_engines`):
@@ -181,7 +187,17 @@ def _within(ts: str | None, now: datetime | None, window_s: float) -> bool:
 KNOWN_KINDS: dict[str, dict[str, object]] = {
     "lemonade": {"connection": {"url": True, "metrics_url": True, "container": True},
                  "remote_capable": False, "local_capable": True},
-    "comfyui": {"connection": {"url": True},
+    # `container` is OPTIONAL (Finding 1, whole-branch review): the
+    # provenance sweep (app.node_store.declared_containers, consulted by
+    # arbiter._provenance_local_oci and routers/provenance's backfill) walks
+    # every declared engine's connection.container to enumerate OCI images —
+    # comfyui being the one url-only kind meant its container could never be
+    # named at all, silently dropping ods-comfyui from that sweep versus the
+    # pre-E1 settings.park_allowlist it replaced. The probe itself still
+    # never dials the container (`_ComfyAdapter.build_client` reads only
+    # `url`); this field exists purely as the operator's record of which
+    # container this declaration's engine runs in.
+    "comfyui": {"connection": {"url": True, "container": False},
                 "remote_capable": False, "local_capable": True},
     "hipfire": {"connection": {"container": True},
                 "remote_capable": False, "local_capable": True},
@@ -277,9 +293,18 @@ def validate_engines(engines: object, remote: bool = False) -> None:
             raise _bad(f"{resource}: connection has extra field(s): "
                        f"{sorted(extra_conn)}")
         for field, required in schema.items():
-            if required and not (isinstance(conn.get(field), str) and conn[field]):
-                raise _bad(f"{resource}: connection.{field} is required "
-                           f"for kind {kind!r}")
+            if required:
+                if not (isinstance(conn.get(field), str) and conn[field]):
+                    raise _bad(f"{resource}: connection.{field} is required "
+                               f"for kind {kind!r}")
+            elif field in conn:
+                # Optional field, but PRESENT: still type-checked (a caller
+                # that included it gets the same non-empty-string bar a
+                # required field would, never a silent pass-through of
+                # whatever shape happened to be handed in).
+                if not (isinstance(conn[field], str) and conn[field]):
+                    raise _bad(f"{resource}: connection.{field} must be a "
+                               "non-empty string when present")
         gpu = e.get("gpu_index")
         if isinstance(gpu, bool) or not isinstance(gpu, int) or gpu < 0:
             raise _bad(f"{resource}: gpu_index must be a non-negative integer")

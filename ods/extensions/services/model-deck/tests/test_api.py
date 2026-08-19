@@ -3823,7 +3823,13 @@ def test_engine_kinds_route_shape(tmp_path, monkeypatch):
         "metrics_url": {"required": True},
         "container": {"required": True},
     }
-    assert kinds["comfyui"]["connection"] == {"url": {"required": True}}
+    assert kinds["comfyui"]["connection"] == {
+        "url": {"required": True},
+        # Finding 1 (whole-branch review): OPTIONAL, so the OCI provenance
+        # sweep (app.node_store.declared_containers) can enumerate a
+        # declared comfyui container like every other kind.
+        "container": {"required": False},
+    }
     assert kinds["hipfire"]["connection"] == {"container": {"required": True}}
     assert set(kinds["lemonade"]["human_verbs"]) == {"load", "unload"}
     assert set(kinds["comfyui"]["human_verbs"]) == {"free"}

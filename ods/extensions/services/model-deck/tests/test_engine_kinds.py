@@ -96,6 +96,51 @@ def test_validate_engines_container_consent_must_be_bool():
         validate_engines([_entry(container_consent=0)])
 
 
+# --- Finding 1 (whole-branch review): comfyui gains an OPTIONAL
+# connection.container, so declared_containers' OCI provenance sweep can
+# enumerate ods-comfyui like every other kind — comfyui's schema used to be
+# the one url-only kind with no way to carry a container name at all. The
+# optionality mechanism is minimal: KNOWN_KINDS' schema dict already maps
+# field -> required (bool); `False` was simply unused until now. A field
+# marked False is never REQUIRED, but validate_engines still type-checks it
+# (non-empty string) when the caller chose to include it — an optional field
+# is not an unchecked one.
+
+def _comfy_entry(**over):
+    e = {"resource": "img", "kind": "comfyui",
+         "connection": {"url": "http://comfyui:8188"},
+         "gpu_index": 1,
+         "container_consent": True,
+         "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}}
+    e.update(over)
+    return e
+
+
+def test_comfyui_connection_schema_declares_container_optional():
+    assert KNOWN_KINDS["comfyui"]["connection"] == {"url": True, "container": False}
+
+
+def test_comfyui_container_absent_still_passes():
+    validate_engines([_comfy_entry()])
+
+
+def test_comfyui_accepts_a_container_name():
+    validate_engines([_comfy_entry(
+        connection={"url": "http://comfyui:8188", "container": "ods-comfyui"})])
+
+
+def test_comfyui_refuses_a_non_string_container():
+    with pytest.raises(ValueError, match="container"):
+        validate_engines([_comfy_entry(
+            connection={"url": "http://comfyui:8188", "container": 5})])
+
+
+def test_comfyui_refuses_an_empty_string_container():
+    with pytest.raises(ValueError, match="container"):
+        validate_engines([_comfy_entry(
+            connection={"url": "http://comfyui:8188", "container": ""})])
+
+
 def test_resource_shape_refused_when_slashy():
     # resource keys build "local/<resource>" lifecycle keys — a slash
     # would forge a foreign key ([[literal-declared-inputs]]).
