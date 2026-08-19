@@ -181,6 +181,13 @@ def _build_deck(settings: Settings) -> dict:
     # the env allowlist's default), everything else False. A fresh box's
     # seed above already carries the field, so this is a no-op there.
     node_store.stamp_missing_container_consent()
+    # One-time comfyui container stamp (Finding 1c, whole-branch review): an
+    # already-E1 box's pre-existing comfyui entry predates connection.
+    # container (Finding 1a's schema addition) and gains the same
+    # settings.comfyui_container default a fresh seed now carries (Finding
+    # 1b) — restoring OCI provenance coverage for ods-comfyui on upgrade,
+    # not just on a fresh install.
+    node_store.stamp_missing_comfyui_container(settings)
 
     # `allowed` is the zero-arg callable DockerCtl re-resolves on every
     # `_guard` call — closes over `node_store` above, never a captured

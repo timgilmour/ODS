@@ -216,6 +216,29 @@ def test_boot_stamps_control_on_legacy_seeded_spark(tmp_path, monkeypatch):
     assert entry["control"] == "swap"
 
 
+def test_boot_stamps_comfyui_container_on_a_pre_existing_entry(tmp_path, monkeypatch):
+    """Finding 1c (whole-branch review): an already-E1 box's nodes.json —
+    written before comfyui's schema accepted connection.container (Finding
+    1a) — gains the settings default on disk at boot, exactly once, mirroring
+    test_boot_stamps_control_on_legacy_seeded_spark above."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MODEL_DECK_COMFYUI_CONTAINER", "test-ods-comfyui")
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "local", "label": "local", "agent_kind": "local",
+         "engines": [
+             {"resource": "comfyui", "kind": "comfyui",
+              "connection": {"url": "http://comfyui:8188"}, "gpu_index": 1,
+              "container_consent": True,
+              "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+         ]},
+    ]))
+    from app.main import create_app
+    app = create_app()
+    engines = {e["resource"]: e for e in app.state.deck["node_store"].get("local")["engines"]}
+    assert engines["comfyui"]["connection"]["container"] == "test-ods-comfyui"
+
+
 # --- harvest routes per swap node (N1 T11) ----------------------------------
 #
 # main._build_deck builds one (node_id, "vllm") route per control:"swap"

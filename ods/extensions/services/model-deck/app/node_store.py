@@ -530,6 +530,45 @@ class NodeStore:
                 self._save(data)
             return changed
 
+    def stamp_missing_comfyui_container(self, settings) -> bool:
+        """One-time upgrade (Finding 1c, whole-branch review): stamp
+        `connection.container` onto every declared comfyui-kind engine entry
+        that predates the field — comfyui's connection schema only just
+        gained it (app/engine_kinds.py KNOWN_KINDS, Finding 1a), and an
+        already-E1 box's pre-existing comfyui entry has no way to grow it on
+        its own. Uses the SEED-ONLY `settings.comfyui_container` default —
+        the same value a fresh box's `seed_engines_if_missing` now writes
+        (Finding 1b) — so an upgrading box regains the same OCI provenance
+        sweep coverage (`declared_containers`) a fresh install would have
+        had from the start.
+
+        Keyed on raw-file absence of `connection.container` per comfyui
+        entry (the stamp_missing_control / stamp_missing_container_consent
+        pattern), so it runs at most once per entry lifetime: an operator
+        who later clears or renames the container is never re-stamped.
+        `isinstance(eng, dict)` / `isinstance(conn, dict)` guard the same
+        way `stamp_missing_container_consent` does — a malformed sibling
+        element must not raise."""
+        with self._lock:
+            data = load_json(self._path)
+            if not isinstance(data, list):
+                return False
+            changed = False
+            for entry in data:
+                if not _well_formed(entry):
+                    continue
+                for eng in entry.get("engines") or []:
+                    if not isinstance(eng, dict) or eng.get("kind") != "comfyui":
+                        continue
+                    conn = eng.get("connection")
+                    if not isinstance(conn, dict) or "container" in conn:
+                        continue
+                    conn["container"] = settings.comfyui_container
+                    changed = True
+            if changed:
+                self._save(data)
+            return changed
+
 
 def consented_containers(node_store: NodeStore | None) -> set[str]:
     """Container names of local declared engines with `container_consent`

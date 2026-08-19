@@ -866,6 +866,119 @@ def test_stamp_missing_container_consent_tolerates_a_null_engines_entry(store, t
     assert store.stamp_missing_container_consent() is False
 
 
+# --- Finding 1c (whole-branch review): stamp_missing_comfyui_container ----
+# One-time upgrade for an already-E1 box's pre-existing comfyui entry, now
+# that comfyui's schema accepts connection.container (Finding 1a) — the
+# sibling to stamp_missing_container_consent, same raw-read/lock/idempotent
+# pattern, keyed per-entry on absence of connection.container, kind=="comfyui"
+# only.
+
+def test_stamp_missing_comfyui_container_adds_the_settings_default(store, tmp_path):
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": [
+             {"resource": "comfyui", "kind": "comfyui",
+              "connection": {"url": "http://comfyui:8188"}, "gpu_index": 1,
+              "container_consent": True,
+              "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+         ]},
+    ])
+    settings = _settings()
+    assert store.stamp_missing_comfyui_container(settings) is True
+    engines = {e["resource"]: e for e in store.get("local")["engines"]}
+    assert engines["comfyui"]["connection"]["container"] == settings.comfyui_container
+    # Idempotent: a second call finds nothing left to stamp.
+    assert store.stamp_missing_comfyui_container(settings) is False
+
+
+def test_stamp_missing_comfyui_container_ignores_non_comfyui_kinds(store, tmp_path):
+    """Only kind=="comfyui" is touched — a lemonade-kind entry (whose
+    schema REQUIRES container, so a raw entry missing it is already
+    schema-invalid and heals to [] by a different path entirely) must never
+    be mistaken for this migration's target."""
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": [
+             {"resource": "gguf-a", "kind": "lemonade",
+              "connection": {"url": "http://gguf-a:8080",
+                             "metrics_url": "http://gguf-a:8001/metrics",
+                             "container": "ods-gguf-a"},
+              "gpu_index": 2, "container_consent": True,
+              "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60}},
+         ]},
+    ])
+    assert store.stamp_missing_comfyui_container(_settings()) is False
+    engines = {e["resource"]: e for e in store.get("local")["engines"]}
+    assert engines["gguf-a"]["connection"]["container"] == "ods-gguf-a"  # untouched
+
+
+def test_stamp_missing_comfyui_container_leaves_an_already_stamped_entry_alone(store, tmp_path):
+    """An operator-set (or already-migrated) container name is never
+    overwritten — the raw-file ABSENCE check is the whole gate, same as
+    stamp_missing_control never re-promoting a demoted node."""
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": [
+             {"resource": "comfyui", "kind": "comfyui",
+              "connection": {"url": "http://comfyui:8188",
+                             "container": "operator-named-comfy"},
+              "gpu_index": 1, "container_consent": True,
+              "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+         ]},
+    ])
+    assert store.stamp_missing_comfyui_container(_settings()) is False
+    engines = {e["resource"]: e for e in store.get("local")["engines"]}
+    assert engines["comfyui"]["connection"]["container"] == "operator-named-comfy"
+
+
+def test_stamp_missing_comfyui_container_tolerates_a_null_engines_entry(store, tmp_path):
+    """Mirrors stamp_missing_container_consent's own null-engines
+    regression test: a hand-edited `"engines": null` must not crash the
+    migration at boot."""
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": None},
+    ])
+    assert store.stamp_missing_comfyui_container(_settings()) is False
+
+
+def test_stamp_missing_comfyui_container_tolerates_a_non_dict_connection(store, tmp_path):
+    """`isinstance(eng, dict)` guards the outer element (Finding 7's idiom,
+    applied here too); a malformed `connection` on an otherwise well-formed
+    comfyui entry must not raise either."""
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": [
+             {"resource": "comfyui", "kind": "comfyui", "connection": "not-a-dict",
+              "gpu_index": 1, "container_consent": True,
+              "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+             "not a dict either",
+         ]},
+    ])
+    assert store.stamp_missing_comfyui_container(_settings()) is False
+
+
+def test_declared_containers_includes_a_stamped_comfyui_entry_end_to_end(store, tmp_path):
+    """Finding 1d: the whole chain, real store to real declared_containers
+    — an upgrading box's pre-existing comfyui entry regains OCI provenance
+    coverage exactly like the fresh-seed path (Finding 1b) does."""
+    from app.node_store import declared_containers
+
+    _legacy_file(tmp_path, [
+        {"id": "local", "label": "Box L", "agent_kind": "local",
+         "engines": [
+             {"resource": "comfyui", "kind": "comfyui",
+              "connection": {"url": "http://comfyui:8188"}, "gpu_index": 1,
+              "container_consent": True,
+              "policy_defaults": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+         ]},
+    ])
+    settings = _settings()
+    assert declared_containers(store) == set()  # before the stamp: not enumerable
+    store.stamp_missing_comfyui_container(settings)
+    assert declared_containers(store) == {settings.comfyui_container}
+
+
 # --- Task 7 fix round 1: the LOCAL direction of the run-location gate ------
 
 _LOCAL_ONLY_REFUSED_ENGINE = {
