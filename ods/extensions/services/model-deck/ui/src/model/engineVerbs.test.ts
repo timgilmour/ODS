@@ -20,6 +20,7 @@ function kindsPayload(
     connection: Record<string, { required: boolean }>;
     remote_capable: boolean;
     local_capable: boolean;
+    demand: boolean;
     human_verbs: string[];
   }[],
 ): EngineKindsResponse {
@@ -32,6 +33,7 @@ const WIDGET = kindsPayload([
     connection: { url: { required: true } },
     remote_capable: true,
     local_capable: false,
+    demand: true,
     // Deliberately NOT alphabetical-by-accident-only: the backend serves
     // `sorted(human_verbs())` (app/routers/nodes.py:502), and this module
     // must render the payload's order rather than re-sorting it.
@@ -42,6 +44,7 @@ const WIDGET = kindsPayload([
     connection: {},
     remote_capable: true,
     local_capable: false,
+    demand: false,
     human_verbs: ["polish"],
   },
 ]);
@@ -109,6 +112,7 @@ describe("remoteEngineVerbs", () => {
         connection: { url: { required: true } },
         remote_capable: true,
         local_capable: false,
+        demand: false,
         human_verbs: ["load", "unload"],
       },
     ]);

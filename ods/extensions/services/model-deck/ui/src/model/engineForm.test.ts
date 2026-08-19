@@ -15,7 +15,7 @@ import {
 } from "./engineForm";
 
 // Fixture builder mirroring GET /api/engine-kinds's shape
-// ({"kinds": [{kind, connection, remote_capable, local_capable,
+// ({"kinds": [{kind, connection, remote_capable, local_capable, demand,
 // human_verbs}, ...]}, app/routers/nodes.py:493-504) — never the live four
 // (lemonade/comfyui/hipfire/sglang-omni) except where a test's own pin
 // names them verbatim (this file's Step 1, and kindsFor's own pinned real-
@@ -31,6 +31,7 @@ function kindsPayload(
     connection: Record<string, { required: boolean }>;
     remote_capable: boolean;
     local_capable: boolean;
+    demand: boolean;
     human_verbs: string[];
   }[],
 ): EngineKindsResponse {
@@ -45,7 +46,7 @@ test("fields derive from the kinds payload, not literals", () => {
   const form = emptyForm(
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
     }]),
     "comfyui",
   );
@@ -56,7 +57,7 @@ test("save is blocked until required fields are filled", () => {
   const form = emptyForm(
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
     }]),
     "comfyui",
   );
@@ -76,11 +77,11 @@ test("save is blocked until required fields are filled", () => {
 const WIDGET_GADGET = kindsPayload([
   {
     kind: "widget", connection: { host: { required: true }, note: { required: false } },
-    remote_capable: false, local_capable: true, human_verbs: ["free"],
+    remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
   },
   {
     kind: "gadget", connection: { path: { required: true } },
-    remote_capable: true, local_capable: false, human_verbs: ["load", "unload"],
+    remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"],
   },
 ]);
 
@@ -201,7 +202,7 @@ describe("canSave", () => {
     const noRequired = kindsPayload([
       {
         kind: "gizmo", connection: { note: { required: false } },
-        remote_capable: false, local_capable: true, human_verbs: [],
+        remote_capable: false, local_capable: true, demand: true, human_verbs: [],
       },
     ]);
     expect(canSave(emptyForm(noRequired, "gizmo"))).toBe(true);
@@ -286,19 +287,19 @@ describe("kindsFor", () => {
     {
       kind: "lemonade",
       connection: { url: { required: true }, metrics_url: { required: true }, container: { required: true } },
-      remote_capable: false, local_capable: true, human_verbs: ["load", "unload"],
+      remote_capable: false, local_capable: true, demand: true, human_verbs: ["load", "unload"],
     },
     {
       kind: "comfyui", connection: { url: { required: true } },
-      remote_capable: false, local_capable: true, human_verbs: ["free"],
+      remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"],
     },
     {
       kind: "hipfire", connection: { container: { required: true } },
-      remote_capable: false, local_capable: true, human_verbs: ["park", "resume"],
+      remote_capable: false, local_capable: true, demand: false, human_verbs: ["park", "resume"],
     },
     {
       kind: "sglang-omni", connection: { url: { required: true } },
-      remote_capable: true, local_capable: false, human_verbs: ["load", "unload"],
+      remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"],
     },
   ]);
 
@@ -315,11 +316,11 @@ describe("kindsFor", () => {
   const MIXED = kindsPayload([
     {
       kind: "local-only", connection: {},
-      remote_capable: false, local_capable: true, human_verbs: [],
+      remote_capable: false, local_capable: true, demand: true, human_verbs: [],
     },
     {
       kind: "remote-only", connection: {},
-      remote_capable: true, local_capable: false, human_verbs: [],
+      remote_capable: true, local_capable: false, demand: false, human_verbs: [],
     },
     // A kind capable nowhere (the shape KNOWN_KINDS' own comment,
     // app/engine_kinds.py:175, says a real kind can never be — pinned here
@@ -327,7 +328,7 @@ describe("kindsFor", () => {
     // missing/false capability to "included").
     {
       kind: "capable-nowhere", connection: {},
-      remote_capable: false, local_capable: false, human_verbs: [],
+      remote_capable: false, local_capable: false, demand: false, human_verbs: [],
     },
   ]);
 

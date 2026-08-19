@@ -1015,6 +1015,12 @@ export interface EngineKindDef {
    * served at routers/nodes.py:501). Every E1 kind carries this True;
    * sglang-omni is the first False (it has no local client to build). */
   local_capable: boolean;
+  /** Whether a released resource of this kind reloads itself on the next
+   * request (`app.engine_kinds`'s per-kind `demand()`, served at
+   * routers/nodes.py's list_engine_kinds). It is the entire meaning of an
+   * idle TTL: true makes release invisible and saves ~70 W of idle burn,
+   * false makes it one-way. Consumed by messages.ttlConsequence. */
+  demand: boolean;
   human_verbs: string[];
 }
 

@@ -401,6 +401,32 @@ export const messages = {
     title: "container verbs need the host's park allowlist too",
     body: "load/unload/free reach the engine directly and work immediately; park, resume, and the storage-move restart hook go through Docker start/stop and refuse (409) until this container name is added to the host's park allowlist.",
   }),
+
+  /** A duration for humans beside the raw seconds the API takes. 0 is a
+   * MODE, not a duration: every kind's idle_action gates on
+   * `policy["idle_ttl"] > 0` (app/engine_kinds.py per-kind idle rules), so
+   * zero disables idle release outright. */
+  ttlValue: (seconds: number): string => {
+    if (seconds <= 0) return "off";
+    if (seconds < 60) return `${seconds} s`;
+    const minutes = Math.round(seconds / 60);
+    return `${seconds} s — ${minutes >= 60 ? `${Math.round(minutes / 60)} h` : `${minutes} min`}`;
+  },
+
+  /** What this TTL will actually DO, which depends entirely on whether the
+   * kind can reload itself. `demand` comes from GET /api/engine-kinds
+   * (app/routers/nodes.py's list_engine_kinds), never from a kind name in
+   * this file. null = the catalog did not load; say so rather than imply a
+   * reversibility nobody verified. */
+  ttlConsequence: (seconds: number, demand: boolean | null): string => {
+    if (seconds <= 0) return "never released automatically";
+    const duration = seconds < 60 ? `${seconds} s` : `${Math.round(seconds / 60) >= 60 ? `${Math.round(Math.round(seconds / 60) / 60)} h` : `${Math.round(seconds / 60)} min`}`;
+    const when = `released after ${duration} idle`;
+    if (demand === null) return `${when} — reload behaviour unknown (kind catalog unavailable)`;
+    return demand
+      ? `${when} — the next request reloads it automatically`
+      : `${when} — reload is MANUAL, nothing brings it back`;
+  },
 };
 
 /** Short labels — control text, badges, captions and the `title` tooltips

@@ -380,3 +380,38 @@ describe("declared remote engine presentation (Task 10b)", () => {
     expect(m.action?.label).toBe("Retry");
   });
 });
+
+describe("idle-TTL affordances", () => {
+  it("renders 0 as off, not as a number", () => {
+    // Every kind's idle_action gates on `policy["idle_ttl"] > 0`
+    // (app/engine_kinds.py — lemonade/comfyui/sglang-omni idle rules), so 0
+    // is a MODE, not a duration.
+    expect(messages.ttlValue(0)).toBe("off");
+  });
+
+  it("renders seconds with a human duration beside them", () => {
+    expect(messages.ttlValue(900)).toBe("900 s — 15 min");
+    expect(messages.ttlValue(300)).toBe("300 s — 5 min");
+    expect(messages.ttlValue(45)).toBe("45 s");
+  });
+
+  it("says nothing happens when the TTL is off", () => {
+    expect(messages.ttlConsequence(0, true)).toBe("never released automatically");
+    expect(messages.ttlConsequence(0, false)).toBe("never released automatically");
+  });
+
+  it("distinguishes an invisible release from a one-way one", () => {
+    // THE point of the whole feature: same number, opposite meaning.
+    expect(messages.ttlConsequence(900, true)).toBe(
+      "released after 15 min idle — the next request reloads it automatically");
+    expect(messages.ttlConsequence(900, false)).toBe(
+      "released after 15 min idle — reload is MANUAL, nothing brings it back");
+  });
+
+  it("declines to claim a consequence it cannot know", () => {
+    // The kinds catalog failed to load: say so rather than guessing a
+    // reversibility the operator would rely on.
+    expect(messages.ttlConsequence(900, null)).toBe(
+      "released after 15 min idle — reload behaviour unknown (kind catalog unavailable)");
+  });
+});

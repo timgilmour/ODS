@@ -999,7 +999,7 @@ function remoteTenant(overrides: Partial<RemoteTenant> = {}): RemoteTenant {
 const OMNI_KINDS: EngineKindsResponse = {
   kinds: [{
     kind: "sglang-omni", connection: { url: { required: true } },
-    remote_capable: true, local_capable: false, human_verbs: ["load", "unload"],
+    remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"],
   }],
 };
 
