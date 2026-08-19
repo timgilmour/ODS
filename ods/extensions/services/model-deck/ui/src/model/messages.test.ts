@@ -292,6 +292,24 @@ describe("labels", () => {
     );
   });
 
+  it("degrades model-mismatch honestly when called with no step at all (ApplyModal's report.warnings path, Finding 4)", () => {
+    // ApplyModal.tsx's result-phase warnings list calls
+    // labels.stepWarnReason(w) with a bare reason string -- report.warnings
+    // is ApplyReport's own array of raw reason CODES (app/sets.py), with
+    // no step/resource riding along at all. Before this fix, `step` being
+    // undefined made `step?.declared`/`step?.resident` both fall to
+    // "unknown", rendering "resident unknown, declared unknown" as if the
+    // backend had asserted specific-but-unknown identities. Absent a step
+    // object entirely, the honest sentence names no identities at all.
+    expect(labels.stepWarnReason("model-mismatch")).toBe(
+      "declared model differs from resident — apply will not swap",
+    );
+    // Same degrade, with a resource tag but still no step object.
+    expect(labels.stepWarnReason("model-mismatch", "gguf-a")).toBe(
+      "gguf-a: declared model differs from resident — apply will not swap",
+    );
+  });
+
   it("degrades an unrecognized warn reason to the raw code rather than inventing a sentence", () => {
     expect(labels.stepWarnReason("some-future-reason")).toBe("some-future-reason");
   });

@@ -594,7 +594,17 @@ export const labels = {
    * a resource is already loaded with a model, but the declared model differs
    * from the resident one. The planner emits a warn (no actuation) so the
    * operator knows about the drift. Declared and resident model names ride
-   * in the step object's declared/resident keys.
+   * in the step object's declared/resident keys — but ApplyModal's
+   * result-phase warnings list (Finding 4, whole-branch review) calls this
+   * with a bare reason string and no `step` at all (ApplyReport.warnings is
+   * raw reason CODES, app/sets.py's report["warnings"].append(step["reason"])
+   * — no identities travel with it). `step` undefined therefore degrades to
+   * the identity-free sentence "declared model differs from resident"
+   * rather than rendering "resident unknown, declared unknown" as if the
+   * backend had asserted specific-but-unknown identities; a STEP present
+   * but merely missing its declared/resident keys (a malformed backend
+   * payload) still renders "unknown" for each, since a mismatch WAS
+   * asserted there, just without full detail.
    * "durable-revert-unavailable" (app/sets.py:653, no resource — it is
    * about the DURABLE route, not a per-resource actuation): the previous-set
    * revert has no catalog id to re-activate the old default route with. */
@@ -609,8 +619,20 @@ export const labels = {
       case "no-model-to-load":
         return resource ? `${resource} has no model to load` : "no model to load";
       case "model-mismatch": {
-        const declared = step?.declared ?? "unknown";
-        const resident = step?.resident ?? "unknown";
+        // No step object at all (ApplyModal's report.warnings path, Finding
+        // 4 — whole-branch review) means no identities travelled with this
+        // call, unlike a STEP present but missing its declared/resident
+        // keys (the malformed-step case just below, which still names
+        // "unknown" — the backend asserted a mismatch on SPECIFIC identities
+        // it just didn't include). Rendering "unknown"/"unknown" here would
+        // invent a fact — the honest degrade names no identities at all.
+        if (!step) {
+          return resource
+            ? `${resource}: declared model differs from resident — apply will not swap`
+            : "declared model differs from resident — apply will not swap";
+        }
+        const declared = step.declared ?? "unknown";
+        const resident = step.resident ?? "unknown";
         return resource
           ? `${resource} resident ${resident}, declared ${declared} — apply will not swap`
           : `resident ${resident}, declared ${declared} — apply will not swap`;
