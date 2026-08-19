@@ -1740,4 +1740,34 @@ describe("buildNodes — swap node per-GPU composition", () => {
     expect(gpuCard(boxa, 1).controls).toEqual([]);
     expect(gpuCard(boxa, 1).placements.map((p) => p.id)).toEqual(["boxa/song-lab"]);
   });
+
+  // Finding 3 (whole-branch review): T10's `unmanaged` marker on a swap
+  // node's per-GPU cards had two branches nothing exercised — a bare
+  // NON-slot card getting marked, and the slot card's own explicit strip
+  // (nodes.ts ~:1013's `const { unmanaged: _slotUnmanaged, ...bare } = card`)
+  // NEVER firing even when its own GPU declares nothing. Both GPUs bare
+  // (no remoteTenants at all) isolates the two from each other: gpu1 has
+  // nothing declared AND is not the slot; gpu0 has nothing declared AND IS
+  // the slot.
+  const twoGpuBothBare: DeckNodeEntry = {
+    ...boxaEntry,
+    gpus: [
+      { index: 0, name: "RTX 6000", memory_used_mb: 0, memory_total_mb: 49152,
+        utilization_percent: 0 },
+      { index: 1, name: "RTX 6000", memory_used_mb: 0, memory_total_mb: 49152,
+        utilization_percent: 0 },
+    ],
+  };
+
+  it("marks a swap node's bare non-slot GPU card unmanaged", () => {
+    const s = stateWith({ nodes: [localEntry, twoGpuBothBare] });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(gpuCard(boxa, 1).unmanaged).toBe(true);
+  });
+
+  it("never marks the slot card unmanaged, even when its own GPU has nothing declared", () => {
+    const s = stateWith({ nodes: [localEntry, twoGpuBothBare] });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(gpuCard(boxa, 0).unmanaged).toBeUndefined();
+  });
 });
