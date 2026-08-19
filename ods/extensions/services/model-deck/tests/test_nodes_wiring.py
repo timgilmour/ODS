@@ -239,6 +239,41 @@ def test_boot_stamps_comfyui_container_on_a_pre_existing_entry(tmp_path, monkeyp
     assert engines["comfyui"]["connection"]["container"] == "test-ods-comfyui"
 
 
+def test_hipfire_resume_refused_409_when_container_consent_is_false(tmp_path, monkeypatch):
+    """Finding 2 (whole-branch review) — the ONE API-level end-to-end proof
+    of the consented_containers guard, on the REAL wiring: a real DockerCtl,
+    resolved through the real LocalClients/node_store chain (not
+    tests/test_api.py's make_app — its FakeLocalClients bypasses this exact
+    guard, which is exactly why it had zero coverage), refuses a
+    container_consent:False local engine's resume with 409, the guard
+    phrase intact in the response detail.
+
+    ``?force=true`` sidesteps ONLY the host-agent-busy pre-check
+    (``_ensure_host_agent_idle`` short-circuits on force before making any
+    HTTP call); ``HipfireClient.resume()`` itself makes no network call
+    before ``DockerCtl.start()``'s own ``_guard()`` — so this test reaches
+    the real guard with no litellm/hostagent/docker-ctl mocking needed at
+    all: the request never gets far enough to dial any of them."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "local", "label": "local", "agent_kind": "local",
+         "engines": [
+             {"resource": "hipfire", "kind": "hipfire",
+              "connection": {"container": "ods-hipfire"}, "gpu_index": 0,
+              "container_consent": False,
+              "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
+         ]},
+    ]))
+    from app.main import create_app
+    app = create_app()
+
+    resp = TestClient(app).post("/api/tenants/hipfire/resume?force=true")
+
+    assert resp.status_code == 409
+    assert "is not consented for deck control" in resp.json()["detail"]
+
+
 # --- harvest routes per swap node (N1 T11) ----------------------------------
 #
 # main._build_deck builds one (node_id, "vllm") route per control:"swap"

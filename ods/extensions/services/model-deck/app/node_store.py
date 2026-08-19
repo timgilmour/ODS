@@ -578,13 +578,16 @@ def consented_containers(node_store: NodeStore | None) -> set[str]:
     reference, so a consent flip takes effect on the very next `_guard`
     call, never a snapshot). Fails closed: no store / no local entry /
     malformed engines -> empty set, never an exception — a guard that can't
-    determine consent must refuse, not crash the caller."""
+    determine consent must refuse, not crash the caller. `isinstance(e, dict)`
+    (Finding 7, whole-branch review) makes that promise true independent of
+    the caller's own healing — the same two-token guard
+    `stamp_missing_container_consent` applies to its own `eng` iteration."""
     local = node_store.get("local") if node_store is not None else None
     if local is None:
         return set()
     out: set[str] = set()
     for e in local.get("engines", []):
-        if e.get("container_consent") is True:
+        if isinstance(e, dict) and e.get("container_consent") is True:
             name = (e.get("connection") or {}).get("container")
             if isinstance(name, str) and name:
                 out.add(name)
@@ -599,14 +602,16 @@ def declared_containers(node_store: NodeStore | None) -> set[str]:
     and narrowing this enumeration to consented entries would silently drop
     provenance coverage of a container an operator declared but withheld
     stop/start consent for — enumeration is not consent. Fails closed like
-    `consented_containers` above."""
+    `consented_containers` above, including its `isinstance(e, dict)` guard
+    (Finding 7)."""
     local = node_store.get("local") if node_store is not None else None
     if local is None:
         return set()
     return {
         (e.get("connection") or {}).get("container")
         for e in local.get("engines", [])
-        if isinstance((e.get("connection") or {}).get("container"), str)
+        if isinstance(e, dict)
+        and isinstance((e.get("connection") or {}).get("container"), str)
         and (e.get("connection") or {}).get("container")
     }
 

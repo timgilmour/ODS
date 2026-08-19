@@ -1081,3 +1081,115 @@ def test_load_heals_a_hand_edited_cross_node_duplicate(store, tmp_path):
 
     assert [e["resource"] for e in reloaded.get("local")["engines"]] == ["song-r"]
     assert [e["resource"] for e in reloaded.get("nimbus")["engines"]] == ["song-b"]
+
+
+# --- Finding 2 (whole-branch review): consented_containers / declared_
+# containers had ZERO direct test coverage despite being the guard docker_
+# ctl.py's `_guard` and the provenance sweep both depend on. Direct unit
+# tests on a real NodeStore (not the FakeDeclaredNodeStore precedent
+# tests/test_arbiter.py uses for its own higher-level provenance-pass
+# coverage) below.
+
+from app.node_store import consented_containers, declared_containers
+
+
+def test_consented_containers_no_store_is_empty():
+    assert consented_containers(None) == set()
+
+
+def test_consented_containers_no_local_entry_is_empty(store):
+    # A fresh store has no entries at all -- get("local") answers None.
+    assert consented_containers(store) == set()
+
+
+def test_consented_containers_filters_entries_without_connection_container(store):
+    """comfyui's container is OPTIONAL (Finding 1a) -- an entry that
+    consents but names no container has nothing for the guard to allowlist."""
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+               "engines": [{"resource": "img", "kind": "comfyui",
+                            "connection": {"url": "http://comfyui:8188"},
+                            "gpu_index": 1, "container_consent": True,
+                            "policy_defaults": {"priority": 1, "pinned": False,
+                                                "idle_ttl": 0}}]})
+    assert consented_containers(store) == set()
+
+
+def test_consented_containers_requires_consent_is_true_not_merely_truthy(store, monkeypatch):
+    """The guard's own comparison is `is True`, strict — not
+    `if consent:`. A real NodeStore load can never surface an int consent
+    value (validate_engines' `isinstance(consent, bool)` check makes
+    `_heal_engines` wipe the WHOLE engines list to [] before this function
+    ever sees it), so this test monkeypatches THIS store's own `.get`
+    directly rather than writing the shape to disk — isolating the guard's
+    comparison from the load-time healing that would otherwise make ANY
+    non-bool consent untestable this way."""
+    raw_local = {"id": "local", "engines": [
+        {"resource": "hipfire", "connection": {"container": "ods-hipfire"},
+         "container_consent": 1},
+    ]}
+    monkeypatch.setattr(store, "get",
+                        lambda node_id: raw_local if node_id == "local" else None)
+    assert consented_containers(store) == set()
+
+
+def test_consented_containers_never_includes_a_node_agents_engines(store):
+    """consented_containers reads `node_store.get("local")` only -- a
+    node-agent entry's own consented, container-bearing... except no
+    remote_capable kind's schema HAS a container field today (sglang-omni
+    is url-only), so this pins the structural fact directly: even with a
+    populated engines[] on a node-agent entry, nothing from it ever
+    reaches either function, because neither ever asks for that node."""
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local"})
+    store.add({**_remote_spec(), "engines": [_OMNI_ENGINE]}, credential="key-nimbus")
+    assert consented_containers(store) == set()
+    assert declared_containers(store) == set()
+
+
+def test_declared_containers_no_store_is_empty():
+    assert declared_containers(None) == set()
+
+
+def test_declared_containers_no_local_entry_is_empty(store):
+    assert declared_containers(store) == set()
+
+
+def test_consented_containers_never_raises_on_a_non_dict_engine_element(store, monkeypatch):
+    """Finding 7 (code half): the docstring already promises "malformed
+    engines -> empty set, never an exception" -- pin it true for a raw
+    non-dict sibling, matching stamp_missing_container_consent's own
+    `isinstance(eng, dict)` idiom. Reachable in principle from a caller that
+    hands in a node_store whose `.get()` does not itself validate/heal (this
+    module's docstring claims independence from that healing)."""
+    raw_local = {"id": "local", "engines": [
+        "not a dict", 42, None,
+        {"resource": "hipfire", "connection": {"container": "ods-hipfire"},
+         "container_consent": True},
+    ]}
+    monkeypatch.setattr(store, "get",
+                        lambda node_id: raw_local if node_id == "local" else None)
+    assert consented_containers(store) == {"ods-hipfire"}
+
+
+def test_declared_containers_never_raises_on_a_non_dict_engine_element(store, monkeypatch):
+    raw_local = {"id": "local", "engines": [
+        "not a dict", 42, None,
+        {"resource": "hipfire", "connection": {"container": "ods-hipfire"}},
+    ]}
+    monkeypatch.setattr(store, "get",
+                        lambda node_id: raw_local if node_id == "local" else None)
+    assert declared_containers(store) == {"ods-hipfire"}
+
+
+def test_declared_containers_is_consent_blind(store):
+    """CONTROLLER RULING (declared_containers' own docstring): enumeration
+    is not consent -- a container_consent:False entry still enumerates for
+    the provenance sweep, even though the SAME entry is excluded from
+    consented_containers."""
+    store.add({"id": "local", "label": "Box L", "agent_kind": "local",
+               "engines": [{"resource": "hipfire", "kind": "hipfire",
+                            "connection": {"container": "ods-hipfire"},
+                            "gpu_index": 0, "container_consent": False,
+                            "policy_defaults": {"priority": 100, "pinned": True,
+                                                "idle_ttl": 0}}]})
+    assert declared_containers(store) == {"ods-hipfire"}
+    assert consented_containers(store) == set()
