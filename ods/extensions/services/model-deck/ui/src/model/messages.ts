@@ -586,7 +586,7 @@ export const labels = {
    * "durable-revert-unavailable" (app/sets.py:653, no resource — it is
    * about the DURABLE route, not a per-resource actuation): the previous-set
    * revert has no catalog id to re-activate the old default route with. */
-  stepWarnReason: (reason: string, resource?: string | null): string => {
+  stepWarnReason: (reason: string, resource?: string | null, step?: any): string => {
     switch (reason) {
       case "durable-revert-unavailable":
         return "durable revert unavailable — no catalog id to re-activate the previous model";
@@ -596,6 +596,13 @@ export const labels = {
           : "skipped — queue not confirmed empty";
       case "no-model-to-load":
         return resource ? `${resource} has no model to load` : "no model to load";
+      case "model-mismatch": {
+        const declared = step?.declared ?? "unknown";
+        const resident = step?.resident ?? "unknown";
+        return resource
+          ? `${resource} resident ${resident}, declared ${declared} — apply will not swap`
+          : `resident ${resident}, declared ${declared} — apply will not swap`;
+      }
       default:
         return reason;
     }

@@ -53,7 +53,7 @@ export function stepRow(step: Step, index: number): StepRow {
       return {
         key,
         label: labels.stepWarn,
-        detail: reason !== null ? labels.stepWarnReason(reason, resource) : null,
+        detail: reason !== null ? labels.stepWarnReason(reason, resource, step) : null,
       };
     }
     default:

@@ -1000,25 +1000,23 @@ def test_plan_apply_emits_resource_tagged_generic_load_step():
     ]
 
 
-def test_plan_apply_declared_model_over_resident_model_plans_no_swap(tmp_path):
-    """Pins TODAY's semantics in the new resource-keyed vocabulary (ruling,
-    E1 Task 8 review: set-apply does NOT gain model-swap actuation as a
-    side effect of the resource generalization — that's a real design
-    question of its own, gated separately with Tim later). A resource
-    already "loaded" satisfies plan_apply by STATE ALONE — no swap step
-    exists to reconcile model identity, only load/unload state (see
-    ``_record_goal_intents``'s own docstring for the full incident-history
-    rationale, and ``test_declared_model_x_over_resident_y_derives_drifted_
-    not_restore`` above for the reconciler-side half of the same
-    invariant). The DECLARED model still wins the recorded intent, via the
-    goal-intent path, not a planned step."""
+def test_plan_apply_declared_model_mismatch_warns_and_does_not_swap(tmp_path):
+    """Ruling #2-C (2026-08-17): apply still NEVER swaps model identity —
+    wrong-model drift stays reported-not-actuated (the reconciler-side half
+    is pinned by test_declared_model_x_over_resident_y_derives_drifted_not_
+    restore above) — but the silence is gone: the planner emits an honest
+    warn step where it used to emit nothing. The DECLARED model still wins
+    the recorded intent, via the goal-intent path, not a planned step."""
     world = _world({"gguf-a": {"engine": "lemonade", "gpu_index": 2,
                                "state": "loaded", "model": "old.gguf",
                                "footprint": 10, "idle_s": 0.0}},
                    [_G(2, 100, 50)])
     cfg = _cfgset(resources={"gguf-a": {"desired": "loaded", "model": "new.gguf"}})
 
-    assert plan_apply(cfg, world) == []  # no swap step — state alone satisfies the goal
+    assert plan_apply(cfg, world) == [{
+        "step": "warn", "reason": "model-mismatch", "resource": "gguf-a",
+        "declared": "new.gguf", "resident": "old.gguf",
+    }]
 
     intent = IntentStore(tmp_path / "intent.json")
     from app.sets import _record_goal_intents

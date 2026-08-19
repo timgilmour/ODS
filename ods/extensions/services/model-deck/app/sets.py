@@ -759,6 +759,19 @@ def plan_apply(cfgset: ConfigSet, world: dict, settings_now: dict | None = None)
             else:
                 loads.append({"step": "load", "resource": resource, "model": model})
 
+        elif (rd.desired == "loaded" and "load" in verbs
+              and tenant["state"] == "loaded"
+              and rd.model is not None and rd.model != tenant["model"]):
+            # Ruling #2-C: state alone satisfies the goal (apply never swaps
+            # model identity — that actuation is an explicit INST-I2 design
+            # item), but the old silent no-op hid the mismatch entirely.
+            # Emit the warn where there was silence; the declared model still
+            # wins the recorded intent via _record_goal_intents, and status
+            # derives `drifted` (report-only) exactly as before.
+            loads.append({"step": "warn", "reason": "model-mismatch",
+                          "resource": resource,
+                          "declared": rd.model, "resident": tenant["model"]})
+
     steps.extend(resumes)
     steps.extend(loads)
 
