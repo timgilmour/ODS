@@ -336,6 +336,33 @@ describe("mergedArgsForPreview", () => {
     const merged = mergedArgsForPreview(resolved, b);
     expect(merged["enable-chunked-prefill"]).toBe(true);
   });
+
+  it("heals a poisoned stored value so an unrelated dirty edit doesn't 422 preview", () => {
+    // A persisted [null] predates the wire's refusal (api.ts's ArgValue list
+    // arm admits null for exactly this legacy case); GET /effective serves it
+    // verbatim, and preview POSTs with heal=false 422 on it
+    // (app/routers/settings.py preview -> normalize_args_map). Healing the
+    // STORED half here keeps the operator's typed half strict.
+    const poisoned: Record<string, ResolvedEntry> = {
+      "served-model-name": { value: [null], origin: "declared", layer: "engine" },
+      "extra-arg": { value: ["a", null], origin: "declared", layer: "engine" },
+    };
+    const b = bufferSet(emptyBuffer, "engines", "max-model-len", "8192");
+    const merged = mergedArgsForPreview(poisoned, b);
+    expect(merged["served-model-name"]).toEqual([]);
+    expect(merged["extra-arg"]).toEqual(["a"]);
+  });
+
+  it("does not heal operator-typed values — preview and save must keep agreeing", () => {
+    // parseValueText can't actually produce null (text.split), so this pins
+    // the SEAM's scoping, not a reachable user path: a null placed in the
+    // typed buffer passes through un-healed and would refuse at the wire,
+    // same as save.
+    const b = bufferSet(emptyBuffer, "engines", "bad-key",
+      ["x", null] as unknown as ArgValue);
+    const merged = mergedArgsForPreview({}, b);
+    expect(merged["bad-key"]).toEqual(["x", null]);
+  });
 });
 
 describe("displayValue / parseValueText", () => {

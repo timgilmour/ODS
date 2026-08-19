@@ -431,6 +431,17 @@ export function toPuts(
 // Merged preview args — for POST /settings/preview's live argline
 // ---------------------------------------------------------------------------
 
+/** Drop null elements from a STORED ArgValue's list arm. Persisted legacy
+ * poison ([null], app/argline.py's pre-refusal era) round-trips through
+ * GET /effective verbatim and 422s any preview it rides into; the backend
+ * heals its own persisted reads the same way (SettingsStore.restore,
+ * normalize_args_map heal=True). Applied ONLY to stored-origin values —
+ * never the operator's typed buffer, which must stay strict so preview and
+ * save keep agreeing on new input (open-rulings #5-B). */
+export function healStoredValue(value: ArgValue): ArgValue {
+  return Array.isArray(value) ? value.filter((v): v is string => v !== null) : value;
+}
+
 /** The args map to ship to `previewRender` for the live argline: start from
  * the resolution's DECLARED-ONLY winners (origin === "declared" — derived
  * layers are never shipped, app/routers/settings.py's `_declared_only`
@@ -448,7 +459,7 @@ export function mergedArgsForPreview(
 
   for (const [name, entry] of Object.entries(resolved)) {
     if (entry.origin !== "declared") continue;
-    merged[name] = entry.value;
+    merged[name] = healStoredValue(entry.value);
     layerOf[name] = entry.layer;
   }
 
