@@ -42,6 +42,7 @@ export interface EngineFormState {
   priority: number;
   pinned: boolean;
   idleTtl: number;
+  containerConsent: boolean;
 }
 
 /** A freshly-declared engine's starting policy — priority 0 (no eviction
@@ -107,6 +108,7 @@ export function emptyForm(kinds: EngineKindsResponse, kind: string): EngineFormS
     priority: DEFAULT_POLICY.priority,
     pinned: DEFAULT_POLICY.pinned,
     idleTtl: DEFAULT_POLICY.idle_ttl,
+    containerConsent: false,
   };
 }
 
@@ -128,6 +130,7 @@ export function formForEntry(entry: DeclaredEngine, kinds: EngineKindsResponse):
     priority: entry.policy_defaults.priority,
     pinned: entry.policy_defaults.pinned,
     idleTtl: entry.policy_defaults.idle_ttl,
+    containerConsent: entry.container_consent,
   };
 }
 
@@ -186,9 +189,9 @@ export function formErrors(form: EngineFormState): string[] {
 }
 
 /** The POST/PUT body — exactly `app.engine_kinds.validate_engines`'s
- * accepted shape (resource, kind, connection, gpu_index, policy_defaults;
- * engine_kinds.py:220-223's extra-field check refuses anything else). Only
- * meaningful once `formErrors(form)` is empty (`gpuIndex` is asserted
+ * accepted shape (resource, kind, connection, gpu_index, policy_defaults,
+ * container_consent; engine_kinds.py:220-223's extra-field check refuses anything else).
+ * Only meaningful once `formErrors(form)` is empty (`gpuIndex` is asserted
  * non-null here on that assumption, same posture nodeForm.ts's
  * `toCreatePayload`/`toPatchPayload` take: the Save button stays disabled
  * until then, so this is never called on a form the gate has not cleared). */
@@ -199,6 +202,7 @@ export function toPayload(form: EngineFormState): DeclaredEngine {
     connection: { ...form.connection },
     gpu_index: form.gpuIndex as number,
     policy_defaults: { priority: form.priority, pinned: form.pinned, idle_ttl: form.idleTtl },
+    container_consent: form.containerConsent,
   };
 }
 

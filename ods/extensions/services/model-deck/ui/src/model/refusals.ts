@@ -7,8 +7,8 @@
  * regardless of force, so arming Force on their 409s offers a button that
  * refuses identically on click:
  *
- *  - the park allowlist — app/engines/docker_ctl.py `_guard`:
- *    `container {name!r} is not in the park allowlist`
+ *  - the container-consent check — app/engines/docker_ctl.py `_guard`:
+ *    `container {name!r} is not consented for deck control (container_consent on its engine declaration)`
  *  - the default-route guard — app/engines/hipfire.py `park()`, raised
  *    before the force check even runs:
  *    `litellm's default route currently targets hipfire`
@@ -20,7 +20,7 @@
  */
 export function forceParkCanOverride(detail: string): boolean {
   return (
-    !detail.includes("is not in the park allowlist") &&
+    !detail.includes("is not consented for deck control") &&
     !detail.includes("litellm's default route currently targets")
   );
 }

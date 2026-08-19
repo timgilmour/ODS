@@ -127,6 +127,7 @@ describe("formForEntry", () => {
     connection: { host: "http://widget-a:9000", note: "spare" },
     gpu_index: 2,
     policy_defaults: { priority: 10, pinned: true, idle_ttl: 300 },
+    container_consent: false,
   };
 
   test("pre-fills every field, including the connection values and gpu/policy", () => {
@@ -247,16 +248,35 @@ describe("toPayload", () => {
       connection: { host: "http://widget-a:9000", note: "" },
       gpu_index: 2,
       policy_defaults: { priority: 7, pinned: true, idle_ttl: 90 },
+      container_consent: false,
     });
   });
 
-  test("has exactly five top-level keys — matching engine_kinds.py:220-223's extra-field refusal", () => {
+  test("has exactly six top-level keys — matching engine_kinds.py:220-223's extra-field refusal plus container_consent", () => {
     let form = emptyForm(WIDGET_GADGET, "gadget");
     form = { ...form, resource: "g", gpuIndex: 3 };
     form = setField(form, "path", "/dev/g0");
     expect(Object.keys(toPayload(form)).sort()).toEqual(
-      ["connection", "gpu_index", "kind", "policy_defaults", "resource"],
+      ["connection", "container_consent", "gpu_index", "kind", "policy_defaults", "resource"],
     );
+  });
+
+  test("round-trips container_consent through the form buffer", () => {
+    // update_engine is a full-entry replace (app/routers/nodes.py) — the form
+    // buffer is the ONLY carrier of consent across an edit; dropping it here
+    // would silently un-consent the entry on any unrelated save.
+    const entry: DeclaredEngine = {
+      resource: "widget-a", kind: "widget", connection: { host: "http://widget-a:9000", note: "" },
+      gpu_index: 3, policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
+      container_consent: true,
+    };
+    const form = formForEntry(entry, WIDGET_GADGET);
+    expect(form.containerConsent).toBe(true);
+    expect(toPayload(form).container_consent).toBe(true);
+  });
+
+  test("a fresh add defaults consent to false — explicit is the point", () => {
+    expect(emptyForm(WIDGET_GADGET, "widget").containerConsent).toBe(false);
   });
 });
 
@@ -264,14 +284,17 @@ describe("sortedEngines", () => {
   const a: DeclaredEngine = {
     resource: "zeta", kind: "widget", connection: {}, gpu_index: 5,
     policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
+    container_consent: false,
   };
   const b: DeclaredEngine = {
     resource: "alpha", kind: "widget", connection: {}, gpu_index: 5,
     policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
+    container_consent: false,
   };
   const c: DeclaredEngine = {
     resource: "middle", kind: "gadget", connection: {}, gpu_index: 3,
     policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
+    container_consent: false,
   };
 
   test("orders by gpu_index first, then resource name breaks a tie on the same GPU", () => {

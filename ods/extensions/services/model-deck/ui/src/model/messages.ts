@@ -400,21 +400,14 @@ export const messages = {
     title: "removes the declaration only — a running engine keeps running, untouched",
   }),
 
-  // Shown in the Add flow (README's "Declared Engines" section, Park-
-  // allowlist prerequisite): declaring a resource is enough for the deck
-  // to observe it, policy-manage it, and include it in a Set, but a
-  // container-affecting verb (hipfire-kind park/resume; the storage
-  // pull-through hook's automatic restart of a lemonade-kind resource)
-  // additionally needs the resource's connection.container name in the
-  // HOST's settings.park_allowlist (app/settings.py:95) — DockerCtl
-  // refuses any other name with GuardError, checked before any HTTP call
-  // (app/engines/docker_ctl.py:197-199). Neutral, not a warning: this is not a
-  // defect in what the operator just typed, it's a heads-up about a
-  // SEPARATE, host-level prerequisite the form has no way to check or set.
-  engineParkAllowlistNote: (): Message => ({
+  // Replaces engineParkAllowlistNote: consent is a per-entry declared flag
+  // now (container_consent, validated in app/engine_kinds.py's
+  // validate_engines; enforced live in app/engines/docker_ctl.py's _guard),
+  // not a host env var the form could only warn about.
+  engineConsentNote: (): Message => ({
     tone: "neutral",
-    title: "container verbs need the host's park allowlist too",
-    body: "load/unload/free reach the engine directly and work immediately; park, resume, and the storage-move restart hook go through Docker start/stop and refuse (409) until this container name is added to the host's park allowlist.",
+    title: "container verbs are opt-in per entry",
+    body: "load/unload/free reach the engine directly and work immediately regardless of this box; park, resume, and the storage-move restart hook go through Docker stop/start and refuse (409) unless it is checked.",
   }),
 
   /** A duration for humans beside the raw seconds the API takes. 0 is a
@@ -920,6 +913,7 @@ export const labels = {
   engineGpu: "GPU",
   engineSelectGpu: "select a GPU…",
   enginePinnedLabel: "Pinned",
+  engineConsentLabel: "Allow the deck to stop/start this container",
   enginePriority: "Priority",
   engineIdleTtl: "Idle TTL (seconds, 0 = off)",
   /** A connection field's label is DERIVED from the payload's own field key

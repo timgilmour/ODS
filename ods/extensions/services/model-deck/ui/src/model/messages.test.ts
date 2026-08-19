@@ -142,18 +142,11 @@ describe("engines editor messages (E1 Task 12)", () => {
     expect(m.title.toLowerCase()).toContain("keeps running");
   });
 
-  it("notes that container verbs need the host's park allowlist too (E1 final-review item 3b)", () => {
-    // Backs the note shown in the Add flow — README's "Declared Engines"
-    // Park-allowlist prerequisite (settings.park_allowlist,
-    // app/settings.py:95, enforced in app/engines/docker_ctl.py:197-199): a newly
-    // declared resource is fully usable for observation/policy/Set Builder
-    // with NO allowlist entry — only park/resume/the storage restart hook
-    // need one. Neutral, not a warning: it's a heads-up about a separate
-    // host-level prerequisite, not a defect in the form.
-    const m = messages.engineParkAllowlistNote();
+  it("explains what the consent checkbox grants, per entry", () => {
+    const m = messages.engineConsentNote();
     expect(m.tone).toBe("neutral");
-    expect(m.body).toContain("park allowlist");
-    expect(m.body).toContain("load/unload/free");
+    expect(m.body).toContain("stop/start");
+    expect(m.body).toContain("409");
   });
 });
 

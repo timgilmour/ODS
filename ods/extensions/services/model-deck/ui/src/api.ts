@@ -1046,17 +1046,19 @@ export interface EnginePolicyDefaults {
 
 /** One declared engine — the exact shape `app.engine_kinds.validate_engines`
  * accepts (app/engine_kinds.py:201-263: resource, kind, connection,
- * gpu_index, policy_defaults, no other field), what POST/PUT
+ * gpu_index, policy_defaults, container_consent, no other field), what POST/PUT
  * `/api/nodes/{node_id}/engines*` both accept and echo back, and what
  * `NodeRegistryEntry.engines[]` carries verbatim off its owning NodeStore
  * row — local or node-agent either one (E1 Task 5 relaxed `engines[]` off
- * the local-only entry). */
+ * the local-only entry). `container_consent` permits the deck to stop/start
+ * this entry's container (validated per-entry, ruling #1). */
 export interface DeclaredEngine {
   resource: string;
   kind: string;
   connection: Record<string, string>;
   gpu_index: number;
   policy_defaults: EnginePolicyDefaults;
+  container_consent: boolean;
 }
 
 /** GET /api/engine-kinds (app/routers/nodes.py:476-504) — the UI's kind

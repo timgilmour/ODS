@@ -300,6 +300,7 @@ const widgetEngine: DeclaredEngine = {
   connection: { host: "http://widget-a:9000" },
   gpu_index: 2,
   policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 },
+  container_consent: false,
 };
 
 describe("getEngineKinds", () => {

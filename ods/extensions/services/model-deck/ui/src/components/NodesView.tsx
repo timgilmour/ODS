@@ -705,8 +705,8 @@ function EngineFormPanel({
   return (
     <div className="engine-form">
       {/* Both modes, not just add: an EDIT can repoint connection.container
-          at a container outside the allowlist just as easily. */}
-      <Banner message={messages.engineParkAllowlistNote()} />
+          at a container outside the consent setting just as easily. */}
+      <Banner message={messages.engineConsentNote()} />
       <label>
         {labels.engineResource}
         <input
@@ -763,6 +763,14 @@ function EngineFormPanel({
           onChange={(e) => setForm({ ...form, pinned: e.target.checked })}
         />
         {labels.enginePinnedLabel}
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          checked={form.containerConsent}
+          onChange={(e) => setForm({ ...form, containerConsent: e.target.checked })}
+        />
+        {labels.engineConsentLabel}
       </label>
       <label>
         {labels.enginePriority}

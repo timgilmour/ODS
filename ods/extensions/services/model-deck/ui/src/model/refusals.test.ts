@@ -3,11 +3,11 @@ import { forceParkCanOverride } from "./refusals";
 
 describe("forceParkCanOverride", () => {
   // Producer: app/engines/docker_ctl.py _guard —
-  // f"container {name!r} is not in the park allowlist". ?force=true never
-  // skips this guard, so Force must not be offered.
-  it("is false for the park-allowlist refusal", () => {
+  // f"container {name!r} is not consented for deck control (container_consent on its engine declaration)".
+  // ?force=true never skips this guard, so Force must not be offered.
+  it("is false for the container-consent refusal", () => {
     expect(
-      forceParkCanOverride("container 'ods-newthing' is not in the park allowlist"),
+      forceParkCanOverride("container 'ods-newthing' is not consented for deck control (container_consent on its engine declaration)"),
     ).toBe(false);
   });
 
