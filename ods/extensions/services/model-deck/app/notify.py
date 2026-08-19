@@ -4,7 +4,8 @@ arrived in its store.
 
 lemonade (verified live, v10.2.0): registers store GGUFs only at startup;
 no rescan endpoint exists. Hook = container restart via DockerCtl
-(`ods-llama-server` is already on the park allowlist). DEFERRED per-resource
+(`ods-llama-server`'s seeded entry carries `container_consent: true`).
+DEFERRED per-resource
 with a returned warning when THAT resource has a model loaded — we never
 yank a loaded model to register a file; the operator retries after unload or
 the idle TTL clears the way.
@@ -69,9 +70,10 @@ ultimately propagates (deterministic, and every failure — first or not —
 already has its own logged event regardless).
 
 Final-review item 3a (E1): the per-resource catch around `_restart` above
-now names `GuardError` alongside `EngineError` — a container outside
-`settings.park_allowlist` makes `DockerCtl.stop()`/`start()` raise
-`GuardError` (app/engines/docker_ctl.py:197-199), and `GuardError` is deliberately
+now names `GuardError` alongside `EngineError` — a container whose engine
+entry lacks `container_consent: true` makes `DockerCtl.stop()`/`start()`
+raise `GuardError` (app/engines/docker_ctl.py's `_guard`, open-rulings #1),
+and `GuardError` is deliberately
 NOT an `EngineError` subclass (app/engines/__init__.py:30-38: "Callers that
 want to distinguish 'engine is broken' from 'guard tripped' need these to
 be unrelated exception types"). An `EngineError`-only catch here let that

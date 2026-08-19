@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from app import origins, provenance, provenance_history
 from app.mover import hash_file
+from app.node_store import declared_containers
 from app.observe import _LOCAL_NODE
 from app.origins import file as file_origin
 
@@ -118,8 +119,12 @@ def backfill(request: Request) -> dict:
 
     dockerctl = deck.get("dockerctl")
     if dockerctl is not None:
+        # declared_containers: the local declaration's connection.container
+        # values, consent-BLIND — enumeration is not consent (open-rulings
+        # #1; see app.node_store.declared_containers' docstring and
+        # app.arbiter.Watcher._provenance_local_oci, the identical pattern).
         bodies: dict[str, dict | None] = {}
-        for name in deck["settings"].park_allowlist:
+        for name in declared_containers(deck["node_store"]):
             try:
                 bodies[name] = dockerctl.inspect(name)
             except Exception:  # noqa: BLE001 — a container we cannot read is skipped

@@ -277,13 +277,13 @@ def test_first_failure_logs_and_sibling_still_restarts_then_raises(tmp_path):
 
 # ===========================================================================
 # E1 final-review item 3a: GuardError is deliberately NOT an EngineError
-# subclass (app/engines/__init__.py:30-38) — a container outside
-# settings.park_allowlist makes DockerCtl.stop()/start() raise GuardError
-# (app/engines/docker_ctl.py:197-199), not EngineError. Before this fix the
-# per-resource try/except above named EngineError only, so a park-allowlist
-# refusal escaped it entirely: the loop aborted mid-way, every SIBLING's
-# restart was skipped, and no notify-restart-failed event was ever logged
-# for the resource that actually failed.
+# subclass (app/engines/__init__.py:30-38) — a container without
+# container_consent makes DockerCtl.stop()/start() raise GuardError
+# (app/engines/docker_ctl.py's _guard, open-rulings #1), not EngineError.
+# Before this fix the per-resource try/except above named EngineError only,
+# so a consent refusal escaped it entirely: the loop aborted mid-way, every
+# SIBLING's restart was skipped, and no notify-restart-failed event was ever
+# logged for the resource that actually failed.
 # ===========================================================================
 
 
@@ -304,7 +304,9 @@ def test_first_failure_guard_error_isolates_sibling_and_logs(tmp_path):
     gguf_b = _gguf_b_entry()
     dockerctl = _SelectiveDockerCtl(
         fail_container="ods-gguf-a",
-        exc=GuardError("container 'ods-gguf-a' is not in the park allowlist"),
+        exc=GuardError(
+            "container 'ods-gguf-a' is not consented for deck control "
+            "(container_consent on its engine declaration)"),
     )
     deck = _deck(
         tmp_path,
@@ -313,7 +315,7 @@ def test_first_failure_guard_error_isolates_sibling_and_logs(tmp_path):
         dockerctl=dockerctl,
     )
 
-    with pytest.raises(GuardError, match="park allowlist"):
+    with pytest.raises(GuardError, match="not consented for deck control"):
         notify_engine(_loc("lemonade"), deck)
 
     # The failing resource: attempted mid-restart (stop AND start both ran).
@@ -328,4 +330,4 @@ def test_first_failure_guard_error_isolates_sibling_and_logs(tmp_path):
     assert len(failures) == 1
     assert failures[0]["detail"]["resource"] == "gguf-a"
     assert failures[0]["detail"]["container"] == "ods-gguf-a"
-    assert "park allowlist" in failures[0]["detail"]["error"]
+    assert "not consented for deck control" in failures[0]["detail"]["error"]

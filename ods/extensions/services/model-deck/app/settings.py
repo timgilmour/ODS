@@ -104,9 +104,6 @@ class Settings(BaseSettings):
     # re-prefill). 0 disables the recency rule; an in-flight request
     # (queue_depth > 0) always refuses. See HipfireClient.ensure_not_busy.
     hipfire_activity_window_s: float = 600.0
-    park_allowlist: list[str] = Field(
-        default_factory=lambda: ["ods-hipfire", "ods-comfyui", "ods-llama-server"]
-    )
     watch_interval: float = 2.0
 
     # Node-observation cadence (app/node_observer.py). Its own thread, never

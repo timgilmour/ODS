@@ -46,8 +46,23 @@ class _FakeDockerCtl:
             raise EngineError(f"no such container {name}") from None
 
 
+def _hipfire_engine(container: str) -> dict:
+    """A minimal, schema-valid local engine declaration naming `container`
+    — since ruling #1 the backfill route enumerates containers to inspect
+    from the LIVE local declaration (app.node_store.declared_containers),
+    not settings.park_allowlist, so a test that wants a container inspected
+    must declare it."""
+    return {
+        "resource": "hipfire", "kind": "hipfire",
+        "connection": {"container": container},
+        "gpu_index": 0,
+        "policy_defaults": {"priority": 0, "pinned": False, "idle_ttl": 0},
+        "container_consent": True,
+    }
+
+
 def _app(tmp_path, monkeypatch, *, units=(), locations=(), bodies=None,
-         available=True):
+         available=True, engines=None):
     monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
     app = create_app()
     deck = app.state.deck
@@ -59,6 +74,8 @@ def _app(tmp_path, monkeypatch, *, units=(), locations=(), bodies=None,
         "location_store": _FakeLocations(locations, available=available),
         "dockerctl": _FakeDockerCtl(bodies) if bodies is not None else None,
     })
+    if engines is not None:
+        deck["node_store"].update("local", {"engines": engines})
     return TestClient(app), deck
 
 
@@ -314,7 +331,8 @@ def _backfill_app(tmp_path, monkeypatch):
               "location": "hot", "size": 4096, "mtime": 2.0, "state": "resident"}]
     bodies = {"ods-hipfire": {"Image": "sha256:a",
                               "Config": {"Image": "ods-hipfire:latest"}}}
-    return _app(tmp_path, monkeypatch, units=units, bodies=bodies)
+    return _app(tmp_path, monkeypatch, units=units, bodies=bodies,
+               engines=[_hipfire_engine("ods-hipfire")])
 
 
 def test_backfill_creates_entries_with_no_origin(tmp_path, monkeypatch):
@@ -365,7 +383,11 @@ def test_backfill_never_overwrites_a_declared_origin(tmp_path, monkeypatch):
 
 
 def test_backfill_skips_a_container_it_cannot_read(tmp_path, monkeypatch):
-    client, _deck = _app(tmp_path, monkeypatch, units=(), bodies={})
+    # ods-hipfire is DECLARED (so it's enumerated) but absent from bodies
+    # (so the fake dockerctl's inspect() raises) — the real "unreadable"
+    # case, not just an empty declaration.
+    client, _deck = _app(tmp_path, monkeypatch, units=(), bodies={},
+                         engines=[_hipfire_engine("ods-hipfire")])
     body = client.post("/api/provenance/backfill").json()
     assert body["total"] == 0      # no entry invented for an unreadable container
 

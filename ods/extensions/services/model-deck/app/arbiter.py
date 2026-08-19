@@ -143,6 +143,7 @@ from app.events import log_event
 from app.harvest import PROBE_INTERPRETER, PROBE_SOURCE, parse_probe_output
 from app.intent import FAILURE_BUDGET
 from app.lifecycle import derive_status, join_warming
+from app.node_store import declared_containers
 from app.observe import (
     _LOCAL_NODE,
     merge_observations,
@@ -466,7 +467,7 @@ def harvest_catalog_pair(engine_exec, characteristics_store, log, node, engine,
     never "current" for a peek that only LOOKS unchanged.
 
     An engine that is not running (EngineError/BusyError) or whose
-    container isn't in the deck's own park allowlist (GuardError --
+    container lacks container_consent (GuardError --
     deliberately not an EngineError subclass, see app.engines) simply
     yields no catalog -- a supported state, since validation warns rather
     than blocks (app.validate_settings). It still logs a deduped
@@ -1660,15 +1661,20 @@ class Watcher:
     def _provenance_local_oci(self, node: str, now: str) -> None:
         """Local engine images, one container inspect each.
 
-        Iterates the park allowlist BY NAME rather than listing containers:
-        the socket-proxy allowlist has no `GET /containers/json` rule, and
-        this way needs none — it is the same `GET /containers/{name}/json`
-        that running()/image_ref() already make.
+        Iterates the local declaration's `connection.container` values
+        (app.node_store.declared_containers) BY NAME rather than listing
+        containers: the socket-proxy allowlist has no `GET /containers/json`
+        rule, and this way needs none — it is the same
+        `GET /containers/{name}/json` that running()/image_ref() already
+        make. Consent-BLIND, deliberately (open-rulings #1): `inspect()` was
+        never guarded, and narrowing this to consented entries would
+        silently drop provenance coverage of a declared-but-unconsented
+        container.
         """
         if self._dockerctl is None:
             return
         bodies: dict[str, dict | None] = {}
-        for name in self._settings.park_allowlist:
+        for name in declared_containers(self._node_store):
             try:
                 bodies[name] = self._dockerctl.inspect(name)
             except (EngineError, GuardError, KeyError):

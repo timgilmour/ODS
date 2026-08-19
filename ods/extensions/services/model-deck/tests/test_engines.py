@@ -428,7 +428,30 @@ def test_litellm_raises_engineerror_on_transport_failure():
 
 
 def _dockerctl(handler, allowlist=("ods-hipfire",)):
-    return DockerCtl("http://docker-ctl:2375", list(allowlist), transport=_transport(handler))
+    # `allowed` is a zero-arg callable (open-rulings #1: the guard resolves
+    # container_consent LIVE, never a captured snapshot) — this fixture
+    # closes over a fixed set for the ~45 tests that don't care about
+    # liveness; test_dockerctl_guard_resolves_consent_live_not_at_construction
+    # below is the one that mutates the set after construction to pin that
+    # the resolver is actually called fresh each time.
+    allowed = set(allowlist)
+    return DockerCtl("http://docker-ctl:2375", lambda: allowed, transport=_transport(handler))
+
+
+def test_dockerctl_guard_resolves_consent_live_not_at_construction():
+    """Consent granted after construction takes effect immediately — the
+    guard calls the resolver per _guard(), never captures a snapshot
+    (ruling #1: the flag is editable in the registry at any time)."""
+    allowed: set[str] = set()
+    handler = _recording_handler(204, {})
+    ctl = DockerCtl("http://docker-ctl:2375", lambda: allowed,
+                    transport=_transport(handler))
+
+    with pytest.raises(GuardError):
+        ctl.stop("ods-hipfire")
+
+    allowed.add("ods-hipfire")
+    ctl.stop("ods-hipfire")  # now allowed, no re-construction
 
 
 def test_dockerctl_stop_raises_guarderror_naming_container_when_not_allowlisted():

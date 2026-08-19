@@ -531,6 +531,47 @@ class NodeStore:
             return changed
 
 
+def consented_containers(node_store: NodeStore | None) -> set[str]:
+    """Container names of local declared engines with `container_consent`
+    — the source `app.engines.docker_ctl.DockerCtl`'s guard checks, resolved
+    LIVE (open-rulings #1: `DockerCtl.__init__`'s `allowed` param is a
+    zero-arg callable that closes over this function + a node_store
+    reference, so a consent flip takes effect on the very next `_guard`
+    call, never a snapshot). Fails closed: no store / no local entry /
+    malformed engines -> empty set, never an exception — a guard that can't
+    determine consent must refuse, not crash the caller."""
+    local = node_store.get("local") if node_store is not None else None
+    if local is None:
+        return set()
+    out: set[str] = set()
+    for e in local.get("engines", []):
+        if e.get("container_consent") is True:
+            name = (e.get("connection") or {}).get("container")
+            if isinstance(name, str) and name:
+                out.add(name)
+    return out
+
+
+def declared_containers(node_store: NodeStore | None) -> set[str]:
+    """Container names of ALL local declared engines, consent-BLIND — the
+    provenance/inspect enumeration source (app.arbiter.Watcher's OCI pass,
+    the provenance router's backfill route). CONTROLLER RULING:
+    `DockerCtl.inspect()` was never guarded (only stop/start/exec_run are),
+    and narrowing this enumeration to consented entries would silently drop
+    provenance coverage of a container an operator declared but withheld
+    stop/start consent for — enumeration is not consent. Fails closed like
+    `consented_containers` above."""
+    local = node_store.get("local") if node_store is not None else None
+    if local is None:
+        return set()
+    return {
+        (e.get("connection") or {}).get("container")
+        for e in local.get("engines", [])
+        if isinstance((e.get("connection") or {}).get("container"), str)
+        and (e.get("connection") or {}).get("container")
+    }
+
+
 def seed_if_missing(store: NodeStore, *, node_label: str, spark_id: str,
                     spark_node_url: str, spark_serving_url: str,
                     spark_node_name: str, spark_node_keys_json: str) -> bool:

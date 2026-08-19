@@ -3763,10 +3763,10 @@ def test_harvest_failed_dedup_resets_when_the_failure_kind_changes(tmp_path):
 
 
 def test_harvest_survives_guarderror_when_the_engine_is_not_allowlisted(tmp_path):
-    """GuardError (a non-allowlisted container) is deliberately NOT an
+    """GuardError (a non-consented container) is deliberately NOT an
     EngineError subclass (app.engines' module docstring) -- an operator who
-    narrows park_allowlist must not turn every derive pass into a raised
-    GuardError. Same supported-no-catalog posture as an EngineError/
+    withholds container_consent must not turn every derive pass into a
+    raised GuardError. Same supported-no-catalog posture as an EngineError/
     BusyError failure."""
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
@@ -3842,8 +3842,8 @@ def test_harvest_reruns_against_the_real_dockerengineexec_when_the_image_id_chan
             return httpx.Response(200, content=frame, request=request)
         raise AssertionError(f"unexpected path {request.url.path!r}")
 
-    dockerctl = DockerCtl("http://docker-ctl:2375", ["ods-hipfire"],
-                           transport=httpx.MockTransport(handler))
+    dockerctl = DockerCtl("http://docker-ctl:2375", lambda: {"ods-hipfire"},
+                          transport=httpx.MockTransport(handler))
     store = CharacteristicsStore(tmp_path / "c.json")
     watcher = _watcher(tmp_path=tmp_path, characteristics_store=store,
                        engine_exec=DockerEngineExec(dockerctl, "ods-hipfire"),
@@ -4047,6 +4047,34 @@ class _FakeDockerCtl:
             raise EngineError(f"no such container {name}") from None
 
 
+class _FakeDeclaredNodeStore:
+    """Just enough of NodeStore for app.node_store.declared_containers to
+    enumerate the local engines' connection.container values — the
+    provenance-pass enumeration source since ruling #1 replaced
+    settings.park_allowlist with the live local declaration.
+
+    `self._node_store` is ALSO consulted by Watcher.tick()'s own per-tick
+    declaration re-read (arbiter.py: `engines = local.get("engines", [])`,
+    then `self._world.snapshot(gpus, engines, ...)`), which needs full,
+    valid-shaped entries — resource/kind/gpu_index, not just a container
+    name — or that unrelated machinery crashes before provenance ever runs.
+    `kind: "lemonade"` resolves through _make_watcher's default
+    `lemonade=None -> FakeLemonade()` local_clients fake, already a working
+    client `_LemonadeAdapter.observe` can call without further setup."""
+
+    def __init__(self, containers):
+        self._containers = list(containers)
+
+    def get(self, node_id):
+        if node_id != "local":
+            return None
+        return {"engines": [
+            {"resource": "lemonade", "kind": "lemonade",
+             "connection": {"container": c}, "gpu_index": 0}
+            for c in self._containers
+        ]}
+
+
 class _FakeCatalogUnits:
     def __init__(self, units):
         self._units = units
@@ -4067,7 +4095,7 @@ def _one_container(tmp_path, bodies=None, **kwargs):
     docker = _FakeDockerCtl(bodies if bodies is not None else {
         "ods-hipfire": {"Image": "sha256:a", "Config": {"Image": "ods-hipfire:latest"}}})
     watcher = _watcher(tmp_path, provenance_store=store, dockerctl=docker,
-                       park_allowlist=["ods-hipfire"], **kwargs)
+                       node_store=_FakeDeclaredNodeStore(["ods-hipfire"]), **kwargs)
     return watcher, store, docker
 
 
@@ -4231,7 +4259,7 @@ def test_provenance_marks_unavailable_by_artifact_id_not_container_name(tmp_path
         "Image": "sha256:a",
         "Config": {"Image": "ignatberesnev/comfyui-gfx1151:v0.2"}}})
     watcher = _watcher(tmp_path, provenance_store=store, dockerctl=docker,
-                       park_allowlist=["ods-comfyui"], clock=clock)
+                       node_store=_FakeDeclaredNodeStore(["ods-comfyui"]), clock=clock)
     watcher.tick()
     assert store.entry("oci:local:ignatberesnev/comfyui-gfx1151") is not None
 

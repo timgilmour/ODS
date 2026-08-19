@@ -141,21 +141,19 @@ def _build_deck(settings: Settings) -> dict:
     )
     comfy = ComfyClient(settings.comfyui_url)
     litellm = LiteLLMClient(settings.litellm_url, settings.litellm_key)
-    dockerctl = DockerCtl(settings.dockerctl_url, settings.park_allowlist)
-    hipfire = HipfireClient(
-        health_url=f"http://{settings.hipfire_container}:{_HIPFIRE_PORT}/health",
-        dockerctl=dockerctl,
-        container=settings.hipfire_container,
-        litellm=litellm,
-        stats_url=f"http://{settings.hipfire_container}:{_HIPFIRE_PORT}/stats",
-        activity_window_s=settings.hipfire_activity_window_s,
-    )
-    hostagent_url = settings.hostagent_url or (
-        f"http://{detect_default_gateway() or 'host.docker.internal'}:7710"
-    )
-    hostagent = HostAgent(hostagent_url, settings.hostagent_key)
 
-    from app.node_store import LEGACY_SPARK_SEED_ID, NodeStore, seed_if_missing, seed_engines_if_missing
+    # node_store is constructed here, ABOVE dockerctl, so DockerCtl's
+    # `allowed` callable (open-rulings #1) can close over it: NodeStore's
+    # own construction has no dependency on dockerctl or vice versa, so this
+    # ordering is free — see app.node_store.consented_containers' docstring
+    # for why the guard needs a LIVE reference, not a snapshot.
+    from app.node_store import (
+        LEGACY_SPARK_SEED_ID,
+        NodeStore,
+        consented_containers,
+        seed_engines_if_missing,
+        seed_if_missing,
+    )
 
     node_store = NodeStore(data_dir / "nodes.json", data_dir / "node_credentials.json")
     # One-time migration: env -> registry. Once nodes.json exists env is
@@ -183,6 +181,24 @@ def _build_deck(settings: Settings) -> dict:
     # the env allowlist's default), everything else False. A fresh box's
     # seed above already carries the field, so this is a no-op there.
     node_store.stamp_missing_container_consent()
+
+    # `allowed` is the zero-arg callable DockerCtl re-resolves on every
+    # `_guard` call — closes over `node_store` above, never a captured
+    # snapshot (open-rulings #1).
+    dockerctl = DockerCtl(settings.dockerctl_url,
+                          lambda: consented_containers(node_store))
+    hipfire = HipfireClient(
+        health_url=f"http://{settings.hipfire_container}:{_HIPFIRE_PORT}/health",
+        dockerctl=dockerctl,
+        container=settings.hipfire_container,
+        litellm=litellm,
+        stats_url=f"http://{settings.hipfire_container}:{_HIPFIRE_PORT}/stats",
+        activity_window_s=settings.hipfire_activity_window_s,
+    )
+    hostagent_url = settings.hostagent_url or (
+        f"http://{detect_default_gateway() or 'host.docker.internal'}:7710"
+    )
+    hostagent = HostAgent(hostagent_url, settings.hostagent_key)
 
     from app.local_clients import LocalClients
 
@@ -452,8 +468,9 @@ def _build_watcher(settings: Settings):
         configurable_engines=deck["configurable_engines"],
         # Provenance pass: the same shared ledger the HTTP routers read and
         # declare into, plus the socket-proxy client that supplies local
-        # image identity (one inspect per park-allowlist container — no new
-        # proxy permission, see DockerCtl.inspect).
+        # image identity (one inspect per DECLARED container, consent-blind
+        # — app.node_store.declared_containers — no new proxy permission,
+        # see DockerCtl.inspect).
         provenance_store=deck["provenance_store"],
         dockerctl=deck["dockerctl"],
     )

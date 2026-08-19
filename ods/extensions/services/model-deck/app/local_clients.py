@@ -13,7 +13,7 @@ declared, exactly NodeClients' "not operable right now is a state, not an
 error" posture.
 
 Construction dispatches to `app.engine_kinds.ENGINE_KINDS[kind].build_client(
-connection, settings)` (review fix, T3 round 2: this module used to hold
+connection, settings, node_store)` (review fix, T3 round 2: this module used to hold
 the per-kind constructor dispatch itself — a disclosed engine-kind-name
 residue — moved onto the adapters instead, since per-kind constructor
 knowledge is exactly what app.engine_kinds exists to hold; see that
@@ -70,7 +70,8 @@ class LocalClients:
             # user-reachable state, so a bare KeyError is the correct
             # "let it crash" signal (matches World.snapshot's own
             # ENGINE_KINDS[entry["kind"]] lookup, app/state.py).
-            client = ENGINE_KINDS[entry["kind"]].build_client(entry["connection"], self._settings)
+            client = ENGINE_KINDS[entry["kind"]].build_client(
+                entry["connection"], self._settings, self._store)
             self._built[resource] = (key, client)
             return client
 

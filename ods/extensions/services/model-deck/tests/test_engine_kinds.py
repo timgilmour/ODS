@@ -1073,7 +1073,7 @@ def test_sglang_omni_has_no_local_client_and_says_so(tmp_path):
     declaration on the local entry. Refusing by name beats the bare
     AttributeError a missing method would raise inside a world snapshot."""
     with pytest.raises(ValueError, match="sglang-omni"):
-        _omni().build_client({"url": "http://127.0.0.1:8008"}, object())
+        _omni().build_client({"url": "http://127.0.0.1:8008"}, object(), None)
 
 
 # --- warming (GF4): the rule, ahead of the reconcile wiring ----------------

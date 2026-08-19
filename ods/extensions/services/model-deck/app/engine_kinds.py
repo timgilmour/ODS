@@ -71,6 +71,7 @@ from app.engines.hipfire import HipfireClient
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
 from app.engines.sglang_omni import SglangOmniClient
+from app.node_store import consented_containers
 from app.observe import local_key, node_key
 from app.registry import HIPFIRE_FOOTPRINT
 
@@ -430,11 +431,14 @@ class _LemonadeAdapter:
             return obs["footprint"]
         return None
 
-    def build_client(self, connection: dict, settings):
+    def build_client(self, connection: dict, settings, node_store):
         # Moved from app.local_clients._build_client (review fix, T3 round
         # 2) — same constructor call app.main._build_deck used to make
         # once. `settings.lemonade_key` is a deck-level shared credential,
-        # not part of the per-resource declared connection.
+        # not part of the per-resource declared connection. `node_store` is
+        # accepted-and-ignored: only the hipfire adapter's DockerCtl needs a
+        # live consent source (open-rulings #1) — this kind has no Docker
+        # involvement.
         return LemonadeClient(connection["url"], settings.lemonade_key,
                               metrics_url=connection["metrics_url"])
 
@@ -718,7 +722,9 @@ class _ComfyAdapter:
             return None
         return max(0, gpu["used"] - co_footprints - _SLACK_BYTES)
 
-    def build_client(self, connection: dict, settings):
+    def build_client(self, connection: dict, settings, node_store):
+        # `node_store` accepted-and-ignored — see _LemonadeAdapter's
+        # build_client docstring: only hipfire's DockerCtl needs it.
         return ComfyClient(connection["url"])
 
     def restart_container(self, entry: dict) -> str | None:
@@ -855,7 +861,7 @@ class _HipfireAdapter:
         # completeness (every kind implements the same protocol).
         return None
 
-    def build_client(self, connection: dict, settings):
+    def build_client(self, connection: dict, settings, node_store):
         # DockerCtl/LiteLLMClient built fresh here rather than reusing
         # app.main._build_deck's shared instances (which still exist,
         # unchanged, for the pre-E1 actuation path) — both are stateless
@@ -864,8 +870,15 @@ class _HipfireAdapter:
         # app.local_clients' module docstring for the one known
         # transitional gap (HipfireClient's own conversation-activity
         # tracker), out of scope for this fix.
+        #
+        # `allowed` closes over `node_store` (received from
+        # LocalClients.client_for, which already holds it) so the guard
+        # resolves container_consent LIVE, never a snapshot captured here
+        # at build time (open-rulings #1; same rationale as app.main's own
+        # DockerCtl construction).
         container = connection["container"]
-        dockerctl = DockerCtl(settings.dockerctl_url, settings.park_allowlist)
+        dockerctl = DockerCtl(settings.dockerctl_url,
+                              lambda: consented_containers(node_store))
         litellm = LiteLLMClient(settings.litellm_url, settings.litellm_key)
         return HipfireClient(
             health_url=f"http://{container}:{_HIPFIRE_PORT}/health",
@@ -1115,7 +1128,7 @@ class _SglangOmniAdapter:
             return False
         return _within(intent.get("updated_ts"), now, _SGLANG_OMNI_WARM_WINDOW_S)
 
-    def build_client(self, connection: dict, settings):
+    def build_client(self, connection: dict, settings, node_store):
         """REFUSED, by name: this kind speaks the node-agent wire, so there
         is no local client to build for a declaration on the local entry.
 

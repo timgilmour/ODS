@@ -6,11 +6,17 @@ sidecar (default http://docker-ctl:2375) over a 5 s httpx.Client. The proxy
 accepts unversioned paths, so no `/v1.4x` prefix is needed. A `transport=`
 kwarg lets tests inject httpx.MockTransport instead of touching the network.
 
-`allowlist` is OUR enforcement, independent of (and in addition to) the
+`allowed` is OUR enforcement, independent of (and in addition to) the
 proxy's own API-class narrowing: stop()/start()/exec_run() raise GuardError,
-naming the rejected container, if `name` is not in `allowlist` — checked
+naming the rejected container, if `name` is not in `allowed()` — checked
 BEFORE any HTTP call is made, so a disallowed name never reaches the socket
-at all. running()/image_ref() are reads and are NOT gated — same posture as
+at all. `allowed` is a ZERO-ARG CALLABLE, resolved fresh on every `_guard`
+call (open-rulings #1: `container_consent` is registry state an operator can
+flip on a declared engine at any time, and the socket proxy wildcards
+start/stop by name — see compose.yaml — so this in-process check is the ONLY
+name restriction on what the deck will stop; a snapshot captured once at
+construction would go stale the moment consent changed underneath it).
+running()/image_ref() are reads and are NOT gated — same posture as
 running() always had.
 
 Real wire shapes this is coded against:
@@ -83,10 +89,18 @@ class DockerCtl:
     def __init__(
         self,
         base_url: str,
-        allowlist: list[str],
+        allowed,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        self._allowlist = allowlist
+        # `allowed` is a zero-arg callable returning the container names the
+        # deck may stop/start RIGHT NOW — declared engines with
+        # container_consent (app.node_store.consented_containers). Resolved
+        # fresh on every `_guard` call, never captured: the flag is registry
+        # state an operator can flip at any time, and the socket proxy
+        # wildcards start/stop by name, so this check is the ONLY name
+        # restriction on what the deck will actually stop (open-rulings #1).
+        # Fail closed.
+        self._allowed = allowed
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=_TIMEOUT,
@@ -164,7 +178,7 @@ class DockerCtl:
         separate them, defeating the whole point of that redirect (see
         app.harvest's module docstring, finding 3).
 
-        Guarded by the same park allowlist as stop()/start(): running an
+        Guarded by the same live consent check as stop()/start(): running an
         arbitrary command inside a container is at least as powerful a
         primitive as stopping/starting it, and this client must never be
         able to do either to a container an operator hasn't explicitly
@@ -195,8 +209,10 @@ class DockerCtl:
         return _demux_stdout(resp.content)
 
     def _guard(self, name: str) -> None:
-        if name not in self._allowlist:
-            raise GuardError(f"container {name!r} is not in the park allowlist")
+        if name not in self._allowed():
+            raise GuardError(
+                f"container {name!r} is not consented for deck control "
+                "(container_consent on its engine declaration)")
 
     def _lifecycle_post(self, name: str, action: str, **kwargs) -> None:
         engine_request(lambda: self._client.post(f"/containers/{name}/{action}",
