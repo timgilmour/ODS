@@ -3871,6 +3871,40 @@ def test_engine_kinds_serves_demand_so_the_ui_can_state_ttl_consequence(tmp_path
     assert all("demand" in k for k in body["kinds"])
 
 
+def test_engine_kinds_serves_idle_release_so_the_ui_never_claims_a_rule_that_does_not_exist(
+    tmp_path, monkeypatch,
+):
+    """hipfire's `idle_action` is unconditionally None and its
+    `arbiter_verbs()` is empty (app/engine_kinds.py:830-844: "No arbiter verb
+    (see arbiter_verbs above) -> no idle rule either: park stays human-only.
+    Structural omission made explicit") — a nonzero idle_ttl on a hipfire
+    resource does NOTHING. lemonade/comfyui/sglang-omni each have a real
+    idle rule (arbiter_verbs() non-empty, idle_action conditionally fires).
+    Served here so ttlConsequence can say "never released automatically
+    (this kind has no idle rule)" instead of the false MANUAL-reload
+    sentence a nonzero TTL on hipfire used to render.
+
+    Derived from `arbiter_verbs()` being non-empty: verified against every
+    adapter's own arbiter_verbs()/idle_action in app/engine_kinds.py —
+    lemonade (:388-389 frozenset({"unload"}), :397-416 real rule), comfyui
+    (:664-665 frozenset({"free"}), :673-692 real rule), hipfire (:830-831
+    frozenset(), :839-844 "no idle rule either"), sglang-omni (:1009-1010
+    frozenset({"unload"}), :1025-1048 real rule) — exactly the kinds with a
+    non-empty arbiter_verbs() are the kinds with a real idle_action, so the
+    one flag is a faithful proxy for the other and this route need not
+    invent a second adapter method."""
+    app, _deck = make_app(tmp_path, monkeypatch)
+
+    body = TestClient(app).get("/api/engine-kinds").json()
+    kinds = {k["kind"]: k for k in body["kinds"]}
+
+    assert kinds["lemonade"]["idle_release"] is True
+    assert kinds["comfyui"]["idle_release"] is True
+    assert kinds["hipfire"]["idle_release"] is False
+    assert kinds["sglang-omni"]["idle_release"] is True
+    assert all("idle_release" in k for k in body["kinds"])
+
+
 def test_engine_add_validates_and_lands(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     _declare_local(deck, [])

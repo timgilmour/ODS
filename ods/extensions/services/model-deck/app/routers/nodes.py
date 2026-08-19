@@ -508,5 +508,21 @@ def list_engine_kinds() -> dict:
             # (spec §8) -- app/engine_kinds.py's per-kind `demand()`.
             "demand": ENGINE_KINDS[kind].demand(),
             "human_verbs": sorted(ENGINE_KINDS[kind].human_verbs()),
+            # Whether a nonzero idle_ttl on this kind DOES ANYTHING. hipfire's
+            # `idle_action` is unconditionally None and its `arbiter_verbs()`
+            # is empty (app/engine_kinds.py's _HipfireAdapter: "No arbiter
+            # verb -> no idle rule either: park stays human-only. Structural
+            # omission made explicit") — a nonzero TTL on it is a no-op, and
+            # without this flag the UI's ttlConsequence had no way to say so
+            # (it rendered the false "reload is MANUAL" sentence instead,
+            # which implies a rule that fires and simply never reloads).
+            # Derived from `arbiter_verbs()` being non-empty rather than a
+            # new adapter method: verified against all four adapters that
+            # exactly the kinds with a real idle_action also have a
+            # non-empty arbiter_verbs() (lemonade/comfyui/sglang-omni yes,
+            # hipfire no) — see tests/test_api.py's
+            # test_engine_kinds_serves_idle_release_... for the per-line
+            # citations this comment summarizes.
+            "idle_release": bool(ENGINE_KINDS[kind].arbiter_verbs()),
         })
     return {"kinds": kinds}
