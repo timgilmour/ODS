@@ -29,8 +29,10 @@ export interface NodeFormState {
   servingAddress: string;
   credential: string;
   /** Declared operability (app/node_store.py _CONTROLS) — see
-   * DeckNodeEntry.control in api.ts. */
-  control: "none" | "swap";
+   * DeckNodeEntry.control in api.ts. Widened to include "instances" (INST
+   * I1) purely so this type keeps mirroring the wire's; the add/edit form
+   * itself gains no "instances" UI here — that is Task 11+'s to build. */
+  control: "none" | "swap" | "instances";
 }
 
 export function emptyForm(): NodeFormState {

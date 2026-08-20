@@ -184,6 +184,14 @@ export interface DeckResource {
    * targeting join on, and those are unchanged by the per-GPU regroup. */
   id: string;
   label: string;
+  /** The numeric GPU index this card IS (`gpu<index>`'s own index) — `null`
+   * ONLY for the one card with no GPU behind it at all: a swap node's
+   * fallback "Serving slot" card when the node reported no GPUs (INST I1,
+   * `buildSwapNode`'s own literal). Every other card, local or remote, is
+   * built FROM a GPU index (`cardIndices`), so this is never null there.
+   * The instance-create surface (Task 11) reads this to seed a fresh form's
+   * GPU claim from "the card the operator clicked". */
+  gpuIndex: number | null;
   /** null means "capacity is unknown", which renders as a hatched track —
    * distinct from a real zero. An unreachable node reports null, never 0. */
   capacity: { used: number; total: number } | null;
@@ -246,6 +254,16 @@ export interface DeckNode {
    * the surface: the verbs travel with the entry, already disabled when the
    * node is dark. */
   hiddenEngines?: RemoteEngineControl[];
+  /** Whether this node's registry entry declares `control: "instances"`
+   * (INST I1) — the create/remove/move instance surface, a THIRD control
+   * kind alongside `control: "swap"`'s serving slot and plain `"none"`.
+   * Decided HERE, at the model layer, from the entry's own declared
+   * `control` (never inferred from what a node happens to carry) — same
+   * "declared, never inferred" posture `DeckNodeEntry.control`'s own doc
+   * states. The local half reads the LOCAL registry entry out of
+   * `state.nodes` (there is no `entry` parameter for the local box's own
+   * builder); every remote/swap node reads its own entry directly. */
+  instancesCapable: boolean;
 }
 
 /** The control surface every swap node's serving slot exposes — the value
@@ -370,8 +388,21 @@ export function sortedResourceEntries(
   tenants: Record<string, ResourceTenant>,
 ): [string, ResourceTenant][] {
   return Object.entries(tenants).sort(
-    ([nameA, a], [nameB, b]) => a.gpu_index - b.gpu_index || nameA.localeCompare(nameB),
+    ([nameA, a], [nameB, b]) =>
+      Math.min(...tenantGpus(a)) - Math.min(...tenantGpus(b)) || nameA.localeCompare(nameB),
   );
+}
+
+/** The GPU claim off a live tenant, one spelling regardless of which the
+ * wire used — mirrors `engineForm.ts`'s `engineGpus` for the OBSERVED half
+ * (D-I1-2): `/api/state` stamps every tenant with BOTH `gpu_index` (derived,
+ * `min(gpu_indices)`, app/state.py's one producer) and, when the underlying
+ * declaration claimed more than one GPU, `gpu_indices` itself. This is the
+ * one reader that resolves the two into a single list; every other function
+ * in this file (`sortedResourceEntries`, `localNode`, `remoteNodeCards`)
+ * calls this rather than re-deriving the same `?? [gpu_index]` fallback. */
+export function tenantGpus(t: ResourceTenant): number[] {
+  return t.gpu_indices ?? [t.gpu_index];
 }
 
 /** The GPU indices a node shows a card for: every GPU it REPORTS, plus every
@@ -463,17 +494,27 @@ function localNode(state: StateResponse): DeckNode {
     // definition. A failed poll is an App-level error, not a node state.
     status: "reachable",
     lastSeen: null,
+    // Declared, never inferred (DeckNode.instancesCapable's own doc): the
+    // LOCAL registry entry is `state.nodes`' one `agent_kind === "local"`
+    // row, the same entry NodeRegistryEntry's `control` lives on — no
+    // `"local"` id literal read here, the FILTER is on `agent_kind` (E2
+    // obligation 4's node-generic-wire rule extends to this file's own
+    // reads of the block).
+    instancesCapable:
+      (state.nodes ?? []).find((e) => e.agent_kind === "local")?.control === "instances",
     resources: cardIndices(
       world.gpus.map((g) => g.index),
-      sorted.map(([, tenant]) => tenant.gpu_index),
+      sorted.flatMap(([, tenant]) => tenantGpus(tenant)),
     ).map((index) => {
       const gpu = world.gpus.find((g) => g.index === index);
-      // Every resource declared on THIS GPU. The GPU name rides `stats`;
-      // composing it into a title is a rendering concern, not this file's.
-      const declared = sorted.filter(([, tenant]) => tenant.gpu_index === index);
+      // Every resource declared ON THIS GPU — a multi-GPU tenant's claim
+      // INCLUDES the index, so its chip/control rides EVERY card it claims
+      // (D-I1-2: atomic, on all or none), not just the lowest one.
+      const declared = sorted.filter(([, tenant]) => tenantGpus(tenant).includes(index));
       return {
         id: `gpu${index}`,
         label: `GPU ${index}`,
+        gpuIndex: index,
         capacity: gpu ? { used: gpu.used, total: gpu.total } : null,
         stats: statsOf(telemetry, index),
         // Always present, even for an empty/unloaded resource: the Load
@@ -629,7 +670,10 @@ function remoteEnginePlacement(
 function remoteTenantsOf(world: StateResponse["world"], nodeId: string): RemoteTenant[] {
   return Object.values(world.remote_tenants ?? {})
     .filter((t) => t.node_id === nodeId)
-    .sort((a, b) => a.gpu_index - b.gpu_index || a.resource.localeCompare(b.resource));
+    .sort(
+      (a, b) => Math.min(...tenantGpus(a)) - Math.min(...tenantGpus(b)) ||
+        a.resource.localeCompare(b.resource),
+    );
 }
 
 /** One declared remote engine's control surface. The SAME construction for
@@ -703,12 +747,15 @@ function remoteNodeCards(
   }
   const resources = cardIndices(
     (entry.gpus ?? []).map((g) => g.index),
-    visible.map((t) => t.gpu_index),
+    visible.flatMap((t) => tenantGpus(t)),
   ).map((index) => {
-    const onGpu = visible.filter((t) => t.gpu_index === index);
+    // Membership rule mirrors `localNode`'s: a multi-GPU tenant's claim
+    // INCLUDES the index, so it rides EVERY card it claims (D-I1-2).
+    const onGpu = visible.filter((t) => tenantGpus(t).includes(index));
     return {
       id: `gpu${index}`,
       label: `GPU ${index}`,
+      gpuIndex: index,
       // The node's OWN GPU list (the node-observer's) — never `world.gpus`,
       // which is this box's, and never a second source for one fact.
       capacity: gpuCapacity(entry.gpus, index),
@@ -779,6 +826,7 @@ function observedNode(
     warning: entry.serving?.warning ?? undefined,
     resources,
     hiddenEngines,
+    instancesCapable: entry.control === "instances",
   };
 }
 
@@ -988,7 +1036,10 @@ function buildSwapNode(
   // zero.
   const cards: DeckResource[] = resources.length > 0
     ? resources
-    : [{ id: "slot0", label: "Serving slot", capacity: null, controls: [], remoteEngines: [], placements: [] }];
+    : [{
+        id: "slot0", label: "Serving slot", gpuIndex: null, capacity: null,
+        controls: [], remoteEngines: [], placements: [],
+      }];
 
   return {
     id: entry.id,
@@ -1020,6 +1071,7 @@ function buildSwapNode(
       };
     }),
     hiddenEngines,
+    instancesCapable: entry.control === "instances",
   };
 }
 

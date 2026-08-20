@@ -104,7 +104,7 @@ describe("emptyForm", () => {
   test("defaults resource blank, no GPU picked, and a conservative policy", () => {
     const form = emptyForm(WIDGET_GADGET, "widget");
     expect(form.resource).toBe("");
-    expect(form.gpuIndex).toBeNull();
+    expect(form.gpuIndices).toEqual([]);
     expect(form.priority).toBe(0);
     expect(form.pinned).toBe(false);
     // idle_ttl 0 = never idle-release (app.engine_kinds's per-kind
@@ -135,7 +135,7 @@ describe("formForEntry", () => {
     expect(form.resource).toBe("widget-a");
     expect(form.kind).toBe("widget");
     expect(form.connection).toEqual({ host: "http://widget-a:9000", note: "spare" });
-    expect(form.gpuIndex).toBe(2);
+    expect(form.gpuIndices).toEqual([2]);
     expect(form.priority).toBe(10);
     expect(form.pinned).toBe(true);
     expect(form.idleTtl).toBe(300);
@@ -166,14 +166,14 @@ describe("withKind", () => {
     const started: EngineFormState = {
       ...emptyForm(WIDGET_GADGET, "widget"),
       resource: "my-engine",
-      gpuIndex: 3,
+      gpuIndices: [3],
       priority: 5,
       pinned: true,
       idleTtl: 120,
     };
     const switched = withKind(started, WIDGET_GADGET, "gadget");
     expect(switched.resource).toBe("my-engine");
-    expect(switched.gpuIndex).toBe(3);
+    expect(switched.gpuIndices).toEqual([3]);
     expect(switched.priority).toBe(5);
     expect(switched.pinned).toBe(true);
     expect(switched.idleTtl).toBe(120);
@@ -200,11 +200,11 @@ describe("setField", () => {
 describe("canSave", () => {
   // Documents the narrow, pinned scope: canSave is a connection-only check
   // (see the brief's own two tests above) — it does NOT gate on resource or
-  // gpuIndex being set. formErrors below is the full save gate.
+  // gpuIndices being set. formErrors below is the full save gate.
   test("is true with every required connection field filled, even with no resource or GPU chosen", () => {
     const form = setField(emptyForm(WIDGET_GADGET, "widget"), "host", "http://widget:9000");
     expect(form.resource).toBe("");
-    expect(form.gpuIndex).toBeNull();
+    expect(form.gpuIndices).toEqual([]);
     expect(canSave(form)).toBe(true);
   });
 
@@ -231,22 +231,22 @@ describe("formErrors", () => {
 
   test("is empty once resource, gpu, and every required connection field are filled", () => {
     let form = emptyForm(WIDGET_GADGET, "widget");
-    form = { ...form, resource: "widget-a", gpuIndex: 5 };
+    form = { ...form, resource: "widget-a", gpuIndices: [5] };
     form = setField(form, "host", "http://widget-a:9000");
     expect(formErrors(form)).toEqual([]);
   });
 });
 
 describe("toPayload", () => {
-  test("produces exactly validate_engines' accepted shape — no extra keys, gpu_index numeric, policy_defaults nested", () => {
+  test("produces exactly validate_engines' accepted shape — no extra keys, gpu_indices array, policy_defaults nested", () => {
     let form = emptyForm(WIDGET_GADGET, "widget");
-    form = { ...form, resource: "widget-a", gpuIndex: 2, priority: 7, pinned: true, idleTtl: 90 };
+    form = { ...form, resource: "widget-a", gpuIndices: [2], priority: 7, pinned: true, idleTtl: 90 };
     form = setField(form, "host", "http://widget-a:9000");
     expect(toPayload(form)).toEqual({
       resource: "widget-a",
       kind: "widget",
       connection: { host: "http://widget-a:9000", note: "" },
-      gpu_index: 2,
+      gpu_indices: [2],
       policy_defaults: { priority: 7, pinned: true, idle_ttl: 90 },
       container_consent: false,
     });
@@ -254,10 +254,10 @@ describe("toPayload", () => {
 
   test("has exactly six top-level keys — matching engine_kinds.py:220-223's extra-field refusal plus container_consent", () => {
     let form = emptyForm(WIDGET_GADGET, "gadget");
-    form = { ...form, resource: "g", gpuIndex: 3 };
+    form = { ...form, resource: "g", gpuIndices: [3] };
     form = setField(form, "path", "/dev/g0");
     expect(Object.keys(toPayload(form)).sort()).toEqual(
-      ["connection", "container_consent", "gpu_index", "kind", "policy_defaults", "resource"],
+      ["connection", "container_consent", "gpu_indices", "kind", "policy_defaults", "resource"],
     );
   });
 

@@ -400,6 +400,27 @@ export const messages = {
     title: "removes the declaration only — a running engine keeps running, untouched",
   }),
 
+  // Instances (INST I1, app/routers/instances.py) — UNLIKE forgetEngine
+  // above, these verbs DO act on the running container: an instance is
+  // deck-managed end to end (D-I1-1), so its own confirms must say the
+  // opposite of forgetEngineConfirm's reassurance rather than reuse it.
+  removeInstanceConfirm: (): Message => ({
+    tone: "danger",
+    title: "stops and deletes the container — whatever it served is gone; the declaration, its intent record and policy row are forgotten",
+  }),
+  moveInstanceConfirm: (gpus: number[]): Message => ({
+    tone: "warning",
+    title: `two phases: the container is removed, then re-created on GPU ${gpus.join("+")} — nothing migrates live; reload its model afterwards`,
+  }),
+  instanceRequested: (): Message => ({
+    tone: "neutral",
+    title: "requested — the node's instances-helper is creating it; the card fills in once the container answers",
+  }),
+  gatewayStaged: (): Message => ({
+    tone: "neutral",
+    title: "gateway route staged in extra-routes.json; it applies at the next ODS gateway regeneration",
+  }),
+
   // Replaces engineParkAllowlistNote: consent is a per-entry declared flag
   // now (container_consent, validated in app/engine_kinds.py's
   // validate_engines; enforced live in app/engines/docker_ctl.py's _guard),
@@ -974,6 +995,25 @@ export const labels = {
   engineGpuRequired: "select a GPU",
   engineConnectionFieldRequired: (field: string) =>
     `${field.replace(/_/g, " ")} is required for this kind`,
+
+  // Instances (INST I1, model/instanceForm.ts) — the free-standing
+  // create/remove/move surface layered on the declared-engine CRUD above.
+  // Env-field names are the BACKEND's own vocabulary (GET /api/engine-kinds'
+  // `instance_env` keys), rendered verbatim (`instanceEnvLabel`) rather than
+  // humanized like `engineFieldLabel` above — these are environment variable
+  // names an operator sets directly, not a connection field this UI invented
+  // wording for.
+  createInstance: "+ Create instance",
+  addEngineHere: "+ add engine here",
+  instanceTag: "instance",
+  moveInstance: "Move",
+  removeInstance: "Remove",
+  engineGpus: "GPUs",
+  instanceEnvLabel: (name: string) => name,
+  instancePort: (p: number) => `host port ${p}`,
+  instanceGpusRequired: "select at least one GPU",
+  instanceTooManyGpus: (max: number) => `this kind allows at most ${max} GPU(s)`,
+  instanceEnvRequired: (name: string) => `${name} is required`,
 
   // GpuStatsBlock (Task 4) — the GPU-Monitor-format stats row's own labels
   // (util's visible caption; temp/power's tooltip names, since their units

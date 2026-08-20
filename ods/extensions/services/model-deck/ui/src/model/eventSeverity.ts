@@ -29,7 +29,14 @@ const SUCCESS_SUFFIXES = ["-done", "-end", "-restore"];
 const ATTENTION_SUFFIXES = ["-warn"];
 
 // Kinds that carry a severity but don't follow the suffix convention.
-const SUCCESS_EXACT = new Set(["reconciled"]);
+const SUCCESS_EXACT = new Set([
+  "reconciled",
+  // INST I1 (app/routers/instances.py): a container was created/removed
+  // successfully. Neither ends in a classifying suffix ("-created"/
+  // "-removed" match none of SUCCESS_SUFFIXES above), so both need the
+  // exact-kind list, same as "reconciled".
+  "instance-created", "instance-removed",
+]);
 const ATTENTION_EXACT = new Set([
   "storage-shortfall", "host-agent-busy", "free-raced", "origin-moved",
   // The operator asked for a load and it did NOT happen: an action of
@@ -41,6 +48,10 @@ const ATTENTION_EXACT = new Set([
   // PROBE_URL_WARNING). Amber, not red: nothing has failed yet, but the
   // node's env wants fixing before the next blind swap — a decision.
   "lifecycle-node-misconfigured",
+  // INST I1: a move was ACCEPTED, not completed — D-I1-1's honest two-phase
+  // (remove, then re-create) means the operator's own model reload is still
+  // pending on the far side. Amber, a decision still owed, not a done deal.
+  "instance-move-requested",
 ]);
 
 // E1 Task 11: exact-kind overrides that must win over the SUFFIX convention

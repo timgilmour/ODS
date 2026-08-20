@@ -38,11 +38,53 @@ export interface EngineFormState {
    * see this module's docstring for why canSave() takes no `kinds` argument
    * of its own. */
   requiredConnectionFields: string[];
-  gpuIndex: number | null;
+  /** The GPU claim (D-I1-2, INST I1) — replaces the single `gpuIndex` this
+   * field used to be. Empty means "no GPU picked yet", the same fact
+   * `gpuIndex === null` used to carry; `toPayload` always writes this out as
+   * `gpu_indices`, never the legacy `gpu_index` spelling (the UI writes ONE
+   * spelling). */
+  gpuIndices: number[];
   priority: number;
   pinned: boolean;
   idleTtl: number;
   containerConsent: boolean;
+}
+
+/** The GPU claim off a declared entry, one spelling regardless of which the
+ * wire used — mirrors `app.engine_kinds.gpu_indices_of` (D-I1-2): a
+ * validated `DeclaredEngine` carries EXACTLY ONE of `gpu_index` or
+ * `gpu_indices`, and this is the one reader in this module that resolves
+ * that choice, so no other call site re-derives the same `?? [gpu_index]`
+ * fallback. */
+export function engineGpus(e: DeclaredEngine): number[] {
+  return e.gpu_indices ?? [e.gpu_index as number];
+}
+
+/** This kind's GPU cap, or `null` when unknown/uncapped (`EngineKindDef.
+ * max_gpus`, GET /api/engine-kinds) — the one place `toggleGpu`/
+ * `toggleInstanceGpu` look it up, so a form never carries a stale copy of
+ * its own kind's cap. */
+export function maxGpusFor(catalog: EngineKindDef[] | null, kind: string): number | null {
+  return catalog?.find((k) => k.kind === kind)?.max_gpus ?? null;
+}
+
+/** The shared add/remove/replace rule behind both `toggleGpu` (engine forms)
+ * and `instanceForm.ts`'s `toggleInstanceGpu` (CONTROLLER RULING, INST I1
+ * pre-flight) — one pure list operation rather than the same four lines
+ * twice. Present: drop it. Absent with `max === 1`: REPLACE the whole claim
+ * (a single-GPU kind's picker behaves like a radio, not a checklist).
+ * Absent otherwise: append and keep the claim sorted, so board order and the
+ * payload's own ordering never depend on click sequence. */
+export function toggleIndex(list: number[], index: number, max: number | null): number[] {
+  if (list.includes(index)) return list.filter((g) => g !== index);
+  if (max === 1) return [index];
+  return [...list, index].sort((a, b) => a - b);
+}
+
+/** Toggles `index` in/out of the form's GPU claim — see `toggleIndex` for
+ * the shared rule. */
+export function toggleGpu(form: EngineFormState, index: number, max: number | null): EngineFormState {
+  return { ...form, gpuIndices: toggleIndex(form.gpuIndices, index, max) };
 }
 
 /** A freshly-declared engine's starting policy — priority 0 (no eviction
@@ -104,7 +146,7 @@ export function emptyForm(kinds: EngineKindsResponse, kind: string): EngineFormS
     resource: "",
     kind,
     ...connectionFor(kinds, kind),
-    gpuIndex: null,
+    gpuIndices: [],
     priority: DEFAULT_POLICY.priority,
     pinned: DEFAULT_POLICY.pinned,
     idleTtl: DEFAULT_POLICY.idle_ttl,
@@ -126,7 +168,7 @@ export function formForEntry(entry: DeclaredEngine, kinds: EngineKindsResponse):
     kind: entry.kind,
     connection: { ...entry.connection },
     requiredConnectionFields: requiredFieldsOf(schemaFor(kinds, entry.kind)),
-    gpuIndex: entry.gpu_index,
+    gpuIndices: engineGpus(entry),
     priority: entry.policy_defaults.priority,
     pinned: entry.policy_defaults.pinned,
     idleTtl: entry.policy_defaults.idle_ttl,
@@ -179,7 +221,7 @@ export function canSave(form: EngineFormState): boolean {
 export function formErrors(form: EngineFormState): string[] {
   const errors: string[] = [];
   if (!form.resource.trim()) errors.push(labels.engineResourceRequired);
-  if (form.gpuIndex === null) errors.push(labels.engineGpuRequired);
+  if (form.gpuIndices.length === 0) errors.push(labels.engineGpuRequired);
   for (const field of form.requiredConnectionFields) {
     if (!form.connection[field]?.trim()) {
       errors.push(labels.engineConnectionFieldRequired(field));
@@ -189,18 +231,24 @@ export function formErrors(form: EngineFormState): string[] {
 }
 
 /** The POST/PUT body — exactly `app.engine_kinds.validate_engines`'s
- * accepted shape (resource, kind, connection, gpu_index, policy_defaults,
- * container_consent; engine_kinds.py:220-223's extra-field check refuses anything else).
- * Only meaningful once `formErrors(form)` is empty (`gpuIndex` is asserted
- * non-null here on that assumption, same posture nodeForm.ts's
- * `toCreatePayload`/`toPatchPayload` take: the Save button stays disabled
- * until then, so this is never called on a form the gate has not cleared). */
+ * accepted shape (resource, kind, connection, gpu_indices, policy_defaults,
+ * container_consent; engine_kinds.py:220-223's extra-field check refuses
+ * anything else). Only meaningful once `formErrors(form)` is empty (a
+ * non-empty `gpuIndices` is asserted here on that assumption, same posture
+ * nodeForm.ts's `toCreatePayload`/`toPatchPayload` take: the Save button
+ * stays disabled until then, so this is never called on a form the gate has
+ * not cleared).
+ *
+ * `gpu_indices`, never `gpu_index` (D-I1-2): the UI writes exactly ONE
+ * spelling regardless of how many GPUs are claimed — a single-GPU form
+ * still writes `gpu_indices: [n]`, not the legacy scalar, so nothing
+ * downstream of Save has to handle two shapes for the same fact. */
 export function toPayload(form: EngineFormState): DeclaredEngine {
   return {
     resource: form.resource,
     kind: form.kind,
     connection: { ...form.connection },
-    gpu_index: form.gpuIndex as number,
+    gpu_indices: form.gpuIndices,
     policy_defaults: { priority: form.priority, pinned: form.pinned, idle_ttl: form.idleTtl },
     container_consent: form.containerConsent,
   };
@@ -218,7 +266,9 @@ export function toPayload(form: EngineFormState): DeclaredEngine {
  * the two just to reuse the other's comparator. */
 export function sortedEngines(engines: DeclaredEngine[]): DeclaredEngine[] {
   return [...engines].sort(
-    (a, b) => a.gpu_index - b.gpu_index || a.resource.localeCompare(b.resource),
+    (a, b) =>
+      Math.min(...engineGpus(a)) - Math.min(...engineGpus(b)) ||
+      a.resource.localeCompare(b.resource),
   );
 }
 

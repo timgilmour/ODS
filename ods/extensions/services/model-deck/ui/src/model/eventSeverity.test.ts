@@ -210,3 +210,12 @@ describe("update-checking kinds", () => {
     expect(eventSeverity("update-available")).toBe("neutral");
   });
 });
+
+describe("instance lifecycle kinds (INST I1)", () => {
+  it("instance lifecycle kinds", () => {
+    expect(eventSeverity("instance-created")).toBe("success");
+    expect(eventSeverity("instance-removed")).toBe("success");
+    expect(eventSeverity("instance-move-requested")).toBe("attention");
+    expect(eventSeverity("instance-create-failed")).toBe("failure");
+  });
+});

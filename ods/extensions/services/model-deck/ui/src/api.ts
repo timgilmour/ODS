@@ -47,6 +47,15 @@ export interface ExternalProc {
 export interface ResourceTenant {
   engine: string;
   gpu_index: number;
+  /** The GPU claim, when this tenant's declaration named more than one
+   * (INST I1, D-I1-2): `gpu_index` above is DERIVED as `min(gpu_indices)`
+   * from this same field by ONE producer (app/state.py's World.snapshot),
+   * so every existing reader of `gpu_index` keeps working unchanged.
+   * Optional — a fixture predating this field, or a validated entry the
+   * accessor below has already collapsed, may omit it; `tenantGpus`
+   * (model/nodes.ts) is the one reader that must fall back to `gpu_index`
+   * rather than every call site re-deriving the same fallback. */
+  gpu_indices?: number[];
   state: string;
   model?: string | null;
   footprint?: number | null;
@@ -245,10 +254,11 @@ export interface DeckNodeEntry {
   serving_address: string | null;
   credential_set: boolean;
   /** Declared operability (app/node_store.py _CONTROLS): "swap" nodes get
-   * serving verbs and a board card with controls; "none" nodes are
-   * observe-only regardless of what data they carry — declared, never
+   * serving verbs and a board card with controls; "instances" nodes (INST
+   * I1) get the create/remove/move instance surface instead; "none" nodes
+   * are observe-only regardless of what data they carry — declared, never
    * inferred. */
-  control: "none" | "swap";
+  control: "none" | "swap" | "instances";
   status: NodeAgentStatus;
   last_seen: string | null;
   gpus: NodeGpu[] | null;
@@ -923,7 +933,13 @@ export interface NodeRegistryEntry {
   // `_public` spreads the stored NodeStore entry as-is, which always
   // carries `control` (app/node_store.py _CONTROLS, healed by
   // `_heal_control` if ever missing/invalid).
-  control: "none" | "swap";
+  control: "none" | "swap" | "instances";
+  /** The host port range reserved for this entry's instance containers
+   * (D-I1-3): the lowest free port among its managed entries is allocated
+   * from here, published `127.0.0.1:<port>` — the deck itself never dials
+   * it, only the operator/host tooling does. Present only on a `control:
+   * "instances"` entry. */
+  instance_port_range?: { start: number; end: number };
   // Optional: absent when nothing is declared. Present on BOTH agent kinds
   // (app/node_store.py's `_validate`, :204-214, and `_heal_engines`,
   // :112-138 — relaxed off "local entry only" by E1 Task 5, so a node-agent
@@ -1032,6 +1048,24 @@ export interface EngineKindDef {
    * messages.ttlConsequence renders it as "never released automatically
    * (this kind has no idle rule)" regardless of the TTL value. */
   idle_release: boolean;
+  /** The most GPUs one instance of this kind may claim at once, or `null`
+   * for no cap (app/routers/nodes.py's list_engine_kinds, INST I1 Task 1).
+   * Optional: a fixture predating this field (every pre-INST-I1 test in
+   * this repo) omits it, and every reader here treats absence the same as
+   * `null` — `maxGpusFor`'s own `?? null`. */
+  max_gpus?: number | null;
+  /** Whether this kind may be declared as a free-standing INSTANCE (POST
+   * /api/nodes/{id}/instances) rather than only the node's single
+   * pre-seeded entry — served alongside `max_gpus` above. Optional for the
+   * same pre-INST-I1 fixture-compat reason; absent reads as not
+   * instantiable (`instanceKindsFor`'s filter), never as a guessed yes. */
+  instance?: boolean;
+  /** Required-env schema for an instance of this kind (app/routers/nodes.py's
+   * `list_engine_kinds`, sourced from `KNOWN_KINDS`'s per-kind
+   * `instance_env()`) — the instance form's env-field source, same
+   * "never a UI literal" posture `connection` above already documents.
+   * Optional/absent reads as `{}` (`instanceForm.ts`'s `envSchema`). */
+  instance_env?: Record<string, EngineConnectionFieldSchema>;
 }
 
 /** GET /api/engine-kinds's body (app/routers/nodes.py:476-504's
@@ -1048,19 +1082,38 @@ export interface EnginePolicyDefaults {
 
 /** One declared engine — the exact shape `app.engine_kinds.validate_engines`
  * accepts (app/engine_kinds.py:201-263: resource, kind, connection,
- * gpu_index, policy_defaults, container_consent, no other field), what POST/PUT
- * `/api/nodes/{node_id}/engines*` both accept and echo back, and what
- * `NodeRegistryEntry.engines[]` carries verbatim off its owning NodeStore
- * row — local or node-agent either one (E1 Task 5 relaxed `engines[]` off
- * the local-only entry). `container_consent` permits the deck to stop/start
- * this entry's container (validated per-entry, ruling #1). */
+ * gpu_index OR gpu_indices, policy_defaults, container_consent, no other
+ * required field), what POST/PUT `/api/nodes/{node_id}/engines*` both accept
+ * and echo back, and what `NodeRegistryEntry.engines[]` carries verbatim off
+ * its owning NodeStore row — local or node-agent either one (E1 Task 5
+ * relaxed `engines[]` off the local-only entry). `container_consent` permits
+ * the deck to stop/start this entry's container (validated per-entry, ruling
+ * #1).
+ *
+ * `gpu_index`/`gpu_indices` (D-I1-2, INST I1): a validated entry carries
+ * EXACTLY ONE of the two — `gpu_index` the legacy single-GPU spelling
+ * unchanged, `gpu_indices` the new multi-GPU claim — never both, and the UI
+ * always WRITES `gpu_indices` (`engineForm.ts`'s `toPayload`). Both optional
+ * here (rather than a union) because every existing fixture in this repo
+ * still constructs a `gpu_index`-only literal; `engineGpus` (engineForm.ts)
+ * is the one reader that must fall back correctly, so no other call site
+ * re-derives the same `?? [gpu_index]` fallback. `managed`/`port`/`env`
+ * (INST I1 instance CRUD, app/routers/instances.py) ride the same declared
+ * shape for a resource created through the instances route: `managed: true`
+ * marks it deck-supervised, `port` is the allocated host port (D-I1-3),
+ * `env` the instance's own environment. Optional: a non-instance engine
+ * (every E1 kind) carries none of the three. */
 export interface DeclaredEngine {
   resource: string;
   kind: string;
   connection: Record<string, string>;
-  gpu_index: number;
+  gpu_index?: number;
+  gpu_indices?: number[];
   policy_defaults: EnginePolicyDefaults;
   container_consent: boolean;
+  managed?: boolean;
+  port?: number;
+  env?: Record<string, string>;
 }
 
 /** GET /api/engine-kinds (app/routers/nodes.py:476-504) — the UI's kind
@@ -1149,5 +1202,72 @@ export function forgetEngine(nodeId: string, resource: string): Promise<{ status
   return request<{ status: string }>(
     `/api/nodes/${encodeURIComponent(nodeId)}/engines/${encodeURIComponent(resource)}`,
     { method: "DELETE" },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Instances (INST I1, app/routers/instances.py) — free-GPU-assignment engine
+// instances, layered on top of the declared-engine CRUD above rather than
+// replacing it: create writes a DECLARED engine (D-I1-1 — no intent record,
+// status reads `unmanaged` until the operator's first load/adopt, exactly
+// like any other declared resource) via the node's instances-helper, remove
+// tears the container down (forgetting intent+policy first, same sequence
+// `forgetEngine` documents, so the reconciler can never restore a container
+// mid-removal), and move is the honest two-phase (D-I1-1 — remove then
+// re-create on the new GPU set; nothing migrates live).
+// ---------------------------------------------------------------------------
+
+/** POST /api/nodes/{node_id}/instances's accepted body (app/routers/
+ * instances.py's InstanceCreate) — `kind` picks the descriptor,
+ * `gpu_indices` the claim (non-empty, unique, sorted, ≤ the kind's
+ * `max_gpus` — enforced server-side same as `validate_engines`), `env` the
+ * instance's own required/optional environment (`EngineKindDef.instance_env`
+ * names which keys). */
+export interface InstanceCreateBody {
+  kind: string;
+  gpu_indices: number[];
+  env: Record<string, string>;
+}
+
+/** POST /api/nodes/{node_id}/instances (app/routers/instances.py) — 201 with
+ * the freshly declared entry, the same `DeclaredEngine` shape every other
+ * declared-engine route echoes (`managed: true`, an allocated `port`, and
+ * this body's own `env` riding along). 404 unknown node, 422 a shape defect
+ * (including a `kind` this node's `control` cannot run, or a claim over the
+ * kind's `max_gpus`), 409 the resource name collides. */
+export function createInstance(nodeId: string, body: InstanceCreateBody): Promise<DeclaredEngine> {
+  return request<DeclaredEngine>(`/api/nodes/${encodeURIComponent(nodeId)}/instances`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** DELETE /api/nodes/{node_id}/instances/{resource} (app/routers/
+ * instances.py) — forgets intent+policy FIRST (D-I1-1), then tears the
+ * container down; unlike `forgetEngine` this one DOES act on the running
+ * process, by design (an instance is deck-managed end to end). */
+export function removeInstance(nodeId: string, resource: string): Promise<{ status: string }> {
+  return request<{ status: string }>(
+    `/api/nodes/${encodeURIComponent(nodeId)}/instances/${encodeURIComponent(resource)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** POST /api/nodes/{node_id}/instances/{resource}/move (app/routers/
+ * instances.py) — the honest two-phase (D-I1-1): the container is removed,
+ * then re-created on `gpu_indices`. Resolves once the second phase's
+ * `DeclaredEngine` is back; nothing migrates live, and the resource keeps
+ * its name and key across the move. */
+export function moveInstance(
+  nodeId: string, resource: string, gpu_indices: number[],
+): Promise<DeclaredEngine> {
+  return request<DeclaredEngine>(
+    `/api/nodes/${encodeURIComponent(nodeId)}/instances/${encodeURIComponent(resource)}/move`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ gpu_indices }),
+    },
   );
 }

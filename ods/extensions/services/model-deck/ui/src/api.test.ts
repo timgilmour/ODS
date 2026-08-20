@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   addEngine,
   ApiError,
+  createInstance,
   createNode,
   errorMessage,
   forgetEngine,
@@ -15,7 +16,7 @@ import {
   updateEngine,
   updateNode,
 } from "./api";
-import type { DeclaredEngine, NodeRegistryEntry, SparkStatus } from "./api";
+import type { DeclaredEngine, InstanceCreateBody, NodeRegistryEntry, SparkStatus } from "./api";
 
 // The registry-CRUD wire shape, exactly as app/routers/nodes.py::_public
 // produces it over NodeStore.add()/update() (app/node_store.py:104-139):
@@ -423,5 +424,31 @@ describe("postEngineVerb", () => {
       status: 405,
       message: "song-lab (sglang-omni) does not support park",
     });
+  });
+});
+
+// INST I1 (app/routers/instances.py) — createInstance's own idiom, mirroring
+// addEngine's test above: node-scoped, 201 accepted the same as any other
+// `res.ok` status (request() only special-cases 204/non-ok).
+describe("createInstance", () => {
+  it("POSTs the body verbatim to /api/nodes/{node_id}/instances and accepts 201", async () => {
+    const body: InstanceCreateBody = {
+      kind: "hipfire", gpu_indices: [2, 3], env: { HIPFIRE_MODEL: "qwen3.8:27b" },
+    };
+    const created: DeclaredEngine = {
+      resource: "hipfire-2", kind: "hipfire", connection: {}, gpu_indices: [2, 3],
+      policy_defaults: { priority: 0, pinned: false, idle_ttl: 0 }, container_consent: false,
+      managed: true, port: 18100, env: { HIPFIRE_MODEL: "qwen3.8:27b" },
+    };
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true, status: 201, json: async () => created } as Response;
+    }));
+    const result = await createInstance("sparky", body);
+    expect(calls[0].url).toBe("/api/nodes/sparky/instances");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual(body);
+    expect(result).toEqual(created);
   });
 });

@@ -19,6 +19,7 @@ import {
   isSwapSlotId,
   nodeIdOfPlacement,
   swapNodes,
+  tenantGpus,
   type DeckNode,
   type DeckResource,
   type Placement,
@@ -1769,5 +1770,64 @@ describe("buildNodes — swap node per-GPU composition", () => {
     const s = stateWith({ nodes: [localEntry, twoGpuBothBare] });
     const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
     expect(gpuCard(boxa, 0).unmanaged).toBeUndefined();
+  });
+});
+
+// INST I1 (Task 10) — multi-GPU claims (D-I1-2) and the "instances" control
+// kind. Fixture rule per this file's header: GPUs 2/3 (never 0/1), never a
+// resource named after its kind.
+describe("INST I1 — multi-GPU claims and instancesCapable", () => {
+  it("a multi-GPU tenant places a chip on EVERY claimed card (atomic claim)", () => {
+    const s = stateWith({
+      tenants: {
+        ...DEFAULT_TENANTS,
+        dual: {
+          engine: "lemonade", gpu_index: 2, gpu_indices: [2, 3],
+          state: "loaded", model: "shared-model", footprint: 900_000_000, idle_s: 5,
+        },
+      },
+    });
+    const [local] = buildNodes(s, {});
+    expect(gpuCard(local, 2).placements.map((p) => p.id)).toContain("local/dual");
+    expect(gpuCard(local, 3).placements.map((p) => p.id)).toContain("local/dual");
+    expect(gpuCard(local, 2).controls).toContain("dual");
+    expect(gpuCard(local, 3).controls).toContain("dual");
+  });
+
+  it("tenantGpus reads the list, then the scalar", () => {
+    expect(tenantGpus({ gpu_index: 2 } as never)).toEqual([2]);
+    expect(tenantGpus({ gpu_index: 2, gpu_indices: [2, 3] } as never)).toEqual([2, 3]);
+  });
+
+  it("cards carry their numeric gpuIndex; the swap slot card carries null", () => {
+    const [local] = buildNodes(stateWith(), {});
+    expect(gpuCard(local, 2).gpuIndex).toBe(2);
+    expect(gpuCard(local, 3).gpuIndex).toBe(3);
+
+    // A swap node reporting no GPUs at all falls back to the one
+    // gpu-less "Serving slot" card (buildSwapNode's own literal) — the
+    // ONE card in the whole model that carries `gpuIndex: null`.
+    const s = stateWith({ nodes: [localEntry, { ...boxaEntry, gpus: null }] });
+    const boxa = buildNodes(s, { boxa: sparkStatus() }).find((n) => n.id === "boxa")!;
+    expect(boxa.resources[0].id).toBe("slot0");
+    expect(boxa.resources[0].gpuIndex).toBeNull();
+  });
+
+  it("instancesCapable follows the registry entry's control", () => {
+    const instancesLocal: DeckNodeEntry = { ...localEntry, control: "instances" };
+    const [local] = buildNodes(stateWith({ nodes: [instancesLocal] }), {});
+    expect(local.instancesCapable).toBe(true);
+
+    const [localNone] = buildNodes(stateWith({ nodes: [localEntry] }), {});
+    expect(localNone.instancesCapable).toBe(false);
+
+    const instancesAgent: DeckNodeEntry = { ...heraEntry, control: "instances" };
+    const nodes = buildNodes(stateWith({ nodes: [localEntry, instancesAgent] }), {});
+    expect(nodes.find((n) => n.id === "hera")!.instancesCapable).toBe(true);
+
+    const swapNodesResult = buildNodes(
+      stateWith({ nodes: [localEntry, boxaEntry] }), { boxa: sparkStatus() },
+    );
+    expect(swapNodesResult.find((n) => n.id === "boxa")!.instancesCapable).toBe(false);
   });
 });

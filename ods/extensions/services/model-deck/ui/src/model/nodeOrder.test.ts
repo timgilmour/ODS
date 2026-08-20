@@ -3,7 +3,7 @@ import type { DeckNode } from "./nodes";
 import { applyOrder, reorder } from "./nodeOrder";
 
 const node = (id: string): DeckNode => ({
-  id, label: id, status: "reachable", lastSeen: null, resources: [],
+  id, label: id, status: "reachable", lastSeen: null, resources: [], instancesCapable: false,
 });
 
 describe("applyOrder", () => {

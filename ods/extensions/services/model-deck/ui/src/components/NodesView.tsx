@@ -743,9 +743,12 @@ function EngineFormPanel({
       <label>
         {labels.engineGpu}
         <select
-          value={form.gpuIndex ?? ""}
+          value={form.gpuIndices[0] ?? ""}
           onChange={(e) =>
-            setForm({ ...form, gpuIndex: e.target.value === "" ? null : Number(e.target.value) })
+            setForm({
+              ...form,
+              gpuIndices: e.target.value === "" ? [] : [Number(e.target.value)],
+            })
           }
         >
           <option value="">{labels.engineSelectGpu}</option>
