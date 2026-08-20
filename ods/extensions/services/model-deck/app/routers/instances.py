@@ -48,6 +48,17 @@ def _client(deck: dict, node: dict):
         raise HTTPException(status_code=503, detail=(
             f'node {node["id"]!r} is declared control: "instances" but a prerequisite is missing '
             '(address, credential)'))
+    # node_store._require_instances_prereqs is the WRITE-side twin of this
+    # check and refuses a POST/PUT that sets control:"instances" without a
+    # range — but that guard never runs over a raw nodes.json read at boot
+    # (a hand-edited file, or one written before this field existed), so a
+    # node can still reach here missing it. Without this, create_instance's
+    # own `node["instance_port_range"]` KeyErrors into a bare 500 instead of
+    # the same operator-facing 503 every other missing prerequisite gets.
+    if not node.get("instance_port_range"):
+        raise HTTPException(status_code=503, detail=(
+            f'node {node["id"]!r} is declared control: "instances" but a prerequisite is missing '
+            '(instance_port_range)'))
     return client
 
 
@@ -126,7 +137,15 @@ def remove_instance(node_id: str, resource: str, request: Request) -> dict:
     entry = _managed_entry(node, resource)
     key = node_key(node_id, resource)
     deck["hold_store"].hold(key, ttl_s=_HOLD_S)
-    _ship(deck, client, "remove", entry, "instance-remove-failed", node_id)
+    try:
+        _ship(deck, client, "remove", entry, "instance-remove-failed", node_id)
+    except HTTPException:
+        # The hold announced "this absence is ours, don't restore it" —
+        # but the teardown never shipped, so nothing is absent. Leaving the
+        # hold in place would silence the reconciler on a container that is
+        # still there for up to _HOLD_S with no actuator left watching it.
+        deck["hold_store"].release(key)
+        raise
     store.update(node_id, {"engines": [e for e in node.get("engines", []) if e["resource"] != resource]})
     deck["intent_store"].forget(key)
     deck["policy_store"].forget(resource)
@@ -154,7 +173,13 @@ def move_instance(node_id: str, resource: str, body: InstanceMove, request: Requ
         raise _shape_error(str(exc), "gpu_indices") from exc
     key = node_key(node_id, resource)
     deck["hold_store"].hold(key, ttl_s=_HOLD_S)
-    _ship(deck, client, "move", moved, "instance-move-failed", node_id)
+    try:
+        _ship(deck, client, "move", moved, "instance-move-failed", node_id)
+    except HTTPException:
+        # Same reasoning as remove: the hold only makes sense while an
+        # actuation that will make the key genuinely absent is in flight.
+        deck["hold_store"].release(key)
+        raise
     store.update(node_id, {"engines": [moved if e["resource"] == resource else e
                                        for e in node.get("engines", [])]})
     deck["intent_store"].forget(key)

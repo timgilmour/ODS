@@ -468,6 +468,26 @@ Six audit events, one per verb's success/failure pair:
   the tree under `<instances-dir>/data/<resource>/ComfyUI`, not an
   improvised permissions fix.
 
+**Responses mean queued, not done.** `201` (create) and `200` (remove,
+move) mean the declaration was written and the node-agent accepted the
+request — nothing more. The host-side instances-helper renders the compose
+file and actually runs `docker compose` seconds later, off the request
+path, and that step can still fail (a bad image pull, a port collision the
+declaration-time check didn't catch, a template error). Where to look when
+a create/remove/move doesn't show up: `<ctl>/instances.log` (the helper's
+own run log), `<ctl>/instance-status-<resource>.json` (also served as
+`GET /v1/node/instance/{resource}/status` on the node-agent — see
+[node-agent's README](../node-agent/README.md#engine-instances-inst-i1)),
+and the board itself: a failed create shows a declared resource whose card
+never answers.
+
+A **hipfire** instance is a special case of this: its container boots
+already serving `HIPFIRE_MODEL` (there is no separate "load" step), but
+`create` writes only the declaration and no intent (D-I1-1) — so with no
+intent record, its status reads `unmanaged`, not `idle` (`app/lifecycle.py`'s
+`derive_status`: observed loaded, no intent, "adopt candidate"), until the
+operator adopts it or parks/resumes it.
+
 ### Serving (node-addressed swap control)
 
 | Method | Path | Description |

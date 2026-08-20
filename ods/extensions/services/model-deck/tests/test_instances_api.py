@@ -70,6 +70,24 @@ def test_create_on_a_non_instances_node_is_503_naming_the_prereqs(tmp_path, monk
     # same content the brief's assertion intended.
     assert r.status_code == 503 and 'control: "instances"' in r.json()["detail"]
 
+def test_create_missing_port_range_is_503_not_a_keyerror_500(tmp_path, monkeypatch):
+    # node_store._require_instances_prereqs is the write-side gate and
+    # refuses a PATCH that sets control:"instances" without a range — so a
+    # node missing it can only exist via a raw nodes.json (hand-edited, or
+    # written before this field existed). NodeStore._load() re-reads the
+    # file on every call (no cache to invalidate), so writing straight to
+    # disk is enough; no explicit reload step needed.
+    app, deck = make_app(tmp_path, monkeypatch)
+    _instances_node(deck, _Recorder())
+    store = deck["node_store"]
+    data = json.loads(store._path.read_text())
+    for entry in data:
+        if entry["id"] == "local":
+            del entry["instance_port_range"]
+    store._path.write_text(json.dumps(data))
+    r = TestClient(app).post("/api/nodes/local/instances", json=BODY)
+    assert r.status_code == 503 and "instance_port_range" in r.json()["detail"]
+
 def test_remove_holds_ships_then_forgets_declaration_intent_policy(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch); rec = _Recorder(); _instances_node(deck, rec); c = TestClient(app)
     c.post("/api/nodes/local/instances", json=BODY)
@@ -81,6 +99,18 @@ def test_remove_holds_ships_then_forgets_declaration_intent_policy(tmp_path, mon
     assert "local/hipfire-1" not in deck["intent_store"].get()
     assert not any(e["resource"] == "hipfire-1" for e in deck["node_store"].get("local")["engines"])
     assert "hipfire-1" not in deck["policy_store"].get()
+
+def test_remove_failure_releases_the_hold(tmp_path, monkeypatch):
+    # A hold announces "this absence is ours, don't restore it" — but if
+    # the teardown never shipped, nothing became absent. Leaving the hold
+    # in place would silence the reconciler on a container that is still
+    # there for up to _HOLD_S with no actuator left watching it.
+    app, deck = make_app(tmp_path, monkeypatch); rec = _Recorder(); _instances_node(deck, rec); c = TestClient(app)
+    c.post("/api/nodes/local/instances", json=BODY)
+    rec.fail = EngineError("boom")
+    r = c.delete("/api/nodes/local/instances/hipfire-1")
+    assert r.status_code == 502
+    assert not deck["hold_store"].held("local/hipfire-1")
 
 def test_remove_refuses_an_unmanaged_declaration(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch); _instances_node(deck, _Recorder())

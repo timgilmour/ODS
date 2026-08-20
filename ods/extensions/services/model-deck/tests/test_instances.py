@@ -24,7 +24,12 @@ def test_check_observed_gpus_refuses_when_the_pool_is_unknown():
         check_observed_gpus([2], None)
 
 
-def test_next_resource_name_is_lowest_free_and_never_slot0():
+def test_next_resource_name_is_lowest_free():
+    # No "never slot0" case belongs here: "slot0" is the serving slot's own
+    # reserved OBSERVATION key, not a `{kind}-{n}` name this function could
+    # ever produce for any real kind (comfyui/hipfire/lemonade/sglang-omni)
+    # — see next_resource_name's docstring and app/engine_kinds.py's
+    # validate_engines, which is what actually refuses a declared "slot0".
     assert next_resource_name("hipfire", set()) == "hipfire-1"
     assert next_resource_name("hipfire", {"hipfire-1", "hipfire-3"}) == "hipfire-2"
 

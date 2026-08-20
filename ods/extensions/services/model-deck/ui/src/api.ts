@@ -29,7 +29,8 @@ export interface ExternalProc {
  *
  * `engine` and `gpu_index` are stamped uniformly on every entry regardless
  * of kind (app/state.py's World.snapshot: `obs["engine"] = kind` /
- * `obs["gpu_index"] = entry["gpu_index"]`, app/state.py:158-159). Every
+ * `obs["gpu_indices"] = gpu_indices_of(entry)` then `obs["gpu_index"] =
+ * min(claim)` — ONE producer of both spellings, app/state.py:182-189). Every
  * other field is that resource's declared KIND's own
  * `app.engine_kinds.ENGINE_KINDS[kind].observe()` shape — a union of every
  * kind's fields rather than a discriminated one, because `kind` is data
@@ -101,11 +102,13 @@ export interface World {
   tenants: Record<string, ResourceTenant>;
   externals: ExternalProc[];
   default_route: string | null;
-  /** resource -> declared GPU index (app/state.py's World.snapshot
-   * `"placement": {resource: entry["gpu_index"] ...}`) — redundant with
-   * each tenant's own `gpu_index` field; kept because it is still on the
-   * wire, even though `nodes.ts` reads `gpu_index` off the tenant directly. */
-  placement: Record<string, number>;
+  /** resource -> declared GPU indices, a LIST even for a single-GPU claim
+   * (app/state.py's World.snapshot `"placement": {resource:
+   * gpu_indices_of(entry) for resource, entry in declared.items()}`,
+   * app/state.py:206) — redundant with each tenant's own `gpu_indices`
+   * field; kept because it is still on the wire, even though `nodes.ts`
+   * reads `gpu_index`/`gpu_indices` off the tenant directly. */
+  placement: Record<string, number[]>;
   /** The REMOTE half of the same snapshot, keyed `<node>/<resource>`
    * (app/observe.py:31's `node_key`) — every engine DECLARED on a registry
    * entry other than the local one, merged in by

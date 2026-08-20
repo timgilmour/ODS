@@ -6,12 +6,15 @@ from app.engines import GuardError
 
 
 def next_resource_name(kind: str, taken: set[str]) -> str:
-    """The lowest-numbered `{kind}-{n}` (n >= 1) not already in `taken` and
-    never "slot0" — that name is reserved for the seeded, un-deck-managed
-    instance every kind ships with (E1's single triple), and a deck-created
-    resource must never collide with it."""
+    """The lowest-numbered `{kind}-{n}` (n >= 1) not already in `taken`.
+    "slot0" never enters this scheme at all — it is the serving-slot's own
+    reserved OBSERVATION key (a swap node's UI card id, `app/observe.py`'s
+    `slot_key` -> `f"{node_id}/slot0"`), never a `{kind}-{n}` name a create
+    call could produce; declaring an engine literally called "slot0" is
+    refused upstream at validation (`app/engine_kinds.py`'s
+    `validate_engines`, ~:324-348), not here."""
     n = 1
-    while f"{kind}-{n}" in taken or f"{kind}-{n}" == "slot0":
+    while f"{kind}-{n}" in taken:
         n += 1
     return f"{kind}-{n}"
 

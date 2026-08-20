@@ -18,7 +18,10 @@
               "local_capable": true,
               "human_verbs": [
                 "free"
-              ]
+              ],
+              "max_gpus": 1,
+              "instance": true,
+              "instance_env": {}
             },
             {
               "kind": "hipfire",
@@ -32,7 +35,17 @@
               "human_verbs": [
                 "park",
                 "resume"
-              ]
+              ],
+              "max_gpus": 1,
+              "instance": true,
+              "instance_env": {
+                "HIPFIRE_MODEL": {
+                  "required": true
+                },
+                "HIPFIRE_IDLE_TIMEOUT": {
+                  "required": false
+                }
+              }
             },
             {
               "kind": "lemonade",
@@ -52,7 +65,20 @@
               "human_verbs": [
                 "load",
                 "unload"
-              ]
+              ],
+              "max_gpus": null,
+              "instance": true,
+              "instance_env": {
+                "LEMONADE_CTX_SIZE": {
+                  "required": false
+                },
+                "LLAMA_ARG_TENSOR_SPLIT": {
+                  "required": false
+                },
+                "LLAMA_ARG_SPLIT_MODE": {
+                  "required": false
+                }
+              }
             },
             {
               "kind": "sglang-omni",
@@ -66,7 +92,10 @@
               "human_verbs": [
                 "load",
                 "unload"
-              ]
+              ],
+              "max_gpus": 1,
+              "instance": false,
+              "instance_env": {}
             }
           ]
         }

@@ -416,10 +416,6 @@ export const messages = {
     tone: "neutral",
     title: "requested — the node's instances-helper is creating it; the card fills in once the container answers",
   }),
-  gatewayStaged: (): Message => ({
-    tone: "neutral",
-    title: "gateway route staged in extra-routes.json; it applies at the next ODS gateway regeneration",
-  }),
 
   // Replaces engineParkAllowlistNote: consent is a per-entry declared flag
   // now (container_consent, validated in app/engine_kinds.py's
@@ -927,15 +923,16 @@ export const labels = {
   // never inferred: "swap" gets serving verbs and a board card with
   // controls, "none" is observe-only regardless of what data the row
   // carries.
-  nodeControlLabel: "Operate serving slot",
   nodeControlHint:
     "Off: observe only. On: the deck swaps/restores this node's serving slot.",
 
   // control PICKER (INST I1, Task 11 — replaces the swap/none checkbox
   // above with a three-way select now that _CONTROLS has a third member).
-  // nodeControlLabel/nodeControlHint above stay as they are: this is the
-  // field's own new label and its three option strings, not a replacement
-  // for the existing hint copy.
+  // nodeControlHint above stays as it is: this is the field's own new
+  // label and its three option strings, not a replacement for the existing
+  // hint copy. (The old checkbox's own label, "Operate serving slot", was
+  // deleted here as dead — the picker renders `nodeControl` as its label
+  // now.)
   nodeControl: "Control",
   nodeControlNone: "none",
   nodeControlSwap: "swap (serving slot)",
@@ -999,7 +996,6 @@ export const labels = {
   engineResource: "Resource name",
   engineKind: "Kind",
   engineGpu: "GPU",
-  engineSelectGpu: "select a GPU…",
   enginePinnedLabel: "Pinned",
   engineConsentLabel: "Allow the deck to stop/start this container",
   enginePriority: "Priority",
@@ -1038,7 +1034,6 @@ export const labels = {
   instanceEnvLabel: (name: string) => name,
   instancePort: (p: number) => `host port ${p}`,
   instanceGpusRequired: "select at least one GPU",
-  instanceTooManyGpus: (max: number) => `this kind allows at most ${max} GPU(s)`,
   instanceEnvRequired: (name: string) => `${name} is required`,
 
   // GpuStatsBlock (Task 4) — the GPU-Monitor-format stats row's own labels

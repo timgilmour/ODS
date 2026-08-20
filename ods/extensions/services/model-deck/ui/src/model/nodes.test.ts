@@ -88,9 +88,12 @@ function stateWith(
       tenants,
       externals: overrides.externals ?? [],
       default_route: null,
-      // Redundant with each tenant's own gpu_index (see api.ts's World.placement
-      // doc) — derived here so a fixture never has to state the same fact twice.
-      placement: Object.fromEntries(Object.entries(tenants).map(([r, t]) => [r, t.gpu_index])),
+      // Redundant with each tenant's own gpu_indices (see api.ts's
+      // World.placement doc, a LIST even for a single-GPU claim) — derived
+      // here so a fixture never has to state the same fact twice.
+      placement: Object.fromEntries(
+        Object.entries(tenants).map(([r, t]) => [r, t.gpu_indices ?? [t.gpu_index]]),
+      ),
       ...(overrides.remoteTenants ? { remote_tenants: overrides.remoteTenants } : {}),
     },
     // Every declared resource needs a policy row or tenantPlacement's
