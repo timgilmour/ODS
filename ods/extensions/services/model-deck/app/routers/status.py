@@ -69,6 +69,15 @@ def _nodes_block(deck: dict) -> list[dict]:
             # rebinds every actuation client live, from the registry, on
             # every call — there is no boot-time binding left to go stale.
             "control": entry["control"],
+            # The host port range reserved for this entry's instance
+            # containers (D-I1-3, INST I1) — a plain pass-through beside
+            # `control` above, off the same stored NodeStore entry
+            # (`node_store.py`'s `_ALLOWED`/`_PATCHABLE` carry it, validated
+            # by `_validate_port_range`). `.get`, not `[...]`: an entry
+            # whose control was never set to "instances" carries no such
+            # key at all, and `None` is the honest "unset" answer rather
+            # than a KeyError this block would otherwise have to guard.
+            "instance_port_range": entry.get("instance_port_range"),
             "status": "online" if entry["agent_kind"] == "local" else obs.get("status"),
             "last_seen": obs.get("last_seen"),
             # The local entry has no observer snapshot (it's never probed

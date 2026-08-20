@@ -25,6 +25,7 @@ export default function NodeCard({
   onChipClick,
   onOpenSettings,
   onRefresh,
+  onAddEngineHere,
 }: {
   node: DeckNode;
   world: World;
@@ -46,9 +47,28 @@ export default function NodeCard({
   onChipClick: (placement: Placement) => void;
   onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
+  /** The board's "+ add engine here" entry point (INST I1). Optional so
+   * Board can pass it unconditionally while THIS card decides whether it
+   * ever reaches a ResourcePanel: only when `node.instancesCapable`
+   * (declared control: "instances", nodes.ts's own doc) — a node this
+   * card's own registry entry never opened the instances surface on must
+   * never offer the button, regardless of what an individual GPU card's
+   * `unmanaged` flag says. */
+  onAddEngineHere?: (nodeId: string, gpuIndex: number) => void;
 }) {
   const unreachable = node.status === "unreachable";
   const age = humanizeAge(node.lastSeen);
+
+  // The per-card gate (this doc's own "regardless of what an individual GPU
+  // card's `unmanaged` flag says") — computed once here rather than inline
+  // in the .map below, and undefined (not a no-op arrow) when the node
+  // itself is not instances-capable, matching ResourcePanel's own "the
+  // affordance never appears without something behind it" contract for
+  // `onChipClick`/`onAddEngineHere`.
+  const addEngineHere =
+    node.instancesCapable && onAddEngineHere
+      ? (gpuIndex: number) => onAddEngineHere(node.id, gpuIndex)
+      : undefined;
 
   // Engine-level entry: no model in context, so the panel opens with the two
   // model-scoped tabs disabled. Rendered even while the node is unreachable
@@ -133,6 +153,7 @@ export default function NodeCard({
             onChipClick={onChipClick}
             onOpenSettings={onOpenSettings}
             onRefresh={onRefresh}
+            onAddEngineHere={addEngineHere}
           />
         ))}
       </div>

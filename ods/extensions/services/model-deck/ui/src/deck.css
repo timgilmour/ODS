@@ -2168,6 +2168,59 @@ button.danger {
   gap: var(--space);
 }
 
+/* ------------------------------------------------------- instances (INST I1) */
+/* Task 11 — the GPU checkbox group shared by EngineFormPanel/InstanceFormPanel/
+   EngineRow's Move picker, the managed-row "instance" badge, and the board's
+   "+ add engine here" entry point. */
+
+.engine-gpu-picker legend {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+/* Overrides .engine-form label's own flex-column rule above: a checkbox
+   group reads as a stack of "[x] GPU N — free/total" rows, not a single
+   column-flexed control the way a text/select field does. */
+.engine-gpu-picker label {
+  display: block;
+  flex-direction: unset;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.engine-gpu-picker input[type="checkbox"] {
+  margin-right: 0.4rem;
+}
+
+.engines-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space);
+}
+
+/* An INST I1 instance's row marker — same muted-chip tokens as `.ui-pill-off`
+   (--chip-unloaded-bg/fg), same reuse rationale `.unmanaged-tag` above states:
+   a second color pair for the same "nothing alarming here" meaning would be a
+   second thing to keep in sync across themes. */
+.instance-tag {
+  background: var(--chip-unloaded-bg);
+  color: var(--chip-unloaded-fg);
+}
+
+.engine-row-port {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+/* The board's "+ add engine here" affordance (ResourcePanel, INST I1) —
+   deliberately no color overrides: the bare `button` rule near the top of
+   this file already reads as a secondary action (bordered, panel
+   background), and this is exactly that, just sitting under the empty-
+   dropzone caption rather than in a form's action row. */
+.add-engine-here {
+  margin-top: calc(var(--space) / 2);
+}
+
 /* Idle-TTL affordances (engine form + PolicyModal rows, ui/src/model/
    messages.ts's ttlValue/ttlConsequence): same muted-caption idiom as
    .nodes-hint/.settings-section-hint above, sized down for sitting right

@@ -59,6 +59,13 @@ export default function App() {
   // Bumped on every poll tick and after any mutating action; EventsView
   // re-fetches its own window whenever this changes (see EventsView.tsx).
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  // The board's "+ add engine here" click (INST I1) — which node and GPU to
+  // pre-seed the Nodes screen's create-instance form with. Set by
+  // `onAddEngineHere` below and consumed exactly once by NodesView
+  // (`onSeedConsumed`), which is also what clears it — App holds it only
+  // long enough to hand it to the screen the operator is about to land on.
+  const [instanceSeed, setInstanceSeed] =
+    useState<{ nodeId: string; gpuIndex: number } | null>(null);
 
   // Fetches all three in parallel (Promise.all-style), but each leg's own
   // .then/.catch means a storage failure can never reject the whole call
@@ -156,6 +163,17 @@ export default function App() {
     setView(next);
     setDetailPlacement(null);
   }, []);
+
+  // The board's "+ add engine here" entry point (INST I1) — seeds the
+  // Nodes screen's create-instance form with the card the operator clicked
+  // and switches to it, in the same click. `showView` (above) already
+  // clears `detailPlacement`, which this wants too: the seed and an open
+  // model-detail drawer are two different reasons to be on the Nodes
+  // screen, and only one of them makes sense at a time.
+  const onAddEngineHere = useCallback((nodeId: string, gpuIndex: number) => {
+    setInstanceSeed({ nodeId, gpuIndex });
+    showView("nodes");
+  }, [showView]);
 
   // Poll every 3s; paused entirely while an apply confirmation modal (Deck's
   // SetStrip, SetBuilder's own preview, the policy editor, or the settings
@@ -296,6 +314,7 @@ export default function App() {
               onChipClick={setDetailPlacement}
               onOpenSettings={setSettingsTarget}
               onRefresh={refreshAll}
+              onAddEngineHere={onAddEngineHere}
             />
           )}
         </>
@@ -329,6 +348,8 @@ export default function App() {
           gpus={state?.world.gpus ?? []}
           policy={state?.policy ?? {}}
           onChanged={refreshAll}
+          instanceSeed={instanceSeed}
+          onSeedConsumed={() => setInstanceSeed(null)}
         />
       )}
 

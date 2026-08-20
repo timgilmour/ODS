@@ -65,6 +65,7 @@ export default function ResourcePanel({
   onChipClick,
   onOpenSettings,
   onRefresh,
+  onAddEngineHere,
 }: {
   resource: DeckResource;
   world: World;
@@ -96,6 +97,14 @@ export default function ResourcePanel({
   onChipClick?: (placement: Placement) => void;
   onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
+  /** The board's "+ add engine here" entry point (INST I1, App.tsx's
+   * `onAddEngineHere`) — optional so a card stays a plain unmanaged panel
+   * wherever no handler is threaded (NodeCard passes it only when
+   * `node.instancesCapable`, the same "the affordance never appears without
+   * something behind it" rule `onChipClick`'s own doc states just above).
+   * Called with THIS card's own GPU index, never a literal — see the
+   * button's own gate below for why that index is always non-null here. */
+  onAddEngineHere?: (gpuIndex: number) => void;
 }) {
   return (
     <Panel
@@ -116,7 +125,24 @@ export default function ResourcePanel({
       <Meter capacity={resource.capacity} />
 
       {resource.placements.length === 0 ? (
-        <div className="dropzone-empty">{labels.nothingPlaced}</div>
+        <div className="dropzone-empty">
+          {labels.nothingPlaced}
+          {/* INST I1's board entry point: only an UNMANAGED card (a
+              control-capable node's bare GPU, nothing declared on it —
+              nodes.ts's own `unmanaged` doc) with a real GPU index behind it
+              (never the swap node's index-less "Serving slot" fallback
+              card) and only when the caller actually threaded the callback
+              (NodeCard gates that on `node.instancesCapable`). */}
+          {resource.unmanaged && resource.gpuIndex !== null && onAddEngineHere && (
+            <button
+              type="button"
+              className="add-engine-here"
+              onClick={() => onAddEngineHere(resource.gpuIndex as number)}
+            >
+              {labels.addEngineHere}
+            </button>
+          )}
+        </div>
       ) : (
         resource.placements.map((p) => (
           <div key={p.id} className="resource-placement">

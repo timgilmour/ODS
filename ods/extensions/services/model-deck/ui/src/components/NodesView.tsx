@@ -2,11 +2,14 @@ import { useEffect, useState, type ChangeEvent } from "react";
 import {
   addEngine,
   bytesToGB,
+  createInstance,
   createNode,
   deleteNode,
   forgetEngine,
   getEngineKinds,
   listNodeRegistry,
+  moveInstance,
+  removeInstance,
   testNode,
   updateEngine,
   updateNode,
@@ -20,16 +23,31 @@ import {
 import {
   demandFor,
   emptyForm as emptyEngineForm,
+  engineGpus,
   formErrors,
   formForEntry as engineFormForEntry,
   idleReleaseFor,
   kindsFor,
+  maxGpusFor,
   setField as setEngineField,
   sortedEngines,
+  toggleGpu,
+  toggleIndex,
   toPayload as toEnginePayload,
   withKind,
   type EngineFormState,
 } from "../model/engineForm";
+import {
+  emptyInstanceForm,
+  instanceFormErrors,
+  instanceKindsFor,
+  sameClaim,
+  setInstanceEnv,
+  toggleInstanceGpu,
+  toInstancePayload,
+  withInstanceKind,
+  type InstanceFormState,
+} from "../model/instanceForm";
 import { labels, messages } from "../model/messages";
 import {
   emptyForm,
@@ -64,6 +82,8 @@ export default function NodesView({
   gpus,
   policy,
   onChanged,
+  instanceSeed,
+  onSeedConsumed,
 }: {
   nodes: DeckNodeEntry[];
   /** The Engines editor's GPU-picker source (spec §5: `/api/state`'s
@@ -87,10 +107,27 @@ export default function NodesView({
    * its engine declaration. */
   policy: PolicyMap;
   onChanged: () => void;
+  /** The board's "+ add engine here" click (App.tsx's `onAddEngineHere`),
+   * naming which node and GPU to open the create-instance form on. Selects
+   * that node in the rail below (the effect right after `selected`'s own
+   * declaration) so the operator lands on the right form without a second
+   * click, and is threaded down to that node's `EnginesSection`, which
+   * consumes it once and calls `onSeedConsumed` — see NodeForm's own prop
+   * doc for why "once per mount" already means "once per seed" here. */
+  instanceSeed: { nodeId: string; gpuIndex: number } | null;
+  onSeedConsumed: () => void;
 }) {
   const [selected, setSelected] = useState<string | "add" | null>(null);
   const remotes = nodes.filter((n) => n.agent_kind !== "local");
   const entry = nodes.find((n) => n.id === selected) ?? null;
+
+  // Fires whenever a fresh seed arrives (App sets `instanceSeed` and calls
+  // `showView("nodes")` in the same click) — selects the seed's node in the
+  // rail so EnginesSection, below, mounts already showing that node's form
+  // and can consume the seed itself.
+  useEffect(() => {
+    if (instanceSeed) setSelected(instanceSeed.nodeId);
+  }, [instanceSeed]);
 
   return (
     <Panel className="nodes-view" title={labels.nodes}>
@@ -151,6 +188,8 @@ export default function NodesView({
                 onChanged();
               }}
               onEnginesChanged={onChanged}
+              instanceSeed={instanceSeed}
+              onSeedConsumed={onSeedConsumed}
             />
           ) : entry ? (
             <>
@@ -172,6 +211,8 @@ export default function NodesView({
                   onChanged();
                 }}
                 onEnginesChanged={onChanged}
+                instanceSeed={instanceSeed}
+                onSeedConsumed={onSeedConsumed}
               />
             </>
           ) : null}
@@ -214,6 +255,8 @@ function NodeForm({
   onDone,
   onDeleted,
   onEnginesChanged,
+  instanceSeed,
+  onSeedConsumed,
 }: {
   mode: "add" | "edit";
   entry: DeckNodeEntry | null;
@@ -226,6 +269,13 @@ function NodeForm({
    * badges included) catch up immediately rather than waiting for the next
    * poll tick. */
   onEnginesChanged: () => void;
+  /** Threaded straight through to `EnginesSection` below — see NodesView's
+   * own doc for the seed's origin and lifecycle. Unused in "add" mode
+   * (EnginesSection never mounts for a node that does not exist yet), but
+   * accepted unconditionally so both NodeForm call sites in NodesView stay
+   * symmetrical. */
+  instanceSeed: { nodeId: string; gpuIndex: number } | null;
+  onSeedConsumed: () => void;
 }) {
   // Seeded ONCE per mount. The parent keys this component by selection (see
   // NodesView above), so switching rows unmounts/remounts rather than
@@ -353,20 +403,64 @@ function NodeForm({
         <span className="nodes-caption">{messages.nodeCredentialCaption().title}</span>
       </label>
       <label>
-        {labels.nodeControlLabel}
-        <input
-          type="checkbox"
-          checked={form.control === "swap"}
-          disabled={agentKind === "local"}
+        {labels.nodeControl}
+        <select
+          value={form.control}
           onChange={(e) => {
-            setForm({ ...form, control: e.target.checked ? "swap" : "none" });
+            setForm({ ...form, control: e.target.value as NodeFormState["control"] });
             setTestResult(null);
           }}
-        />
+        >
+          <option value="none">{labels.nodeControlNone}</option>
+          {/* Never removed from the list — app/node_store.py:_validate
+              refuses control:"swap" for agent_kind:"local" unconditionally
+              (G1 revisits), so this option is disabled rather than absent
+              here, the same "never offer a kind the write gate would
+              refuse" posture kindsFor's own doc states, applied via the
+              option's own `disabled` rather than a second picker. */}
+          <option value="swap" disabled={agentKind === "local"}>{labels.nodeControlSwap}</option>
+          {/* UNLIKE "swap", control: "instances" has no categorical local
+              refusal (app/node_store.py's _require_instances_prereqs' own
+              docstring: "Local or remote alike; the protocol is
+              node-generic") — offered unconditionally. */}
+          <option value="instances">{labels.nodeControlInstances}</option>
+        </select>
         <span className="nodes-caption">
-          {agentKind === "local" ? labels.nodeControlLocalRefused : labels.nodeControlHint}
+          {agentKind === "local" && form.control === "swap"
+            ? labels.nodeControlLocalRefused
+            : labels.nodeControlHint}
         </span>
       </label>
+      {form.control === "instances" && (
+        <>
+          <label>
+            {labels.nodeInstancePortStart}
+            <input
+              type="number"
+              min={1024}
+              max={65535}
+              value={form.instancePortStart}
+              onChange={(e) => {
+                setForm({ ...form, instancePortStart: e.target.value });
+                setTestResult(null);
+              }}
+            />
+          </label>
+          <label>
+            {labels.nodeInstancePortEnd}
+            <input
+              type="number"
+              min={1024}
+              max={65535}
+              value={form.instancePortEnd}
+              onChange={(e) => {
+                setForm({ ...form, instancePortEnd: e.target.value });
+                setTestResult(null);
+              }}
+            />
+          </label>
+        </>
+      )}
 
       <div className="nodes-form-actions">
         <button
@@ -434,6 +528,8 @@ function NodeForm({
           gpus={gpus}
           policy={policy}
           onChanged={onEnginesChanged}
+          instanceSeed={instanceSeed}
+          onSeedConsumed={onSeedConsumed}
         />
       )}
     </div>
@@ -454,6 +550,8 @@ function EnginesSection({
   gpus,
   policy,
   onChanged,
+  instanceSeed,
+  onSeedConsumed,
 }: {
   /** Which registry entry this instance edits — "local" or any node-agent
    * id, the same `id` the outer rail selected (NodesView's own `entry.id`).
@@ -472,17 +570,41 @@ function EnginesSection({
   gpus: Gpu[];
   policy: PolicyMap;
   onChanged: () => void;
+  /** The board's "+ add engine here" seed (NodesView's own doc), consumed
+   * exactly once below when it names THIS node — a stale seed surviving a
+   * rail switch to a DIFFERENT node must never open an instance form here. */
+  instanceSeed: { nodeId: string; gpuIndex: number } | null;
+  onSeedConsumed: () => void;
 }) {
   const [kinds, setKinds] = useState<EngineKindsResponse | null>(null);
   const [engines, setEngines] = useState<DeclaredEngine[] | null>(null);
+  // The registry entry's own declared `control` (app/node_store.py
+  // _CONTROLS) — read off the SAME `listNodeRegistry()` fetch `engines`
+  // comes from, so "declared control: instances" and "this node's own
+  // engines[]" can never describe two different polls. Gates the
+  // "+ Create instance" button below: instances are a free-standing verb
+  // this node's control must actually support, not merely "some engine
+  // exists to edit".
+  const [control, setControl] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | "add" | null>(null);
+  const [editing, setEditing] =
+    useState<string | "add" | { mode: "instance"; gpuIndex: number | null } | null>(null);
+  // messages.instanceRequested()'s banner (D-I1-1: create writes a
+  // declaration, no intent — the operator's first load/adopt is a SEPARATE
+  // click) — shown once after a successful create, since InstanceFormPanel
+  // itself unmounts via afterCreate's `setEditing(null)` and cannot keep
+  // showing its own banner. Cleared on the next edit rather than left to
+  // stick around describing a request that already resolved one way or
+  // the other.
+  const [notice, setNotice] = useState<string | null>(null);
 
   function reload() {
     Promise.all([getEngineKinds(), listNodeRegistry()]).then(
       ([k, { nodes: registry }]) => {
+        const own = registry.find((n) => n.id === nodeId);
         setKinds(k);
-        setEngines(registry.find((n) => n.id === nodeId)?.engines ?? []);
+        setEngines(own?.engines ?? []);
+        setControl(own?.control ?? null);
         setLoadError(null);
       },
       (err) => setLoadError(err instanceof Error ? err.message : String(err)),
@@ -496,6 +618,27 @@ function EnginesSection({
   // the dependency (rather than an empty array) keeps that true by the
   // effect's OWN contract instead of by a coincidence one level up.
   useEffect(reload, [nodeId]);
+
+  // Consumes the board's "+ add engine here" seed exactly once per mount.
+  // An EMPTY dependency array is deliberate, same "once per mount already
+  // means once per seed" reasoning `reload`'s own comment states just
+  // above: NodeForm remounts this section on every rail switch, so a seed
+  // naming a DIFFERENT node never reaches an already-mounted instance of
+  // this one, and a seed naming THIS node is consumed the one time this
+  // effect can ever see it.
+  // Empty deps deliberately, not `[instanceSeed, nodeId, onSeedConsumed]` —
+  // see the comment above: this must run exactly once per mount, not
+  // re-fire on every later `instanceSeed` change (App clears it right back
+  // to null via `onSeedConsumed`, which would otherwise immediately
+  // re-trigger this effect's own body against a now-null seed).
+  // oxlint-disable react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (instanceSeed?.nodeId === nodeId) {
+      setEditing({ mode: "instance", gpuIndex: instanceSeed.gpuIndex });
+      onSeedConsumed();
+    }
+  }, []);
+  // oxlint-enable react-hooks/exhaustive-deps
 
   if (loadError) {
     return (
@@ -518,6 +661,14 @@ function EnginesSection({
 
   function afterMutate() {
     setEditing(null);
+    setNotice(null);
+    reload();
+    onChanged();
+  }
+
+  function afterCreate() {
+    setEditing(null);
+    setNotice(messages.instanceRequested().title);
     reload();
     onChanged();
   }
@@ -525,12 +676,10 @@ function EnginesSection({
   return (
     <div className="engines-section">
       <h3>{labels.engines}</h3>
+      {notice && <Banner message={messages.instanceRequested()} onDismiss={() => setNotice(null)} />}
       {sorted.length === 0 && editing === null && (
         <div className="engines-empty">
           <p>{messages.enginesEmpty().title}</p>
-          <button type="button" onClick={() => setEditing("add")}>
-            {labels.addEngine}
-          </button>
         </div>
       )}
       {sorted.length > 0 && (
@@ -540,6 +689,8 @@ function EnginesSection({
               key={e.resource}
               nodeId={nodeId}
               engine={e}
+              kinds={kinds}
+              gpus={gpus}
               pinned={policy[e.resource]?.pinned ?? e.policy_defaults.pinned}
               onEdit={() => setEditing(e.resource)}
               onForgotten={afterMutate}
@@ -547,54 +698,108 @@ function EnginesSection({
           ))}
         </ul>
       )}
-      {sorted.length > 0 && editing === null && (
-        <button type="button" onClick={() => setEditing("add")}>
-          {labels.addEngine}
-        </button>
+      {editing === null && (
+        <div className="engines-section-actions">
+          <button type="button" onClick={() => setEditing("add")}>
+            {labels.addEngine}
+          </button>
+          {/* Only when this node's own registry entry declares control:
+              "instances" — a node that merely happens to have engines
+              declared (control "none"/"swap") gets no free-standing
+              instance-create surface at all, same as the board's own
+              "+ add engine here" gate (NodeCard's `node.instancesCapable`). */}
+          {control === "instances" && (
+            <button
+              type="button"
+              onClick={() => setEditing({ mode: "instance", gpuIndex: null })}
+            >
+              {labels.createInstance}
+            </button>
+          )}
+        </div>
       )}
       {editing !== null && (
-        <EngineFormPanel
-          // Keyed on what's being edited — same "start a new buffer, don't
-          // inherit the last one" rule NodeForm's own key={entry.id} states
-          // above, applied one level down.
-          key={editing}
-          mode={editing === "add" ? "add" : "edit"}
-          entry={editing === "add" ? null : (sorted.find((e) => e.resource === editing) ?? null)}
-          nodeId={nodeId}
-          isRemote={isRemote}
-          kinds={kinds}
-          gpus={gpus}
-          onDone={afterMutate}
-          onCancel={() => setEditing(null)}
-        />
+        typeof editing === "string" ? (
+          <EngineFormPanel
+            // Keyed on what's being edited — same "start a new buffer, don't
+            // inherit the last one" rule NodeForm's own key={entry.id} states
+            // above, applied one level down.
+            key={editing}
+            mode={editing === "add" ? "add" : "edit"}
+            entry={editing === "add" ? null : (sorted.find((e) => e.resource === editing) ?? null)}
+            nodeId={nodeId}
+            isRemote={isRemote}
+            kinds={kinds}
+            gpus={gpus}
+            onDone={afterMutate}
+            onCancel={() => setEditing(null)}
+          />
+        ) : (
+          <InstanceFormPanel
+            key={`instance:${editing.gpuIndex}`}
+            nodeId={nodeId}
+            isRemote={isRemote}
+            kinds={kinds}
+            gpus={gpus}
+            seedGpu={editing.gpuIndex}
+            onDone={afterCreate}
+            onCancel={() => setEditing(null)}
+          />
+        )
       )}
     </div>
   );
 }
 
-/** One declared engine's row: identity + a pinned badge + Edit + an armed
- * Forget. Forget reuses the deck's one armed-action machinery
- * (`isArmedFor`/`ArmedButton`, model/armed.ts) rather than inventing a
- * second inline arm/confirm — same pattern PlacementActions.tsx's Force
- * park and SparkSwap.tsx's Force swap use, applied per-row here since each
- * row is its own independent guarded action. */
+/** One declared engine's row: identity + a pinned badge + either Edit/Forget
+ * (a plain declared engine) or Move/Remove (`engine.managed` — an INST I1
+ * instance). Every guarded action reuses the deck's one armed-action
+ * machinery (`isArmedFor`/`ArmedButton`, model/armed.ts) rather than
+ * inventing an inline arm/confirm — same pattern PlacementActions.tsx's
+ * Force park and SparkSwap.tsx's Force swap use. Move and Remove are two
+ * INDEPENDENT guarded verbs that can both sit on screen at once (Remove is
+ * always visible; Move's picker opens beside it), so each gets its OWN
+ * refusalSeq/armedForSeq identity pair — sharing one would let arming
+ * Remove read as Move already being armed too, the exact cross-button
+ * version of the stale-arming bug armed.ts's own docstring describes. */
 function EngineRow({
   nodeId,
   engine,
   pinned,
+  kinds,
+  gpus,
   onEdit,
   onForgotten,
 }: {
   nodeId: string;
   engine: DeclaredEngine;
   pinned: boolean;
+  /** For `maxGpusFor` — bounds the Move picker's checkbox group to this
+   * engine's own kind, same source EngineFormPanel's GPU picker reads. */
+  kinds: EngineKindsResponse;
+  /** The Move picker's own checkbox source — the same board GPU list
+   * EngineFormPanel/InstanceFormPanel already read from `EnginesSection`. */
+  gpus: Gpu[];
   onEdit: () => void;
   onForgotten: () => void;
 }) {
-  const [refusalSeq, setRefusalSeq] = useState(0);
-  const [armedForSeq, setArmedForSeq] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const armed = isArmedFor(armedForSeq, refusalSeq);
+
+  const [forgetRefusalSeq, setForgetRefusalSeq] = useState(0);
+  const [forgetArmedForSeq, setForgetArmedForSeq] = useState<number | null>(null);
+  const forgetArmed = isArmedFor(forgetArmedForSeq, forgetRefusalSeq);
+
+  const [removeRefusalSeq, setRemoveRefusalSeq] = useState(0);
+  const [removeArmedForSeq, setRemoveArmedForSeq] = useState<number | null>(null);
+  const removeArmed = isArmedFor(removeArmedForSeq, removeRefusalSeq);
+
+  const [moving, setMoving] = useState(false);
+  const [target, setTarget] = useState<number[]>(() => engineGpus(engine));
+  const [moveRefusalSeq, setMoveRefusalSeq] = useState(0);
+  const [moveArmedForSeq, setMoveArmedForSeq] = useState<number | null>(null);
+  const moveArmed = isArmedFor(moveArmedForSeq, moveRefusalSeq);
+
+  const max = maxGpusFor(kinds.kinds, engine.kind);
 
   async function doForget() {
     try {
@@ -606,7 +811,34 @@ function EngineRow({
       onForgotten();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setRefusalSeq((n) => n + 1);
+      setForgetRefusalSeq((n) => n + 1);
+    }
+  }
+
+  async function doRemove() {
+    try {
+      // DELETE /api/nodes/{node_id}/instances/{resource} (app/routers/
+      // instances.py): UNLIKE forgetEngine above, this STOPS AND DELETES
+      // the running container (D-I1-1 — an instance is deck-managed end to
+      // end) — messages.removeInstanceConfirm() says so while armed, below.
+      await removeInstance(nodeId, engine.resource);
+      onForgotten();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setRemoveRefusalSeq((n) => n + 1);
+    }
+  }
+
+  async function doMove() {
+    try {
+      // POST /api/nodes/{node_id}/instances/{resource}/move (app/routers/
+      // instances.py): the honest two-phase (D-I1-1) — the container is
+      // removed, then re-created on `target`; nothing migrates live.
+      await moveInstance(nodeId, engine.resource, target);
+      onForgotten();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setMoveRefusalSeq((n) => n + 1);
     }
   }
 
@@ -614,7 +846,13 @@ function EngineRow({
     <li className="engine-row">
       <span className="engine-row-resource">{engine.resource}</span>
       <span className="engine-row-kind">{engine.kind}</span>
-      <span className="engine-row-gpu">{`GPU ${engine.gpu_index}`}</span>
+      <span className="engine-row-gpu">{`GPU ${engineGpus(engine).join("+")}`}</span>
+      {engine.managed && (
+        <span className="ui-pill instance-tag">{labels.instanceTag}</span>
+      )}
+      {engine.managed && engine.port !== undefined && (
+        <span className="engine-row-port">{labels.instancePort(engine.port)}</span>
+      )}
       {pinned && (
         <span className="ui-pill" title={labels.pinnedTitle}>
           {labels.pinned}
@@ -624,18 +862,185 @@ function EngineRow({
         <Banner message={messages.guardRefused(error)} onDismiss={() => setError(null)} />
       )}
       <div className="engine-row-actions">
-        <button type="button" onClick={onEdit}>
-          {labels.editEngine}
-        </button>
-        <ArmedButton
-          label={labels.forgetEngine}
-          armed={armed}
-          onArm={() => setArmedForSeq(refusalSeq)}
-          onConfirm={doForget}
-        />
-        {armed && <span className="engine-caption">{messages.forgetEngineConfirm().title}</span>}
+        {engine.managed ? (
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setMoving((m) => !m);
+                setTarget(engineGpus(engine));
+              }}
+            >
+              {labels.moveInstance}
+            </button>
+            {moving && (
+              <>
+                <fieldset className="engine-gpu-picker">
+                  <legend>{labels.engineGpus}</legend>
+                  {gpus.map((g) => (
+                    <label key={g.index}>
+                      <input
+                        type="checkbox"
+                        checked={target.includes(g.index)}
+                        onChange={() => setTarget(toggleIndex(target, g.index, max))}
+                      />
+                      {`GPU ${g.index} — ${bytesToGB(g.free)} / ${bytesToGB(g.total)} GB free`}
+                    </label>
+                  ))}
+                </fieldset>
+                <ArmedButton
+                  label={labels.moveInstance}
+                  armed={moveArmed}
+                  disabled={target.length === 0 || sameClaim(target, engineGpus(engine))}
+                  onArm={() => setMoveArmedForSeq(moveRefusalSeq)}
+                  onConfirm={doMove}
+                />
+                {moveArmed && (
+                  <span className="engine-caption">{messages.moveInstanceConfirm(target).title}</span>
+                )}
+              </>
+            )}
+            <ArmedButton
+              label={labels.removeInstance}
+              armed={removeArmed}
+              onArm={() => setRemoveArmedForSeq(removeRefusalSeq)}
+              onConfirm={doRemove}
+            />
+            {removeArmed && (
+              <span className="engine-caption">{messages.removeInstanceConfirm().title}</span>
+            )}
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={onEdit}>
+              {labels.editEngine}
+            </button>
+            <ArmedButton
+              label={labels.forgetEngine}
+              armed={forgetArmed}
+              onArm={() => setForgetArmedForSeq(forgetRefusalSeq)}
+              onConfirm={doForget}
+            />
+            {forgetArmed && (
+              <span className="engine-caption">{messages.forgetEngineConfirm().title}</span>
+            )}
+          </>
+        )}
       </div>
     </li>
+  );
+}
+
+/** The Create-instance sub-form (INST I1) — sibling to `EngineFormPanel`
+ * below, over the free-standing instances route rather than the
+ * declared-engines CRUD: its own kind filter (`instanceKindsFor`, only
+ * kinds `instance: true` marks), its own env buffer (`EngineKindDef.
+ * instance_env`, not `connection`), and no `resource` field at all — the
+ * node's instances-helper names the container, the operator never types a
+ * resource name for one. */
+function InstanceFormPanel({
+  nodeId,
+  isRemote,
+  kinds,
+  gpus,
+  seedGpu,
+  onDone,
+  onCancel,
+}: {
+  nodeId: string;
+  isRemote: boolean;
+  kinds: EngineKindsResponse;
+  gpus: Gpu[];
+  /** The board card the operator clicked "+ Create instance"/"+ add engine
+   * here" from, or `null` for the section's own "+ Create instance" button
+   * (no GPU pre-picked). Seeds the form's starting claim only — the
+   * operator can still change it before saving. */
+  seedGpu: number | null;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const available = instanceKindsFor(kinds, isRemote);
+  // Seeded once per mount, same rationale as EngineFormPanel's own `form`
+  // state below — the parent keys this by `editing`, so a different target
+  // remounts rather than reusing this instance's buffer.
+  const [form, setForm] = useState<InstanceFormState>(
+    emptyInstanceForm(kinds, available[0]?.kind ?? "", seedGpu),
+  );
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const errors = instanceFormErrors(form);
+  const max = maxGpusFor(kinds.kinds, form.kind);
+
+  async function save() {
+    setSaveError(null);
+    try {
+      // POST /api/nodes/{node_id}/instances (app/routers/instances.py's
+      // create_instance): 201 = declared AND queued at the node's
+      // instances-helper; the container appears on the board once it
+      // answers (messages.instanceRequested(), shown by EnginesSection
+      // after `onDone` below resolves).
+      await createInstance(nodeId, toInstancePayload(form));
+      onDone();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className="engine-form instance-form">
+      <label>
+        {labels.engineKind}
+        <select
+          value={form.kind}
+          onChange={(e) => setForm(withInstanceKind(form, kinds, e.target.value))}
+        >
+          {available.map((k) => (
+            <option key={k.kind} value={k.kind}>
+              {k.kind}
+            </option>
+          ))}
+        </select>
+      </label>
+      <fieldset className="engine-gpu-picker">
+        <legend>{labels.engineGpus}</legend>
+        {gpus.map((g) => (
+          <label key={g.index}>
+            <input
+              type="checkbox"
+              checked={form.gpuIndices.includes(g.index)}
+              onChange={() => setForm(toggleInstanceGpu(form, g.index, max))}
+            />
+            {`GPU ${g.index} — ${bytesToGB(g.free)} / ${bytesToGB(g.total)} GB free`}
+          </label>
+        ))}
+      </fieldset>
+      {Object.keys(form.env).map((name) => (
+        <label key={name}>
+          {labels.instanceEnvLabel(name)}
+          {form.requiredEnv.includes(name) ? " *" : ""}
+          <input
+            value={form.env[name]}
+            onChange={(e) => setForm(setInstanceEnv(form, name, e.target.value))}
+          />
+        </label>
+      ))}
+      {saveError && (
+        <Banner message={messages.guardRefused(saveError)} onDismiss={() => setSaveError(null)} />
+      )}
+      <div className="engine-form-actions">
+        <button type="button" onClick={onCancel}>
+          {labels.cancel}
+        </button>
+        <button
+          type="button"
+          className="primary"
+          disabled={errors.length > 0}
+          onClick={save}
+          title={errors.join("; ")}
+        >
+          {labels.createInstance}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -740,25 +1145,29 @@ function EngineFormPanel({
           />
         </label>
       ))}
-      <label>
-        {labels.engineGpu}
-        <select
-          value={form.gpuIndices[0] ?? ""}
-          onChange={(e) =>
-            setForm({
-              ...form,
-              gpuIndices: e.target.value === "" ? [] : [Number(e.target.value)],
-            })
-          }
-        >
-          <option value="">{labels.engineSelectGpu}</option>
-          {gpus.map((g) => (
-            <option key={g.index} value={g.index}>
-              {`GPU ${g.index} — ${bytesToGB(g.free)} / ${bytesToGB(g.total)} GB free`}
-            </option>
-          ))}
-        </select>
-      </label>
+      <fieldset className="engine-gpu-picker">
+        <legend>{labels.engineGpus}</legend>
+        {/* CONTROLLER RULING (Task 10 review landmine): the single-GPU
+            <select> this replaces wrote ONLY `gpuIndices[0]` on save,
+            silently truncating a multi-GPU declared engine's claim (edit an
+            entry with gpu_indices [2,3], and Save would ship [2] alone).
+            `toggleGpu` with `max === 1` REPLACES the whole claim (its own
+            doc in engineForm.ts), so a single-GPU kind's picker still
+            behaves like a radio group — the cap comes from the descriptor,
+            never a literal here. */}
+        {gpus.map((g) => (
+          <label key={g.index}>
+            <input
+              type="checkbox"
+              checked={form.gpuIndices.includes(g.index)}
+              onChange={() =>
+                setForm(toggleGpu(form, g.index, maxGpusFor(kinds.kinds, form.kind)))
+              }
+            />
+            {`GPU ${g.index} — ${bytesToGB(g.free)} / ${bytesToGB(g.total)} GB free`}
+          </label>
+        ))}
+      </fieldset>
       <label>
         <input
           type="checkbox"

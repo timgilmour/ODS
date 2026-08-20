@@ -4,6 +4,7 @@ import {
   emptyInstanceForm,
   instanceFormErrors,
   instanceKindsFor,
+  sameClaim,
   setInstanceEnv,
   toInstancePayload,
   toggleInstanceGpu,
@@ -65,5 +66,12 @@ describe("instanceForm", () => {
     const f = setInstanceEnv(emptyInstanceForm(KINDS, "hipfire", 4), "HIPFIRE_MODEL", "qwen3.8:27b");
     expect(instanceFormErrors(f)).toEqual([]);
     expect(toInstancePayload(f)).toEqual({ kind: "hipfire", gpu_indices: [4], env: { HIPFIRE_MODEL: "qwen3.8:27b" } });
+  });
+
+  it("sameClaim ignores order but not membership", () => {
+    expect(sameClaim([2, 3], [3, 2])).toBe(true);
+    expect(sameClaim([2, 3], [2, 4])).toBe(false);
+    expect(sameClaim([2, 3], [2])).toBe(false);
+    expect(sameClaim([], [])).toBe(true);
   });
 });

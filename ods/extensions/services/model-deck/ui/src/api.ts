@@ -259,6 +259,19 @@ export interface DeckNodeEntry {
    * are observe-only regardless of what data they carry — declared, never
    * inferred. */
   control: "none" | "swap" | "instances";
+  /** The host port range reserved for this entry's instance containers
+   * (D-I1-3) — the same field `NodeRegistryEntry.instance_port_range`
+   * documents, passed through by this producer too
+   * (app/routers/status.py's `_nodes_block`, which copies it beside
+   * `control` off the same stored NodeStore entry). Optional so every
+   * existing `DeckNodeEntry` fixture in this repo (pre-INST-I1) still
+   * compiles unchanged — same posture `StateResponse.nodes` itself takes.
+   * `null`/absent both mean "unset": every non-"instances" entry, and an
+   * "instances" entry that has not had one assigned yet
+   * (`_require_instances_prereqs` refuses saving control: "instances"
+   * without one, but the field can still be read before that save
+   * completes). */
+  instance_port_range?: { start: number; end: number } | null;
   status: NodeAgentStatus;
   last_seen: string | null;
   gpus: NodeGpu[] | null;
@@ -955,6 +968,8 @@ export interface NodeRegistryEntry {
 export function createNode(body: {
   id: string; label: string; address: string;
   serving_address?: string | null; credential?: string;
+  control?: "none" | "swap" | "instances";
+  instance_port_range?: { start: number; end: number };
 }): Promise<NodeRegistryEntry> {
   return request<NodeRegistryEntry>("/api/nodes", {
     method: "POST",
@@ -966,6 +981,8 @@ export function createNode(body: {
 export function updateNode(id: string, body: {
   label?: string; address?: string; serving_address?: string | null;
   credential?: string;
+  control?: "none" | "swap" | "instances";
+  instance_port_range?: { start: number; end: number } | null;
 }): Promise<NodeRegistryEntry> {
   return request<NodeRegistryEntry>(`/api/nodes/${encodeURIComponent(id)}`, {
     method: "PUT",

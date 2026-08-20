@@ -108,6 +108,22 @@ export function instanceFormErrors(form: InstanceFormState): string[] {
   return errors;
 }
 
+/** Whether two GPU claims name the same set, order irrelevant — the Move
+ * button's disable rule (CONTROLLER RULING, `NodesView.tsx`'s `EngineRow`):
+ * re-declaring a container on the GPUs it already runs on is a no-op the row
+ * must refuse before it ever reaches `moveInstance`, same as
+ * `instanceFormErrors`' empty-claim check refuses submitting nothing at all.
+ * Compares SORTED copies rather than assuming array order already agrees —
+ * both `engineGpus` (engineForm.ts, the current claim) and this module's own
+ * `toggleInstanceGpu`/engineForm.ts's `toggleIndex` keep their accumulator
+ * sorted, but a caller building `target` some other way (a picker seeded
+ * directly from the row, say) should not have to replicate that. */
+export function sameClaim(a: number[], b: number[]): boolean {
+  const sa = [...a].sort((x, y) => x - y);
+  const sb = [...b].sort((x, y) => x - y);
+  return sa.length === sb.length && sa.every((v, i) => v === sb[i]);
+}
+
 /** The POST /api/nodes/{id}/instances body — exactly `InstanceCreateBody`'s
  * shape (app/routers/instances.py's `InstanceCreate`). Empty optional env
  * values are OMITTED, never sent as `""`: `validate_engines`' env loop

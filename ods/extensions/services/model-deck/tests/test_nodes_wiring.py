@@ -102,6 +102,27 @@ def test_nodes_block_shape_without_observer(monkeypatch):
     # entry) — the env seed stamps "swap" here because a credential is set.
     assert nodes["local"]["control"] == "none"
     assert nodes["sparky"]["control"] == "swap"
+    # INST I1 T11: instance_port_range rides beside control, straight off
+    # the same stored entry (app/routers/status.py's _nodes_block) — None
+    # for both here since neither entry has one set yet.
+    assert nodes["local"]["instance_port_range"] is None
+    assert nodes["sparky"]["instance_port_range"] is None
+
+
+def test_nodes_block_carries_the_instance_port_range_when_set(monkeypatch):
+    """The pass-through side of the same field: once an entry has one on
+    file (app/node_store.py's _validate_port_range shape), /api/state's
+    nodes block reports it verbatim rather than dropping it the way this
+    block used to for every field NodeRegistryEntry (GET /api/nodes) carried
+    but _nodes_block did not yet copy."""
+    app = _app(monkeypatch, MODEL_DECK_NODE_LABEL="autarch")
+    app.state.deck["node_store"].update(
+        "local", {"instance_port_range": {"start": 11500, "end": 11509}})
+
+    with TestClient(app) as c:
+        nodes = {n["id"]: n for n in c.get("/api/state").json()["nodes"]}
+
+    assert nodes["local"]["instance_port_range"] == {"start": 11500, "end": 11509}
 
 
 class _FakeNodeObserver:

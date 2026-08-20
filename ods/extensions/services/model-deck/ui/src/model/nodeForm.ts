@@ -29,14 +29,26 @@ export interface NodeFormState {
   servingAddress: string;
   credential: string;
   /** Declared operability (app/node_store.py _CONTROLS) — see
-   * DeckNodeEntry.control in api.ts. Widened to include "instances" (INST
-   * I1) purely so this type keeps mirroring the wire's; the add/edit form
-   * itself gains no "instances" UI here — that is Task 11+'s to build. */
+   * DeckNodeEntry.control in api.ts. "instances" (INST I1) now has its own
+   * UI here — the port-range fields immediately below — built in Task 11. */
   control: "none" | "swap" | "instances";
+  /** String buffers for `control: "instances"`' port-range prerequisite
+   * (app/node_store.py's `_require_instances_prereqs`, :311-322) — plain
+   * text inputs, not numbers, so an in-progress or invalid edit ("11" typed
+   * so far) can sit on screen without being silently coerced to 0 the way a
+   * bare `<input type="number">` value would be. Empty means "unset",
+   * exactly like `NodeFormState`'s other optional text fields
+   * (servingAddress). `portRangeOf`/`parsedPort` below are the only readers
+   * that turn these into the wire's `{start, end}` ints. */
+  instancePortStart: string;
+  instancePortEnd: string;
 }
 
 export function emptyForm(): NodeFormState {
-  return { id: "", label: "", address: "", servingAddress: "", credential: "", control: "none" };
+  return {
+    id: "", label: "", address: "", servingAddress: "", credential: "", control: "none",
+    instancePortStart: "", instancePortEnd: "",
+  };
 }
 
 export function formForEntry(entry: DeckNodeEntry): NodeFormState {
@@ -47,7 +59,49 @@ export function formForEntry(entry: DeckNodeEntry): NodeFormState {
     servingAddress: entry.serving_address ?? "",
     credential: "",
     control: entry.control,
+    instancePortStart: entry.instance_port_range ? String(entry.instance_port_range.start) : "",
+    instancePortEnd: entry.instance_port_range ? String(entry.instance_port_range.end) : "",
   };
+}
+
+/** Parses one port-range field: empty means "not typed yet" (`null`),
+ * exactly like `testTarget`'s own "nothing to test" reading of a blank
+ * field — anything else must be an integer inside the backend's
+ * 1024-65535 window (`app/node_store.py`'s `_validate_port_range`,
+ * :60-70) to count as a usable value at all. An out-of-range or
+ * non-numeric value collapses to `null` the same as empty, so `validate`'s
+ * gate and `portRangeOf` below always agree on what "nothing entered" vs
+ * "a bad entry still needs fixing" means — there is no third value one of
+ * them could read as valid and the other as unset. */
+function parsedPort(raw: string): number | null {
+  if (!raw.trim()) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1024 && n <= 65535 ? n : null;
+}
+
+/** The wire's `instance_port_range` shape, or `null` when either field is
+ * unset/invalid (`parsedPort`) — the one place both fields turn into the
+ * `{start, end}` object `toCreatePayload`/`toPatchPayload` ship. Only
+ * meaningful once `validate(form)` is empty for `control: "instances"`,
+ * same posture `engineForm.ts`'s `toPayload` takes for its own gate: the
+ * Save button stays disabled until then, so this never has to decide what
+ * an out-of-order or out-of-range pair should mean on the wire. */
+function portRangeOf(form: NodeFormState): { start: number; end: number } | null {
+  const start = parsedPort(form.instancePortStart);
+  const end = parsedPort(form.instancePortEnd);
+  return start !== null && end !== null ? { start, end } : null;
+}
+
+/** Whether two port ranges (or their `null` absence) are the SAME fact —
+ * `toPatchPayload`'s own "only when changed" rule, field-wise rather than a
+ * JSON.stringify comparison so key order can never make an unchanged range
+ * look changed. */
+function sameRange(
+  a: { start: number; end: number } | null,
+  b: { start: number; end: number } | null,
+): boolean {
+  if (a === null || b === null) return a === b;
+  return a.start === b.start && a.end === b.end;
 }
 
 /** `agentKind` decides whether an address is required. The seeded local
@@ -93,11 +147,31 @@ export function validate(
       const credentialPresent = Boolean(form.credential) || Boolean(entry?.credential_set);
       if (!credentialPresent) errors.push(labels.nodeSwapNeedsCredential);
     }
+  } else if (form.control === "instances") {
+    // Mirror of app/node_store.py:_require_instances_prereqs, :311-322 —
+    // address + a credential + a port range, all present, missing fields
+    // NAMED. UNLIKE control:"swap" this has no categorical local refusal:
+    // that same function's own docstring says "Local or remote alike; the
+    // protocol is node-generic" — the local box can declare control:
+    // "instances" same as any node-agent entry. Address/credential reuse
+    // the SWAP labels rather than a second pair of near-identical strings:
+    // both read as generic "operating a node requires ..." sentences, and
+    // `_require_instances_prereqs` asks for exactly the same two fields
+    // (never servingAddress, which instances has no use for).
+    if (!form.address.trim()) errors.push(labels.nodeSwapNeedsAddress);
+    const credentialPresent = Boolean(form.credential) || Boolean(entry?.credential_set);
+    if (!credentialPresent) errors.push(labels.nodeSwapNeedsCredential);
+    const start = parsedPort(form.instancePortStart);
+    const end = parsedPort(form.instancePortEnd);
+    if (start === null || end === null || start > end) {
+      errors.push(labels.nodeInstancesNeedsPortRange);
+    }
   }
   return errors;
 }
 
 export function toCreatePayload(form: NodeFormState) {
+  const range = portRangeOf(form);
   return {
     id: form.id,
     label: form.label,
@@ -105,17 +179,24 @@ export function toCreatePayload(form: NodeFormState) {
     serving_address: form.servingAddress.trim() || null,
     credential: form.credential,
     control: form.control,
+    // Only when both fields parse (portRangeOf's own gate) — an add form
+    // with control other than "instances" never has both filled in
+    // practice, so this key is simply absent rather than shipping a
+    // half-typed range the backend would 422 on anyway.
+    ...(range ? { instance_port_range: range } : {}),
   };
 }
 
 export function toPatchPayload(form: NodeFormState, entry: DeckNodeEntry) {
-  const patch: Record<string, string | null> = {};
+  const patch: Record<string, string | null | { start: number; end: number }> = {};
   if (form.label !== entry.label) patch.label = form.label;
   if (form.address !== (entry.address ?? "")) patch.address = form.address;
   const serving = form.servingAddress.trim() || null;
   if (serving !== (entry.serving_address ?? null)) patch.serving_address = serving;
   if (form.credential) patch.credential = form.credential;
   if (form.control !== entry.control) patch.control = form.control;
+  const range = portRangeOf(form);
+  if (!sameRange(range, entry.instance_port_range ?? null)) patch.instance_port_range = range;
   return patch;
 }
 

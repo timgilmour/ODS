@@ -20,6 +20,7 @@ export default function Board({
   onChipClick,
   onOpenSettings,
   onRefresh,
+  onAddEngineHere,
 }: {
   nodes: DeckNode[];
   world: World;
@@ -48,6 +49,10 @@ export default function Board({
   onChipClick: (placement: Placement) => void;
   onOpenSettings: (target: SettingsTarget) => void;
   onRefresh: () => void;
+  /** The board's "+ add engine here" entry point (INST I1) — threaded to
+   * every card unconditionally; each NodeCard decides for itself whether it
+   * ever reaches a button (`node.instancesCapable`). */
+  onAddEngineHere?: (nodeId: string, gpuIndex: number) => void;
 }) {
   const [order, setOrder] = useState<string[]>(loadOrder);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -90,6 +95,7 @@ export default function Board({
             onChipClick={onChipClick}
             onOpenSettings={onOpenSettings}
             onRefresh={onRefresh}
+            onAddEngineHere={onAddEngineHere}
           />
         </div>
       ))}

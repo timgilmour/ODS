@@ -126,6 +126,127 @@ describe("validate — control: swap prerequisites", () => {
   });
 });
 
+// Mirror of app/node_store.py:_require_instances_prereqs (:311-322) —
+// control: "instances" requires address + a credential + a port range,
+// all present, missing fields NAMED. address/credential reuse the swap
+// labels (nodeForm.ts's own comment on this branch says why); the port
+// range gets its own label since neither swap prerequisite names it.
+describe("validate — control: instances prerequisites", () => {
+  test("missing address, credential, and port range are each named", () => {
+    const form: NodeFormState = {
+      ...formForEntry(entry), control: "instances",
+      address: "", credential: "", instancePortStart: "", instancePortEnd: "",
+    };
+    const errors = validate(form, "add", "node-agent");
+    expect(errors).toContain(labels.nodeSwapNeedsAddress);
+    expect(errors).toContain(labels.nodeSwapNeedsCredential);
+    expect(errors).toContain(labels.nodeInstancesNeedsPortRange);
+  });
+
+  test("a start > end range is refused by name", () => {
+    const form: NodeFormState = {
+      ...formForEntry(entry), control: "instances", credential: "k",
+      instancePortStart: "11510", instancePortEnd: "11500",
+    };
+    expect(validate(form, "add", "node-agent")).toContain(labels.nodeInstancesNeedsPortRange);
+  });
+
+  test("an out-of-window port (below 1024) is refused by name", () => {
+    const form: NodeFormState = {
+      ...formForEntry(entry), control: "instances", credential: "k",
+      instancePortStart: "80", instancePortEnd: "11509",
+    };
+    expect(validate(form, "add", "node-agent")).toContain(labels.nodeInstancesNeedsPortRange);
+  });
+
+  test("address, credential, and a valid port range together have no control errors", () => {
+    const form: NodeFormState = {
+      ...formForEntry(entry), control: "instances", credential: "k",
+      instancePortStart: "11500", instancePortEnd: "11509",
+    };
+    const errors = validate(form, "add", "node-agent");
+    expect(errors).not.toContain(labels.nodeSwapNeedsAddress);
+    expect(errors).not.toContain(labels.nodeSwapNeedsCredential);
+    expect(errors).not.toContain(labels.nodeInstancesNeedsPortRange);
+  });
+
+  // Same credential_present rule swap's own equivalent test proves above —
+  // a stored credential satisfies the prerequisite with nothing retyped.
+  test("edit mode: entry.credential_set true satisfies the credential prerequisite with nothing retyped", () => {
+    const form: NodeFormState = {
+      ...formForEntry(entry), control: "instances",
+      instancePortStart: "11500", instancePortEnd: "11509",
+    };
+    expect(validate(form, "edit", "node-agent", entry)).toEqual([]);
+  });
+
+  // UNLIKE control: "swap", control: "instances" has no categorical local
+  // refusal (_require_instances_prereqs' own docstring: "Local or remote
+  // alike; the protocol is node-generic").
+  test("the local entry is not refused categorically for control: instances", () => {
+    const form: NodeFormState = {
+      ...formForEntry(localEntry), control: "instances",
+      address: "http://local:7720", credential: "k",
+      instancePortStart: "11500", instancePortEnd: "11509",
+    };
+    expect(validate(form, "edit", "local", localEntry)).toEqual([]);
+  });
+});
+
+describe("formForEntry — instance port range", () => {
+  test("seeds both fields as strings from the entry's instance_port_range", () => {
+    const withRange: DeckNodeEntry = {
+      ...entry, control: "instances",
+      instance_port_range: { start: 11500, end: 11509 },
+    };
+    const form = formForEntry(withRange);
+    expect(form.instancePortStart).toBe("11500");
+    expect(form.instancePortEnd).toBe("11509");
+  });
+
+  test("blank when the entry carries none", () => {
+    const form = formForEntry(entry);
+    expect(form.instancePortStart).toBe("");
+    expect(form.instancePortEnd).toBe("");
+  });
+});
+
+describe("toCreatePayload / toPatchPayload — instance_port_range", () => {
+  test("toCreatePayload carries the range when both fields are set", () => {
+    const form: NodeFormState = {
+      ...formForEntry(entry), id: "hera", credential: "k", control: "instances",
+      instancePortStart: "11500", instancePortEnd: "11509",
+    };
+    expect(toCreatePayload(form)).toEqual({
+      id: "hera", label: "Hera Box", address: "http://hera:7720",
+      serving_address: "http://hera:8000", credential: "k", control: "instances",
+      instance_port_range: { start: 11500, end: 11509 },
+    });
+  });
+
+  test("toCreatePayload omits the key when either field is unset", () => {
+    const form = { ...formForEntry(entry), control: "instances" as const, credential: "k" };
+    expect(toCreatePayload(form)).not.toHaveProperty("instance_port_range");
+  });
+
+  test("toPatchPayload emits the range when it changes vs the entry", () => {
+    const form = {
+      ...formForEntry(entry), instancePortStart: "11500", instancePortEnd: "11509",
+    };
+    expect(toPatchPayload(form, entry)).toEqual({
+      instance_port_range: { start: 11500, end: 11509 },
+    });
+  });
+
+  test("toPatchPayload emits nothing when the range is unchanged", () => {
+    const withRange: DeckNodeEntry = {
+      ...entry, instance_port_range: { start: 11500, end: 11509 },
+    };
+    const form = formForEntry(withRange);
+    expect(toPatchPayload(form, withRange)).toEqual({});
+  });
+});
+
 describe("toPatchPayload", () => {
   test("sends only changed fields", () => {
     const form = { ...formForEntry(entry), label: "Renamed" };
@@ -150,7 +271,7 @@ describe("toPatchPayload", () => {
 test("toCreatePayload maps camelCase to the wire", () => {
   expect(toCreatePayload({ id: "hera", label: "Hera Box",
     address: "http://hera:7720", servingAddress: "", credential: "k",
-    control: "none" })).toEqual({
+    control: "none", instancePortStart: "", instancePortEnd: "" })).toEqual({
       id: "hera", label: "Hera Box", address: "http://hera:7720",
       serving_address: null, credential: "k", control: "none" });
 });

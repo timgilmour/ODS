@@ -931,6 +931,18 @@ export const labels = {
   nodeControlHint:
     "Off: observe only. On: the deck swaps/restores this node's serving slot.",
 
+  // control PICKER (INST I1, Task 11 — replaces the swap/none checkbox
+  // above with a three-way select now that _CONTROLS has a third member).
+  // nodeControlLabel/nodeControlHint above stay as they are: this is the
+  // field's own new label and its three option strings, not a replacement
+  // for the existing hint copy.
+  nodeControl: "Control",
+  nodeControlNone: "none",
+  nodeControlSwap: "swap (serving slot)",
+  nodeControlInstances: "instances (deck-created engines)",
+  nodeInstancePortStart: "Instance port range start",
+  nodeInstancePortEnd: "Instance port range end",
+
   // model/nodeForm.ts's validate() and testTarget() — pure decision logic
   // that must not own its own copy (the same "everything through here"
   // rule the rest of the deck follows). See applySteps.ts's stepRow for the
@@ -952,9 +964,23 @@ export const labels = {
   // rule for control: "swap" — address + serving_address + a credential,
   // all present, missing fields NAMED. The backend 422 is authoritative;
   // this only saves the round-trip.
+  //
+  // nodeSwapNeedsAddress/nodeSwapNeedsCredential are SHARED with control:
+  // "instances"' own prerequisite rule (_require_instances_prereqs,
+  // :311-322) — both sentences are generic ("operating a node requires
+  // ..."), not swap-specific wording, and instances asks for exactly the
+  // same two fields (never a serving address, which it has no use for), so
+  // this reuses them rather than adding a near-identical second pair.
   nodeSwapNeedsAddress: "operating a node requires an agent address",
   nodeSwapNeedsServingAddress: "operating a node requires a serving address",
   nodeSwapNeedsCredential: "operating a node requires a credential",
+  /** control: "instances"' own port-range prerequisite
+   * (app/node_store.py's `_validate_port_range`, :60-70, enforced again by
+   * `_require_instances_prereqs`, :311-322) — both fields non-empty
+   * integers 1024-65535 with start <= end. Named once, not per-field: the
+   * two inputs sit right next to each other on screen, so "which one" is
+   * never ambiguous the way a shared address/credential error could be. */
+  nodeInstancesNeedsPortRange: "control: instances needs an instance port range",
   /** Categorical, not a missing prerequisite: app/node_store.py:_validate
    * refuses control:"swap" for agent_kind:"local" unconditionally — local
    * actuation is docker-ctl, not the swap protocol (G1 revisits). */
