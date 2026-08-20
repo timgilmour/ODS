@@ -1,0 +1,19 @@
+{
+  "image": "ods-hipfire:latest",
+  "internal_port": 11435,
+  "service": {
+    "restart": "unless-stopped",
+    "devices": ["/dev/dri:/dev/dri", "/dev/kfd:/dev/kfd"],
+    "group_add": ["44", "992"],
+    "security_opt": ["no-new-privileges:true"],
+    "healthcheck": {"test": ["CMD", "curl", "-f", "http://127.0.0.1:11435/health"],
+                    "interval": "30s", "timeout": "10s", "retries": 5, "start_period": "300s"},
+    "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
+  },
+  "environment": {"HIPFIRE_IDLE_TIMEOUT": "0", "HIPFIRE_QWEN35_GRAMMAR": "0"},
+  "env_allow": ["HIPFIRE_MODEL", "HIPFIRE_IDLE_TIMEOUT"],
+  "volumes": ["{ods_dir}/data/hipfire/models:/opt/hipfire/.hipfire/models:z",
+              "{data_dir}/kernels:/opt/hipfire/.hipfire_kernels:z"],
+  "per_instance_dirs": ["kernels"],
+  "route": {"model_env": "HIPFIRE_MODEL", "path": "/v1"}
+}

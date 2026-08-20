@@ -1,0 +1,12 @@
+[Unit]
+Description=Model Deck instances-helper (renders + runs deck-instances compose project)
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=%h/projects/ODS/ods/extensions/services/node-agent/instances-helper/instances-helper.sh --daemon %h/deck-instances/ctl %h/projects/ODS/ods/extensions/services/node-agent/instances-helper/templates %h/deck-instances/rendered %h/ods
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

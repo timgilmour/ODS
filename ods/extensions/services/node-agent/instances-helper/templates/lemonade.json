@@ -1,0 +1,31 @@
+{
+  "image": "ods-lemonade-server:latest",
+  "internal_port": 8080,
+  "service": {
+    "restart": "unless-stopped",
+    "entrypoint": ["/bin/sh", "/opt/lemonade-entrypoint.sh"],
+    "command": ["serve", "--port", "8080", "--host", "0.0.0.0", "--no-tray", "--llamacpp", "rocm",
+                "--llamacpp-args", "--metrics --host 0.0.0.0", "--extra-models-dir", "/models"],
+    "expose": ["8001"],
+    "devices": ["/dev/dri:/dev/dri", "/dev/kfd:/dev/kfd"],
+    "group_add": ["44", "992"],
+    "security_opt": ["no-new-privileges:true"],
+    "healthcheck": {"test": ["CMD", "curl", "-sf", "http://127.0.0.1:8080/api/v1/health"],
+                    "interval": "15s", "timeout": "10s", "retries": 10, "start_period": "300s"},
+    "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
+  },
+  "environment": {"LEMONADE_LLAMACPP": "rocm", "LEMONADE_LLAMACPP_ROCM_BIN": "/opt/llama-custom/llama-server",
+                  "ROCBLAS_USE_HIPBLASLT": "1", "LEMONADE_CTX_SIZE": "32768",
+                  "LLAMA_ARG_FLASH_ATTN": "auto", "LLAMA_ARG_CACHE_TYPE_K": "f16", "LLAMA_ARG_CACHE_TYPE_V": "f16",
+                  "LLAMA_ARG_REASONING": "off",
+                  "LLAMA_ARG_SPLIT_MODE": "layer"},
+  "env_allow": ["LEMONADE_CTX_SIZE", "LLAMA_ARG_TENSOR_SPLIT", "LLAMA_ARG_SPLIT_MODE"],
+  "volumes": ["{ods_dir}/data/models:/models:ro,z",
+              "{ods_dir}/config/llama-server/models.ini:/config/models.ini:ro,z",
+              "{ods_dir}/extensions/services/llama-server/lemonade-entrypoint.sh:/opt/lemonade-entrypoint.sh:ro,z",
+              "{data_dir}/hf-cache:/root/.cache/huggingface",
+              "{data_dir}/llama:/opt/lemonade/llama",
+              "{data_dir}/recipe:/root/.cache/lemonade"],
+  "per_instance_dirs": ["hf-cache", "llama", "recipe"],
+  "route": null
+}
