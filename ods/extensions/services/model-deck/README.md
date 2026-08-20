@@ -352,7 +352,11 @@ since a create call always states one).
   "resource": "lemonade-1",       // deck-generated: {kind}-{n}, lowest free
                                     // n >= 1, never "slot0"
   "kind": "lemonade",
-  "connection": {"container": "deck-lemonade-1", "url": "http://deck-lemonade-1:8080"},
+  "connection": {                // instance_connection()'s lemonade shape:
+    "url": "http://lemonade-1:8080",              // http://<resource>:<internal port> —
+    "metrics_url": "http://lemonade-1:8001/metrics", // the SERVICE name, always set for lemonade
+    "container": "deck-lemonade-1"                // the container, for docker-facing consumers
+  },
   "gpu_indices": [2],
   "policy_defaults": {"priority": 50, "pinned": false, "idle_ttl": 900},
   "container_consent": true,       // seeded true on every managed entry — see below
@@ -432,9 +436,9 @@ host-side instances-helper actually running — see
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/nodes/{id}/instances` | Create (`{kind, gpu_indices, env}`). **201** with the new entry. 422 an unknown/non-instantiable kind, a bad GPU claim, or a GPU not observed on this node; 409 the port range is exhausted; 503 the node isn't operable for instances (see above); 502 the node refused the create (declaration rolled back) |
-| `DELETE` | `/api/nodes/{id}/instances/{resource}` | Remove — hold, ship, forget (see ordering above). 404 unknown node/resource; 409 `{resource}` is declared but not deck-managed (use the plain engine `DELETE` instead); 502 the node refused the teardown |
-| `POST` | `/api/nodes/{id}/instances/{resource}/move` | Move to a new GPU claim (`{gpu_indices}`). 404 unknown node/resource; 409 already claiming exactly that set, or not deck-managed; 422 a bad claim; 502 the node refused the move |
+| `POST` | `/api/nodes/{id}/instances` | Create (`{kind, gpu_indices, env}`). **201** with the new entry. 422 an unknown/non-instantiable kind, a bad GPU claim, or a GPU not observed on this node; 409 the port range is exhausted, OR the node-agent already has an instance request pending (`BusyError`); 503 the node isn't operable for instances (see above); 502 the node refused the create (declaration rolled back) |
+| `DELETE` | `/api/nodes/{id}/instances/{resource}` | Remove — hold, ship, forget (see ordering above). 404 unknown node/resource; 409 `{resource}` is declared but not deck-managed (use the plain engine `DELETE` instead), OR the node-agent already has an instance request pending (`BusyError`); 502 the node refused the teardown |
+| `POST` | `/api/nodes/{id}/instances/{resource}/move` | Move to a new GPU claim (`{gpu_indices}`). 404 unknown node/resource; 409 already claiming exactly that set, not deck-managed, or the node-agent already has an instance request pending (`BusyError`); 422 a bad claim; 502 the node refused the move |
 
 Six audit events, one per verb's success/failure pair:
 `instance-created` · `instance-create-failed` · `instance-removed` ·
@@ -453,8 +457,10 @@ Six audit events, one per verb's success/failure pair:
   directories under the instances-dir (`per_instance_dirs` in
   `lemonade.json`) — no instance shares another's model download or
   compilation cache.
-- **comfyui** instances each get their own `user`/`output`/`input`/`temp`
-  directories, with the *shared* ComfyUI tree (`user/comfyui.db` and its
+- **comfyui** instances each get their own `user`/`output`/`input`/`temp`/`miopen`
+  directories (`per_instance_dirs` in `comfyui.json` — five, not four; `miopen`
+  is ROCm's MIOpen kernel-compile cache, same reason lemonade caches its own),
+  with the *shared* ComfyUI tree (`user/comfyui.db` and its
   lockfile, `output/`'s counters, `user/__manager/`) mounted **read-only**
   — the corruption cases two instances writing the same tree would hit
   (D-I1-6). If a read-only shared tree ever breaks boot for a custom node

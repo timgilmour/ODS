@@ -341,7 +341,7 @@ curl -X POST -H "Authorization: Bearer $NODE_AGENT_KEY" \
 | Status | Meaning |
 |---|---|
 | `202` | Request accepted and written; the instances-helper now owns it. |
-| `409` | A request is already pending for this node (one in-flight request at a time — `instance-req.json` already exists). |
+| `409` | A request is already pending for this node (one in-flight request at a time — `instance-req.json` already exists). This is exactly the 409 the deck itself turns into `app.engines.BusyError` (`app/engines/instances.py`) and re-raises as its OWN 409 on all three of `POST/DELETE/POST .../instances[/move]` (`app/routers/instances.py`'s `_ship`) — an operator seeing a 409 from the deck's instances routes should look here, not at a declaration conflict. |
 | `422` | The document fails shape validation (wrong key set, bad `resource`/`gpu_indices`/`port`/`env`), or `document["resource"] != {resource}`. |
 | `503` | `NODE_INSTANCES_CTL_DIR` is unset — instance control is not enabled on this node. |
 
