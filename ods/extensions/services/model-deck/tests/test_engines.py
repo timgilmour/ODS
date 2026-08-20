@@ -16,6 +16,7 @@ from app.engines.comfyui import ComfyClient
 from app.engines.docker_ctl import DockerCtl
 from app.engines.hipfire import HipfireClient
 from app.engines.hostagent import HostAgent
+from app.engines.instances import InstancesClient
 from app.engines.lemonade import LemonadeClient
 from app.engines.litellm import LiteLLMClient
 from app.engines.node_agent import NodeAgentUnreachable
@@ -1808,3 +1809,33 @@ def test_sglang_omni_status_accepts_a_null_busy_count():
                                          "busy_requests": None}, request=request)
 
     assert _sglang_client(handler).status()["busy_requests"] is None
+
+
+# ===========================================================================
+# InstancesClient (INST I1 Task 7) — deck -> node-agent INSTANCE verbs.
+# ===========================================================================
+
+
+def test_instances_client_posts_verb_and_document_and_accepts_202():
+    handler = _recording_handler(202, {"accepted": True})
+    c = InstancesClient("http://node:7720", "k", transport=_transport(handler))
+    doc = {"resource": "gguf-a", "kind": "lemonade", "gpu_indices": [3], "port": 11500, "env": {}}
+    c.request("create", doc)
+    req = handler.calls[0]
+    assert req.method == "POST" and req.url.path == "/v1/node/instance/gguf-a"
+    assert json.loads(req.content) == {"verb": "create", "document": doc}
+    assert req.headers["authorization"] == "Bearer k"
+
+
+def test_instances_client_409_is_busy_and_other_failures_name_the_resource():
+    c = InstancesClient("http://node:7720", "k", transport=_transport(_json_handler(409, {"detail": "pending"})))
+    with pytest.raises(BusyError):
+        c.request("create", {"resource": "gguf-a", "kind": "lemonade", "gpu_indices": [3], "port": 1, "env": {}})
+    c2 = InstancesClient("http://node:7720", "k", transport=_transport(_json_handler(503, {"detail": "off"})))
+    with pytest.raises(EngineError, match="instance 'gguf-a' create"):
+        c2.request("create", {"resource": "gguf-a", "kind": "lemonade", "gpu_indices": [3], "port": 1, "env": {}})
+
+
+def test_instances_client_status_returns_result_or_none():
+    c = InstancesClient("http://node:7720", "k", transport=_transport(_json_handler(200, {"result": None})))
+    assert c.status("gguf-a") is None

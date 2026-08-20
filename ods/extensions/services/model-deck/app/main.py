@@ -247,6 +247,7 @@ def _build_deck(settings: Settings) -> dict:
     declared_comfy = local_clients.client_for("comfyui")
     declared_hipfire = local_clients.client_for("hipfire")
 
+    from app.engines.instances import InstancesClient
     from app.engines.spark import SparkClient
     from app.node_clients import (
         NodeClients,
@@ -255,11 +256,17 @@ def _build_deck(settings: Settings) -> dict:
         RemoteObserver,
     )
 
-    def _swap_client_factory(entry: dict, credential: str):
-        return SparkClient(node_url=entry["address"], node_key=credential,
-                           serving_url=entry["serving_address"], litellm=litellm)
+    def _control_client_factory(entry: dict, credential: str):
+        """ONE factory, dispatching on the registry's control (N1 seam): the
+        client layer never special-cases a node id."""
+        if entry["control"] == "swap":
+            return SparkClient(node_url=entry["address"], node_key=credential,
+                               serving_url=entry["serving_address"], litellm=litellm)
+        if entry["control"] == "instances":
+            return InstancesClient(entry["address"], credential)
+        raise ValueError(f"control {entry['control']!r} has no client")
 
-    node_clients = NodeClients(node_store, _swap_client_factory)
+    node_clients = NodeClients(node_store, _control_client_factory)
     node_observers = NodeObservers(node_store, node_clients)
     # Local-node counterpart of node_observers above: a node-agent entry's
     # gpus come from probing that box, the local entry's come from this

@@ -768,3 +768,77 @@ def test_remote_observer_without_the_wiring_is_an_empty_half(paced):
     assert paced.observer.half(paced.registry, None, None, paced.world,
                                object()) == {"remote_gpus": {},
                                              "remote_tenants": {}}
+
+
+# ===========================================================================
+# INST I1 Task 7 — control-dispatching binding: "instances" nodes join
+# "swap" nodes as OPERABLE, with no "local" special-casing anywhere in the
+# gate. Node id "cirrus" (never "sparky" — fixture discipline).
+# ===========================================================================
+
+
+def test_client_for_binds_an_instances_node_without_serving_address(hand_built_registry):
+    store = hand_built_registry([{"id": "cirrus", "label": "C", "agent_kind": "node-agent",
+                                  "address": "http://c:7720", "control": "instances",
+                                  "instance_port_range": {"start": 11500, "end": 11509}, "engines": []}],
+                                {"cirrus": "k"})
+    built = []
+    def factory(entry, credential):
+        built.append((entry["control"], credential)); return object()
+    clients = NodeClients(store, factory)
+    assert clients.client_for("cirrus") is not None
+    assert built == [("instances", "k")]
+
+
+def test_client_for_still_requires_serving_address_for_swap_only(hand_built_registry):
+    store = hand_built_registry([
+        {"id": "cirrus", "label": "C", "agent_kind": "node-agent",
+         "address": "http://c:7720", "control": "swap", "engines": []},
+        {"id": "nimbus", "label": "N", "agent_kind": "node-agent",
+         "control": "instances", "engines": []},
+        {"id": "orbit", "label": "O", "agent_kind": "node-agent",
+         "address": "http://o:7720", "serving_address": "http://o:8000",
+         "control": "none", "engines": []},
+    ], {"cirrus": "k-c", "nimbus": "k-n", "orbit": "k-o"})
+
+    def factory(entry, credential):
+        return object()
+
+    clients = NodeClients(store, factory)
+
+    assert clients.client_for("cirrus") is None    # swap, no serving_address
+    assert clients.client_for("nimbus") is None     # instances, no address
+    assert clients.client_for("orbit") is None       # control:none, despite having everything
+
+
+def test_observers_snapshot_keeps_instances_clients_alive(hand_built_registry):
+    """NodeObservers.snapshot() builds observers for swap nodes ONLY but must
+    retire clients for nodes that are neither swap NOR instances."""
+    store = hand_built_registry([
+        {"id": "boxa", "label": "A", "agent_kind": "node-agent",
+         "address": "http://a:7720", "serving_address": "http://a:8000",
+         "control": "swap", "engines": []},
+        {"id": "cirrus", "label": "C", "agent_kind": "node-agent",
+         "address": "http://c:7720", "control": "instances",
+         "instance_port_range": {"start": 11500, "end": 11509}, "engines": []},
+        {"id": "orbit", "label": "O", "agent_kind": "node-agent",
+         "address": "http://o:7720", "serving_address": "http://o:8000",
+         "control": "swap", "engines": []},
+    ], {"boxa": "k-a", "cirrus": "k-c", "orbit": "k-o"})
+
+    clients = NodeClients(store, FakeClient)
+    observers = NodeObservers(store, clients)
+
+    instances_client = clients.client_for("cirrus")
+    # "orbit" was operable a moment ago (still is, until the patch below) --
+    # build its client first so there is something for retire_absent() to
+    # actually drop, then demote it out of the operable set entirely.
+    orbit_client = clients.client_for("orbit")
+    assert orbit_client is not None
+    store.patch("orbit", control="none")
+
+    snap = observers.snapshot()
+
+    assert set(snap) == {"boxa"}                             # observers: swap only
+    assert clients.client_for("cirrus") is instances_client  # kept alive
+    assert orbit_client.closed is True                        # retired

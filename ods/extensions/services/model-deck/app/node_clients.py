@@ -54,6 +54,26 @@ from app.observe import SparkObserver
 # `read_remote_gpus` below — a second copy is how the next units bug gets in.
 _MIB = 1024**2
 
+# INST I1 Task 7: a registry entry is OPERABLE — reachable through some
+# actuation client at all — when its control is one of these. "swap" (the
+# original SparkClient surface) and "instances" (deck-created engine
+# instances, Task 4-6's node-agent channel) are the only two; "none" and any
+# future control that isn't wired for actuation stay None. No node id is
+# ever named here (E2 obligation 4 / D-I1-3's N1 seam) — the registry's own
+# `control` field is the only thing that decides.
+OPERABLE_CONTROLS = ("swap", "instances")
+
+
+def control_prereqs(control: str) -> tuple[str, ...]:
+    """Registry fields a control needs BESIDES a credential (node_store's
+    _require_*_prereqs is the write-side twin; this is the read-side gate).
+    "swap" needs both `address` (the node-agent) and `serving_address` (the
+    inference endpoint it swaps in front of); "instances" needs only
+    `address` — it has no serving surface of its own, only the node-agent
+    channel this client talks to."""
+    return {"swap": ("address", "serving_address"),
+            "instances": ("address",)}.get(control, ())
+
 
 def binding_view(store, entry: dict) -> dict:
     """The three fields a swap client is bound from, as the registry holds
@@ -82,15 +102,16 @@ class NodeClients:
 
     def client_for(self, node_id: str):
         """The current client for `node_id`, or None when the node is not
-        operable (missing, control != "swap", or a prerequisite absent —
-        e.g. its credential vanished mid-flight, design §9). Rebuilds when
-        the binding view changed; the old client is closed, not leaked."""
+        operable (missing, control not in OPERABLE_CONTROLS, or a
+        control-specific prerequisite absent — e.g. its credential vanished
+        mid-flight, design §9). Rebuilds when the binding view changed; the
+        old client is closed, not leaked."""
         with self._lock:
             entry = self._store.get(node_id)
+            control = entry.get("control") if entry is not None else None
             if (entry is None
-                    or entry.get("control") != "swap"
-                    or not entry.get("address")
-                    or not entry.get("serving_address")
+                    or control not in OPERABLE_CONTROLS
+                    or any(not entry.get(f) for f in control_prereqs(control))
                     or not self._store.credential_set(node_id)):
                 self._retire(node_id)
                 return None
@@ -155,10 +176,21 @@ class NodeObservers:
     def snapshot(self) -> dict[str, object]:
         """The live observer map. Re-reads the registry on every call (the
         node_observer precedent: add/remove/credential changes apply live,
-        no restart); the store read is one small-file JSON load."""
+        no restart); the store read is one small-file JSON load.
+
+        Observers exist for control:"swap" nodes ONLY — an "instances" node
+        has no serving surface to poll for what's loaded, only the
+        create/remove/move verb channel (app.engines.instances). But its
+        CLIENT must not be retired here: nothing else calls client_for() for
+        it either, so retiring against swap_ids alone would leak-close a
+        healthy instances client on every snapshot. Retirement therefore
+        runs against the whole OPERABLE set (swap ∪ instances), not the
+        narrower swap_ids the observer loop itself uses."""
         with self._lock:
-            swap_ids = {n["id"] for n in self._store.list()
-                        if n.get("control") == "swap"}
+            entries = self._store.list()
+            swap_ids = {n["id"] for n in entries if n.get("control") == "swap"}
+            operable_ids = {n["id"] for n in entries
+                            if n.get("control") in OPERABLE_CONTROLS}
             for node_id in swap_ids:
                 if node_id not in self._observers:
                     self._observers[node_id] = self._factory(
@@ -170,8 +202,9 @@ class NodeObservers:
             # Retire the CLIENT too — see retire_absent's docstring: once an
             # observer is gone nothing will call client_for(node_id) again,
             # so retire-on-read can never fire and the old client would leak
-            # otherwise.
-            self._clients.retire_absent(swap_ids)
+            # otherwise. Against operable_ids, not swap_ids — see the
+            # docstring above.
+            self._clients.retire_absent(operable_ids)
             return dict(self._observers)
 
     def observer_for(self, node_id: str):
