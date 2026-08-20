@@ -1,0 +1,15 @@
+# Instances-control overlay for the node-agent — OPT-IN (INST I1). Activate:
+#   docker compose -f compose.yaml.disabled -f compose.instances.yaml.disabled up -d --build
+# The agent writes <ctl>/instance-req.json; the host-side instances-helper
+# (instances-helper/instances-helper.sh, run as the operator via a systemd
+# user unit — see deck-instances-helper.service) owns docker compose.
+services:
+  ods-node-agent:
+    environment:
+      NODE_INSTANCES_CTL_DIR: /instances-ctl
+    volumes:
+      - ${HOST_INSTANCES_CTL_DIR:?path to the instances ctl dir (e.g. ~/deck-instances/ctl)}:/instances-ctl:rw
+    # The base file reserves NVIDIA devices (sparky). A LOCAL AMD box has no
+    # nvidia runtime; GPU observation for the local node stays on the deck's
+    # own sysfs reader (design §4), so the agent needs NO device at all here.
+    deploy: !reset {}

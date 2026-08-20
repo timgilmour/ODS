@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from fastapi.responses import Response
 
 import engines
+import instances
 import nodeconfig
 import serving
 import settings_store
@@ -89,6 +90,8 @@ def node_info():
     capabilities = ["metrics"]
     if swapctl.enabled():
         capabilities.append("swap")
+    if instances.enabled():
+        capabilities.append("instances")
     return {
         "name": nodeconfig.NODE_NAME,
         "hostname": socket.gethostname(),
@@ -116,6 +119,12 @@ def node_serving():
 async def _swapctl_disabled(request: Request, exc: swapctl.SwapCtlDisabled):
     return JSONResponse(status_code=503,
                         content={"detail": "swap control is not configured"})
+
+
+@app.exception_handler(instances.InstancesDisabled)
+async def _instances_disabled_handler(request: Request, exc: instances.InstancesDisabled):
+    return JSONResponse(status_code=503,
+                        content={"detail": "instance control not enabled on this node"})
 
 
 class SwapBody(BaseModel):
@@ -169,6 +178,32 @@ def node_engine_up(name: str):
           dependencies=[Depends(verify_key)])
 def node_engine_down(name: str):
     return _node_engine_request(name, "down")
+
+
+class InstanceBody(BaseModel):
+    verb: str
+    document: dict
+
+
+@app.post("/v1/node/instance/{resource}", status_code=202,
+          dependencies=[Depends(verify_key)])
+def node_instance_request(resource: str, body: InstanceBody):
+    doc = instances.validate_document(body.document)  # ValueError -> 422 via the existing handler
+    if doc["resource"] != resource:
+        raise HTTPException(status_code=422,
+                            detail=f"path resource {resource!r} != document resource {doc['resource']!r}")
+    try:
+        instances.request_instance(body.verb, doc)
+    except instances.InstanceRequestPending as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"accepted": True}
+
+
+@app.get("/v1/node/instance/{resource}/status", dependencies=[Depends(verify_key)])
+def node_instance_status(resource: str):
+    if not instances.NAME_RE.match(resource):
+        raise HTTPException(status_code=422, detail="resource must match ^[a-z0-9][a-z0-9-]*$")
+    return {"result": instances.read_status(resource)}
 
 
 @app.post("/v1/node/swap", status_code=202, dependencies=[Depends(verify_key)])

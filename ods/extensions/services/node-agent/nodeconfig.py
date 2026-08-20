@@ -54,6 +54,11 @@ NODE_ENGINES_FILE = _env_str("NODE_ENGINES_FILE", "")
 # settings document, compose-text and catalog routes all answer 503 rather
 # than writing into some implicit default directory.
 NODE_SETTINGS_DIR = _env_str("NODE_SETTINGS_DIR", "")
+# Instances control is opt-in like swap control: unset means the
+# /v1/node/instance/* routes answer 503. This is a rw dir shared with the
+# host-side instances-helper -- the agent writes instance-req.json here, the
+# helper writes instance-status-<resource>.json back (forensics only).
+NODE_INSTANCES_CTL_DIR = _env_str("NODE_INSTANCES_CTL_DIR", "")
 # NODE_AGENT_PORT is deliberately absent here: the listening port is owned by
 # the Dockerfile CMD (`uvicorn --port ${NODE_AGENT_PORT:-7720}`), so a second
 # copy in Python was read by nothing and only added a crash-at-import path.
