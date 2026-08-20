@@ -1,6 +1,5 @@
 import json, subprocess, sys
 from pathlib import Path
-import pytest
 
 RENDER = Path(__file__).resolve().parents[1] / "instances-helper" / "render_instance.py"
 TEMPLATES = Path(__file__).resolve().parents[1] / "instances-helper" / "templates"
@@ -62,7 +61,42 @@ def test_malformed_document_exits_1(tmp_path):
     assert r.returncode == 1 and "unusable instance document" in r.stderr
 
 
-@pytest.mark.xfail(strict=True, reason="comfyui.json lands in Task 6")
+def test_comfyui_renders_per_instance_dirs_and_a_read_only_tree(tmp_path):
+    r, out, inst = _render(tmp_path, {**DOC, "kind": "comfyui", "env": {}})
+    assert r.returncode == 0, r.stderr
+    svc = json.loads(out.read_text())["services"]["agent"]
+    assert svc["shm_size"] == "8g"
+    assert "/opt/ods/data/comfyui/ComfyUI:/opt/ComfyUI:ro,z" in svc["volumes"]
+    for sub in ("user", "output", "input", "temp", "miopen"):
+        assert (inst / "data" / "agent" / sub).is_dir()
+    cmd = " ".join(svc["command"]) if isinstance(svc["command"], list) else svc["command"]
+    for flag in ("--user-directory /data/user", "--output-directory /data/output",
+                 "--input-directory /data/input", "--temp-directory /data/temp"):
+        assert flag in cmd
+    assert svc["ports"] == ["127.0.0.1:11500:8188"]
+
+
+def test_reserved_resource_names_are_refused(tmp_path):
+    for name in ("hipfire", "ods-foo"):
+        r, out, _ = _render(tmp_path, {**DOC, "resource": name})
+        assert r.returncode == 1
+        assert name in r.stderr
+        assert not out.exists()
+
+
+def test_template_service_block_refuses_renderer_owned_keys(tmp_path):
+    templates = tmp_path / "bad_templates"
+    templates.mkdir()
+    (templates / "kinds.json").write_text(json.dumps({"hipfire": "hipfire.json"}))
+    bad_tpl = json.loads((TEMPLATES / "hipfire.json").read_text())
+    bad_tpl["service"]["image"] = "sneaky:latest"
+    (templates / "hipfire.json").write_text(json.dumps(bad_tpl))
+    r, out, _ = _render(tmp_path, DOC, templates=templates)
+    assert r.returncode == 1
+    assert "image" in r.stderr
+    assert not out.exists()
+
+
 def test_every_template_in_kinds_json_exists_and_has_the_schema():
     kinds = json.loads((TEMPLATES / "kinds.json").read_text())
     for kind, fname in kinds.items():

@@ -13,6 +13,20 @@ import sys
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 TEMPLATE_KEYS = {"image", "internal_port", "service", "environment", "env_allow",
                  "volumes", "per_instance_dirs", "route"}
+# The service name becomes a DNS alias on ods-network — these are already
+# taken by the ODS triple/deck/gateway, and any "ods-*" name collides with a
+# container-name prefix elsewhere in the stack. The deck's generator never
+# emits these; this set is the security boundary, not a UI nicety.
+RESERVED_RESOURCE_NAMES = {"hipfire", "lemonade", "llama-server", "comfyui",
+                           "model-deck", "litellm"}
+RESERVED_RESOURCE_PREFIX = "ods-"
+# Keys the renderer itself sets on the service block (container_name/image
+# from the template + doc; environment/ports/volumes/networks computed from
+# the doc and template's own top-level fields). A template that also sets
+# one of these in its "service" block would have it silently overwritten
+# (or would silently win, if merge order ever changed) — refuse instead.
+RENDERER_OWNED_SERVICE_KEYS = {"container_name", "image", "environment", "ports",
+                               "volumes", "networks"}
 
 
 def _die(code: int, msg: str) -> None:
@@ -31,6 +45,9 @@ def main(templates_dir, doc_path, out_path, instances_dir, ods_dir) -> None:
         assert isinstance(env, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()), "env"
     except Exception as exc:  # noqa: BLE001 — every malformation is the same answer: refuse, say so
         _die(1, f"unusable instance document {doc_path}: {exc!r}")
+    if resource in RESERVED_RESOURCE_NAMES or resource.startswith(RESERVED_RESOURCE_PREFIX):
+        _die(1, f"resource {resource!r} is reserved (reserved names: {sorted(RESERVED_RESOURCE_NAMES)}, "
+                 f"prefix: {RESERVED_RESOURCE_PREFIX!r})")
     kinds = json.load(open(os.path.join(templates_dir, "kinds.json")))
     if kind not in kinds:
         _die(2, f"unknown kind {kind!r} (known: {sorted(kinds)})")
@@ -40,6 +57,9 @@ def main(templates_dir, doc_path, out_path, instances_dir, ods_dir) -> None:
     tpl = json.load(open(tpl_path))
     if set(tpl) != TEMPLATE_KEYS:
         _die(1, f"template {kinds[kind]} must have exactly {sorted(TEMPLATE_KEYS)}")
+    owned = sorted(set(tpl["service"]) & RENDERER_OWNED_SERVICE_KEYS)
+    if owned:
+        _die(1, f"template {kinds[kind]} service block sets renderer-owned key(s) {owned}")
     bad = sorted(set(env) - set(tpl["env_allow"]))
     if bad:
         _die(1, f"env {bad} not allowed for kind {kind!r} (allowed: {tpl['env_allow']})")
