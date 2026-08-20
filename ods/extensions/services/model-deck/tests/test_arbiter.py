@@ -640,6 +640,43 @@ def test_idle_actions_resolve_a_multi_gpu_tenant_to_its_first_gpu_for_capacity()
     assert [a["resource"] for a in actions] == ["gguf-a"]
 
 
+def test_idle_actions_co_residency_for_a_multi_gpu_tenant_reaches_every_claimed_gpu():
+    """Discriminating companion to the test above (fix round 1): lemonade's
+    own idle rule never consults `gpu`/`co_footprints`, so that test passes
+    identically pre- and post-task. comfyui's DOES — its free-verb guard is
+    gated on `self.reclaimable(obs, gpu, co_footprints) != 0`
+    (app.engine_kinds._ComfyAdapter.idle_action/reclaimable) — so a
+    comfyui-kind tenant claiming [3, 4] actually exercises the union-over-
+    every-claimed-GPU co-residency this task adds.
+
+    "img" (comfyui-kind) claims GPU [3, 4]; capacity is read off its FIRST
+    claimed GPU (3, `_idle_actions`), whose `used` is 11 GiB. "gguf-b"
+    (lemonade-kind) is LOADED on GPU 4 alone with a known 10 GiB footprint
+    — no overlap with GPU 3 under the OLD single-GPU-equality co-residency
+    check, but img's claim [3, 4] intersects gguf-b's [4], so the new
+    `_co_resident_footprints_any` counts it: reclaimable = max(0, 11 GiB -
+    10 GiB - 1 GiB slack) == 0, so img's free-verb idle-release does NOT
+    fire. Under the old (or a first-claimed-GPU-only) comparison gguf-b
+    would be invisible to img's co-residency sum, reclaimable would be
+    10 GiB (nonzero), and a free WOULD fire — see this test's RED evidence
+    in the task report."""
+    world = _dworld({
+        "img": {"engine": "comfyui", "gpu_indices": [3, 4], "gpu_index": 3,
+                "state": "idle", "queue": 0, "idle_s": 100.0},
+        "gguf-b": {"engine": "lemonade", "gpu_index": 4, "state": "loaded",
+                   "model": "b.gguf", "footprint": 10 * GIB},
+    }, [_dgpu(3, 34 * GIB, 11 * GIB), _dgpu(4, 34 * GIB, 5 * GIB)])
+    policy = {"img": {"priority": 1, "pinned": False, "idle_ttl": 60},
+              # idle_ttl 0: gguf-b has no idle rule of its own here — this
+              # test is about img's co-residency reading gguf-b, not about
+              # gguf-b idle-releasing itself and adding a confounding action.
+              "gguf-b": {"priority": 2, "pinned": False, "idle_ttl": 0}}
+
+    actions = decide(world, policy, None)
+
+    assert actions == []
+
+
 def test_contention_is_scoped_to_the_pending_gpu():
     """Two contended GPUs at once (impossible pre-E1): only residents of
     the pending load's GPU are candidates."""
