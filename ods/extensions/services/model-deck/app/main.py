@@ -211,6 +211,11 @@ def _build_deck(settings: Settings) -> dict:
         litellm=litellm,
         stats_url=f"http://{settings.hipfire_container}:{_HIPFIRE_PORT}/stats",
         activity_window_s=settings.hipfire_activity_window_s,
+        # Mirrors stamp_missing_gateway_host (D-I1-5): the seeded entry's
+        # live litellm route is the compose SERVICE alias "hipfire", not
+        # the container name "ods-hipfire" — both must guard the park.
+        guard_hosts=frozenset({settings.hipfire_container,
+                               settings.hipfire_container.removeprefix("ods-")}),
     )
     hostagent_url = settings.hostagent_url or (
         f"http://{detect_default_gateway() or 'host.docker.internal'}:7710"

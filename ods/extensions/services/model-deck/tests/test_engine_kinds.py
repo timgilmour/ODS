@@ -448,6 +448,27 @@ def test_hipfire_adapter_active_verbs_and_demand():
     assert hipfire.demand() is False
 
 
+def test_hipfire_adapter_build_client_derives_guard_hosts_from_container_and_gateway_host():
+    """E1 debt 2 (D-I1-5, INST I1 T3): the client's park guard must key on
+    the resource's OWN declared names (container + optional gateway_host),
+    never a substring of the kind name — proven at the adapter boundary
+    where connection dicts actually flow in from nodes.json."""
+    from app.engine_kinds import ENGINE_KINDS
+    from app.engines.hipfire import HipfireClient
+    from app.settings import Settings
+
+    hipfire = ENGINE_KINDS["hipfire"]
+    settings = Settings()
+
+    client = hipfire.build_client(
+        {"container": "deck-agent", "gateway_host": "agent"}, settings, None)
+    assert isinstance(client, HipfireClient)
+    assert client._guard_hosts == frozenset({"deck-agent", "agent"})
+
+    no_gateway = hipfire.build_client({"container": "deck-agent"}, settings, None)
+    assert no_gateway._guard_hosts == frozenset({"deck-agent"})
+
+
 def test_hipfire_observe_looks_up_its_own_resource_name_in_routes():
     """The delegated mechanism choice (Task 3 brief): hipfire's model comes
     from routes.get(RESOURCE), not a hardcoded "hipfire" literal — proven

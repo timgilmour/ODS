@@ -23,11 +23,16 @@ A transport-level failure reaching health_url while the container is known
 to be running propagates as EngineError (that's not "loading", it's "we
 can't tell" — different from the ordinary loading path).
 
-park() checks litellm.default_targets_hipfire() BEFORE calling
-dockerctl.stop(); if that check itself raises EngineError, it propagates
-unchanged and the container is never touched — fail safe: if we can't see
-the route table, we don't park. If the check returns True, GuardError is
-raised (not an EngineError subclass) and stop() is never called.
+park() checks whether litellm's default route's HOSTNAME is one of this
+resource's own declared names (its container, plus any caller-declared
+guard_hosts — e.g. a compose SERVICE alias) BEFORE calling dockerctl.stop();
+if that check itself raises EngineError, it propagates unchanged and the
+container is never touched — fail safe: if we can't see the route table, we
+don't park. If the hostname matches, GuardError is raised (not an
+EngineError subclass) and stop() is never called. (E1 debt 2, D-I1-5: a
+plain substring match on "hipfire" in the api_base would wrongly refuse
+parking any instance whose name merely contains the kind, e.g.
+"deck-hipfire-1".)
 
 park() then refuses while a hipfire conversation is live (the 2026-07-21
 incident: a set apply stopped/recreated the engine under an in-flight
@@ -63,6 +68,7 @@ tracker's time seam.
 """
 
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -85,6 +91,7 @@ class HipfireClient:
         stats_url: str | None = None,
         activity_window_s: float = 600.0,
         clock=time.monotonic,
+        guard_hosts: frozenset[str] = frozenset(),
     ) -> None:
         self._health_url = health_url
         self._stats_url = stats_url or health_url.replace("/health", "/stats")
@@ -96,6 +103,12 @@ class HipfireClient:
         self._served_last: int | None = None
         self._last_activity_time: float | None = None
         self._client = httpx.Client(timeout=_TIMEOUT, transport=transport)
+        # Hostnames litellm's default route may name to mean THIS resource:
+        # its container name plus any caller-declared names (a compose
+        # SERVICE alias, e.g. gateway_host — see _HipfireAdapter.build_client
+        # and app.main's shared instance) — never a substring of the kind
+        # name (E1 debt 2, D-I1-5).
+        self._guard_hosts = frozenset(guard_hosts) | {container}
 
     def status(self) -> str:
         if not self._dockerctl.running(self._container):
@@ -143,11 +156,17 @@ class HipfireClient:
                     "pass force=true to override)"
                 )
 
+    def _default_route_targets_me(self) -> bool:
+        api_base = self._litellm.default_api_base()
+        if not api_base:
+            return False
+        return (urlsplit(api_base).hostname or "") in self._guard_hosts
+
     def park(self, force: bool = False) -> None:
-        if self._litellm.default_targets_hipfire():
+        if self._default_route_targets_me():
             raise GuardError(
                 f"refusing to park {self._container!r}: "
-                "litellm's default route currently targets hipfire"
+                "litellm's default route currently targets it"
             )
         if not force:
             self.ensure_not_busy(f"park {self._container!r}")

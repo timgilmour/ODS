@@ -1025,6 +1025,12 @@ class _HipfireAdapter:
         # at build time (open-rulings #1; same rationale as app.main's own
         # DockerCtl construction).
         container = connection["container"]
+        # Names litellm's default route may host to mean THIS resource
+        # (E1 debt 2, D-I1-5): the container plus its optional declared
+        # gateway_host (compose SERVICE alias) — see HipfireClient's own
+        # docstring for why a substring match on "hipfire" was wrong.
+        gateway = connection.get("gateway_host")
+        guard_hosts = frozenset({container}) | ({gateway} if gateway else set())
         dockerctl = DockerCtl(settings.dockerctl_url,
                               lambda: consented_containers(node_store))
         litellm = LiteLLMClient(settings.litellm_url, settings.litellm_key)
@@ -1035,6 +1041,7 @@ class _HipfireAdapter:
             litellm=litellm,
             stats_url=f"http://{container}:{_HIPFIRE_PORT}/stats",
             activity_window_s=settings.hipfire_activity_window_s,
+            guard_hosts=guard_hosts,
         )
 
     def restart_container(self, entry: dict) -> str | None:

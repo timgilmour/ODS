@@ -392,20 +392,13 @@ def test_litellm_route_table_hits_model_info_with_auth_header():
     assert req.headers["authorization"] == "Bearer testkey"
 
 
-def test_litellm_default_targets_hipfire_false_when_default_points_elsewhere():
-    handler = _json_handler(200, _MODEL_INFO_BODY)
-    client = LiteLLMClient("http://litellm:4000", "testkey", transport=_transport(handler))
-
-    assert client.default_targets_hipfire() is False
-
-
-def test_litellm_default_targets_hipfire_true_when_default_points_at_hipfire():
-    body = json.loads(json.dumps(_MODEL_INFO_BODY))  # deep copy
-    body["data"][0]["litellm_params"]["api_base"] = "http://hipfire:11435/v1"
-    handler = _json_handler(200, body)
-    client = LiteLLMClient("http://litellm:4000", "testkey", transport=_transport(handler))
-
-    assert client.default_targets_hipfire() is True
+def test_litellm_default_api_base_returns_the_default_routes_host_or_none():
+    # Replaces the two direct default_targets_hipfire tests (E1 debt 2,
+    # INST I1 T3): that method is deleted by design — HipfireClient.park
+    # now compares default_api_base()'s HOSTNAME against its own declared
+    # guard_hosts rather than substring-matching "hipfire" in the URL.
+    assert _litellm_default_targets_hipfire(True).default_api_base() == "http://hipfire:11435/v1"
+    assert _litellm(_json_handler(200, {"data": []})).default_api_base() is None
 
 
 def test_litellm_raises_engineerror_on_non_2xx():
@@ -982,6 +975,11 @@ def test_hipfire_status_does_not_check_health_when_parked():
 
 
 def test_hipfire_park_raises_guarderror_when_default_targets_hipfire_and_never_stops():
+    # Re-keyed (E1 debt 2, INST I1 T3): the fixture's default route api_base
+    # is http://hipfire:11435/v1 (host "hipfire") while the container is
+    # "ods-hipfire" — those differ, so guard_hosts must be given explicitly
+    # (mirroring the seeded resource's real connection.container="ods-hipfire"
+    # + connection.gateway_host="hipfire") for the guard to still fire here.
     stop_calls = []
 
     def dockerctl_handler(request):
@@ -990,12 +988,36 @@ def test_hipfire_park_raises_guarderror_when_default_targets_hipfire_and_never_s
 
     dockerctl = _dockerctl(dockerctl_handler)
     litellm = _litellm_default_targets_hipfire(True)
-    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm)
+    client = HipfireClient("http://hipfire:11435/health", dockerctl, "ods-hipfire", litellm,
+                           guard_hosts=frozenset({"hipfire"}))
 
     with pytest.raises(GuardError):
         client.park()
 
     assert stop_calls == []  # /stop never fired
+
+
+def test_hipfire_park_guard_matches_the_hostname_against_guard_hosts_exactly():
+    """Instance "deck-hipfire-1" must NOT be blocked by a default route at
+    http://hipfire:11435/v1 (E1 debt 2: the old substring match on "hipfire"
+    would have wrongly refused parking any instance whose name merely
+    contains the kind)."""
+    lit = _litellm_default_targets_hipfire(True)
+    inst = HipfireClient("http://deck-hipfire-1:11435/health",
+                         _dockerctl_lifecycle(True, allowlist=("deck-hipfire-1",)),
+                         "deck-hipfire-1", lit, transport=_transport(_json_handler(200, {})),
+                         guard_hosts=frozenset({"deck-hipfire-1", "hipfire-1"}))
+
+    inst.park(force=True)
+
+    assert any(c.url.path == "/containers/deck-hipfire-1/stop" for c in inst._dockerctl.calls)
+
+    # The seeded resource (container ods-hipfire, gateway_host "hipfire") IS blocked.
+    seeded = HipfireClient("http://ods-hipfire:11435/health", _dockerctl_lifecycle(True),
+                           "ods-hipfire", lit, transport=_transport(_json_handler(200, {})),
+                           guard_hosts=frozenset({"ods-hipfire", "hipfire"}))
+    with pytest.raises(GuardError, match="default route currently targets"):
+        seeded.park(force=True)
 
 
 def test_hipfire_park_propagates_engineerror_when_route_check_transport_fails():
@@ -1048,9 +1070,11 @@ def test_hipfire_resume_starts_container_and_does_not_poll_status():
 # --- HipfireClient.stats() + busy guard ---
 
 
-def _dockerctl_lifecycle(running: bool):
+def _dockerctl_lifecycle(running: bool, allowlist=("ods-hipfire",)):
     """DockerCtl whose GET .../json reports `running` and whose POST
-    .../{stop,start} succeeds, recording lifecycle calls in .calls."""
+    .../{stop,start} succeeds, recording lifecycle calls in .calls.
+    `allowlist` defaults to the seeded container name; INST I1 T3's
+    instance-hostname guard test passes its own instance container name."""
     calls = []
 
     def handler(request):
@@ -1059,7 +1083,7 @@ def _dockerctl_lifecycle(running: bool):
         calls.append(request)
         return httpx.Response(204, request=request)
 
-    ctl = _dockerctl(handler)
+    ctl = _dockerctl(handler, allowlist=allowlist)
     ctl.calls = calls
     return ctl
 
@@ -1080,7 +1104,12 @@ def _stats_transport(bodies):
 
 
 def _busy_client(bodies, *, running=True, window_s=600.0, clock=None, route_on_hipfire=False):
-    kwargs = {"transport": _stats_transport(bodies), "activity_window_s": window_s}
+    kwargs = {"transport": _stats_transport(bodies), "activity_window_s": window_s,
+              # Mirrors the seeded resource's real connection.gateway_host
+              # (D-I1-5): the fixture's default route hostname is "hipfire",
+              # not the container "ods-hipfire" (see the re-keyed park-guard
+              # test above).
+              "guard_hosts": frozenset({"hipfire"})}
     if clock is not None:
         kwargs["clock"] = clock
     client = HipfireClient(

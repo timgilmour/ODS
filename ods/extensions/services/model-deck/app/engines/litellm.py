@@ -44,11 +44,16 @@ class LiteLLMClient:
         entries = self._model_info()
         return {entry["model_name"]: entry["litellm_params"]["model"] for entry in entries}
 
-    def default_targets_hipfire(self) -> bool:
+    def default_api_base(self) -> str | None:
+        """The `default` route's api_base, or None when no default route
+        exists. Callers decide what it means (HipfireClient.park compares
+        its HOSTNAME against the resource's own declared names — E1 debt 2:
+        the old substring match on "hipfire" would have blocked parking
+        any instance whose name contains the kind)."""
         for entry in self._model_info():
             if entry["model_name"] == "default":
-                return "hipfire" in entry["litellm_params"].get("api_base", "")
-        return False
+                return entry["litellm_params"].get("api_base")
+        return None
 
     def model_info(self) -> list[dict]:
         """Raw /model/info entries — for callers needing api_base etc."""
