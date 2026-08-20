@@ -29,7 +29,9 @@ export const name = "e1-engines";
  * | Add button            | text `+ Add engine` (exact)                                  |
  * | Form                  | `.engine-form`                                               |
  * | Kind select           | `.engine-form label:has-text("Kind") select`                 |
- * | GPU select's label    | `.engine-form label:has-text("GPU")`                         |
+ * | GPU checkbox picker   | `.engine-form .engine-gpu-picker` (fieldset; each GPU is its |
+ * |                       | own `<label>GPU N — ...</label>` — INST I1 T11 replaced the |
+ * |                       | old single-GPU `<select>` with this multi-GPU checkbox group)|
  * | Save                  | `.engine-form-actions .primary` (text `Save`)                |
  * | Cancel                | `.engine-form-actions button` (text `Cancel`, exact)         |
  * | Consent banner        | `.engine-form .ui-banner` (hasText "container verbs are      |
@@ -41,14 +43,32 @@ export const name = "e1-engines";
  * | Armed-confirm caption | `.engine-row .engine-caption` (rendered only while armed)    |
  *
  * R4 (controller ruling): `:has-text()` substring-matches, and the engine
- * form has several `<label>` elements. "Kind" and "GPU" are each confirmed,
- * by reading every label text the form can render (Resource name, Kind, each
- * kind's own connection field label(s), GPU, Pinned, Priority, Idle TTL
+ * form has several `<label>` elements. "Kind" is confirmed, by reading every
+ * label text the form can render (Resource name, Kind, each kind's own
+ * connection field label(s), Pinned, Priority, Idle TTL
  * [ui/src/model/messages.ts:857-866,873]), to be a substring of no OTHER
  * label's text — but `assertUnique` below still asserts the match count
  * rather than trusting that reading, so a future label addition that DOES
  * collide fails loudly here instead of silently widening the selector's
- * match set. Items 4-7 (Task 7) add two exact-text() selectors: `text="Policy"`
+ * match set.
+ *
+ * Fix round 1 (INST I1 T12 controller ruling): "GPU" is NOT a single label
+ * any more — Task 11 replaced the one `<label>GPU<select>` with a
+ * `.engine-gpu-picker` fieldset carrying ONE `<label>` per fixture GPU
+ * ("GPU 0 — ...", "GPU 1 — ..."), so a bare `label:has-text("GPU")` now
+ * matches one element per GPU the fixture declares (2, for this fixture's
+ * hipfire-GPU-0/lemonade-GPU-1 pair) — this broke `assertUnique`'s own
+ * "exactly 1" contract the moment Task 11 landed, caught only by actually
+ * running the full `./deck-gate` (not by inspection) during Task 12's
+ * review. Item 2 below now asserts the picker container instead of a bare
+ * label text, and item 4 selects GPU 1 by clicking that GPU's own checkbox
+ * (`label:has-text("GPU 1") input[type=checkbox]` — unambiguous here since
+ * "GPU 1" is a substring of neither "GPU 0"'s own label text nor vice
+ * versa), then asserts the dispatched body's `gpu_indices` (D-I1-2: the UI
+ * always WRITES `gpu_indices`, never the legacy `gpu_index`, even though a
+ * validated wire entry may still carry either spelling on read).
+ *
+ * Items 4-7 (Task 7) add two exact-text() selectors: `text="Policy"`
  * (labels.policy on the App.tsx header button, and labels.policyTitle on the
  * PolicyModal's own <h3> once open — asserted unique BEFORE the modal opens,
  * when only the button exists) and `text="Cancel"` (labels.cancel, shared by
@@ -121,7 +141,12 @@ export async function run() {
       await page.waitForSelector(".engine-form");
 
       await assertUnique(page, '.engine-form label:has-text("Kind")', "Kind label");
-      await assertUnique(page, '.engine-form label:has-text("GPU")', "GPU label");
+      // Fix round 1 (INST I1 T12 controller ruling): "GPU" is no longer a
+      // single label (Task 11 replaced the old `<label>GPU<select>` with a
+      // `.engine-gpu-picker` fieldset carrying ONE `<label>` per fixture
+      // GPU) — asserted as the picker CONTAINER instead, which is genuinely
+      // unique regardless of how many GPUs a fixture declares.
+      await assertUnique(page, ".engine-form .engine-gpu-picker", "GPU checkbox picker");
 
       const kinds = await textsOf(page, '.engine-form label:has-text("Kind") select option');
       results.check(
@@ -159,10 +184,15 @@ export async function run() {
       //
       //   (a) DISPATCH — the POST actually carried what the operator typed.
       //       Read straight from stub.requests(), never from anything the UI
-      //       re-renders. gpu_index is the load-bearing field: GPU 0 is the
-      //       picker's first <option>, so a form that silently dropped the
-      //       gpu_index selection would still coincidentally submit 0 — the
-      //       fixture's gguf-test is GPU 1 for exactly this reason.
+      //       re-renders. gpu_indices is the load-bearing field: no GPU
+      //       checkbox starts checked (toggleGpu's own empty-form seed), so
+      //       a form that silently dropped the operator's GPU-1 click would
+      //       submit an EMPTY claim, not a coincidental GPU-0 default (Fix
+      //       round 1: this used to be true of the old single-GPU <select>,
+      //       whose first <option> was GPU 0 — the checkbox picker Task 11
+      //       replaced it with has no such default at all) — the fixture's
+      //       gguf-test is GPU 1 regardless, for the same "prove the real
+      //       claim, not a coincidence" reason.
       //
       //   (b) RENDER — the new row appears in the declared-engines list. This
       //       is deliberately NOT read off a board card / `/api/state`: that
@@ -202,7 +232,13 @@ export async function run() {
         '.engine-form label:has-text("container") input',
         "ods-llama-server-test",
       );
-      await page.selectOption('.engine-form label:has-text("GPU") select', "1");
+      // Fix round 1: GPU 1 is now picked by checking that GPU's own
+      // checkbox in the `.engine-gpu-picker` fieldset, not a `<select>`
+      // (Task 11 replaced the single-GPU select with a multi-GPU
+      // checkbox group). "GPU 1" is a substring of neither GPU 0's own
+      // label text nor vice versa, so this stays unambiguous.
+      await assertUnique(page, '.engine-form .engine-gpu-picker label:has-text("GPU 1")', "GPU 1 checkbox label");
+      await page.click('.engine-form .engine-gpu-picker label:has-text("GPU 1") input[type=checkbox]');
       await page.click(".engine-form-actions .primary");
       await page.waitForTimeout(300);
       const posted = stub.requests().find((r) => r.method === "POST");
@@ -211,7 +247,12 @@ export async function run() {
         posted?.path === "/api/nodes/local/engines" &&
           posted?.body?.resource === "gguf-test" &&
           posted?.body?.kind === "lemonade" &&
-          posted?.body?.gpu_index === 1,
+          // Fix round 1: the UI always WRITES `gpu_indices` now
+          // (D-I1-2), never the legacy `gpu_index` — this assertion still
+          // proves the exact same load-bearing fact the old one did (GPU
+          // 1 was genuinely selected, not silently defaulted to the
+          // picker's first entry, GPU 0).
+          JSON.stringify(posted?.body?.gpu_indices) === JSON.stringify([1]),
         JSON.stringify(posted ?? null),
       );
       const after = await textsOf(page, ".engines-list .engine-row .engine-row-resource");
@@ -263,7 +304,17 @@ export async function run() {
       // Resource name and Kind are always the FIRST and SECOND <label> in
       // EngineFormPanel's JSX, before the kind-varying connection-field
       // block, so `label:nth-of-type(n)` — plain CSS, browser-native — is both
-      // valid here and stable across every kind.
+      // valid here and stable across every kind. Fix round 1 (INST I1 T12
+      // controller ruling): scoped with the DIRECT-CHILD combinator
+      // (`.engine-form > label:nth-of-type(n)`), not the bare descendant
+      // selector this used to be — Task 11's `.engine-gpu-picker` fieldset
+      // wraps each GPU checkbox in its OWN `<label>`, and the first such
+      // nested label is ALSO "nth-of-type(1)" among ITS OWN siblings (the
+      // fieldset's children), so the bare descendant form now matches TWO
+      // elements for nth-of-type(1): the real Resource-name label AND GPU
+      // 0's own checkbox label. `>` restricts the match to `.engine-form`'s
+      // DIRECT children, which the GPU checkboxes' labels are not (they are
+      // children of the fieldset, one level deeper).
       //
       // disabledExpression (dom.mjs) returns false for a MISSING element, not
       // an error — so on the "kind stays editable" check (negated: expects
@@ -273,15 +324,15 @@ export async function run() {
       // loudly here, before either isTrulyDisabled call ever runs.
       await page.click('.engine-row:has-text("gguf-test") button:has-text("Edit")');
       await page.waitForSelector(".engine-form");
-      await assertUnique(page, ".engine-form label:nth-of-type(1) input", "Resource name input (edit mode)");
-      await assertUnique(page, ".engine-form label:nth-of-type(2) select", "Kind select (edit mode)");
+      await assertUnique(page, ".engine-form > label:nth-of-type(1) input", "Resource name input (edit mode)");
+      await assertUnique(page, ".engine-form > label:nth-of-type(2) select", "Kind select (edit mode)");
       results.check(
         "item6: resource is locked in Edit mode",
-        await isTrulyDisabled(page, ".engine-form label:nth-of-type(1) input"),
+        await isTrulyDisabled(page, ".engine-form > label:nth-of-type(1) input"),
       );
       results.check(
         "item6: kind stays editable in Edit mode",
-        !(await isTrulyDisabled(page, ".engine-form label:nth-of-type(2) select")),
+        !(await isTrulyDisabled(page, ".engine-form > label:nth-of-type(2) select")),
       );
 
       // Item 7 — Forget is armed, states what it does, and isolates its

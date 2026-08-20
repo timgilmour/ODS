@@ -294,11 +294,34 @@ export async function run() {
         JSON.stringify(moveAfterConfirm),
       );
 
+      // Fix round 1 (INST I1 T12 controller ruling) — a real component
+      // defect the RED proof below caught: EngineRow.doMove's success path
+      // used to call onForgotten() without disarming first. UNLIKE
+      // doForget/doRemove, a successful move does NOT unmount this row (the
+      // resource keeps its name/key across a move, D-I1-1) — so
+      // `moveArmedForSeq`/`moveRefusalSeq`, which only ever change on a
+      // REFUSAL (model/armed.ts's `isArmedFor`), stayed exactly as armed as
+      // the operator's own second click left them, and the picker never
+      // closed. Waits for the CAUSAL refetch to land first (the row's own
+      // GPU text becoming "GPU 3"), then asserts the Move ArmedButton's own
+      // armed-hint is genuinely gone — not a vacuous absence check: this
+      // exact selector already matched (and was waited on) earlier in this
+      // same run, right after arming Move, above, so it is proven able to
+      // find something before this check leans on it finding nothing.
+      await page.waitForSelector('.engine-row:has-text("hipfire-1") .engine-row-gpu:text-is("GPU 3")');
+      const moveHintAfterRefetch = await page
+        .locator('.engine-row:has-text("hipfire-1") .armed-wrap:has(button:text-is("⚠ Move")) .armed-hint')
+        .count();
+      results.check(
+        "inst item7: the Move ArmedButton is disarmed after the causal refetch (a successful move must not leave it stuck armed)",
+        moveHintAfterRefetch === 0,
+        String(moveHintAfterRefetch),
+      );
+
       // --------------------------------------------------------------
       // Item 8 — Remove: arms then dispatches DELETE; the row is gone after
       // the causal refetch (afterMutate's reload()).
       // --------------------------------------------------------------
-      await page.waitForSelector('.engine-row:has-text("hipfire-1") .engine-row-gpu:text-is("GPU 3")');
       await assertUnique(page, '.engine-row:has-text("hipfire-1") .armed-wrap button:text-is("⚠ Remove")', "hipfire-1's Remove ArmedButton");
       await page.click('.engine-row:has-text("hipfire-1") .armed-wrap button:text-is("⚠ Remove")');
       // Scoped the same way item 7's own wait is, and for the same reason:

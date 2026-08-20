@@ -835,6 +835,23 @@ function EngineRow({
       // instances.py): the honest two-phase (D-I1-1) — the container is
       // removed, then re-created on `target`; nothing migrates live.
       await moveInstance(nodeId, engine.resource, target);
+      // Fix round 1 (INST I1 T12 controller ruling): disarm BEFORE
+      // onForgotten(), not after — a real defect, found by the gate this
+      // task added. UNLIKE doForget/doRemove above, a successful move does
+      // NOT unmount this EngineRow instance (the resource keeps its name
+      // and key across a move, D-I1-1) — reload()'s refetch just re-renders
+      // it with a new GPU claim. `moveArmedForSeq`/`moveRefusalSeq` only
+      // ever change on a REFUSAL (the catch branch below), so without this,
+      // a successful move left the Move ArmedButton — and its "Click again
+      // to confirm" caption/hint — stuck in the armed state indefinitely,
+      // with the picker still open, even though nothing was left to
+      // confirm. Closing the picker (`setMoving(false)`) and clearing the
+      // armed identity (`setMoveArmedForSeq(null)`, `isArmedFor`'s own
+      // model/armed.ts contract: null never matches any refusalSeq) mirrors
+      // how a successful Forget/Remove ends up "unarmed" by virtue of the
+      // row disappearing entirely.
+      setMoving(false);
+      setMoveArmedForSeq(null);
       onForgotten();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

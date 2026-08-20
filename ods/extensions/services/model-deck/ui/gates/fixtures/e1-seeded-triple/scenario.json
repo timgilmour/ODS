@@ -1,5 +1,5 @@
 {
-  "_note": "Hand-authored from the live deck at http://127.0.0.1:3015 (captured 2026-08-17; see vocabulary.json for the extracted shape/token baseline of the SAME capture). Models the E1 seed migration's exact local triple \u2014 hipfire GPU 0, lemonade GPU 1, comfyui GPU 1, policy_defaults verified against live /api/nodes \u2014 plus the sparky node-agent's declared sglang-omni engine, so R9's four engine-kinds (comfyui/hipfire/lemonade local_capable, sglang-omni remote_capable-only) have a REAL node-agent entry behind them, not just a catalog line: without it, no later gate item can exercise kindsFor()'s remote-vs-local split. R10: sparky's real LAN address is redacted here to 192.0.2.15 (RFC 5737 TEST-NET-1), the range .env.example's node-agent example already committed to (43112ff7) \u2014 same convention, not a new one; the real address never appears in this file or its history. GET /api/state and GET /api/storage/state carry repeat:true (R7 \u2014 POLL_MS=3000 re-fetches both every tick; Task 4 found this the hard way). GET /api/sets is fetched once on mount (SetStrip.tsx:27,36) and is NOT re-scripted. GET /api/engine-kinds carries repeat:true (Task 6 correction, discovered the hard way exactly like R7/R8: App.tsx:137-147 fetches it once on mount, but NodesView.tsx's EnginesSection ALSO fetches it independently on every mount of a node's Engines editor (reload(), fired again by useEffect(reload, [nodeId]) on every rail-row selection) \u2014 a single-entry, non-repeat script exhausts on the SECOND fetch and 599s the whole editor into 'Could not load engines' before any of E1 items 1-3 can render. The kinds payload never changes within a run, so repeat is correct here, not a workaround. GET /api/nodes, POST .../engines, and DELETE .../engines/{resource} are scripted exactly to Task 7's needs: nodes goes triple -> triple+gguf-test -> back to triple (declare, then forget) \u2014 reload()'s ONLY two call sites (mount, afterMutate), never the 3000ms ambient poll, so this transition is causally tied to the click, not to elapsed time. gguf-test is deliberately GPU 1, AWAY from the add-form's default (GPU 0 is the picker's first option) \u2014 so a form that silently dropped the operator's gpu_index pick would still fail a gpu_index:0 assertion instead of coinciding with it. (Fix round 1 correction: an earlier version of this note also claimed pinned:true was chosen for the same reason \u2014 stale. The gate never touches the Pinned checkbox, so the form actually submits pinned:false; item 4's dispatch check does not assert on pinned, so this was never wrong in effect, only in this note's own rationale.) Task 7 correction: GET /api/policy was scripted here but is DEAD \u2014 no frontend code ever issues that GET (putPolicy is a PUT only; PolicyModal.tsx takes its `policy` prop straight off /api/state's own `policy` field, never fetching its own copy). Removed. Fix round 1 correction: an earlier version of this fixture gave GET /api/state TWO entries (3-tenant policy, then repeat:true with 4) so item 5 could see gguf-test's policy row after the add. Review caught this as an R12 violation: /api/state IS the ambient-polled route (App.tsx's POLL_MS=3000 timer, the same one R12 ruled out for item 4's board-card render), and items 1-4's own actions (5 fills, 2 selectOptions, several waits, a 300ms sleep) run well past 3000ms before item 5's Policy click \u2014 so the 4-key entry was almost certainly already being served by the timer regardless of whether the Add ever dispatched. A polled route may carry only a CONSTANT, never a transition, full stop. GET /api/state is now a SINGLE repeat:true entry, 4 policy keys (gguf-test included) from the very first fetch. This does not corrupt items 1-3: nothing they assert reads state.policy directly, and the pinned-badge count (NodesView.tsx's EngineRow, driven by the ENGINES list not the raw policy map) stays 1 regardless, because gguf-test has no engine ROW until GET /api/nodes advances past its own (causally-gated) entry 0 \u2014 see the GET /api/nodes paragraph above. Item 5 itself is now the render-derivation form: it asserts PolicyModal renders every row of a CONSTANT 4-key policy map, never claiming the add caused anything \u2014 that claim stays item 4's job. This also removes the prior version's phantom-row-after-forget side effect: there is no second entry to have reverted from. R14: GET /api/nodes/sparky/serving/status (repeat:true, matching /api/state's own polling cadence \u2014 App.tsx's refreshState fetches it once per swap node on every refreshAll) and GET /api/settings/catalog/sparky/vllm (single entry, fetched exactly once \u2014 App.tsx's catalog probe effect is keyed on the joined swap-node id list, which is \"sparky\" from the very first /api/state response onward and never changes) are now scripted, closing the two 599s Task 6 left unscripted and dropped the blanket console-errors check over. Both routes are genuinely unreachable from anything items 1-7 exercise directly (sparky's own swap UI is out of scope here) \u2014 they exist purely so the console stays clean, restoring the assertion spec \u00a77 requires.",
+  "_note": "Hand-authored from the live deck at http://127.0.0.1:3015 (captured 2026-08-17; see vocabulary.json for the extracted shape/token baseline of the SAME capture). Models the E1 seed migration's exact local triple — hipfire GPU 0, lemonade GPU 1, comfyui GPU 1, policy_defaults verified against live /api/nodes — plus the sparky node-agent's declared sglang-omni engine, so R9's four engine-kinds (comfyui/hipfire/lemonade local_capable, sglang-omni remote_capable-only) have a REAL node-agent entry behind them, not just a catalog line: without it, no later gate item can exercise kindsFor()'s remote-vs-local split. R10: sparky's real LAN address is redacted here to 192.0.2.15 (RFC 5737 TEST-NET-1), the range .env.example's node-agent example already committed to (43112ff7) — same convention, not a new one; the real address never appears in this file or its history. GET /api/state and GET /api/storage/state carry repeat:true (R7 — POLL_MS=3000 re-fetches both every tick; Task 4 found this the hard way). GET /api/sets is fetched once on mount (SetStrip.tsx:27,36) and is NOT re-scripted. GET /api/engine-kinds carries repeat:true (Task 6 correction, discovered the hard way exactly like R7/R8: App.tsx:137-147 fetches it once on mount, but NodesView.tsx's EnginesSection ALSO fetches it independently on every mount of a node's Engines editor (reload(), fired again by useEffect(reload, [nodeId]) on every rail-row selection) — a single-entry, non-repeat script exhausts on the SECOND fetch and 599s the whole editor into 'Could not load engines' before any of E1 items 1-3 can render. The kinds payload never changes within a run, so repeat is correct here, not a workaround. GET /api/nodes, POST .../engines, and DELETE .../engines/{resource} are scripted exactly to Task 7's needs: nodes goes triple -> triple+gguf-test -> back to triple (declare, then forget) — reload()'s ONLY two call sites (mount, afterMutate), never the 3000ms ambient poll, so this transition is causally tied to the click, not to elapsed time. gguf-test is deliberately GPU 1, AWAY from the old add-form's default (GPU 0 used to be the picker's first <option>) — so a form that silently dropped the operator's GPU pick would still fail a gpu_indices:[0] assertion instead of coinciding with it. Fix round 1 (INST I1 T12 controller ruling): Task 11 replaced that single-GPU <select> with a multi-GPU checkbox group with no default at all, and the UI now always WRITES gpu_indices (D-I1-2) — every gpu_index field this fixture's /api/nodes entries and its POST echo carried has been converted to gpu_indices (a one-element array) to match; /api/state's world.tenants keep the derived single gpu_index untouched, per D-I1-2's own back-compat clause for that producer. (Fix round 1 correction: an earlier version of this note also claimed pinned:true was chosen for the same reason — stale. The gate never touches the Pinned checkbox, so the form actually submits pinned:false; item 4's dispatch check does not assert on pinned, so this was never wrong in effect, only in this note's own rationale.) Task 7 correction: GET /api/policy was scripted here but is DEAD — no frontend code ever issues that GET (putPolicy is a PUT only; PolicyModal.tsx takes its `policy` prop straight off /api/state's own `policy` field, never fetching its own copy). Removed. Fix round 1 correction: an earlier version of this fixture gave GET /api/state TWO entries (3-tenant policy, then repeat:true with 4) so item 5 could see gguf-test's policy row after the add. Review caught this as an R12 violation: /api/state IS the ambient-polled route (App.tsx's POLL_MS=3000 timer, the same one R12 ruled out for item 4's board-card render), and items 1-4's own actions (5 fills, 2 selectOptions, several waits, a 300ms sleep) run well past 3000ms before item 5's Policy click — so the 4-key entry was almost certainly already being served by the timer regardless of whether the Add ever dispatched. A polled route may carry only a CONSTANT, never a transition, full stop. GET /api/state is now a SINGLE repeat:true entry, 4 policy keys (gguf-test included) from the very first fetch. This does not corrupt items 1-3: nothing they assert reads state.policy directly, and the pinned-badge count (NodesView.tsx's EngineRow, driven by the ENGINES list not the raw policy map) stays 1 regardless, because gguf-test has no engine ROW until GET /api/nodes advances past its own (causally-gated) entry 0 — see the GET /api/nodes paragraph above. Item 5 itself is now the render-derivation form: it asserts PolicyModal renders every row of a CONSTANT 4-key policy map, never claiming the add caused anything — that claim stays item 4's job. This also removes the prior version's phantom-row-after-forget side effect: there is no second entry to have reverted from. R14: GET /api/nodes/sparky/serving/status (repeat:true, matching /api/state's own polling cadence — App.tsx's refreshState fetches it once per swap node on every refreshAll) and GET /api/settings/catalog/sparky/vllm (single entry, fetched exactly once — App.tsx's catalog probe effect is keyed on the joined swap-node id list, which is \"sparky\" from the very first /api/state response onward and never changes) are now scripted, closing the two 599s Task 6 left unscripted and dropped the blanket console-errors check over. Both routes are genuinely unreachable from anything items 1-7 exercise directly (sparky's own swap UI is out of scope here) — they exist purely so the console stays clean, restoring the assertion spec §7 requires.",
   "routes": {
     "GET /api/engine-kinds": [
       {
@@ -328,7 +328,9 @@
                   "connection": {
                     "container": "ods-hipfire"
                   },
-                  "gpu_index": 0,
+                  "gpu_indices": [
+                    0
+                  ],
                   "policy_defaults": {
                     "priority": 100,
                     "pinned": true,
@@ -343,7 +345,9 @@
                     "metrics_url": "http://llama-server:8001/metrics",
                     "container": "ods-llama-server"
                   },
-                  "gpu_index": 1,
+                  "gpu_indices": [
+                    1
+                  ],
                   "policy_defaults": {
                     "priority": 50,
                     "pinned": false,
@@ -356,7 +360,9 @@
                   "connection": {
                     "url": "http://comfyui:8188"
                   },
-                  "gpu_index": 1,
+                  "gpu_indices": [
+                    1
+                  ],
                   "policy_defaults": {
                     "priority": 40,
                     "pinned": false,
@@ -381,7 +387,9 @@
                   "connection": {
                     "url": "http://192.0.2.15:8008"
                   },
-                  "gpu_index": 0,
+                  "gpu_indices": [
+                    0
+                  ],
                   "policy_defaults": {
                     "priority": 40,
                     "pinned": false,
@@ -411,7 +419,9 @@
                   "connection": {
                     "container": "ods-hipfire"
                   },
-                  "gpu_index": 0,
+                  "gpu_indices": [
+                    0
+                  ],
                   "policy_defaults": {
                     "priority": 100,
                     "pinned": true,
@@ -426,7 +436,9 @@
                     "metrics_url": "http://llama-server:8001/metrics",
                     "container": "ods-llama-server"
                   },
-                  "gpu_index": 1,
+                  "gpu_indices": [
+                    1
+                  ],
                   "policy_defaults": {
                     "priority": 50,
                     "pinned": false,
@@ -439,7 +451,9 @@
                   "connection": {
                     "url": "http://comfyui:8188"
                   },
-                  "gpu_index": 1,
+                  "gpu_indices": [
+                    1
+                  ],
                   "policy_defaults": {
                     "priority": 40,
                     "pinned": false,
@@ -454,7 +468,9 @@
                     "metrics_url": "http://llama-server-test:8001/metrics",
                     "container": "ods-llama-server-test"
                   },
-                  "gpu_index": 1,
+                  "gpu_indices": [
+                    1
+                  ],
                   "policy_defaults": {
                     "priority": 0,
                     "pinned": true,
@@ -479,7 +495,9 @@
                   "connection": {
                     "url": "http://192.0.2.15:8008"
                   },
-                  "gpu_index": 0,
+                  "gpu_indices": [
+                    0
+                  ],
                   "policy_defaults": {
                     "priority": 40,
                     "pinned": false,
@@ -509,7 +527,9 @@
                   "connection": {
                     "container": "ods-hipfire"
                   },
-                  "gpu_index": 0,
+                  "gpu_indices": [
+                    0
+                  ],
                   "policy_defaults": {
                     "priority": 100,
                     "pinned": true,
@@ -524,7 +544,9 @@
                     "metrics_url": "http://llama-server:8001/metrics",
                     "container": "ods-llama-server"
                   },
-                  "gpu_index": 1,
+                  "gpu_indices": [
+                    1
+                  ],
                   "policy_defaults": {
                     "priority": 50,
                     "pinned": false,
@@ -537,7 +559,9 @@
                   "connection": {
                     "url": "http://comfyui:8188"
                   },
-                  "gpu_index": 1,
+                  "gpu_indices": [
+                    1
+                  ],
                   "policy_defaults": {
                     "priority": 40,
                     "pinned": false,
@@ -562,7 +586,9 @@
                   "connection": {
                     "url": "http://192.0.2.15:8008"
                   },
-                  "gpu_index": 0,
+                  "gpu_indices": [
+                    0
+                  ],
                   "policy_defaults": {
                     "priority": 40,
                     "pinned": false,
@@ -586,7 +612,9 @@
             "metrics_url": "http://llama-server-test:8001/metrics",
             "container": "ods-llama-server-test"
           },
-          "gpu_index": 1,
+          "gpu_indices": [
+            1
+          ],
           "policy_defaults": {
             "priority": 0,
             "pinned": true,
