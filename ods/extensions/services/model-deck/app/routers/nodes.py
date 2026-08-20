@@ -51,9 +51,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 
-from app.engine_kinds import ENGINE_KINDS, KNOWN_KINDS, validate_engines
+from app.engine_kinds import ENGINE_KINDS, KNOWN_KINDS, gpu_indices_of, validate_engines
 from app.engines import EngineError
 from app.events import log_event
+from app.instances import check_observed_gpus
+from app.node_clients import read_remote_gpus
 # `node_key` imported rather than spelled here, the same way app.arbiter
 # takes it: one definition of the `<node>/<resource>` key shape, next to the
 # `local_key` builder that fixes its node half.
@@ -253,6 +255,20 @@ def _shape_error(msg: str, *loc: str) -> RequestValidationError:
         [{"type": "value_error", "loc": ("body", *loc), "msg": msg}])
 
 
+def _observed_gpu_indices(deck: dict, node: dict) -> list[int] | None:
+    """The GPU indices this node reports. Local: the deck's own sysfs read
+    (deck["read_gpus"], bytes world — app.gpu.read_gpus). Remote: the
+    node-agent's own GPU probe (app.node_clients.read_remote_gpus) — None
+    while unreachable (E1 debt 3: a declaration cannot be checked against a
+    pool the deck could not read, so it refuses rather than guessing)."""
+    if node["agent_kind"] == "local":
+        settings = deck["settings"]
+        return [g["index"] for g in deck["read_gpus"](settings.drm_root, settings.kfd_root)]
+    pools = read_remote_gpus(deck["node_store"], deck["node_agent_client_factory"], [node["id"]])
+    pool = pools.get(node["id"])
+    return None if pool is None else [g["index"] for g in pool]
+
+
 @router.post("/{node_id}/engines")
 def add_engine(node_id: str, body: dict, request: Request) -> dict:
     """Declare a new engine on `node_id` (E1 Task 5: node-scoped —
@@ -277,6 +293,10 @@ def add_engine(node_id: str, body: dict, request: Request) -> dict:
         validate_engines([body], remote=node["agent_kind"] == "node-agent")
     except ValueError as exc:
         raise _shape_error(str(exc)) from exc
+    try:
+        check_observed_gpus(gpu_indices_of(body), _observed_gpu_indices(deck, node))
+    except ValueError as exc:
+        raise _shape_error(str(exc), "gpu_indices") from exc
     resource = body["resource"]
     engines = list(node.get("engines", []))
     if any(e["resource"] == resource for e in engines):
@@ -347,6 +367,10 @@ def update_engine(node_id: str, resource: str, body: dict, request: Request) -> 
         validate_engines([body], remote=node["agent_kind"] == "node-agent")
     except ValueError as exc:
         raise _shape_error(str(exc)) from exc
+    try:
+        check_observed_gpus(gpu_indices_of(body), _observed_gpu_indices(deck, node))
+    except ValueError as exc:
+        raise _shape_error(str(exc), "gpu_indices") from exc
     if body["kind"] != existing["kind"]:
         # Forget BEFORE the declaration write below, not after — reversed
         # from forget_engine's own ordering (declaration first, THEN

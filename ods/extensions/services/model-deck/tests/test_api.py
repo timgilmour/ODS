@@ -437,16 +437,17 @@ def wire_swap_node(deck, node_id, client, label=None):
 # E1 Task 7: a second lemonade-kind resource's fixture entry, module-level so
 # later tasks (10+) can use it verbatim without redefining the shape. Mirrors
 # tests/test_engine_kinds.py's `_entry()` — resource deliberately NOT an
-# engine name, GPU not 0/1 ([[defaults-that-hide-bugs]]) — but pinned to GPU
-# 2 specifically (not that file's 3) so a fixture pairing it with a sibling
-# "gguf-b" entry lands the two on DIFFERENT GPUs, same as
-# test_engine_kinds.py's own two-resource fixture.
+# engine name. GPU was originally 2 (away from 0/1, [[defaults-that-hide-bugs]]);
+# INST I1 Task 2 (E1 debt 3, observed-GPU validation) moved it to 1 — this
+# constant is posted through the real `/nodes/local/engines` route in many
+# tests below, and FakeReadGpus (make_app) reports only GPUs 0/1 as observed
+# for the local node, so any other index now 422s at every one of them.
 _GGUF_A_ENTRY = {
     "resource": "gguf-a", "kind": "lemonade",
     "connection": {"url": "http://gguf-a:8080",
                    "metrics_url": "http://gguf-a:8001/metrics",
                    "container": "ods-gguf-a"},
-    "gpu_index": 2,
+    "gpu_index": 1,
     "container_consent": True,
     "policy_defaults": {"priority": 10, "pinned": False, "idle_ttl": 60},
 }
@@ -543,7 +544,9 @@ def test_api_state_shape(tmp_path, monkeypatch):
     assert body["models"] == [{"file": "m.gguf", "size": 1, "footprint": 2}]
     assert body["world"]["default_route"] == "extra.model.gguf"
     assert body["world"]["tenants"]["hipfire"]["state"] == "running"
-    assert body["world"]["placement"]["hipfire"] == 0
+    # placement (INST I1 Task 2, D-I1-2): the declared GPU LIST, even for a
+    # legacy scalar declaration.
+    assert body["world"]["placement"]["hipfire"] == [0]
 
 
 def test_state_provenance_block_carries_an_updates_count(tmp_path, monkeypatch):
@@ -3921,6 +3924,20 @@ def test_engine_kinds_serves_idle_release_so_the_ui_never_claims_a_rule_that_doe
     assert all("idle_release" in k for k in body["kinds"])
 
 
+def test_add_engine_refuses_an_unobserved_gpu_by_name(tmp_path, monkeypatch):
+    """E1 debt 3 (observed-GPU validation, INST I1 Task 2): a declared GPU
+    must be one the node actually reports — FakeReadGpus (make_app) reports
+    GPUs 0 and 1 for the local node."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    body = {"resource": "gguf-x", "kind": "lemonade", "gpu_indices": [7],
+            "connection": {"url": "http://x:8080", "metrics_url": "http://x:8001/metrics",
+                           "container": "ods-x"},
+            "container_consent": True, "policy_defaults": {"priority": 0, "pinned": False, "idle_ttl": 0}}
+    r = TestClient(app).post("/api/nodes/local/engines", json=body)
+    assert r.status_code == 422
+    assert "gpu_indices [7] not observed on this node (observed: [0, 1])" in r.text
+
+
 def test_engine_add_validates_and_lands(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     _declare_local(deck, [])
@@ -3968,7 +3985,10 @@ def test_engine_add_duplicate_409(tmp_path, monkeypatch):
 def test_engine_update_replaces_full_entry(tmp_path, monkeypatch):
     app, deck = make_app(tmp_path, monkeypatch)
     _declare_local(deck, [_GGUF_A_ENTRY])
-    moved = dict(_GGUF_A_ENTRY, gpu_index=5,
+    # gpu_index moved to 0 (was 5): E1 debt 3 — the local node observes
+    # only GPUs 0/1 (FakeReadGpus), so an update through the real route
+    # must land on an observed index.
+    moved = dict(_GGUF_A_ENTRY, gpu_index=0,
                  policy_defaults={"priority": 1, "pinned": True, "idle_ttl": 0})
 
     r = TestClient(app).put("/api/nodes/local/engines/gguf-a", json=moved)
@@ -4015,7 +4035,9 @@ def test_engine_update_same_kind_preserves_the_intent_record(tmp_path, monkeypat
     deck["intent_store"].record("local/gguf-a", state="loaded",
                                 model="a.gguf", engine="lemonade")
 
-    moved = dict(_GGUF_A_ENTRY, gpu_index=5,
+    # gpu_index moved to 0 (was 5): E1 debt 3 — the local node observes
+    # only GPUs 0/1 (FakeReadGpus).
+    moved = dict(_GGUF_A_ENTRY, gpu_index=0,
                 policy_defaults={"priority": 1, "pinned": True, "idle_ttl": 0})
     r = TestClient(app).put("/api/nodes/local/engines/gguf-a", json=moved)
 
@@ -4134,7 +4156,8 @@ def test_state_tenants_reflect_a_live_engine_declaration_edit(tmp_path, monkeypa
 
     assert body["world"]["tenants"]["gguf-a"]["state"] == "loaded"
     assert body["world"]["tenants"]["gguf-a"]["engine"] == "lemonade"
-    assert body["world"]["placement"]["gguf-a"] == _GGUF_A_ENTRY["gpu_index"]
+    # placement (INST I1 Task 2, D-I1-2): the declared GPU LIST.
+    assert body["world"]["placement"]["gguf-a"] == [_GGUF_A_ENTRY["gpu_index"]]
 
     client.delete("/api/nodes/local/engines/gguf-a")
     body_after = client.get("/api/state").json()
@@ -4171,19 +4194,34 @@ def test_api_state_exact_shape_tests_already_match_the_approved_interface(tmp_pa
 def _add_remote_node(deck, node_id="nimbus", *, credential="key-nimbus"):
     """A bare node-agent registry row — address + (optionally) a stored
     credential, no swap/serving machinery — enough for the declared-engines
-    CRUD routes below."""
+    CRUD routes below.
+
+    Also wires a default `node_agent_client_factory` reporting GPU 4 (E1
+    debt 3 / INST I1 Task 2): the declared-engines CRUD routes now check a
+    declaration's GPU against the target node's OBSERVED pool, and every
+    remote fixture below (`_REMOTE_OMNI_BODY`) declares GPU 4 — a caller
+    that needs a different (or unreachable) answer still overrides
+    `deck["node_agent_client_factory"]` itself afterward, same as before
+    this wiring existed (`_wire_remote_omni`/`_wire_remote_engine` do)."""
     deck["node_store"].add(
         {"id": node_id, "label": f"{node_id.title()} Box", "agent_kind": "node-agent",
          "address": f"http://{node_id}:7720"},
         credential=credential)
+    deck["node_agent_client_factory"] = lambda address, credential: _StubAgent(
+        {"gpus": [{"index": 4, "memory_total_mb": 24576, "memory_used_mb": 1024}]})
 
 
+# gpu_index 1 (was 4): E1 debt 3 — this body is also posted straight to the
+# LOCAL node below (test_add_engine_on_local_node_kind_not_remote_capable_
+# gate_does_not_apply), which observes only GPUs 0/1 (FakeReadGpus); its
+# own POST to "nimbus" is unaffected either way (refused by validate_engines
+# — lemonade is not remote_capable — before the observed-GPU check runs).
 _REMOTE_ENGINE_BODY = {
     "resource": "gguf-r", "kind": "lemonade",
     "connection": {"url": "http://gguf-r:8080",
                    "metrics_url": "http://gguf-r:8001/metrics",
                    "container": "ods-gguf-r"},
-    "gpu_index": 4,
+    "gpu_index": 1,
     "container_consent": True,
     "policy_defaults": {"priority": 5, "pinned": False, "idle_ttl": 30},
 }
@@ -5008,7 +5046,10 @@ def test_declaring_a_remote_engine_puts_it_on_the_board_at_once(
     declaration existed, so an operator saw nothing for up to 10 s after a
     successful write."""
     app, deck = make_app(tmp_path, monkeypatch)
-    agent = _StubAgent({"gpus": []})
+    # gpus=[...] (was []): E1 debt 3 — the POST below now checks the
+    # declared GPU (4) against this node's OBSERVED pool before it lands.
+    agent = _StubAgent({"gpus": [{"index": 4, "memory_total_mb": 24576,
+                                  "memory_used_mb": 1024}]})
     _wire_remote_omni(deck, agent=agent, declare=False)
     client = TestClient(app)
     assert client.get("/api/state").json()["world"]["remote_tenants"] == {}
@@ -5018,14 +5059,19 @@ def test_declaring_a_remote_engine_puts_it_on_the_board_at_once(
 
     assert r.status_code == 200
     assert "nimbus/song-r" in client.get("/api/state").json()["world"]["remote_tenants"]
-    assert agent.calls == 1
+    # 2, not 1 (E1 debt 3): the POST itself now costs one observed-GPU probe
+    # (app.routers.nodes._observed_gpu_indices), on top of the GET's own.
+    assert agent.calls == 2
 
 
 def test_updating_a_remote_engine_declaration_reobserves_it(tmp_path, monkeypatch):
     """A connection edit rebinds the client (RemoteEngineClients' binding
     view), so the cached observation describes the OLD connection."""
     app, deck = make_app(tmp_path, monkeypatch)
-    agent = _StubAgent({"gpus": []})
+    # gpus=[...] (was []): E1 debt 3 — the PUT below now checks the declared
+    # GPU (4) against this node's OBSERVED pool before it lands.
+    agent = _StubAgent({"gpus": [{"index": 4, "memory_total_mb": 24576,
+                                  "memory_used_mb": 1024}]})
     _wire_remote_omni(deck, agent=agent)
     client = TestClient(app)
     client.get("/api/state")
@@ -5037,7 +5083,10 @@ def test_updating_a_remote_engine_declaration_reobserves_it(tmp_path, monkeypatc
 
     assert r.status_code == 200
     client.get("/api/state")
-    assert agent.calls == 2
+    # 3, not 2 (E1 debt 3): the PUT itself now costs one observed-GPU probe
+    # (app.routers.nodes._observed_gpu_indices), on top of the initial GET
+    # and the re-probe the connection edit's invalidate() forces.
+    assert agent.calls == 3
 
 
 def test_forgetting_a_remote_engine_drops_it_from_the_board_at_once(

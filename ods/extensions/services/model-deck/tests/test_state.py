@@ -223,7 +223,9 @@ def test_snapshot_derives_placement_from_declared_engines():
 
     result = world.snapshot(**_healthy_kwargs())
 
-    assert result["placement"] == {"hipfire": 0, "lemonade": 1, "comfyui": 1}
+    # placement (INST I1 Task 2, D-I1-2): now the declared GPU LIST, even
+    # for a legacy scalar declaration.
+    assert result["placement"] == {"hipfire": [0], "lemonade": [1], "comfyui": [1]}
 
 
 def test_snapshot_placement_follows_declared_gpu_index_not_a_fixed_default():
@@ -239,7 +241,8 @@ def test_snapshot_placement_follows_declared_gpu_index_not_a_fixed_default():
 
     result = world.snapshot(**kwargs)
 
-    assert result["placement"] == {"hipfire": 2, "lemonade": 0, "comfyui": 0}
+    # placement (INST I1 Task 2, D-I1-2): now the declared GPU LIST.
+    assert result["placement"] == {"hipfire": [2], "lemonade": [0], "comfyui": [0]}
 
 
 def test_snapshot_gpus_computes_free_from_total_minus_used():
@@ -270,8 +273,10 @@ def test_lemonade_engineerror_sets_tenant_unknown_with_none_fields():
 
     result = world.snapshot(**_healthy_kwargs(lemonade=RaisingLemonade()))
 
-    # gains "engine"/"gpu_index" (E1 Task 3: every tenant is stamped with
-    # its declaration's kind + gpu_index) alongside the unchanged fields.
+    # gains "engine"/"gpu_index"/"gpu_indices" (E1 Task 3 stamped
+    # engine/gpu_index; INST I1 Task 2 adds gpu_indices, D-I1-2's list
+    # spelling — a one-element list for this legacy scalar declaration)
+    # alongside the unchanged fields.
     assert result["tenants"]["lemonade"] == {
         "state": "unknown",
         "model": None,
@@ -279,6 +284,7 @@ def test_lemonade_engineerror_sets_tenant_unknown_with_none_fields():
         "idle_s": None,
         "engine": "lemonade",
         "gpu_index": 1,
+        "gpu_indices": [1],
     }
 
 
@@ -289,7 +295,7 @@ def test_comfyui_engineerror_sets_tenant_unknown_with_none_fields():
 
     assert result["tenants"]["comfyui"] == {
         "state": "unknown", "queue": None, "idle_s": None,
-        "engine": "comfyui", "gpu_index": 1,
+        "engine": "comfyui", "gpu_index": 1, "gpu_indices": [1],
     }
 
 
@@ -300,7 +306,7 @@ def test_hipfire_engineerror_sets_tenant_unknown_with_zero_footprint():
 
     assert result["tenants"]["hipfire"] == {
         "state": "unknown", "model": None, "footprint": 0, "queue_depth": None,
-        "engine": "hipfire", "gpu_index": 0,
+        "engine": "hipfire", "gpu_index": 0, "gpu_indices": [0],
     }
 
 
@@ -397,7 +403,7 @@ def test_snapshot_reports_loading_while_a_load_is_in_flight():
 
     assert result["tenants"]["lemonade"] == {
         "state": "loading", "model": None, "footprint": None, "idle_s": None,
-        "engine": "lemonade", "gpu_index": 1,
+        "engine": "lemonade", "gpu_index": 1, "gpu_indices": [1],
     }
 
 
@@ -482,7 +488,8 @@ def test_comfy_state_idle_when_queue_empty():
     result = world.snapshot(**_healthy_kwargs(comfy=StubComfy(queue=0)))
 
     assert result["tenants"]["comfyui"] == {
-        "state": "idle", "queue": 0, "idle_s": 0, "engine": "comfyui", "gpu_index": 1,
+        "state": "idle", "queue": 0, "idle_s": 0, "engine": "comfyui",
+        "gpu_index": 1, "gpu_indices": [1],
     }
 
 

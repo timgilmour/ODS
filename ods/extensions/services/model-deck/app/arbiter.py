@@ -281,10 +281,20 @@ def _decide_idle_release(world: dict, policy: dict) -> list[dict]:
     return actions
 
 
+def tenant_gpus(tenant: dict) -> list[int]:
+    """The ONE tenant-side reader of a GPU claim (D-I1-2): `gpu_indices` when
+    the snapshot carries it (every app.state producer does), else the
+    scalar — which is also what every pre-INST test fixture spells."""
+    if tenant.get("gpu_indices"):
+        return list(tenant["gpu_indices"])
+    gpu = tenant.get("gpu_index")
+    return [] if gpu is None else [gpu]
+
+
 def _idle_actions(tenants: dict, gpus: list[dict], policy: dict,
                   node_id: str | None = None) -> list[dict]:
     """One half's idle-release pass: `tenants` keyed by BARE resource, `gpus`
-    the pool those tenants' `gpu_index` addresses.
+    the pool those tenants' claimed GPU(s) (`tenant_gpus`) address.
 
     `node_id` rides onto every action it produces (and onto nothing else) —
     the local half passes None and its actions keep the exact three-key shape
@@ -304,9 +314,13 @@ def _idle_actions(tenants: dict, gpus: list[dict], policy: dict,
         if pol is None:
             continue
         adapter = ENGINE_KINDS[tenant["engine"]]
-        gpu_index = tenant.get("gpu_index")
-        gpu = _find_gpu(gpus, gpu_index) if gpu_index is not None else None
-        co_footprints = _co_resident_footprints(tenants, resource, gpu_index)
+        # A multi-GPU claim's CAPACITY is read off its FIRST (min) claimed
+        # GPU (D-I1-2) — the arbiter's per-GPU capacity math has no notion
+        # of "spans two cards"; co-residency below is still the UNION over
+        # every claimed GPU.
+        claim = tenant_gpus(tenant)
+        gpu = _find_gpu(gpus, claim[0]) if claim else None
+        co_footprints = _co_resident_footprints_any(tenants, resource, claim)
         action = adapter.idle_action(tenant, pol, gpu, co_footprints)
         if action is None:
             continue
@@ -317,18 +331,24 @@ def _idle_actions(tenants: dict, gpus: list[dict], policy: dict,
     return actions
 
 
-def _co_resident_footprints(tenants: dict, exclude_resource: str, gpu_index) -> int:
-    """Sum of known footprints of every OTHER tenant sharing `gpu_index`
-    with a loaded/running state — the generalization of the old "minus a
-    co-resident loaded lemonade's footprint": a kind's own VRAM use may not
-    be directly observable (comfyui), so its reclaimable estimate must
-    subtract whatever ANY OTHER co-resident tenant is already accounted
-    for, not a hardcoded single-kind check."""
+def _co_resident_footprints_any(tenants: dict, exclude_resource: str,
+                                gpu_indices: list[int]) -> int:
+    """Sum of known footprints of every OTHER tenant sharing ANY of
+    `gpu_indices` with a loaded/running state — the generalization of the
+    old "minus a co-resident loaded lemonade's footprint": a kind's own
+    VRAM use may not be directly observable (comfyui), so its reclaimable
+    estimate must subtract whatever ANY OTHER co-resident tenant is already
+    accounted for, not a hardcoded single-kind check.
+
+    Each OTHER tenant counts ONCE even when it claims more than one of
+    `gpu_indices` (D-I1-2) — summing per-GPU would double count a neighbour
+    claiming two of our GPUs."""
     total = 0
+    claimed = set(gpu_indices)
     for resource, tenant in tenants.items():
         if resource == exclude_resource:
             continue
-        if tenant.get("gpu_index") != gpu_index:
+        if not (set(tenant_gpus(tenant)) & claimed):
             continue
         if tenant.get("state") not in ("loaded", "running"):
             continue
@@ -336,6 +356,13 @@ def _co_resident_footprints(tenants: dict, exclude_resource: str, gpu_index) -> 
         if isinstance(footprint, int) and footprint:
             total += footprint
     return total
+
+
+def _co_resident_footprints(tenants: dict, exclude_resource: str, gpu_index) -> int:
+    """Single-GPU convenience wrapper over `_co_resident_footprints_any`,
+    kept for its existing per-GPU callers (`_eviction_candidates`, whose
+    eviction scope is always ONE pending GPU)."""
+    return _co_resident_footprints_any(tenants, exclude_resource, [gpu_index])
 
 
 def _decide_contention(world: dict, policy: dict, pending_load: dict) -> list[dict]:
@@ -368,9 +395,11 @@ def _decide_contention(world: dict, policy: dict, pending_load: dict) -> list[di
 
 
 def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dict, int]]:
-    """Evictable tenants on the pending GPU (``tenant["gpu_index"] ==
-    gpu["index"]`` — E1: candidates are scoped to the GPU the pending load
-    actually targets, not every declared resource) as ``(action,
+    """Evictable tenants on the pending GPU (``gpu["index"] in
+    tenant_gpus(tenant)`` — E1: candidates are scoped to the GPU the pending
+    load actually targets, not every declared resource; D-I1-2: a
+    multi-GPU tenant is a candidate whenever it claims the pending GPU, not
+    only when that GPU happens to be its first) as ``(action,
     reclaimable_bytes)``, sorted ascending by ``policy[resource]["priority"]``
     (lowest priority evicted first). Eligibility guards are unchanged from
     before; only the resulting order is policy-driven.
@@ -384,7 +413,7 @@ def _eviction_candidates(world: dict, policy: dict, gpu: dict) -> list[tuple[dic
     scored: list[tuple[int, dict, int]] = []
     for resource in sorted(tenants):
         tenant = tenants[resource]
-        if tenant.get("gpu_index") != gpu["index"]:
+        if gpu["index"] not in tenant_gpus(tenant):
             continue
         adapter = ENGINE_KINDS[tenant["engine"]]
         if not adapter.arbiter_verbs():
@@ -879,10 +908,11 @@ class Watcher:
         generalizes per resource is only: is THIS resource the one
         currently unloaded, and is THIS resource's OWN declared GPU's free
         VRAM below that footprint. `gpu_index` now comes from the tenant's
-        OWN declared placement (`tenant["gpu_index"]`, stamped onto every
-        tenant by World.snapshot from the declaration) — this is what
-        kills the single global `settings.lemonade_gpu_index` the pre-E1
-        version read.
+        OWN declared claim (`tenant_gpus(tenant)`, D-I1-2 — a multi-GPU
+        claim's pending load targets its FIRST claimed GPU; the free-VRAM
+        check below is per-GPU by construction, same as everywhere else
+        this module reads capacity) — this is what kills the single global
+        `settings.lemonade_gpu_index` the pre-E1 version read.
         """
         default_route = world["default_route"]
         if not default_route:
@@ -900,7 +930,8 @@ class Watcher:
                 continue
             if tenant["state"] != "unloaded":
                 continue
-            gpu_index = tenant.get("gpu_index")
+            claim = tenant_gpus(tenant)
+            gpu_index = claim[0] if claim else None
             gpu = _find_gpu(world["gpus"], gpu_index) if gpu_index is not None else None
             if gpu is None or gpu["free"] >= footprint:
                 continue

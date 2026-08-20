@@ -296,7 +296,45 @@ def test_two_lemonade_kind_resources_have_independent_idle_clocks():
     assert snap["tenants"]["gguf-a"]["idle_s"] == 0.0
     assert snap["tenants"]["gguf-b"]["idle_s"] == 50.0
     assert snap["tenants"]["gguf-a"]["engine"] == "lemonade"
-    assert snap["placement"] == {"gguf-a": 2, "gguf-b": 3}
+    # placement (INST I1 Task 2, D-I1-2): now the declared GPU LIST, even
+    # for a legacy scalar declaration — the sole reader is tests + the
+    # api.ts comment (Task 8 updates the latter).
+    assert snap["placement"] == {"gguf-a": [2], "gguf-b": [3]}
+
+
+def test_snapshot_stamps_gpu_indices_and_a_derived_min_gpu_index():
+    """INST I1 Task 2 (D-I1-2): a declaration spelled with the LIST stamps
+    the tenant with BOTH the list and a DERIVED min scalar — one producer
+    (app.state), so the two spellings cannot disagree. A legacy scalar
+    declaration reads back as a one-element list with the same scalar.
+
+    Written here, not tests/test_state.py: this is the file's own
+    two-lemonade-kind-resource idiom (gguf-a/gguf-b, GPUs away from live
+    topology) — test_state.py's fixtures pin per-KIND observe() logic with
+    resource==kind names instead (see that file's module docstring)."""
+    from app.state import World
+    world = World(clock=lambda: 0.0)
+    engines = [
+        {"resource": "gguf-a", "kind": "lemonade",
+         "connection": {"url": "u", "metrics_url": "m", "container": "c"},
+         "gpu_index": 2,
+         "policy_defaults": {"priority": 1, "pinned": False, "idle_ttl": 60}},
+        {"resource": "gguf-b", "kind": "lemonade",
+         "connection": {"url": "u2", "metrics_url": "m2", "container": "c2"},
+         "gpu_indices": [3, 4],
+         "policy_defaults": {"priority": 2, "pinned": False, "idle_ttl": 60}},
+    ]
+    clients = _FakeLocalClients({"gguf-a": _FakeGguf(), "gguf-b": _FakeGguf()})
+    gpus = [_gpu(2), _gpu(3), _gpu(4)]
+
+    snap = world.snapshot(gpus, engines, clients, _FakeLitellm(), _FakeRegistry())
+
+    assert snap["tenants"]["gguf-b"]["gpu_indices"] == [3, 4]
+    assert snap["tenants"]["gguf-b"]["gpu_index"] == 3
+    assert snap["placement"]["gguf-b"] == [3, 4]
+    # legacy scalar declaration -> one-element list, same scalar
+    assert snap["tenants"]["gguf-a"]["gpu_indices"] == [2]
+    assert snap["tenants"]["gguf-a"]["gpu_index"] == 2
 
 
 def test_absent_engine_is_absent_everywhere():

@@ -589,6 +589,57 @@ def test_idle_release_iterates_every_declared_gguf():
     assert actions == [{"type": "unload", "resource": "gguf-a", "model": "a.gguf"}]
 
 
+# ===========================================================================
+# INST I1 Task 2 (D-I1-2): multi-GPU tenant claims. `tenant_gpus(tenant)` is
+# the ONE tenant-side reader of a GPU claim (`gpu_indices` when present,
+# else the scalar) — every helper below that used to read `tenant["gpu_index"]`
+# directly now goes through it.
+# ===========================================================================
+
+
+def test_tenant_gpus_reads_list_then_scalar():
+    from app.arbiter import tenant_gpus
+    assert tenant_gpus({"gpu_index": 2}) == [2]
+    assert tenant_gpus({"gpu_indices": [3, 4], "gpu_index": 3}) == [3, 4]
+
+
+def test_multi_gpu_tenant_counts_as_co_resident_on_every_claimed_gpu():
+    from app.arbiter import _co_resident_footprints
+    tenants = {"gguf-a": {"engine": "lemonade", "gpu_indices": [3, 4], "gpu_index": 3,
+                          "state": "loaded", "footprint": 10 * GIB},
+               "gguf-b": {"engine": "lemonade", "gpu_index": 4, "state": "unloaded"}}
+    assert _co_resident_footprints(tenants, "gguf-b", 4) == 10 * GIB
+    assert _co_resident_footprints(tenants, "gguf-b", 3) == 10 * GIB
+    assert _co_resident_footprints(tenants, "gguf-b", 2) == 0
+
+
+def test_eviction_candidates_scope_includes_multi_gpu_tenants_claiming_the_pending_gpu():
+    from app.arbiter import _eviction_candidates
+    world = _dworld({"gguf-a": {"engine": "lemonade", "gpu_indices": [3, 4], "gpu_index": 3,
+                                "state": "loaded", "model": "m.gguf", "footprint": 10 * GIB}},
+                    [_dgpu(3, 34 * GIB, 12 * GIB), _dgpu(4, 34 * GIB, 12 * GIB)])
+    policy = {"gguf-a": {"priority": 10, "pinned": False, "idle_ttl": 0}}
+    cands = _eviction_candidates(world, policy, world["gpus"][1])   # pending on GPU 4
+    assert [a["resource"] for a, _ in cands] == ["gguf-a"]
+
+
+def test_idle_actions_resolve_a_multi_gpu_tenant_to_its_first_gpu_for_capacity():
+    """A multi-GPU claim's idle release still fires: capacity/co-residency
+    are read off the FIRST (min) claimed GPU per `_idle_actions`, and the
+    lemonade adapter's own idle rule (state/pinned/idle_ttl/idle_s) is what
+    actually decides — asserted end to end via `decide`."""
+    world = _dworld({
+        "gguf-a": {"engine": "lemonade", "gpu_indices": [3, 4], "gpu_index": 3,
+                   "state": "loaded", "model": "a.gguf", "footprint": 10 * GIB,
+                   "idle_s": 100.0},
+    }, [_dgpu(3, 34 * GIB, 12 * GIB), _dgpu(4, 34 * GIB, 12 * GIB)])
+    policy = {"gguf-a": {"priority": 1, "pinned": False, "idle_ttl": 60}}
+
+    actions = decide(world, policy, None)
+
+    assert [a["resource"] for a in actions] == ["gguf-a"]
+
+
 def test_contention_is_scoped_to_the_pending_gpu():
     """Two contended GPUs at once (impossible pre-E1): only residents of
     the pending load's GPU are candidates."""

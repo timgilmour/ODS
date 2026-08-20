@@ -83,7 +83,7 @@ No Settings import here — pure inputs only.
 
 import time
 
-from app.engine_kinds import ENGINE_KINDS
+from app.engine_kinds import ENGINE_KINDS, gpu_indices_of
 from app.engines import EngineError
 from app.observe import node_key
 
@@ -181,7 +181,12 @@ class World:
             ctx = {"registry": registry, "routes": routes, "resource": resource}
             obs = adapter.observe(client, mem, now, ctx)
             obs["engine"] = kind
-            obs["gpu_index"] = entry["gpu_index"]
+            claim = gpu_indices_of(entry)
+            obs["gpu_indices"] = claim
+            # DERIVED, for sort order and the pre-INST consumers (Set Builder
+            # reads it — I2 moves it to gpu_indices). ONE producer, so the two
+            # spellings cannot disagree (D-I1-2).
+            obs["gpu_index"] = min(claim)
             tenants[resource] = obs
 
         default_route = None if routes is None else _strip_prefix(routes.get("default"), _OPENAI_PREFIX)
@@ -198,7 +203,7 @@ class World:
             # (False). The storage guards fail CLOSED on the latter — see
             # app.storage.plan_move / storage_decide.
             "routes_known": routes is not None,
-            "placement": {resource: entry["gpu_index"] for resource, entry in declared.items()},
+            "placement": {resource: gpu_indices_of(entry) for resource, entry in declared.items()},
         }
 
     def snapshot_remote(self, engines, clients, gpu_pools, registry) -> dict[str, dict]:
@@ -301,7 +306,12 @@ class World:
                     client, mem, now,
                     {"registry": registry, "routes": None, "resource": resource})
             obs["engine"] = kind
-            obs["gpu_index"] = entry["gpu_index"]
+            claim = gpu_indices_of(entry)
+            obs["gpu_indices"] = claim
+            # DERIVED, for sort order and the pre-INST consumers (Set Builder
+            # reads it — I2 moves it to gpu_indices). ONE producer, so the two
+            # spellings cannot disagree (D-I1-2).
+            obs["gpu_index"] = min(claim)
             # The two fields every downstream key is built from
             # (app.observe.observe_remote). Carried ON the record rather
             # than parsed back out of the map key, so the two cannot drift.
