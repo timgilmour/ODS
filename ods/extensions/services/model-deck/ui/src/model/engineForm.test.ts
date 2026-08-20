@@ -42,6 +42,9 @@ function kindsPayload(
     demand: boolean;
     human_verbs: string[];
     idle_release: boolean;
+    max_gpus: number | null;
+    instance: boolean;
+    instance_env: Record<string, { required: boolean }>;
   }[],
 ): EngineKindsResponse {
   return { kinds };
@@ -56,6 +59,7 @@ test("fields derive from the kinds payload, not literals", () => {
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
       remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"], idle_release: true,
+      max_gpus: null, instance: true, instance_env: {},
     }]),
     "comfyui",
   );
@@ -67,6 +71,7 @@ test("save is blocked until required fields are filled", () => {
     kindsPayload([{
       kind: "comfyui", connection: { url: { required: true } },
       remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"], idle_release: true,
+      max_gpus: null, instance: true, instance_env: {},
     }]),
     "comfyui",
   );
@@ -87,10 +92,12 @@ const WIDGET_GADGET = kindsPayload([
   {
     kind: "widget", connection: { host: { required: true }, note: { required: false } },
     remote_capable: false, local_capable: true, demand: true, human_verbs: ["free"], idle_release: true,
+    max_gpus: null, instance: true, instance_env: {},
   },
   {
     kind: "gadget", connection: { path: { required: true } },
     remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"], idle_release: false,
+    max_gpus: null, instance: true, instance_env: {},
   },
 ]);
 
@@ -213,6 +220,7 @@ describe("canSave", () => {
       {
         kind: "gizmo", connection: { note: { required: false } },
         remote_capable: false, local_capable: true, demand: true, human_verbs: [], idle_release: true,
+        max_gpus: null, instance: true, instance_env: {},
       },
     ]);
     expect(canSave(emptyForm(noRequired, "gizmo"))).toBe(true);
@@ -320,18 +328,22 @@ describe("kindsFor", () => {
       kind: "lemonade",
       connection: { url: { required: true }, metrics_url: { required: true }, container: { required: true } },
       remote_capable: false, local_capable: true, demand: true, human_verbs: ["load", "unload"], idle_release: true,
+      max_gpus: null, instance: true, instance_env: {},
     },
     {
       kind: "comfyui", connection: { url: { required: true } },
       remote_capable: false, local_capable: true, demand: false, human_verbs: ["free"], idle_release: true,
+      max_gpus: null, instance: true, instance_env: {},
     },
     {
       kind: "hipfire", connection: { container: { required: true } },
       remote_capable: false, local_capable: true, demand: false, human_verbs: ["park", "resume"], idle_release: false,
+      max_gpus: 1, instance: true, instance_env: { HIPFIRE_MODEL: { required: true } },
     },
     {
       kind: "sglang-omni", connection: { url: { required: true } },
       remote_capable: true, local_capable: false, demand: false, human_verbs: ["load", "unload"], idle_release: true,
+      max_gpus: 1, instance: false, instance_env: {},
     },
   ]);
 
@@ -349,10 +361,12 @@ describe("kindsFor", () => {
     {
       kind: "local-only", connection: {},
       remote_capable: false, local_capable: true, demand: true, human_verbs: [], idle_release: true,
+      max_gpus: null, instance: true, instance_env: {},
     },
     {
       kind: "remote-only", connection: {},
       remote_capable: true, local_capable: false, demand: false, human_verbs: [], idle_release: false,
+      max_gpus: null, instance: true, instance_env: {},
     },
     // A kind capable nowhere (the shape KNOWN_KINDS' own comment,
     // app/engine_kinds.py:175, says a real kind can never be — pinned here
@@ -361,6 +375,7 @@ describe("kindsFor", () => {
     {
       kind: "capable-nowhere", connection: {},
       remote_capable: false, local_capable: false, demand: false, human_verbs: [], idle_release: false,
+      max_gpus: null, instance: false, instance_env: {},
     },
   ]);
 
@@ -395,14 +410,16 @@ describe("demandFor", () => {
     // already holds for the picker.
     const catalog = [
       { kind: "lemonade", connection: {}, remote_capable: false, local_capable: true,
-        human_verbs: ["load", "unload"], demand: true, idle_release: true },
+        human_verbs: ["load", "unload"], demand: true, idle_release: true,
+        max_gpus: null, instance: true, instance_env: {} },
       // sglang-omni's REAL human_verbs (app/engine_kinds.py's
       // _SglangOmniAdapter.human_verbs, ~line 1012-1016) is ["load",
       // "unload"] — never "free" (that vocabulary belongs to comfyui).
       // idle_release: true — its arbiter_verbs() is frozenset({"unload"})
       // and idle_action has a real rule (:1025-1048).
       { kind: "sglang-omni", connection: {}, remote_capable: true, local_capable: false,
-        human_verbs: ["load", "unload"], demand: false, idle_release: true },
+        human_verbs: ["load", "unload"], demand: false, idle_release: true,
+        max_gpus: 1, instance: false, instance_env: {} },
     ];
     expect(demandFor(catalog, "lemonade")).toBe(true);
     expect(demandFor(catalog, "sglang-omni")).toBe(false);
@@ -478,12 +495,14 @@ describe("idleReleaseFor", () => {
   test("finds the idle_release flag for the kind being edited — mirrors demandFor", () => {
     const catalog = [
       { kind: "lemonade", connection: {}, remote_capable: false, local_capable: true,
-        human_verbs: ["load", "unload"], demand: true, idle_release: true },
+        human_verbs: ["load", "unload"], demand: true, idle_release: true,
+        max_gpus: null, instance: true, instance_env: {} },
       // hipfire: real idle_release is FALSE — arbiter_verbs() is empty,
       // idle_action is unconditionally None (app/engine_kinds.py's
       // _HipfireAdapter, ~line 830-844).
       { kind: "hipfire", connection: {}, remote_capable: false, local_capable: true,
-        human_verbs: ["park", "resume"], demand: false, idle_release: false },
+        human_verbs: ["park", "resume"], demand: false, idle_release: false,
+        max_gpus: 1, instance: true, instance_env: {} },
     ];
     expect(idleReleaseFor(catalog, "lemonade")).toBe(true);
     expect(idleReleaseFor(catalog, "hipfire")).toBe(false);

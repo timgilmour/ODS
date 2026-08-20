@@ -23,6 +23,9 @@ function kindsPayload(
     demand: boolean;
     human_verbs: string[];
     idle_release: boolean;
+    max_gpus: number | null;
+    instance: boolean;
+    instance_env: Record<string, { required: boolean }>;
   }[],
 ): EngineKindsResponse {
   return { kinds };
@@ -40,6 +43,9 @@ const WIDGET = kindsPayload([
     // must render the payload's order rather than re-sorting it.
     human_verbs: ["load", "unload"],
     idle_release: true,
+    max_gpus: null,
+    instance: true,
+    instance_env: {},
   },
   {
     kind: "gadget",
@@ -49,6 +55,9 @@ const WIDGET = kindsPayload([
     demand: false,
     human_verbs: ["polish"],
     idle_release: false,
+    max_gpus: null,
+    instance: true,
+    instance_env: {},
   },
 ]);
 
@@ -118,6 +127,9 @@ describe("remoteEngineVerbs", () => {
         demand: false,
         human_verbs: ["load", "unload"],
         idle_release: true,
+        max_gpus: 1,
+        instance: false,
+        instance_env: {},
       },
     ]);
     expect(remoteEngineVerbs(live, "sglang-omni", "busy", false)).toEqual([

@@ -1066,6 +1066,10 @@ const OMNI_KINDS: EngineKindsResponse = {
     // arbiter_verbs() is frozenset({"unload"}) and idle_action has a real
     // rule (app/engine_kinds.py's _SglangOmniAdapter, ~lines 1009-1048).
     idle_release: true,
+    // INST I1 fields (app/routers/nodes.py's list_engine_kinds, served
+    // unconditionally): sglang-omni's REAL max_gpus is 1 and it is NOT
+    // instantiable (single pre-seeded entry only, no instance route).
+    max_gpus: 1, instance: false, instance_env: {},
   }],
 };
 

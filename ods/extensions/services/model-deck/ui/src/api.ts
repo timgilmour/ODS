@@ -1050,22 +1050,24 @@ export interface EngineKindDef {
   idle_release: boolean;
   /** The most GPUs one instance of this kind may claim at once, or `null`
    * for no cap (app/routers/nodes.py's list_engine_kinds, INST I1 Task 1).
-   * Optional: a fixture predating this field (every pre-INST-I1 test in
-   * this repo) omits it, and every reader here treats absence the same as
-   * `null` — `maxGpusFor`'s own `?? null`. */
-  max_gpus?: number | null;
+   * Served unconditionally on every kind — REQUIRED, not optional, same as
+   * every other field this interface names: the backend stamps it on
+   * every entry regardless of kind, so a fixture omitting it is not
+   * mirroring the wire, it is drifting from it. `maxGpusFor`'s own `??
+   * null` covers "catalog absent" / "kind not in catalog", a DIFFERENT
+   * case from this field's own presence. */
+  max_gpus: number | null;
   /** Whether this kind may be declared as a free-standing INSTANCE (POST
    * /api/nodes/{id}/instances) rather than only the node's single
-   * pre-seeded entry — served alongside `max_gpus` above. Optional for the
-   * same pre-INST-I1 fixture-compat reason; absent reads as not
-   * instantiable (`instanceKindsFor`'s filter), never as a guessed yes. */
-  instance?: boolean;
+   * pre-seeded entry — served alongside `max_gpus` above, unconditionally,
+   * same required posture. */
+  instance: boolean;
   /** Required-env schema for an instance of this kind (app/routers/nodes.py's
    * `list_engine_kinds`, sourced from `KNOWN_KINDS`'s per-kind
    * `instance_env()`) — the instance form's env-field source, same
    * "never a UI literal" posture `connection` above already documents.
-   * Optional/absent reads as `{}` (`instanceForm.ts`'s `envSchema`). */
-  instance_env?: Record<string, EngineConnectionFieldSchema>;
+   * `{}` on the wire for a kind with no instance env, never absent. */
+  instance_env: Record<string, EngineConnectionFieldSchema>;
 }
 
 /** GET /api/engine-kinds's body (app/routers/nodes.py:476-504's
