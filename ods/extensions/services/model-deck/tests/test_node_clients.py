@@ -830,6 +830,14 @@ def test_observers_snapshot_keeps_instances_clients_alive(hand_built_registry):
     observers = NodeObservers(store, clients)
 
     instances_client = clients.client_for("cirrus")
+    # Fix round 1: under the OLD gate ("control != swap" -> None) this would
+    # be None too, and `None is None` below would pass VACUOUSLY -- prove
+    # the client actually got built, by the real factory, for the real
+    # entry, before anything else in the test can hide that.
+    assert instances_client is not None
+    assert isinstance(instances_client, FakeClient)
+    assert instances_client.entry["control"] == "instances"
+    assert instances_client.credential == "k-c"
     # "orbit" was operable a moment ago (still is, until the patch below) --
     # build its client first so there is something for retire_absent() to
     # actually drop, then demote it out of the operable set entirely.

@@ -59,6 +59,54 @@ def test_swap_not_operable_503(tmp_path, monkeypatch):
     assert not a.calls and not b.calls
 
 
+# --- INST I1 T7 fix round 1: instances nodes must not reach a swap client ---
+#
+# `deck["node_clients"]` here is the REAL NodeClients (make_app never
+# overrides that key; only wire_swap_node's two-node fixture above swaps in
+# FakeNodeClients) -- deliberately, so `client_for("cirrus")` builds a real
+# `InstancesClient` per app.main._control_client_factory's dispatch on
+# control:"instances", exactly as production would. Before the fix, `_client`
+# handed that object straight to `.status()`/`.swap()`/`.get_compose()`,
+# none of which InstancesClient has, so the route raised a raw
+# AttributeError -> 500 instead of a wire refusal.
+
+
+def _instances_node_app(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    deck["node_store"].add(
+        {"id": "cirrus", "label": "Cirrus", "agent_kind": "node-agent",
+         "address": "http://cirrus:7720", "control": "instances",
+         "instance_port_range": {"start": 11500, "end": 11509}},
+        credential="key-cirrus")
+    return app, deck
+
+
+def test_serving_status_refuses_an_instances_node_as_not_a_swap_node(
+        tmp_path, monkeypatch):
+    app, deck = _instances_node_app(tmp_path, monkeypatch)
+    r = TestClient(app).get("/api/nodes/cirrus/serving/status")
+    assert r.status_code == 503
+    assert "not a swap node" in r.json()["detail"]
+
+
+def test_serving_swap_refuses_an_instances_node_as_not_a_swap_node(
+        tmp_path, monkeypatch):
+    app, deck = _instances_node_app(tmp_path, monkeypatch)
+    r = TestClient(app).post("/api/nodes/cirrus/serving/swap",
+                             json={"profile": "laguna"})
+    assert r.status_code == 503
+    assert "not a swap node" in r.json()["detail"]
+
+
+def test_serving_reload_refuses_an_instances_node_as_not_a_swap_node(
+        tmp_path, monkeypatch):
+    app, deck = _instances_node_app(tmp_path, monkeypatch)
+    r = TestClient(app).post("/api/nodes/cirrus/serving/reload",
+                             json={"profile": "laguna"})
+    assert r.status_code == 503
+    assert "not a swap node" in r.json()["detail"]
+
+
 def test_swap_guard_409_records_no_intent(tmp_path, monkeypatch):
     app, deck, a, b = _two_node_app(tmp_path, monkeypatch)
     a.fail = GuardError("busy")

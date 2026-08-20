@@ -55,12 +55,24 @@ class ReloadBody(BaseModel):
 
 def _client(request: Request, node_id: str):
     """The node's actuation client, or the wire refusal: 404 for an id the
-    registry has never heard of, 503 for a known node that is not operable
-    (control != "swap" or a prerequisite missing) — the same family as the
-    old unbuilt-engine 503, message updated to say what to fix."""
+    registry has never heard of, 503 for a known node whose control is not
+    "swap" at all (INST I1 T7 fix round 1 — `node_clients.client_for` now
+    also binds "instances" nodes, so `control` must be checked HERE, before
+    the client is ever touched, or an instances node's InstancesClient would
+    reach `.status()`/`.swap()`/`.get_compose()` below and raise a raw
+    AttributeError/TypeError instead of a wire refusal), and 503 for a swap
+    node that is not yet operable (a prerequisite missing) — the same
+    family as the old unbuilt-engine 503, message updated to say what to
+    fix."""
     deck = request.app.state.deck
-    if deck["node_store"].get(node_id) is None:
+    entry = deck["node_store"].get(node_id)
+    if entry is None:
         raise HTTPException(status_code=404, detail=f"unknown node {node_id!r}")
+    control = entry.get("control")
+    if control != "swap":
+        raise HTTPException(status_code=503, detail=(
+            f"node {node_id!r} is not a swap node (control: {control!r}); "
+            "the serving routes need control: \"swap\""))
     client = deck["node_clients"].client_for(node_id)
     if client is None:
         raise HTTPException(status_code=503, detail=(

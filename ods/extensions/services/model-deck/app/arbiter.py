@@ -1458,8 +1458,24 @@ class Watcher:
         node_id, _sep, resource = action["key"].partition("/")
 
         if engine == "spark":
+            # INST I1 T7 fix round 1: `self._node_clients.client_for` now
+            # also binds "instances"-control nodes (a real InstancesClient,
+            # which has no `.swap()`), so a "spark" action naming one would
+            # crash `.swap()` below instead of being refused as no client.
+            # Inert today (nothing produces a "spark" action for a
+            # non-"swap" node), but one dispatch refactor away from live —
+            # defend here the same way app.routers.serving's `_client` now
+            # does. `self._node_store is None` (most spark-restore unit
+            # tests, and any watcher built without it) means "unknown
+            # control" — the ORIGINAL behavior, unconditional client_for,
+            # since there is nothing here to gate on.
+            control = None
+            if self._node_store is not None:
+                control = (self._node_store.get(node_id) or {}).get("control")
             client = (self._node_clients.client_for(node_id)
-                      if self._node_clients is not None else None)
+                      if self._node_clients is not None
+                      and (self._node_store is None or control == "swap")
+                      else None)
             if client is None:
                 raise EngineError(
                     f"restore for {action['key']!r} requested but node "
