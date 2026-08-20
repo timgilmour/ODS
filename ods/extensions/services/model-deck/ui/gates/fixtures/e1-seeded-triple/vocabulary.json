@@ -267,7 +267,9 @@
     ],
     "/api/engine-kinds.kinds": [
       "connection",
+      "demand",
       "human_verbs",
+      "idle_release",
       "kind",
       "local_capable",
       "remote_capable"
@@ -302,6 +304,7 @@
     ],
     "/api/nodes.nodes.engines": [
       "connection",
+      "container_consent",
       "gpu_index",
       "kind",
       "policy_defaults",
@@ -347,6 +350,7 @@
       "reason",
       "resource",
       "source",
+      "step",
       "target",
       "to",
       "unit"
@@ -380,6 +384,7 @@
       "/api/facts/drift",
       "/api/lifecycle/adopt/{key}",
       "/api/lifecycle/auto",
+      "/api/lifecycle/expect-absence/{key}",
       "/api/lifecycle/quarantine/{key}/clear",
       "/api/nodes",
       "/api/nodes/test",
@@ -3571,6 +3576,7 @@
       "DesiredBody",
       "Durable",
       "Ephemeral",
+      "ExpectAbsenceBody",
       "HTTPValidationError",
       "LocationPatch",
       "MoveBody",
@@ -4135,6 +4141,139 @@
     ],
     "/openapi.json.components.schemas.WatchBody.properties.sources.items": [
       "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}": [
+      "delete",
+      "post"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post": [
+      "description",
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete": [
+      "description",
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/lifecycle/expect-absence/{key}.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.components.schemas.ExpectAbsenceBody": [
+      "properties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.ExpectAbsenceBody.properties": [
+      "ttl_s"
+    ],
+    "/openapi.json.components.schemas.ExpectAbsenceBody.properties.ttl_s": [
+      "default",
+      "exclusiveMinimum",
+      "maximum",
+      "title",
       "type"
     ]
   },
