@@ -37,6 +37,19 @@ is older than `ui/src`, `ui/index.html`, `ui/vite.config.ts`, or `ui/public`. It
 deterministic and needs nothing running — no deck, no network, no GPU. This is where every
 E1 gate item lives (`smoke.gate.mjs`, `e1-engines.gate.mjs`, `e1-board.gate.mjs`).
 
+INST I1's own fixture, `fixtures/inst-partial/scenario.json` (`e1-instances.gate.mjs`),
+follows the same fixture rule (design §8 + 2026-08-12 topology review) the other three
+already do, but is worth naming on its own: it is deliberately a **partial** 3-GPU topology
+(local node "nimbus", GPUs 2/3/4, ONE declared resource `gguf-a` claiming `[2,3]`) rather
+than a fully-declared one, because a fully-declared fixture cannot distinguish "unmanaged"
+(gpu4, the fixture's lone bare GPU) from "how every card in this fixture happens to look" —
+the exact `defaults-that-hide-bugs` trap the other three fixtures' own header notes already
+warn about. It is hand-authored to the backend shapes cited in `api.ts`/`model/nodes.ts`/
+`model/instanceForm.ts`, not captured from a live deck (unlike `e1-seeded-triple`'s own
+`_note`): INST I1 is new surface with nothing live to capture from yet. Its `/api/nodes`
+route is scripted as four causal entries (mount, after-create, after-move, after-remove) —
+see the fixture's own `_note` for the exact click-by-click accounting of why four, not five.
+
 **Tier 2 (fidelity, `--live`)** is strictly **read-only** against a real deck and proves
 the fixture tier's fixtures haven't quietly rotted. `readLive` (`capture.mjs`) re-reads
 exactly five routes — `/api/state`, `/api/engine-kinds`, `/api/nodes`, `/api/events?n=500`,

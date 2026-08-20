@@ -89,7 +89,12 @@ if (tier === "capture") {
 // "fixture". Task 11 adds fidelity.gate.mjs into "live" — the first (and,
 // today, only) tier-2 gate.
 const GATES = {
-  fixture: ["./smoke.gate.mjs", "./e1-engines.gate.mjs", "./e1-board.gate.mjs"],
+  fixture: [
+    "./smoke.gate.mjs",
+    "./e1-engines.gate.mjs",
+    "./e1-board.gate.mjs",
+    "./e1-instances.gate.mjs",
+  ],
   live: ["./fidelity.gate.mjs"],
 };
 

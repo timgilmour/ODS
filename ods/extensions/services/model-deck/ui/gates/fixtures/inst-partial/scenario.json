@@ -1,0 +1,314 @@
+{
+  "_note": "HAND-AUTHORED to the backend shapes cited in api.ts/model/nodes.ts/model/instanceForm.ts (INST I1, Task 12) — not a live capture, unlike e1-seeded-triple's own note. Fixture rule (design §8 + 2026-08-12 topology review, global-constraints.md): a non-autarch topology (local node labelled 'nimbus', never 'sparky'/'autarch'), resource 'gguf-a' (never a bare kind name), GPUs 2/3/4 (never 0/1), and a PARTIAL declaration so 'unmanaged' means something a fully-declared fixture could not distinguish. gguf-a (lemonade kind) claims BOTH gpu 2 and gpu 3 (gpu_indices [2,3] on /api/nodes' registry entry, and the SAME claim plus the derived gpu_index:2 on /api/state's tenant — app/state.py's one gpu_index=min(gpu_indices) producer, model/nodes.ts's tenantGpus/cardIndices) so the board renders THREE resource-panel cards but only ONE (gpu4) is unmanaged — the controller's own item-1/2 revision, since a [2]-only claim would have left two unmanaged cards and made 'ONE add-engine-here' false. GET /api/engine-kinds is the Task 10 test catalog verbatim (ui/src/model/instanceForm.test.ts's KINDS): hipfire max_gpus 1, instance:true, instance_env {HIPFIRE_MODEL required, HIPFIRE_IDLE_TIMEOUT optional}; lemonade max_gpus null, instance:true, empty connection/instance_env (gguf-a's own kind, so its Edit form needs no connection fields to satisfy formErrors); sglang-omni instance:false, local_capable:false (never offered on this local node's instance-kind picker, and never a free-standing instance target). repeat:true on engine-kinds (App.tsx fetches it once on mount; EnginesSection's own reload() fetches it again independently the first time this run navigates to the Nodes screen — the same double-fetch e1-seeded-triple's own note documents finding the hard way). GET /api/state is a SINGLE repeat:true entry (R12: a polled route may carry only a constant, never a transition a check leans on) — the local registry entry on it (state.nodes[0]) carries control:'instances' and instance_port_range {11500,11509}, which is what makes DeckNode.instancesCapable true (model/nodes.ts's localNode) and is also NodeForm's own buffer source for item 11's control <select> (NodesView passes state.nodes straight through as NodesView's own 'nodes' prop — the SAME array, not a second fetch). GET /api/nodes (listNodeRegistry, EnginesSection's own fetch — causal only: on mount and after every mutation, never the poll) is scripted to exactly four entries, one per causal boundary this gate crosses: (0) mount, gguf-a alone; (1) after Create, gguf-a plus hipfire-1 managed on gpu4 at host port 11500 with env HIPFIRE_MODEL; (2) after Move, hipfire-1 relocated to gpu3 (same port, same env — D-I1-1's honest two-phase keeps the resource's name and key across a move); (3) after Remove, hipfire-1 gone, gguf-a alone again. Item 10 (editing gguf-a's own declared-engine form, then Cancel) deliberately does NOT advance this sequence — EngineFormPanel's onCancel is a bare setEditing(null), no reload() — so four entries is the whole script, not five; a fifth would sit dead and unconsumed, which run.mjs's own posture (letting an unused script entry through unremarked) is precisely why this count was rechecked against the click sequence before writing it. No node is control:'swap' in this fixture (swapNodes() returns [] against state.nodes), so neither GET /api/nodes/<id>/serving/status nor GET /api/settings/catalog/<id>/vllm is ever dispatched — scripting either would sit as unconsumed dead weight. GET /api/events is never scripted either, matching smoke.gate.mjs's own finding: the default view is 'deck' and this gate never clicks the Events tab, so EventsView never mounts and never fetches it. GET /api/sets (SetStrip, mounted unconditionally under view==='deck') and GET /api/storage/state (App's own refreshState poll, repeat:true) are carried as every other fixture in this directory carries them, both essentially empty since nothing here exercises Set Builder or Storage.",
+  "routes": {
+    "GET /api/engine-kinds": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": {
+          "kinds": [
+            {
+              "kind": "hipfire",
+              "connection": {
+                "container": { "required": true },
+                "gateway_host": { "required": false }
+              },
+              "remote_capable": false,
+              "local_capable": true,
+              "demand": false,
+              "human_verbs": ["park", "resume"],
+              "idle_release": false,
+              "max_gpus": 1,
+              "instance": true,
+              "instance_env": {
+                "HIPFIRE_MODEL": { "required": true },
+                "HIPFIRE_IDLE_TIMEOUT": { "required": false }
+              }
+            },
+            {
+              "kind": "lemonade",
+              "connection": {},
+              "remote_capable": false,
+              "local_capable": true,
+              "demand": true,
+              "human_verbs": [],
+              "idle_release": true,
+              "max_gpus": null,
+              "instance": true,
+              "instance_env": {}
+            },
+            {
+              "kind": "sglang-omni",
+              "connection": { "url": { "required": true } },
+              "remote_capable": true,
+              "local_capable": false,
+              "demand": false,
+              "human_verbs": [],
+              "idle_release": true,
+              "max_gpus": 1,
+              "instance": false,
+              "instance_env": {}
+            }
+          ]
+        }
+      }
+    ],
+    "GET /api/sets": [
+      {
+        "status": 200,
+        "body": { "sets": [], "previous": null }
+      }
+    ],
+    "GET /api/storage/state": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": { "locations": [], "units": [], "jobs": [], "policy": { "auto": false } }
+      }
+    ],
+    "GET /api/state": [
+      {
+        "status": 200,
+        "repeat": true,
+        "body": {
+          "node": { "id": "local", "label": "nimbus" },
+          "world": {
+            "gpus": [
+              { "index": 2, "total": 25000000000, "used": 9000000000, "free": 16000000000 },
+              { "index": 3, "total": 25000000000, "used": 9000000000, "free": 16000000000 },
+              { "index": 4, "total": 25000000000, "used": 0, "free": 25000000000 }
+            ],
+            "tenants": {
+              "gguf-a": {
+                "engine": "lemonade",
+                "gpu_index": 2,
+                "gpu_indices": [2, 3],
+                "state": "unloaded",
+                "model": null,
+                "footprint": null,
+                "idle_s": null
+              }
+            },
+            "externals": [],
+            "default_route": null,
+            "placement": { "gguf-a": 2 },
+            "remote_tenants": {}
+          },
+          "policy": {
+            "gguf-a": { "priority": 20, "pinned": false, "idle_ttl": 900 }
+          },
+          "models": [
+            { "file": "test-model.gguf", "size": 1000000000, "footprint": 1200000000 }
+          ],
+          "lifecycle": {
+            "local/gguf-a": {
+              "status": "parked",
+              "reason": "deliberately unloaded",
+              "intent": {
+                "state": "unloaded",
+                "model": null,
+                "engine": "lemonade",
+                "actor": "deck",
+                "updated_ts": "2026-08-19T00:00:00+00:00",
+                "last_healthy_ts": "2026-08-19T00:00:00+00:00",
+                "failures": 0,
+                "quarantined": false
+              },
+              "observed": {
+                "reachable": true,
+                "loaded": false,
+                "model": null,
+                "transitioning": false
+              },
+              "last_healthy_ts": "2026-08-19T00:00:00+00:00",
+              "settings_drift": null
+            }
+          },
+          "nodes": [
+            {
+              "id": "local",
+              "label": "nimbus",
+              "agent_kind": "local",
+              "address": null,
+              "serving_address": null,
+              "credential_set": false,
+              "control": "instances",
+              "instance_port_range": { "start": 11500, "end": 11509 },
+              "status": "online",
+              "last_seen": null,
+              "gpus": null,
+              "serving": null,
+              "error": null
+            }
+          ]
+        }
+      }
+    ],
+    "GET /api/nodes": [
+      {
+        "status": 200,
+        "body": {
+          "nodes": [
+            {
+              "id": "local",
+              "label": "nimbus",
+              "agent_kind": "local",
+              "added_ts": "2026-08-20T00:00:00+00:00",
+              "control": "instances",
+              "instance_port_range": { "start": 11500, "end": 11509 },
+              "credential_set": false,
+              "engines": [
+                {
+                  "resource": "gguf-a",
+                  "kind": "lemonade",
+                  "connection": {},
+                  "gpu_indices": [2, 3],
+                  "policy_defaults": { "priority": 20, "pinned": false, "idle_ttl": 900 },
+                  "container_consent": true
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "nodes": [
+            {
+              "id": "local",
+              "label": "nimbus",
+              "agent_kind": "local",
+              "added_ts": "2026-08-20T00:00:00+00:00",
+              "control": "instances",
+              "instance_port_range": { "start": 11500, "end": 11509 },
+              "credential_set": false,
+              "engines": [
+                {
+                  "resource": "gguf-a",
+                  "kind": "lemonade",
+                  "connection": {},
+                  "gpu_indices": [2, 3],
+                  "policy_defaults": { "priority": 20, "pinned": false, "idle_ttl": 900 },
+                  "container_consent": true
+                },
+                {
+                  "resource": "hipfire-1",
+                  "kind": "hipfire",
+                  "connection": {},
+                  "gpu_indices": [4],
+                  "policy_defaults": { "priority": 0, "pinned": false, "idle_ttl": 0 },
+                  "container_consent": true,
+                  "managed": true,
+                  "port": 11500,
+                  "env": { "HIPFIRE_MODEL": "qwen-instance-test" }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "nodes": [
+            {
+              "id": "local",
+              "label": "nimbus",
+              "agent_kind": "local",
+              "added_ts": "2026-08-20T00:00:00+00:00",
+              "control": "instances",
+              "instance_port_range": { "start": 11500, "end": 11509 },
+              "credential_set": false,
+              "engines": [
+                {
+                  "resource": "gguf-a",
+                  "kind": "lemonade",
+                  "connection": {},
+                  "gpu_indices": [2, 3],
+                  "policy_defaults": { "priority": 20, "pinned": false, "idle_ttl": 900 },
+                  "container_consent": true
+                },
+                {
+                  "resource": "hipfire-1",
+                  "kind": "hipfire",
+                  "connection": {},
+                  "gpu_indices": [3],
+                  "policy_defaults": { "priority": 0, "pinned": false, "idle_ttl": 0 },
+                  "container_consent": true,
+                  "managed": true,
+                  "port": 11500,
+                  "env": { "HIPFIRE_MODEL": "qwen-instance-test" }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "nodes": [
+            {
+              "id": "local",
+              "label": "nimbus",
+              "agent_kind": "local",
+              "added_ts": "2026-08-20T00:00:00+00:00",
+              "control": "instances",
+              "instance_port_range": { "start": 11500, "end": 11509 },
+              "credential_set": false,
+              "engines": [
+                {
+                  "resource": "gguf-a",
+                  "kind": "lemonade",
+                  "connection": {},
+                  "gpu_indices": [2, 3],
+                  "policy_defaults": { "priority": 20, "pinned": false, "idle_ttl": 900 },
+                  "container_consent": true
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "POST /api/nodes/local/instances": [
+      {
+        "status": 201,
+        "body": {
+          "resource": "hipfire-1",
+          "kind": "hipfire",
+          "connection": {},
+          "gpu_indices": [4],
+          "policy_defaults": { "priority": 0, "pinned": false, "idle_ttl": 0 },
+          "container_consent": true,
+          "managed": true,
+          "port": 11500,
+          "env": { "HIPFIRE_MODEL": "qwen-instance-test" }
+        }
+      }
+    ],
+    "POST /api/nodes/local/instances/hipfire-1/move": [
+      {
+        "status": 200,
+        "body": {
+          "resource": "hipfire-1",
+          "kind": "hipfire",
+          "connection": {},
+          "gpu_indices": [3],
+          "policy_defaults": { "priority": 0, "pinned": false, "idle_ttl": 0 },
+          "container_consent": true,
+          "managed": true,
+          "port": 11500,
+          "env": { "HIPFIRE_MODEL": "qwen-instance-test" }
+        }
+      }
+    ],
+    "DELETE /api/nodes/local/instances/hipfire-1": [
+      {
+        "status": 200,
+        "body": { "status": "removed" }
+      }
+    ]
+  }
+}
