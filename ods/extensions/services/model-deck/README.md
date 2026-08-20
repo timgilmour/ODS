@@ -331,6 +331,137 @@ declaration), and forgetting one is subtractive in the same way (nothing
 unloads or stops just because you removed it). The declared set is the
 deck's *scope of attention*, not a lever on the engines themselves.
 
+### Engine instances
+
+Every declared engine above is something an operator (or an install seed)
+told the deck about. An **instance** is different: it is a declared
+`engines[]` entry the deck itself *created* — a container that exists
+because `POST /api/nodes/{id}/instances` said so, launched through a
+second, host-side channel (the node-agent's file-protocol instances
+channel, and the host-side instances-helper that actually runs `docker
+compose` — see [node-agent's README](../node-agent/README.md) for that
+half). A managed entry carries four fields the declared-only schema above
+doesn't: `managed: true` (the marker this whole feature keys off — see
+below), `port` (the allocated host port), `env` (the operator-chosen subset
+of the kind's `instance_env` allowlist), and `gpu_indices` (its GPU claim —
+already true of any declared engine per D-I1-2, just always present here
+since a create call always states one).
+
+```jsonc
+{
+  "resource": "lemonade-1",       // deck-generated: {kind}-{n}, lowest free
+                                    // n >= 1, never "slot0"
+  "kind": "lemonade",
+  "connection": {"container": "deck-lemonade-1", "url": "http://deck-lemonade-1:8080"},
+  "gpu_indices": [2],
+  "policy_defaults": {"priority": 50, "pinned": false, "idle_ttl": 900},
+  "container_consent": true,       // seeded true on every managed entry — see below
+  "managed": true,
+  "port": 18100,                   // lowest free port in the node's instance_port_range
+  "env": {}
+}
+```
+
+**The three verbs, and their ordering (D-I1-1).** Intent is model-level
+(`loaded`/`unloaded` + model), and a brand-new instance has no model
+opinion yet, so **create declares, then ships** — it writes the
+declaration first and records *no* intent, exactly like any freshly
+declared resource (it reads `idle` until the operator's first load). If
+the ship to the node fails, the declaration is rolled back (502) — nothing
+is left pointing at a container that was never launched. **Remove holds,
+then ships, then forgets** — it takes a reconciler hold on the resource's
+key *before* asking the node to tear it down, so the reconciler can never
+try to restore a container that is deliberately being removed mid-flight;
+only after the teardown ships does it drop the declaration and forget the
+resource's intent and policy row (the same `forget_engine` sequence a
+plain `DELETE .../engines/{resource}` uses). **Move ships the new claim,
+then updates the declaration, then forgets intent** — a moved container is
+a *new* container (same resource name, different GPU claim), so its
+intent is forgotten rather than carried over; whatever model was loaded
+before the move does not reload itself — the operator loads it again by
+hand once the moved instance reads `idle`.
+
+**Multi-GPU claims.** `gpu_indices` is the claim; a create or move call
+that names more than one index claims all of them atomically (all-or-none
+— a multi-GPU tenant renders a chip on every claimed card, never a subset),
+bounded by the kind's own `max_gpus` (`GET /api/engine-kinds`). `gpu_index`
+(singular) still exists everywhere downstream as `min(gpu_indices)`,
+derived by the one producer in `app/state.py` — the Set Builder and every
+older consumer that only knows the singular field keep working unmodified.
+
+**Ports (D-I1-3).** The host port is allocated from the node registry
+entry's `instance_port_range` — the lowest port in that range not already
+taken by one of the node's *managed* entries, no scanning beyond the
+configured range — and published `127.0.0.1:<port>` on the host, for
+operator/host tooling and to guarantee collision-freedom between
+instances. **The deck itself never dials this port** — like every other
+declared engine, it reaches the container over `ods-network` DNS (the
+compose service name IS the resource name: `http://<resource>:<kind's
+internal port>`, e.g. `http://lemonade-1:8080`).
+
+**Consent.** A managed entry is stamped `container_consent: true` at
+creation — the deck created the container, so it has already consented to
+actuating it (see **`container_consent` prerequisite** above for what that
+flag gates and why a plain `POST /api/nodes/{id}/engines` declaration
+defaults it to `false` instead).
+
+**Gateway registration is staged, not applied (D-I1-4).** The host-side
+instances-helper writes (on create/move) or removes (on remove) this
+instance's entry in `~/ods/config/litellm/extra-routes.json` — that file
+is the *input* to `ods/scripts/render-runtime-configs.py`'s route
+renderer, not the live gateway config. **Applying** a staged route —
+regenerating the LiteLLM config and recreating the container — is the
+existing ODS activate/regen path, and nothing in this feature triggers it.
+Only a kind that serves a fixed model at boot gets an entry at all (today:
+hipfire, via its `HIPFIRE_MODEL` env); lemonade and comfyui instances load
+their model dynamically after boot, so staging a route for them is a later
+increment.
+
+**How to enable it.** A node — today, only `local` — has to be set
+`control: "instances"` before `POST /api/nodes/{id}/instances` will do
+anything but 503: that needs an `address` (for `instances`, unlike
+`swap`, no `serving_address`), a stored credential, and an
+`instance_port_range` (`{start, end}`). Set all three on the **Nodes**
+screen's node form (the control select's `instances` option, plus the
+port-range fields it reveals) — the same place `control: "swap"` is set
+for a second node. `control: "instances"` alone is not enough end to end:
+the node-agent process on that box also needs its instances channel opted
+in (`NODE_INSTANCES_CTL_DIR`, `compose.instances.yaml.disabled`) and the
+host-side instances-helper actually running — see
+[node-agent's README](../node-agent/README.md) for that deploy.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/nodes/{id}/instances` | Create (`{kind, gpu_indices, env}`). **201** with the new entry. 422 an unknown/non-instantiable kind, a bad GPU claim, or a GPU not observed on this node; 409 the port range is exhausted; 503 the node isn't operable for instances (see above); 502 the node refused the create (declaration rolled back) |
+| `DELETE` | `/api/nodes/{id}/instances/{resource}` | Remove — hold, ship, forget (see ordering above). 404 unknown node/resource; 409 `{resource}` is declared but not deck-managed (use the plain engine `DELETE` instead); 502 the node refused the teardown |
+| `POST` | `/api/nodes/{id}/instances/{resource}/move` | Move to a new GPU claim (`{gpu_indices}`). 404 unknown node/resource; 409 already claiming exactly that set, or not deck-managed; 422 a bad claim; 502 the node refused the move |
+
+Six audit events, one per verb's success/failure pair:
+`instance-created` · `instance-create-failed` · `instance-removed` ·
+`instance-remove-failed` · `instance-move-requested` ·
+`instance-move-failed`.
+
+**Per-kind notes**, from the host-side instances-helper's own templates
+(`node-agent/instances-helper/templates/*.json`):
+
+- **hipfire** keeps its internal port (`11435`) fixed inside every
+  instance's container — only the *published host port* varies between
+  instances (`app/engine_kinds.py`'s `INSTANCE_INTERNAL_PORT`; see the
+  Global Constraints note on why two hipfire instances still can't share
+  `_HIPFIRE_PORT` on the host).
+- **lemonade** instances each get their own `hf-cache`/`llama`/`recipe`
+  directories under the instances-dir (`per_instance_dirs` in
+  `lemonade.json`) — no instance shares another's model download or
+  compilation cache.
+- **comfyui** instances each get their own `user`/`output`/`input`/`temp`
+  directories, with the *shared* ComfyUI tree (`user/comfyui.db` and its
+  lockfile, `output/`'s counters, `user/__manager/`) mounted **read-only**
+  — the corruption cases two instances writing the same tree would hit
+  (D-I1-6). If a read-only shared tree ever breaks boot for a custom node
+  that writes into it, the recorded fallback is a per-instance *copy* of
+  the tree under `<instances-dir>/data/<resource>/ComfyUI`, not an
+  improvised permissions fix.
+
 ### Serving (node-addressed swap control)
 
 | Method | Path | Description |

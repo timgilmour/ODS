@@ -254,6 +254,44 @@ if a config file, an installer script, or another service also persists
 model/engine state the deck models, name the field and the writer here,
 even if resolving the duplication is future work.
 
+## 7. Engine instances (a kind the deck can create, not just declare)
+
+INST I1 adds a second way an engine's declaration comes to exist: instead
+of an operator `POST`ing a declaration for a container they already
+started, the deck creates the container itself. A kind opts in with
+`"instance": True` in its `KNOWN_KINDS` entry (`app/engine_kinds.py`) plus
+an `instance_env` allowlist and `instance_policy` defaults; three kinds do
+this today (hipfire, lemonade, comfyui). Full operator-facing detail —
+what a managed entry looks like, the ordering rule each verb follows
+(D-I1-1), ports, consent, and the gateway-staging caveat — lives in
+`README.md`'s **Engine instances** section; this item is the route/event
+surface only, in this document's own inventory style.
+
+`app/routers/instances.py`:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/nodes/{id}/instances` | Create (`{kind, gpu_indices, env}`) — declares then ships (D-I1-1); rolled back on a failed ship. **201** |
+| `DELETE` | `/api/nodes/{id}/instances/{resource}` | Remove — holds, ships, forgets declaration/intent/policy |
+| `POST` | `/api/nodes/{id}/instances/{resource}/move` | Move to a new `gpu_indices` claim — ships, updates the declaration, forgets intent |
+
+Six events, `log_event`-written from those three handlers (`_ship`'s
+`fail_kind` argument for the three failure cases):
+`instance-created` · `instance-create-failed` · `instance-removed` ·
+`instance-remove-failed` · `instance-move-requested` ·
+`instance-move-failed`.
+
+The actuation channel itself is a **third** party, not the deck calling
+docker directly: `app/node_clients.py`'s `client_for` (control ==
+`"instances"`) ships the wire document to the node-agent's
+`POST /v1/node/instance/{resource}` (`node-agent/instances.py`,
+`node-agent/app.py`), which only validates shape and queues a file for the
+host-side instances-helper — see `node-agent/README.md` for that half.
+This item therefore does not repeat items 1–3 above per-kind (hipfire's
+own item 1–4 citations still hold for what it means to be declared,
+observable, and actuable) — it is the ADDITIONAL surface a kind gets when
+it also opts into `"instance": True`.
+
 ## Fleet status (not universal — check before assuming)
 
 This checklist describes the shape of correct integration; it does not
@@ -286,3 +324,10 @@ claim every declared engine currently satisfies every item.
   dashboard activation against the running deck) has not been run as part
   of this branch. The `intent.json` evidence cited under item 5 is from the
   live system's prior activation, not a gate this branch executed.
+- Item 7 (instances): three kinds opt in today (hipfire, lemonade,
+  comfyui) — sglang-omni does not (it is remote-only). The live
+  create→load→serve→remove round trip is proven by
+  `livetests/test_disruptive_instances.py`, but ONLY on a box where the
+  local node has been switched to `control: "instances"` and the
+  node-agent + instances-helper deployed (see `node-agent/README.md`) —
+  that drill skips, naming the missing prerequisite, on a fresh install.

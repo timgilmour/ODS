@@ -29,6 +29,7 @@ isn't present).
 | `NODE_VLLM_DIR` | *(unset)* | Read-only mount of the vLLM profile directory (`compose-<profile>.yaml` set, plus an optional `profiles.json` metadata sidecar). Both this and `NODE_SWAP_CTL_DIR` must be set to enable `/v1/node/profiles` and `/v1/node/swap`; either unset and both answer `503`. |
 | `NODE_SWAP_CTL_DIR` | *(unset)* | Shared file-protocol directory this agent writes `request.json` into and reads the host-side swap-helper's `status.json` from. See [`POST /v1/node/swap`](#post-v1nodeswap). |
 | `NODE_SETTINGS_DIR` | *(unset)* | Shared file-protocol directory holding per-profile settings documents (`<profile>.json`, written by this agent's settings routes) and harvested catalog files (`catalog-<profile>.json`, written by the host-side swap-helper). Unset disables `/v1/node/profile/{profile}/settings` and `/v1/node/catalog`, which answer `503`. |
+| `NODE_INSTANCES_CTL_DIR` | *(unset)* | Shared file-protocol directory this agent writes `instance-req.json` into and reads the host-side instances-helper's `instance-status-<resource>.json` from (INST I1). Unset disables `/v1/node/instance/{resource}` and its status route, which answer `503` (`instances.InstancesDisabled`), and drops `"instances"` from `/v1/node/info`'s `capabilities`. See [Engine instances](#engine-instances-inst-i1) below. |
 
 ## Deploy
 
@@ -298,3 +299,166 @@ curl -X POST -H "Authorization: Bearer $NODE_AGENT_KEY" \
 | `400` | Profile name fails the `^[A-Za-z0-9_-]+$` check. |
 | `404` | No `compose-<profile>.yaml` for that name under `NODE_VLLM_DIR`. |
 | `409` | A request is already pending, or the helper is mid-swap. |
+
+### Engine instances (INST I1)
+
+A second, independent file-protocol channel: the Model Deck's own
+`POST /api/nodes/{id}/instances` (create/remove/move — see model-deck's
+`README.md`'s **Engine instances** section for the operator-facing shape)
+reaches this node through here. Same posture as swap control above — this
+agent never touches Docker itself, only validates the document's SHAPE and
+queues a file for a host-side helper — but it is a **separate** ctl
+directory, a separate helper, and a separate `docker compose` project
+(`deck-instances`), never the `NODE_VLLM_DIR`/swap-helper machinery above.
+Kind names are deliberately **not known here** (`instances.py`'s module
+docstring): the agent validates `resource`/`gpu_indices`/`port`/`env`
+shape only, and it is the host-side instances-helper that resolves `kind`
+against its own `templates/kinds.json` — so a compromised agent can at
+most ask the helper for one of the *operator's own* templates, never an
+arbitrary image or command.
+
+#### `POST /v1/node/instance/{resource}`
+
+Body: `{"verb": "create"|"remove"|"move", "document": {...}}`. The
+document is the wire shape the deck's `app/instances.py::instance_document`
+builds — exactly `{resource, kind, gpu_indices, port, env}`, no more, no
+fewer keys (`instances.py`'s `DOC_KEYS`) — and `document["resource"]` must
+equal the path `{resource}`. Writes `<NODE_INSTANCES_CTL_DIR>/instance-req.json`
+for the instances-helper to pick up; nothing here reads a result back for
+control flow — the deck observes the container itself, never this file.
+
+```bash
+curl -X POST -H "Authorization: Bearer $NODE_AGENT_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"verb": "create", "document": {"resource": "lemonade-1", "kind": "lemonade", "gpu_indices": [2], "port": 18100, "env": {}}}' \
+     http://<node-ip>:7720/v1/node/instance/lemonade-1
+```
+
+```json
+{"accepted": true}
+```
+
+| Status | Meaning |
+|---|---|
+| `202` | Request accepted and written; the instances-helper now owns it. |
+| `409` | A request is already pending for this node (one in-flight request at a time — `instance-req.json` already exists). |
+| `422` | The document fails shape validation (wrong key set, bad `resource`/`gpu_indices`/`port`/`env`), or `document["resource"] != {resource}`. |
+| `503` | `NODE_INSTANCES_CTL_DIR` is unset — instance control is not enabled on this node. |
+
+#### `GET /v1/node/instance/{resource}/status`
+
+Reads back `<NODE_INSTANCES_CTL_DIR>/instance-status-<resource>.json`,
+the instances-helper's own completion record (`{resource, verb, ok, error,
+ts}`) — **forensics for a human**, never consulted by the deck's own
+observation, which watches the container directly. `null` result means no
+status file exists yet (never requested, or a stale one already cleared
+before the slow part of the verb began).
+
+```bash
+curl -H "Authorization: Bearer $NODE_AGENT_KEY" http://<node-ip>:7720/v1/node/instance/lemonade-1/status
+```
+
+```json
+{"result": {"resource": "lemonade-1", "verb": "create", "ok": true, "error": null, "ts": "2026-08-20T12:00:00Z"}}
+```
+
+### Deploy: the instances overlay + host-side helper
+
+Instance control is **opt-in on top of** the base agent deploy above, in
+two pieces that both have to be running:
+
+**1. The agent's own overlay** (`compose.instances.yaml.disabled`) adds
+`NODE_INSTANCES_CTL_DIR` and mounts the shared ctl directory into the
+agent container:
+
+```bash
+docker compose -f compose.yaml.disabled -f compose.instances.yaml.disabled up -d --build
+```
+
+Point `HOST_INSTANCES_CTL_DIR` at wherever the ctl directory should live
+on the host (e.g. `~/deck-instances/ctl`) — the overlay's own
+`:?path to the instances ctl dir` guard fails fast if it's unset. The base
+compose file's NVIDIA `deploy.resources` block is reset to nothing here
+(`deploy: !reset {}`): the local node's own GPU observation for instances
+stays on the deck's sysfs reader, so the agent needs no device access at
+all for this channel — the block only ever applied to the sparky-style
+remote deployment above.
+
+**2. The host-side instances-helper** (`instances-helper/`) — the
+privileged half that actually runs `docker compose` on the rendered
+per-kind template. This is Python + one bash script; it does not run in a
+container, and it must run from a **full checkout of this repo**, not a
+copy — the deployed `~/ods/extensions/services/node-agent/` tree is a
+build artifact snapshot and goes stale the moment this repo's templates or
+scripts change; point the systemd unit (below) at the repo checkout, never
+at `~/ods/...`.
+
+```bash
+instances-helper/instances-helper.sh --daemon \
+    <ctl-dir> instances-helper/templates <instances-dir> <ods-dir>
+```
+
+- `<ctl-dir>` — same directory as `HOST_INSTANCES_CTL_DIR` above (this is
+  the two halves of the same file-protocol pair).
+- `instances-helper/templates` — `kinds.json` (kind → template filename)
+  plus one JSON template per kind (`hipfire.json`, `lemonade.json`,
+  `comfyui.json`) declaring the image, internal port, compose service
+  block, environment defaults, `env_allow` (the ONLY env keys a deck
+  document may override — see model-deck's `README.md`), the per-instance
+  data directories to create, and (for kinds that serve a fixed model) a
+  `route` block consumed by `stage_route.py`.
+- `<instances-dir>` — where the helper renders `<resource>.yaml` (one
+  compose file per instance) and creates `<instances-dir>/data/<resource>/`
+  with that kind's `per_instance_dirs` underneath.
+- `<ods-dir>` — the operator's ODS checkout, read-only from here: template
+  volumes reference it (e.g. lemonade's model directory), and
+  `stage_route.py` writes into its `config/litellm/extra-routes.json` —
+  **staging** an instance's gateway route only (D-I1-4). *Applying* a
+  staged route — regenerating LiteLLM's config and recreating the
+  container — is the existing ODS activate/regen path; this helper never
+  triggers it.
+
+Every render+launch runs under docker compose project `deck-instances` —
+never the ODS stack's own multi-file project, and never with
+`--remove-orphans` (Global Constraints: mixing projects that way can tear
+down containers the OTHER project owns).
+
+**Supervision (D-I1-7):** a systemd **user** unit
+(`instances-helper/deck-instances-helper.service`), not a system unit or
+cron — the operator runs `docker compose` as themself, and a user unit
+keeps that identity:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now deck-instances-helper.service
+loginctl enable-linger "$USER"   # keeps the unit running after logout —
+                                  # without this, the unit dies at the next
+                                  # SSH disconnect
+```
+
+The unit's `ExecStart` in this repo is templated on `%h` (the invoking
+user's home) pointing at a full checkout under `~/projects/ODS/...` — edit
+it to match wherever this repo is actually checked out before enabling it;
+the checkout-not-copy rule above applies to whatever path it names.
+
+### Security note: the local-instances address
+
+When `control: "instances"` is set on the Model Deck's **local** node
+entry (the common case: instances running beside the deck on the same
+box), the deck reaches this agent over `ods-network`'s gateway address,
+not `localhost` and not `host.docker.internal` (which does not reach a
+`network_mode: host` process — see `app/settings.py`'s comment on this).
+**The deck's `address` for the local node is `http://172.18.0.1:7720`.**
+Firewall that address class, not a single host IP:
+
+```bash
+ufw allow from 172.18.0.0/16 to any port 7720 proto tcp
+```
+
+`172.18.0.0/16` is `ods-network`'s bridge subnet — every container on it,
+including the deck, presents as some address in that range, and the
+gateway address itself can shift if the network is ever recreated. This is
+the same class of mistake as the 2026-07-16 host-agent UFW incident
+(`ods-ufw-blocks-hostagent-on-reboot`): scoping to one observed IP instead
+of the subnet silently relocks the agent out from under the deck the next
+time the bridge is rebuilt.
