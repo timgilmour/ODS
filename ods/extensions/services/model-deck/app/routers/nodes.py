@@ -72,6 +72,9 @@ class NodeCreate(BaseModel):
     # Declared operability (app/node_store.py _CONTROLS). Default "none":
     # adding a node never grants verbs implicitly.
     control: str = "none"
+    # control: "instances" prereq (INST I1 Task 1) — the port range the
+    # helper allocates published host ports from. None = unset.
+    instance_port_range: dict | None = None
 
 
 class NodePatch(BaseModel):
@@ -80,6 +83,8 @@ class NodePatch(BaseModel):
     serving_address: str | None = None
     credential: str | None = None
     control: str | None = None
+    # None here clears the range on PATCH (app.node_store._PATCHABLE).
+    instance_port_range: dict | None = None
 
 
 class NodeTestBody(BaseModel):
@@ -524,5 +529,15 @@ def list_engine_kinds() -> dict:
             # test_engine_kinds_serves_idle_release_... for the per-line
             # citations this comment summarizes.
             "idle_release": bool(ENGINE_KINDS[kind].arbiter_verbs()),
+            # Instance-capability descriptors (INST I1 Task 1): how many
+            # GPUs a deck-created instance of this kind may claim, whether
+            # the kind can be instantiated at all, and its per-instance env
+            # schema (same {name: {"required": bool}} shape as `connection`
+            # above) — served so the instance-creation picker never bakes a
+            # kind's limits into the UI (spec §8).
+            "max_gpus": spec["max_gpus"],
+            "instance": spec["instance"],
+            "instance_env": {name: {"required": required}
+                             for name, required in spec["instance_env"].items()},
         })
     return {"kinds": kinds}

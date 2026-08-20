@@ -3830,7 +3830,12 @@ def test_engine_kinds_route_shape(tmp_path, monkeypatch):
         # declared comfyui container like every other kind.
         "container": {"required": False},
     }
-    assert kinds["hipfire"]["connection"] == {"container": {"required": True}}
+    assert kinds["hipfire"]["connection"] == {
+        "container": {"required": True},
+        # D-I1-5 (INST I1 Task 1): optional — the compose SERVICE name
+        # litellm's route dials, distinct from the container name.
+        "gateway_host": {"required": False},
+    }
     assert set(kinds["lemonade"]["human_verbs"]) == {"load", "unload"}
     assert set(kinds["comfyui"]["human_verbs"]) == {"free"}
     assert set(kinds["hipfire"]["human_verbs"]) == {"park", "resume"}
@@ -4701,6 +4706,28 @@ def test_engine_kinds_route_serves_both_run_locations(tmp_path, monkeypatch):
         assert kinds[kind]["remote_capable"] is False
 
 
+def test_engine_kinds_payload_carries_instance_capabilities(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    kinds = {k["kind"]: k for k in TestClient(app).get("/api/engine-kinds").json()["kinds"]}
+    assert kinds["hipfire"]["max_gpus"] == 1 and kinds["hipfire"]["instance"] is True
+    assert kinds["hipfire"]["instance_env"] == {"HIPFIRE_MODEL": {"required": True},
+                                                "HIPFIRE_IDLE_TIMEOUT": {"required": False}}
+    assert kinds["lemonade"]["max_gpus"] is None
+    assert kinds["sglang-omni"]["instance"] is False
+
+
+def test_node_patch_accepts_instance_port_range_and_control_instances(tmp_path, monkeypatch):
+    app, deck = make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    r = client.put("/api/nodes/local", json={"address": "http://172.18.0.1:7720",
+                                             "credential": "k",
+                                             "instance_port_range": {"start": 11500, "end": 11509}})
+    assert r.status_code == 200, r.text
+    r = client.put("/api/nodes/local", json={"control": "instances"})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/nodes").json()["nodes"][0]["instance_port_range"] == {"start": 11500, "end": 11509}
+
+
 # ===========================================================================
 # sglang-omni Task 8 — remote engine verb routes
 # (POST /api/nodes/{node_id}/engines/{resource}/{verb}), the declaration
@@ -5084,7 +5111,11 @@ def test_a_local_kind_sharing_a_verb_is_not_misrouted_by_the_verb_alone(
 
     monkeypatch.setitem(engine_kinds.KNOWN_KINDS, "songbox",
                         {"connection": {"url": True}, "remote_capable": False,
-                         "local_capable": True})
+                         "local_capable": True,
+                         # INST I1 Task 1: validate_engines now reads these
+                         # unconditionally for every declared kind.
+                         "max_gpus": None, "instance": False, "instance_env": {},
+                         "instance_policy": {"priority": 0, "pinned": False, "idle_ttl": 0}})
     monkeypatch.setitem(engine_kinds.ENGINE_KINDS, "songbox", _SongboxAdapter())
     app, deck = make_app(tmp_path, monkeypatch)
     _declare_local(deck, _ENGINES + [

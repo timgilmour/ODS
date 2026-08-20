@@ -1193,3 +1193,73 @@ def test_declared_containers_is_consent_blind(store):
                                                 "idle_ttl": 0}}]})
     assert declared_containers(store) == {"ods-hipfire"}
     assert consented_containers(store) == set()
+
+
+# ===========================================================================
+# INST I1 Task 1 — control: "instances", instance_port_range, the gpu_indices
+# / gateway_host boot stamps
+# ===========================================================================
+
+
+def test_controls_include_instances_and_local_may_declare_it(store):
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    store.update("local", {"address": "http://172.18.0.1:7720",
+                           "instance_port_range": {"start": 11500, "end": 11509}},
+                 credential="k")
+    entry = store.update("local", {"control": "instances"})
+    assert entry["control"] == "instances"
+
+
+def test_instances_prereqs_are_named(store):
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    with pytest.raises(ValueError) as exc:
+        store.update("local", {"control": "instances"})
+    assert str(exc.value) == ('control: "instances" requires address, credential, '
+                              'instance_port_range to be set first')
+
+
+def test_instance_port_range_shape(store):
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    for bad, why in (({"start": 80, "end": 90}, "1024-65535"),
+                     ({"start": 2000, "end": 1999}, "start <= end"),
+                     ({"start": 2000}, "exactly"), ([2000, 2001], "object")):
+        with pytest.raises(ValueError, match=why):
+            store.update("local", {"instance_port_range": bad})
+
+
+def test_stamp_missing_gpu_indices_normalises_the_raw_file_once(store, tmp_path):
+    import json
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    raw = json.loads(store._path.read_text())
+    local = next(e for e in raw if e["id"] == "local")
+    local["engines"] = [{"resource": "gguf-a", "kind": "lemonade", "gpu_index": 3,
+                         "connection": {"url": "http://g:8080", "metrics_url": "http://g:8001/metrics",
+                                        "container": "deck-gguf-a"},
+                         "container_consent": True,
+                         "policy_defaults": {"priority": 0, "pinned": False, "idle_ttl": 0}}]
+    store._path.write_text(json.dumps(raw))
+    assert store.stamp_missing_gpu_indices() is True
+    eng = store.get("local")["engines"][0]
+    assert "gpu_index" not in eng and eng["gpu_indices"] == [3]
+    assert store.stamp_missing_gpu_indices() is False   # at most once
+
+
+def test_stamp_missing_gateway_host_only_touches_the_seeded_hipfire_container(store, tmp_path):
+    import json
+    store.add({"id": "local", "label": "This Box", "agent_kind": "local"})
+    raw = json.loads(store._path.read_text())
+    local = next(e for e in raw if e["id"] == "local")
+    local["engines"] = [
+        {"resource": "hipfire", "kind": "hipfire", "gpu_indices": [0],
+         "connection": {"container": "ods-hipfire"}, "container_consent": True,
+         "policy_defaults": {"priority": 100, "pinned": False, "idle_ttl": 0}},
+        {"resource": "agent", "kind": "hipfire", "gpu_indices": [2],
+         "connection": {"container": "deck-agent"}, "container_consent": True,
+         "policy_defaults": {"priority": 100, "pinned": False, "idle_ttl": 0}},
+    ]
+    store._path.write_text(json.dumps(raw))
+    assert store.stamp_missing_gateway_host("ods-hipfire") is True
+    a, b = store.get("local")["engines"]
+    assert a["connection"]["gateway_host"] == "hipfire"      # = container minus the "ods-" prefix: the compose SERVICE name
+    assert "gateway_host" not in b["connection"]
+    assert store.stamp_missing_gateway_host("ods-hipfire") is False

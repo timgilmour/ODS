@@ -1213,9 +1213,16 @@ def test_known_kinds_declare_where_each_kind_may_RUN():
     nothing refused a remote-only kind on the LOCAL entry. Both directions
     are declared now, and every kind must be runnable SOMEWHERE (a kind
     with both False could be declared nowhere and would be dead weight in
-    the picker)."""
+    the picker).
+
+    INST I1 Task 1: the key set grew by four (max_gpus/instance/
+    instance_env/instance_policy, the per-kind instance-capability
+    descriptors) — asserted here as a superset rather than splitting this
+    test, since the two halves (run-location vs. instance-capability) are
+    proven together against every kind anyway."""
     for kind, spec in KNOWN_KINDS.items():
-        assert set(spec) == {"connection", "remote_capable", "local_capable"}, kind
+        assert set(spec) == {"connection", "remote_capable", "local_capable",
+                             "max_gpus", "instance", "instance_env", "instance_policy"}, kind
         assert isinstance(spec["local_capable"], bool), kind
         assert spec["remote_capable"] or spec["local_capable"], kind
 
@@ -1262,3 +1269,150 @@ def test_validate_engines_local_gate_is_the_mirror_of_the_remote_one():
     validate_engines([_entry()], remote=False)
     with pytest.raises(ValueError, match="not remote_capable"):
         validate_engines([_entry()], remote=True)
+
+
+# ===========================================================================
+# INST I1 Task 1 — instance capability descriptors, gpu_indices, managed/
+# port/env
+#
+# Fixture rule (design §8 + 2026-08-12 topology review): resource "gguf-a"
+# (never a kind name), GPUs 2/3/4 (never 0/1).
+# ===========================================================================
+
+from app.engine_kinds import (KNOWN_KINDS, validate_engines, gpu_indices_of,
+                              instance_connection, instance_policy, instance_env_schema,
+                              max_gpus, kind_instantiable, INSTANCE_INTERNAL_PORT,
+                              INSTANCE_CONTAINER_PREFIX)
+
+_LEM = {"url": "http://gguf-a:8080", "metrics_url": "http://gguf-a:8001/metrics",
+        "container": "deck-gguf-a"}
+_POL = {"priority": 0, "pinned": False, "idle_ttl": 0}
+
+
+def _decl(**over):
+    base = {"resource": "gguf-a", "kind": "lemonade", "connection": dict(_LEM),
+            "gpu_indices": [3], "container_consent": True, "policy_defaults": dict(_POL)}
+    base.update(over)
+    return base
+
+
+def test_every_kind_declares_the_four_instance_capability_keys():
+    for kind, spec in KNOWN_KINDS.items():
+        assert {"max_gpus", "instance", "instance_env", "instance_policy"} <= set(spec), kind
+        assert isinstance(spec["instance"], bool)
+        assert spec["max_gpus"] is None or (isinstance(spec["max_gpus"], int) and spec["max_gpus"] >= 1)
+        assert set(spec["instance_policy"]) == {"priority", "pinned", "idle_ttl"}
+
+
+def test_instance_capability_per_kind_matches_the_design():
+    # design §3: hipfire 1 (single-card by necessity), comfyui 1, llama-server N, sglang-omni not instantiable
+    assert (max_gpus("hipfire"), kind_instantiable("hipfire")) == (1, True)
+    assert (max_gpus("comfyui"), kind_instantiable("comfyui")) == (1, True)
+    assert (max_gpus("lemonade"), kind_instantiable("lemonade")) == (None, True)
+    assert kind_instantiable("sglang-omni") is False
+
+
+def test_gpu_indices_of_reads_either_spelling():
+    assert gpu_indices_of({"gpu_index": 2}) == [2]
+    assert gpu_indices_of({"gpu_indices": [3, 4]}) == [3, 4]
+
+
+def test_validate_engines_accepts_gpu_indices_list_and_refuses_both_spellings():
+    validate_engines([_decl()])
+    validate_engines([_decl(gpu_indices=[3, 4])])
+    import pytest
+    with pytest.raises(ValueError, match="exactly one of gpu_index or gpu_indices"):
+        validate_engines([_decl(gpu_index=3)])          # both present (gpu_indices from _decl)
+    with pytest.raises(ValueError, match="exactly one of gpu_index or gpu_indices"):
+        d = _decl(); del d["gpu_indices"]; validate_engines([d])
+
+
+def test_validate_engines_gpu_indices_shape():
+    import pytest
+    for bad, why in (([], "non-empty"), ([3, 3], "unique"), ([4, 3], "sorted"),
+                     ([True], "non-negative integer"), ([-1], "non-negative integer"),
+                     ("3", "list")):
+        with pytest.raises(ValueError, match=why):
+            validate_engines([_decl(gpu_indices=bad)])
+
+
+def test_validate_engines_enforces_max_gpus_per_kind():
+    import pytest
+    with pytest.raises(ValueError, match="kind 'hipfire' allows at most 1 GPU"):
+        validate_engines([_decl(kind="hipfire", connection={"container": "deck-agent"},
+                                gpu_indices=[3, 4])])
+
+
+def test_validate_engines_managed_requires_port_and_env_and_refuses_them_otherwise():
+    import pytest
+    validate_engines([_decl(managed=True, port=11500, env={})])
+    with pytest.raises(ValueError, match="managed entry requires port"):
+        validate_engines([_decl(managed=True, env={})])
+    with pytest.raises(ValueError, match="port must be an int in 1024-65535"):
+        validate_engines([_decl(managed=True, port=80, env={})])
+    with pytest.raises(ValueError, match="port/env are only valid on a managed entry"):
+        validate_engines([_decl(port=11500)])
+    with pytest.raises(ValueError, match="managed must be a boolean"):
+        validate_engines([_decl(managed="yes")])
+
+
+def test_validate_engines_env_follows_the_kinds_instance_env_schema():
+    import pytest
+    hip = {"resource": "agent", "kind": "hipfire", "connection": {"container": "deck-agent"},
+           "gpu_indices": [2], "container_consent": True, "policy_defaults": dict(_POL),
+           "managed": True, "port": 11501}
+    validate_engines([{**hip, "env": {"HIPFIRE_MODEL": "qwen3.8:27b"}}])
+    with pytest.raises(ValueError, match="env.HIPFIRE_MODEL is required for kind 'hipfire'"):
+        validate_engines([{**hip, "env": {}}])
+    with pytest.raises(ValueError, match="env has unknown field"):
+        validate_engines([{**hip, "env": {"HIPFIRE_MODEL": "x", "NOPE": "1"}}])
+    with pytest.raises(ValueError, match="env.HIPFIRE_MODEL must be a non-empty string"):
+        validate_engines([{**hip, "env": {"HIPFIRE_MODEL": ""}}])
+
+
+def test_hipfire_connection_accepts_optional_gateway_host():
+    validate_engines([{"resource": "agent", "kind": "hipfire", "gpu_indices": [2],
+                       "connection": {"container": "deck-agent", "gateway_host": "agent"},
+                       "container_consent": True, "policy_defaults": dict(_POL)}])
+
+
+def test_instance_connection_and_ports_per_kind():
+    assert instance_connection("hipfire", "agent") == {
+        "container": "deck-agent", "gateway_host": "agent"}
+    assert instance_connection("lemonade", "gguf-a") == {
+        "url": "http://gguf-a:8080", "metrics_url": "http://gguf-a:8001/metrics",
+        "container": "deck-gguf-a"}
+    assert instance_connection("comfyui", "img") == {
+        "url": "http://img:8188", "container": "deck-img"}
+    assert INSTANCE_CONTAINER_PREFIX == "deck-"
+    assert INSTANCE_INTERNAL_PORT == {"hipfire": 11435, "lemonade": 8080, "comfyui": 8188}
+    # every instance connection validates under its own kind's schema
+    for kind, res in (("hipfire", "agent"), ("lemonade", "gguf-a"), ("comfyui", "img")):
+        validate_engines([{"resource": res, "kind": kind, "gpu_indices": [4],
+                           "connection": instance_connection(kind, res),
+                           "container_consent": True, "policy_defaults": instance_policy(kind),
+                           "managed": True, "port": 11502,
+                           "env": {k: "v" for k, req in instance_env_schema(kind).items() if req}}])
+
+
+def test_instance_policy_returns_a_copy():
+    a = instance_policy("lemonade"); a["priority"] = 999
+    assert instance_policy("lemonade")["priority"] != 999
+
+
+def test_no_reader_of_gpu_index_outside_the_accessor():
+    """Single seam (D-I1-2): app/ reads a declaration's GPU claim ONLY via
+    gpu_indices_of(). The derived tenant field `obs["gpu_index"]` written by
+    state.py and read by arbiter's tenant_gpus() is the ONE other spelling
+    and is listed here explicitly."""
+    import pathlib, re
+    root = pathlib.Path(__file__).resolve().parents[1] / "app"
+    allowed = {"engine_kinds.py", "state.py", "arbiter.py", "settings.py", "node_store.py"}
+    hits = []
+    for path in root.rglob("*.py"):
+        if path.name in allowed:
+            continue
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(r'\["gpu_index"\]|\.get\("gpu_index"\)', line):
+                hits.append(f"{path.relative_to(root)}:{i}")
+    assert hits == [], hits

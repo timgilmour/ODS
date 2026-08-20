@@ -115,6 +115,14 @@ _SLACK_BYTES = 1024**3  # 1 GiB
 # separate, coexistence-era construction this task doesn't migrate.
 _HIPFIRE_PORT = 11435
 
+# INST I1: the prefix every deck-created instance's container name gets, and
+# the container-INTERNAL port each kind's instances keep (the deck dials
+# <service>:<port> on ods-network, same as the seeded triple — an instance's
+# PUBLISHED host port varies per D-I1-3, but its internal port never does).
+INSTANCE_CONTAINER_PREFIX = "deck-"
+INSTANCE_INTERNAL_PORT: dict[str, int] = {"hipfire": _HIPFIRE_PORT, "lemonade": 8080,
+                                          "comfyui": 8188}
+
 # What an sglang-omni-kind engine holds while resident, MEASURED (GF5, the
 # 2026-08-16 gate run on sparky): ~62 GiB — weights plus overhead, with the
 # KV ceiling at 36 G under --mem-fraction-static 0.30. Declared rather than
@@ -186,7 +194,14 @@ def _within(ts: str | None, now: datetime | None, window_s: float) -> bool:
 # pins that as a shape error rather than leaving it representable.
 KNOWN_KINDS: dict[str, dict[str, object]] = {
     "lemonade": {"connection": {"url": True, "metrics_url": True, "container": True},
-                 "remote_capable": False, "local_capable": True},
+                 "remote_capable": False, "local_capable": True,
+                 # INST (design §3): llama-server pins N GPUs via
+                 # ROCR_VISIBLE_DEVICES (multigpu overlay:
+                 # LLAMA_SERVER_GPU_INDICES list) — unbounded.
+                 "max_gpus": None, "instance": True,
+                 "instance_env": {"LEMONADE_CTX_SIZE": False, "LLAMA_ARG_TENSOR_SPLIT": False,
+                                  "LLAMA_ARG_SPLIT_MODE": False},
+                 "instance_policy": {"priority": 50, "pinned": False, "idle_ttl": 900}},
     # `container` is OPTIONAL (Finding 1, whole-branch review): the
     # provenance sweep (app.node_store.declared_containers, consulted by
     # arbiter._provenance_local_oci and routers/provenance's backfill) walks
@@ -198,9 +213,22 @@ KNOWN_KINDS: dict[str, dict[str, object]] = {
     # `url`); this field exists purely as the operator's record of which
     # container this declaration's engine runs in.
     "comfyui": {"connection": {"url": True, "container": False},
-                "remote_capable": False, "local_capable": True},
-    "hipfire": {"connection": {"container": True},
-                "remote_capable": False, "local_capable": True},
+                "remote_capable": False, "local_capable": True,
+                # INST (design §3): one ComfyUI process, one GPU — D-I1-6's
+                # per-instance data-dir mechanics don't change that.
+                "max_gpus": 1, "instance": True, "instance_env": {},
+                "instance_policy": {"priority": 40, "pinned": False, "idle_ttl": 300}},
+    # gateway_host (D-I1-5): the compose SERVICE name litellm dials (its
+    # api_base host) — for the seeded triple that is "hipfire" (the ODS
+    # service alias), for an instance it is the resource name. Optional:
+    # absent means the park guard matches on `container` alone.
+    "hipfire": {"connection": {"container": True, "gateway_host": False},
+                "remote_capable": False, "local_capable": True,
+                # INST (design §3): single-card by necessity — hipfire has
+                # no multi-GPU tensor-split mode of its own.
+                "max_gpus": 1, "instance": True,
+                "instance_env": {"HIPFIRE_MODEL": True, "HIPFIRE_IDLE_TIMEOUT": False},
+                "instance_policy": {"priority": 100, "pinned": False, "idle_ttl": 0}},
     # One declared field, deliberately: everything the PROBE needs
     # (health_url, the busy-count port, the compose file) lives in the
     # node's own host-owned engines.json allowlist (ruling A1) — the deck
@@ -208,10 +236,58 @@ KNOWN_KINDS: dict[str, dict[str, object]] = {
     # where this engine serves, carried in the declaration so the board can
     # show it; the deck never dials it directly (it talks to the agent).
     "sglang-omni": {"connection": {"url": True},
-                    "remote_capable": True, "local_capable": False},
+                    "remote_capable": True, "local_capable": False,
+                    # Not instance-capable (design §3): a whole engine
+                    # brought up on ANOTHER box through its node-agent, not
+                    # something the deck creates a fresh instance of.
+                    "max_gpus": 1, "instance": False, "instance_env": {},
+                    "instance_policy": {"priority": 40, "pinned": False, "idle_ttl": 0}},
 }
 
 _POLICY_FIELDS = {"priority": int, "pinned": bool, "idle_ttl": int}
+
+
+def gpu_indices_of(entry: dict) -> list[int]:
+    """THE reader of a declaration's GPU claim (D-I1-2). Exactly one spelling
+    is present on a validated entry; the legacy scalar reads as a one-element
+    claim. Never read entry["gpu_index"] elsewhere in app/ (pinned by
+    tests/test_engine_kinds.py's single-seam test)."""
+    if "gpu_indices" in entry:
+        return list(entry["gpu_indices"])
+    return [entry["gpu_index"]]
+
+
+def max_gpus(kind: str) -> int | None:
+    return KNOWN_KINDS[kind]["max_gpus"]
+
+
+def kind_instantiable(kind: str) -> bool:
+    return bool(KNOWN_KINDS[kind]["instance"])
+
+
+def instance_env_schema(kind: str) -> dict[str, bool]:
+    return dict(KNOWN_KINDS[kind]["instance_env"])
+
+
+def instance_policy(kind: str) -> dict:
+    return dict(KNOWN_KINDS[kind]["instance_policy"])
+
+
+def instance_connection(kind: str, resource: str) -> dict:
+    """The connection block a NEW instance of `kind` is declared with. The
+    wire names are the helper's too (service = resource, container =
+    deck-<resource>, the kind's INSTANCE_INTERNAL_PORT) — pinned equal by
+    tests/test_instances_parity.py so the two sides cannot drift."""
+    container = f"{INSTANCE_CONTAINER_PREFIX}{resource}"
+    port = INSTANCE_INTERNAL_PORT[kind]
+    if kind == "hipfire":
+        return {"container": container, "gateway_host": resource}
+    if kind == "lemonade":
+        return {"url": f"http://{resource}:{port}",
+                "metrics_url": f"http://{resource}:8001/metrics", "container": container}
+    if kind == "comfyui":
+        return {"url": f"http://{resource}:{port}", "container": container}
+    raise ValueError(f"kind {kind!r} is not instantiable")
 
 
 def _bad(reason: str) -> ValueError:
@@ -237,8 +313,8 @@ def validate_engines(engines: object, remote: bool = False) -> None:
     for e in engines:
         if not isinstance(e, dict):
             raise _bad("engine entry must be an object")
-        extra = set(e) - {"resource", "kind", "connection", "gpu_index",
-                          "policy_defaults", "container_consent"}
+        extra = set(e) - {"resource", "kind", "connection", "gpu_index", "gpu_indices",
+                          "policy_defaults", "container_consent", "managed", "port", "env"}
         if extra:
             raise _bad(f"engine entry has extra field(s): {sorted(extra)}")
         resource = e.get("resource")
@@ -305,9 +381,53 @@ def validate_engines(engines: object, remote: bool = False) -> None:
                 if not (isinstance(conn[field], str) and conn[field]):
                     raise _bad(f"{resource}: connection.{field} must be a "
                                "non-empty string when present")
-        gpu = e.get("gpu_index")
-        if isinstance(gpu, bool) or not isinstance(gpu, int) or gpu < 0:
-            raise _bad(f"{resource}: gpu_index must be a non-negative integer")
+        has_scalar, has_list = "gpu_index" in e, "gpu_indices" in e
+        if has_scalar == has_list:
+            raise _bad(f"{resource}: exactly one of gpu_index or gpu_indices is required")
+        if has_scalar:
+            gpu = e["gpu_index"]
+            if isinstance(gpu, bool) or not isinstance(gpu, int) or gpu < 0:
+                raise _bad(f"{resource}: gpu_index must be a non-negative integer")
+        else:
+            gpus = e["gpu_indices"]
+            if not isinstance(gpus, list):
+                raise _bad(f"{resource}: gpu_indices must be a list of GPU indices")
+            if not gpus:
+                raise _bad(f"{resource}: gpu_indices must be non-empty")
+            for g in gpus:
+                if isinstance(g, bool) or not isinstance(g, int) or g < 0:
+                    raise _bad(f"{resource}: gpu_indices entries must be non-negative integers")
+            if len(set(gpus)) != len(gpus):
+                raise _bad(f"{resource}: gpu_indices must be unique")
+            if gpus != sorted(gpus):
+                raise _bad(f"{resource}: gpu_indices must be sorted ascending")
+        claim = gpu_indices_of(e)
+        limit = KNOWN_KINDS[kind]["max_gpus"]
+        if limit is not None and len(claim) > limit:
+            raise _bad(f"{resource}: kind {kind!r} allows at most {limit} GPU(s), got {len(claim)}")
+        managed = e.get("managed", False)
+        if not isinstance(managed, bool):
+            raise _bad(f"{resource}: managed must be a boolean")
+        if not managed and ("port" in e or "env" in e):
+            raise _bad(f"{resource}: port/env are only valid on a managed entry")
+        if managed:
+            if "port" not in e:
+                raise _bad(f"{resource}: managed entry requires port")
+            port = e["port"]
+            if isinstance(port, bool) or not isinstance(port, int) or not (1024 <= port <= 65535):
+                raise _bad(f"{resource}: port must be an int in 1024-65535")
+            env = e.get("env")
+            if not isinstance(env, dict):
+                raise _bad(f"{resource}: managed entry requires env (object)")
+            env_schema = KNOWN_KINDS[kind]["instance_env"]
+            unknown = set(env) - set(env_schema)
+            if unknown:
+                raise _bad(f"{resource}: env has unknown field(s): {sorted(unknown)}")
+            for name, required in env_schema.items():
+                if required and name not in env:
+                    raise _bad(f"{resource}: env.{name} is required for kind {kind!r}")
+                if name in env and not (isinstance(env[name], str) and env[name]):
+                    raise _bad(f"{resource}: env.{name} must be a non-empty string")
         consent = e.get("container_consent")
         if not isinstance(consent, bool):
             raise _bad(f"{resource}: container_consent must be a boolean — "

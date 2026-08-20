@@ -188,6 +188,16 @@ def _build_deck(settings: Settings) -> dict:
     # 1b) — restoring OCI provenance coverage for ods-comfyui on upgrade,
     # not just on a fresh install.
     node_store.stamp_missing_comfyui_container(settings)
+    # One-time gpu_indices normalisation (D-I1-2, INST I1 Task 1): an
+    # already-declared engine entry spelling its claim `gpu_index: n` gains
+    # `gpu_indices: [n]` on disk, so nodes.json holds one spelling going
+    # forward — the UI always WRITES gpu_indices.
+    node_store.stamp_missing_gpu_indices()
+    # One-time gateway_host stamp (D-I1-5, INST I1 Task 1): the seeded
+    # hipfire entry gains its compose SERVICE name so the default-route
+    # guard re-key (E1 debt 2) can match litellm's actual api_base host,
+    # not just the container name.
+    node_store.stamp_missing_gateway_host(settings.hipfire_container)
 
     # `allowed` is the zero-arg callable DockerCtl re-resolves on every
     # `_guard` call — closes over `node_store` above, never a captured

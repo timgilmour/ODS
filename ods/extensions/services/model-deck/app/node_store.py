@@ -50,9 +50,24 @@ from app.store_io import load_json, save_json
 # provenance all attach through it) [max-review c33].
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 _AGENT_KINDS = {"local", "node-agent"}
-_CONTROLS = {"none", "swap"}
-_PATCHABLE = {"label", "address", "serving_address", "control", "engines"}
-_ALLOWED = {"id", "label", "agent_kind", "address", "serving_address", "control", "engines"}
+_CONTROLS = {"none", "swap", "instances"}
+_PATCHABLE = {"label", "address", "serving_address", "control", "engines", "instance_port_range"}
+_ALLOWED = {"id", "label", "agent_kind", "address", "serving_address", "control", "engines",
+            "instance_port_range"}
+_PORT_RANGE_KEYS = {"start", "end"}
+
+
+def _validate_port_range(value) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("instance_port_range must be an object {start, end}")
+    if set(value) != _PORT_RANGE_KEYS:
+        raise ValueError("instance_port_range must have exactly start and end")
+    for k in ("start", "end"):
+        v = value[k]
+        if isinstance(v, bool) or not isinstance(v, int) or not (1024 <= v <= 65535):
+            raise ValueError(f"instance_port_range.{k} must be an int in 1024-65535")
+    if value["start"] > value["end"]:
+        raise ValueError("instance_port_range requires start <= end")
 
 # The OLD env-seeded spark node id — frozen MIGRATION DATA, not coupling:
 # pre-N1 installs seeded exactly this id (it was app.observe.spark_node_id(),
@@ -201,6 +216,8 @@ def _validate(spec: dict) -> None:
             raise ValueError(
                 'the local node cannot be control: "swap" — local actuation '
                 "is docker-ctl, not the swap protocol (G1 revisits)")
+    if "instance_port_range" in spec and spec["instance_port_range"] is not None:
+        _validate_port_range(spec["instance_port_range"])
     if "engines" in spec:
         # spec["agent_kind"] is already known to be in _AGENT_KINDS by this
         # point (checked above) -- {"local", "node-agent"} is exactly the
@@ -291,6 +308,19 @@ class NodeStore:
                 'control: "swap" requires ' + ", ".join(missing)
                 + " to be set first")
 
+    def _require_instances_prereqs(self, entry: dict, credential_present: bool) -> None:
+        """control: "instances" (INST §4): address (the node-agent) + a
+        credential + a port range to allocate from — NAMED, like the swap
+        checklist. Local or remote alike; the protocol is node-generic."""
+        missing = [f for f in ("address",) if not entry.get(f)]
+        if not credential_present:
+            missing.append("credential")
+        if not entry.get("instance_port_range"):
+            missing.append("instance_port_range")
+        if missing:
+            raise ValueError('control: "instances" requires ' + ", ".join(missing)
+                             + " to be set first")
+
     def _require_engine_prereqs(self, entry: dict, credential_present: bool) -> None:
         """Engines[] on a node-agent entry additionally requires agent
         OPERABILITY -- address + a credential, present simultaneously (E1
@@ -363,6 +393,8 @@ class NodeStore:
         _validate(spec)
         if spec["control"] == "swap":
             self._require_swap_prereqs(spec, credential_present=bool(credential))
+        if spec["control"] == "instances":
+            self._require_instances_prereqs(spec, credential_present=bool(credential))
         if spec["agent_kind"] == "node-agent" and spec.get("engines"):
             self._require_engine_prereqs(spec, credential_present=bool(credential))
         with self._lock:
@@ -397,6 +429,11 @@ class NodeStore:
                     _validate({k: v for k, v in merged.items() if k != "added_ts"})
                     if merged.get("control") == "swap":
                         self._require_swap_prereqs(
+                            merged,
+                            credential_present=bool(credential)
+                            or self.credential_set(node_id))
+                    if merged.get("control") == "instances":
+                        self._require_instances_prereqs(
                             merged,
                             credential_present=bool(credential)
                             or self.credential_set(node_id))
@@ -564,6 +601,58 @@ class NodeStore:
                     if not isinstance(conn, dict) or "container" in conn:
                         continue
                     conn["container"] = settings.comfyui_container
+                    changed = True
+            if changed:
+                self._save(data)
+            return changed
+
+    def stamp_missing_gpu_indices(self) -> bool:
+        """One-time normalisation (D-I1-2): every engine entry in the RAW file
+        still spelling its claim `gpu_index: n` becomes `gpu_indices: [n]`.
+        Keyed on the presence of the OLD key, so it runs at most once per
+        entry lifetime; raw read, non-destructive, single save."""
+        with self._lock:
+            data = load_json(self._path)
+            if not isinstance(data, list):
+                return False
+            changed = False
+            for entry in data:
+                if not _well_formed(entry):
+                    continue
+                for eng in entry.get("engines") or []:
+                    if not isinstance(eng, dict) or "gpu_index" not in eng or "gpu_indices" in eng:
+                        continue
+                    eng["gpu_indices"] = [eng.pop("gpu_index")]
+                    changed = True
+            if changed:
+                self._save(data)
+            return changed
+
+    def stamp_missing_gateway_host(self, hipfire_container: str) -> bool:
+        """One-time stamp (D-I1-5): the SEEDED hipfire entry (connection.
+        container == settings.hipfire_container, "ods-hipfire") gains
+        connection.gateway_host = its compose SERVICE name — the host litellm's
+        route actually dials (`http://hipfire:11435/v1`). Derived by stripping
+        the ODS `ods-` container prefix, the one naming convention the seeded
+        triple follows (compose.amd.yaml: container_name ods-hipfire, service
+        hipfire). Instances never need this stamp — instance_connection()
+        writes gateway_host at creation."""
+        with self._lock:
+            data = load_json(self._path)
+            if not isinstance(data, list):
+                return False
+            changed = False
+            for entry in data:
+                if not _well_formed(entry):
+                    continue
+                for eng in entry.get("engines") or []:
+                    if not isinstance(eng, dict) or eng.get("kind") != "hipfire":
+                        continue
+                    conn = eng.get("connection")
+                    if (not isinstance(conn, dict) or "gateway_host" in conn
+                            or conn.get("container") != hipfire_container):
+                        continue
+                    conn["gateway_host"] = hipfire_container.removeprefix("ods-")
                     changed = True
             if changed:
                 self._save(data)

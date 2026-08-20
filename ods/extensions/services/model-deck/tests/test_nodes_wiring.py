@@ -239,6 +239,55 @@ def test_boot_stamps_comfyui_container_on_a_pre_existing_entry(tmp_path, monkeyp
     assert engines["comfyui"]["connection"]["container"] == "test-ods-comfyui"
 
 
+def test_boot_stamps_gpu_indices_on_a_pre_existing_entry(tmp_path, monkeypatch):
+    """INST I1 Task 1 (D-I1-2): an already-E1 box's nodes.json — written
+    before gpu_indices existed — gains the normalised spelling on disk at
+    boot, exactly once, mirroring test_boot_stamps_comfyui_container_on_a_
+    pre_existing_entry above."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "local", "label": "local", "agent_kind": "local",
+         "engines": [
+             {"resource": "lemonade", "kind": "lemonade",
+              "connection": {"url": "http://lemonade:8080",
+                            "metrics_url": "http://lemonade:8001/metrics",
+                            "container": "ods-lemonade"},
+              "gpu_index": 1, "container_consent": True,
+              "policy_defaults": {"priority": 50, "pinned": False, "idle_ttl": 900}},
+         ]},
+    ]))
+    from app.main import create_app
+    app = create_app()
+    engines = {e["resource"]: e for e in app.state.deck["node_store"].get("local")["engines"]}
+    assert "gpu_index" not in engines["lemonade"]
+    assert engines["lemonade"]["gpu_indices"] == [1]
+
+
+def test_boot_stamps_gateway_host_on_the_seeded_hipfire_entry(tmp_path, monkeypatch):
+    """D-I1-5 (INST I1 Task 1): the seeded hipfire entry — its connection.
+    container matching settings.hipfire_container — gains gateway_host on
+    disk at boot, exactly once, mirroring test_boot_stamps_comfyui_
+    container_on_a_pre_existing_entry above. Uses the default
+    settings.hipfire_container ("ods-hipfire") rather than overriding it, so
+    the stamp's ods- stripping is exercised against the real default."""
+    monkeypatch.setenv("MODEL_DECK_NO_WATCHER", "1")
+    monkeypatch.setenv("MODEL_DECK_DATA_DIR", str(tmp_path))
+    (tmp_path / "nodes.json").write_text(json.dumps([
+        {"id": "local", "label": "local", "agent_kind": "local",
+         "engines": [
+             {"resource": "hipfire", "kind": "hipfire",
+              "connection": {"container": "ods-hipfire"}, "gpu_index": 0,
+              "container_consent": True,
+              "policy_defaults": {"priority": 100, "pinned": True, "idle_ttl": 0}},
+         ]},
+    ]))
+    from app.main import create_app
+    app = create_app()
+    engines = {e["resource"]: e for e in app.state.deck["node_store"].get("local")["engines"]}
+    assert engines["hipfire"]["connection"]["gateway_host"] == "hipfire"
+
+
 def test_hipfire_resume_refused_409_when_container_consent_is_false(tmp_path, monkeypatch):
     """Finding 2 (whole-branch review) — the ONE API-level end-to-end proof
     of the consented_containers guard, on the REAL wiring: a real DockerCtl,
