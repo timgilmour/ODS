@@ -53,6 +53,7 @@ from app.routers import (
     status,
     storage,
 )
+from app.routers import instances as instances_router
 from app.routers import nodes as nodes_router
 from app.routers import provenance as provenance_router
 # Aliased: create_app() below has its own local `settings` (the Settings()
@@ -661,6 +662,12 @@ def create_app() -> FastAPI:
     # above — nodes_router owns the rest of the /api/nodes/{id}/engines
     # space (the declaration CRUD).
     app.include_router(serving.engines_router, prefix="/api")
+    # INST I1 Task 8: create/remove/move for a DECK-CREATED instance
+    # (/api/nodes/{id}/instances[/...]). Registered here too, ahead of
+    # nodes_router, for the identical reason — nodes_router's own
+    # /nodes/{id}/engines/{resource} CRUD must never be what a request to
+    # this router's own path space falls into.
+    app.include_router(instances_router.router, prefix="/api")
     app.include_router(lifecycle.router, prefix="/api")
     app.include_router(storage.router, prefix="/api")
     app.include_router(facts.router, prefix="/api")
