@@ -33,7 +33,12 @@ os.replace(tmp, path)
 PYEOF
 }
 
-_stage_route() { # verb document-json-path   — Task 9 fills this in; a no-op here, and it never affects the verb's outcome
+_stage_route() { # verb document-json-path — stages (never applies) the instance's
+  # litellm extra-routes entry (D-I1-4). Applying it — regenerating litellm's
+  # config and recreating the container — is the existing ODS render+recreate
+  # path, not triggered here. A staging failure is logged, never fails the verb.
+  python3 "$HELPER_DIR/stage_route.py" "$1" "$2" "$TEMPLATES" "$ODS_DIR/config/litellm/extra-routes.json" >> "$LOG" 2>&1 \
+    || echo "instances-helper: gateway staging failed for $1 (see above)" >> "$LOG"
   return 0
 }
 

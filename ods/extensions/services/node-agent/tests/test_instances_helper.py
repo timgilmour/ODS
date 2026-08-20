@@ -152,6 +152,29 @@ def test_stale_result_is_invalidated_before_the_slow_part(tmp_path):
     assert _status(ctl, "agent")["verb"] == "create"
 
 
+def test_create_stages_a_route_for_hipfire(tmp_path):
+    ctl = _mk_req(tmp_path, "create"); inst = tmp_path / "inst"; inst.mkdir(); ods = tmp_path / "ods"
+    docker = _mk_docker(tmp_path)
+    r = _run_once(ctl, inst, ods, docker.bindir)
+    assert r.returncode == 0, r.stderr
+    assert _status(ctl, "agent")["ok"] is True
+    routes = json.loads((ods / "config" / "litellm" / "extra-routes.json").read_text())
+    assert routes == [{"model_name": "qwen3.8:27b", "model": "openai/qwen3.8:27b",
+                       "api_base": "http://agent:11435/v1", "_deck_instance": "agent"}]
+
+
+def test_staging_failure_never_fails_the_verb(tmp_path):
+    ctl = _mk_req(tmp_path, "create"); inst = tmp_path / "inst"; inst.mkdir(); ods = tmp_path / "ods"
+    litellm_dir = ods / "config" / "litellm"
+    litellm_dir.mkdir(parents=True)
+    (litellm_dir / "extra-routes.json").mkdir()   # a directory where stage_route.py wants to write a file
+    docker = _mk_docker(tmp_path)
+    r = _run_once(ctl, inst, ods, docker.bindir)
+    assert r.returncode == 0, r.stderr
+    assert _status(ctl, "agent")["ok"] is True
+    assert "gateway staging failed" in (ctl / "instances.log").read_text()
+
+
 def test_lock_refuses_a_second_instance(tmp_path):
     ctl = tmp_path / "ctl"; ctl.mkdir()
     inst = tmp_path / "inst"; inst.mkdir()
