@@ -16,12 +16,15 @@ def _render(tmp_path, doc, templates=TEMPLATES):
     return r, out, inst
 
 
-def test_hipfire_renders_service_named_by_resource_with_explicit_rocr_and_host_port(tmp_path):
+def test_hipfire_renders_service_named_deck_resource_with_explicit_rocr_and_host_port(tmp_path):
     r, out, inst = _render(tmp_path, DOC)
     assert r.returncode == 0, r.stderr
     doc = json.loads(out.read_text())             # JSON is valid YAML; the renderer emits JSON
-    svc = doc["services"]["agent"]
-    assert svc["container_name"] == "deck-agent"
+    svc = doc["services"]["deck-agent"]
+    # ONE name per instance: the compose service name (its DNS alias on
+    # ods-network) IS the container name — instances own the deck-* namespace,
+    # so no instance can shadow an ODS service alias (qdrant, dashboard-api, …).
+    assert set(doc["services"]) == {svc["container_name"]} == {"deck-agent"}
     assert svc["environment"]["ROCR_VISIBLE_DEVICES"] == "2"
     assert svc["environment"]["HIPFIRE_MODEL"] == "qwen3.8:27b"
     assert "HSA_OVERRIDE_GFX_VERSION" not in svc["environment"]
@@ -37,7 +40,7 @@ def test_multi_gpu_claim_joins_rocr_with_commas(tmp_path):
     doc = {**DOC, "kind": "lemonade", "gpu_indices": [3, 4], "env": {}}
     r, out, _ = _render(tmp_path, doc)
     assert r.returncode == 0, r.stderr
-    svc = json.loads(out.read_text())["services"]["agent"]
+    svc = json.loads(out.read_text())["services"]["deck-agent"]
     assert svc["environment"]["ROCR_VISIBLE_DEVICES"] == "3,4"
     assert svc["ports"] == ["127.0.0.1:11500:8080"]
 
@@ -64,7 +67,7 @@ def test_malformed_document_exits_1(tmp_path):
 def test_comfyui_renders_per_instance_dirs_and_a_read_only_tree(tmp_path):
     r, out, inst = _render(tmp_path, {**DOC, "kind": "comfyui", "env": {}})
     assert r.returncode == 0, r.stderr
-    svc = json.loads(out.read_text())["services"]["agent"]
+    svc = json.loads(out.read_text())["services"]["deck-agent"]
     assert svc["shm_size"] == "8g"
     assert "/opt/ods/data/comfyui/ComfyUI:/opt/ComfyUI:ro,z" in svc["volumes"]
     for sub in ("user", "output", "input", "temp", "miopen"):
@@ -74,14 +77,6 @@ def test_comfyui_renders_per_instance_dirs_and_a_read_only_tree(tmp_path):
                  "--input-directory /data/input", "--temp-directory /data/temp"):
         assert flag in cmd
     assert svc["ports"] == ["127.0.0.1:11500:8188"]
-
-
-def test_reserved_resource_names_are_refused(tmp_path):
-    for name in ("hipfire", "ods-foo"):
-        r, out, _ = _render(tmp_path, {**DOC, "resource": name})
-        assert r.returncode == 1
-        assert name in r.stderr
-        assert not out.exists()
 
 
 def test_template_service_block_refuses_renderer_owned_keys(tmp_path):

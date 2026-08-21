@@ -353,8 +353,8 @@ since a create call always states one).
                                     // n >= 1, never "slot0"
   "kind": "lemonade",
   "connection": {                // instance_connection()'s lemonade shape:
-    "url": "http://lemonade-1:8080",              // http://<resource>:<internal port> —
-    "metrics_url": "http://lemonade-1:8001/metrics", // the SERVICE name, always set for lemonade
+    "url": "http://deck-lemonade-1:8080",         // http://deck-<resource>:<internal port> —
+    "metrics_url": "http://deck-lemonade-1:8001/metrics", // the SERVICE name == container, always set for lemonade
     "container": "deck-lemonade-1"                // the container, for docker-facing consumers
   },
   "gpu_indices": [2],
@@ -399,9 +399,12 @@ taken by one of the node's *managed* entries, no scanning beyond the
 configured range — and published `127.0.0.1:<port>` on the host, for
 operator/host tooling and to guarantee collision-freedom between
 instances. **The deck itself never dials this port** — like every other
-declared engine, it reaches the container over `ods-network` DNS (the
-compose service name IS the resource name: `http://<resource>:<kind's
-internal port>`, e.g. `http://lemonade-1:8080`).
+declared engine, it reaches the container over `ods-network` DNS. The
+compose service name IS the container name, `deck-<resource>`
+(`http://deck-<resource>:<kind's internal port>`, e.g.
+`http://deck-lemonade-1:8080`): instances own the `deck-*` DNS namespace, so
+no instance can shadow an ODS service alias (`hipfire`, `qdrant`,
+`dashboard-api`, …) — by construction, not by a reserved-name list.
 
 **Consent.** A managed entry is stamped `container_consent: true` at
 creation — the deck created the container, so it has already consented to

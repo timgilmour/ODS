@@ -118,7 +118,7 @@ def test_move_renders_first_then_down_old_then_up_new(tmp_path):
     _run_once(ctl, inst, tmp_path / "ods", docker.bindir)
     assert docker.calls("compose") == [f"compose -p deck-instances -f {inst}/agent.yaml down",
                                        f"compose -p deck-instances -f {inst}/agent.yaml up -d"]
-    assert json.loads((inst / "agent.yaml").read_text())["services"]["agent"]["environment"]["ROCR_VISIBLE_DEVICES"] == "3"
+    assert json.loads((inst / "agent.yaml").read_text())["services"]["deck-agent"]["environment"]["ROCR_VISIBLE_DEVICES"] == "3"
 
 
 def test_unknown_kind_writes_a_refusal_and_never_runs_docker(tmp_path):
@@ -160,7 +160,7 @@ def test_create_stages_a_route_for_hipfire(tmp_path):
     assert _status(ctl, "agent")["ok"] is True
     routes = json.loads((ods / "config" / "litellm" / "extra-routes.json").read_text())
     assert routes == [{"model_name": "qwen3.8:27b", "model": "openai/qwen3.8:27b",
-                       "api_base": "http://agent:11435/v1", "_deck_instance": "agent"}]
+                       "api_base": "http://deck-agent:11435/v1", "_deck_instance": "agent"}]
 
 
 def test_staging_failure_never_fails_the_verb(tmp_path):

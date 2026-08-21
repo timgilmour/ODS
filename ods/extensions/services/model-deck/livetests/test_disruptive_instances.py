@@ -182,7 +182,7 @@ def test_lemonade_instance_create_load_serve_remove(deck, drill_model, events, i
         # the lemonade adapter's id vocabulary), so never the bare filename.
         served = deck.get("/api/state").json()["world"]["tenants"][resource]["model"]
         assert served, "deck reads the instance serving but reports no model id"
-        r = httpx.post(f"http://{resource}:8080/api/v1/chat/completions",
+        r = httpx.post(f"http://deck-{resource}:8080/api/v1/chat/completions",
                        json={"model": served,
                              "messages": [{"role": "user", "content": "hi"}],
                              "max_tokens": 8},

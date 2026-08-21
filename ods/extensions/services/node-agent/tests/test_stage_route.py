@@ -38,7 +38,7 @@ def test_create_appends_an_owned_entry_named_by_the_boot_model(tmp_path):
     r, side = _stage(tmp_path, "create", DOC)
     assert r.returncode == 0, r.stderr
     assert json.loads(side.read_text()) == [{"model_name": "qwen3.8:27b", "model": "openai/qwen3.8:27b",
-                                             "api_base": "http://hipfire-2:11435/v1", "_deck_instance": "hipfire-2"}]
+                                             "api_base": "http://deck-hipfire-2:11435/v1", "_deck_instance": "hipfire-2"}]
 
 
 def test_taken_or_reserved_name_gets_the_instance_suffix(tmp_path):
@@ -57,7 +57,7 @@ def test_taken_or_reserved_name_gets_the_instance_suffix(tmp_path):
 
 def test_remove_drops_only_the_owned_entries(tmp_path):
     existing = json.dumps([{"model_name": "spark-x", "model": "openai/x", "api_base": "http://s:1/v1"},
-                           {"model_name": "m", "model": "openai/m", "api_base": "http://hipfire-2:11435/v1", "_deck_instance": "hipfire-2"}])
+                           {"model_name": "m", "model": "openai/m", "api_base": "http://deck-hipfire-2:11435/v1", "_deck_instance": "hipfire-2"}])
     _, side = _stage(tmp_path, "remove", DOC, existing)
     assert [e["model_name"] for e in json.loads(side.read_text())] == ["spark-x"]
 

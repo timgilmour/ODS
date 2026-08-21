@@ -27,7 +27,7 @@ def test_create_writes_a_managed_entry_then_ships_the_document(tmp_path, monkeyp
     assert r.status_code == 201, r.text
     e = r.json()
     assert e["resource"] == "hipfire-1" and e["managed"] is True and e["port"] == 11500
-    assert e["connection"] == {"container": "deck-hipfire-1", "gateway_host": "hipfire-1"}
+    assert e["connection"] == {"container": "deck-hipfire-1"}
     assert e["container_consent"] is True and e["gpu_indices"] == [1]
     assert e["policy_defaults"] == {"priority": 100, "pinned": False, "idle_ttl": 0}
     assert rec.calls == [("create", {"resource": "hipfire-1", "kind": "hipfire", "gpu_indices": [1],

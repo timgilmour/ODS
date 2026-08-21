@@ -275,18 +275,22 @@ def instance_policy(kind: str) -> dict:
 
 def instance_connection(kind: str, resource: str) -> dict:
     """The connection block a NEW instance of `kind` is declared with. The
-    wire names are the helper's too (service = resource, container =
-    deck-<resource>, the kind's INSTANCE_INTERNAL_PORT) — pinned equal by
-    tests/test_instances_parity.py so the two sides cannot drift."""
+    wire names are the helper's too: compose SERVICE name == container name
+    == deck-<resource> (instances own the deck-* DNS namespace on ods-network,
+    so no instance can shadow an ODS service alias), the kind's
+    INSTANCE_INTERNAL_PORT — pinned equal by tests/test_instances_parity.py so
+    the two sides cannot drift. Every URL here dials the container name; a
+    hipfire instance needs no `gateway_host` (that alias exists for the seeded
+    triple, whose service name differs from its container name)."""
     container = f"{INSTANCE_CONTAINER_PREFIX}{resource}"
     port = INSTANCE_INTERNAL_PORT[kind]
     if kind == "hipfire":
-        return {"container": container, "gateway_host": resource}
+        return {"container": container}
     if kind == "lemonade":
-        return {"url": f"http://{resource}:{port}",
-                "metrics_url": f"http://{resource}:8001/metrics", "container": container}
+        return {"url": f"http://{container}:{port}",
+                "metrics_url": f"http://{container}:8001/metrics", "container": container}
     if kind == "comfyui":
-        return {"url": f"http://{resource}:{port}", "container": container}
+        return {"url": f"http://{container}:{port}", "container": container}
     raise ValueError(f"kind {kind!r} is not instantiable")
 
 

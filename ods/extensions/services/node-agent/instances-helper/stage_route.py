@@ -21,6 +21,10 @@ import sys
 # (render-runtime-configs.py's load_extra_litellm_routes) copies only its
 # named fields, so the marker never reaches the rendered litellm config.
 OWNER_KEY = "_deck_instance"
+# The host a staged route dials: the instance's compose service name == its
+# container name (render_instance.CONTAINER_PREFIX; pinned to the deck's
+# INSTANCE_CONTAINER_PREFIX by model-deck/tests/test_instances_parity.py).
+CONTAINER_PREFIX = "deck-"
 
 # Reserved model_name values, copied from
 # ods/scripts/render-runtime-configs.py:324-327 (_EXTRA_ROUTES_RESERVED) —
@@ -99,7 +103,7 @@ def main(verb, doc_path, templates_dir, sidecar_path) -> None:
     new_entry = {
         "model_name": model_name,
         "model": f"openai/{model}",
-        "api_base": f"http://{resource}:{internal_port}{path}",
+        "api_base": f"http://{CONTAINER_PREFIX}{resource}:{internal_port}{path}",
         OWNER_KEY: resource,
     }
     _write_sidecar(sidecar_path, others + [new_entry])

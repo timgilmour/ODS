@@ -1436,13 +1436,15 @@ def test_hipfire_connection_accepts_optional_gateway_host():
 
 
 def test_instance_connection_and_ports_per_kind():
-    assert instance_connection("hipfire", "agent") == {
-        "container": "deck-agent", "gateway_host": "agent"}
+    # One name per instance: the helper's compose SERVICE name == container
+    # (deck-<resource>), so every host the deck or litellm dials is the
+    # container name and no gateway_host alias is needed.
+    assert instance_connection("hipfire", "agent") == {"container": "deck-agent"}
     assert instance_connection("lemonade", "gguf-a") == {
-        "url": "http://gguf-a:8080", "metrics_url": "http://gguf-a:8001/metrics",
+        "url": "http://deck-gguf-a:8080", "metrics_url": "http://deck-gguf-a:8001/metrics",
         "container": "deck-gguf-a"}
     assert instance_connection("comfyui", "img") == {
-        "url": "http://img:8188", "container": "deck-img"}
+        "url": "http://deck-img:8188", "container": "deck-img"}
     assert INSTANCE_CONTAINER_PREFIX == "deck-"
     assert INSTANCE_INTERNAL_PORT == {"hipfire": 11435, "lemonade": 8080, "comfyui": 8188}
     # every instance connection validates under its own kind's schema

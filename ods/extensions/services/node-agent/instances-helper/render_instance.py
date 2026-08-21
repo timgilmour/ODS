@@ -4,7 +4,13 @@ YAML) for project `deck-instances`. Exit 0 written / 1 malformed document or
 env outside the kind's allowlist / 2 unknown kind. Nothing is ever launched
 from a document this script refused — the helper only runs `docker compose`
 on a file this script wrote. Kind → template is DATA (templates/kinds.json),
-the single seam E2 can turn into a served descriptor."""
+the single seam E2 can turn into a served descriptor.
+
+Instances own the `deck-*` DNS namespace on ods-network: the compose SERVICE
+name (the alias every deck/litellm URL dials) IS the container name,
+`deck-<resource>`. That is what keeps an instance from ever shadowing an ODS
+service alias (hipfire, qdrant, dashboard-api, …) — a property of the naming
+scheme, not of a reserved-name list that would rot as the stack grows."""
 import json
 import os
 import re
@@ -13,13 +19,9 @@ import sys
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 TEMPLATE_KEYS = {"image", "internal_port", "service", "environment", "env_allow",
                  "volumes", "per_instance_dirs", "route"}
-# The service name becomes a DNS alias on ods-network — these are already
-# taken by the ODS triple/deck/gateway, and any "ods-*" name collides with a
-# container-name prefix elsewhere in the stack. The deck's generator never
-# emits these; this set is the security boundary, not a UI nicety.
-RESERVED_RESOURCE_NAMES = {"hipfire", "lemonade", "llama-server", "comfyui",
-                           "model-deck", "litellm"}
-RESERVED_RESOURCE_PREFIX = "ods-"
+# Service name == container name == deck-<resource>. Pinned equal to the
+# deck's INSTANCE_CONTAINER_PREFIX by model-deck/tests/test_instances_parity.py.
+CONTAINER_PREFIX = "deck-"
 # Keys the renderer itself sets on the service block (container_name/image
 # from the template + doc; environment/ports/volumes/networks computed from
 # the doc and template's own top-level fields). A template that also sets
@@ -45,9 +47,6 @@ def main(templates_dir, doc_path, out_path, instances_dir, ods_dir) -> None:
         assert isinstance(env, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()), "env"
     except Exception as exc:  # noqa: BLE001 — every malformation is the same answer: refuse, say so
         _die(1, f"unusable instance document {doc_path}: {exc!r}")
-    if resource in RESERVED_RESOURCE_NAMES or resource.startswith(RESERVED_RESOURCE_PREFIX):
-        _die(1, f"resource {resource!r} is reserved (reserved names: {sorted(RESERVED_RESOURCE_NAMES)}, "
-                 f"prefix: {RESERVED_RESOURCE_PREFIX!r})")
     kinds = json.load(open(os.path.join(templates_dir, "kinds.json")))
     if kind not in kinds:
         _die(2, f"unknown kind {kind!r} (known: {sorted(kinds)})")
@@ -66,10 +65,11 @@ def main(templates_dir, doc_path, out_path, instances_dir, ods_dir) -> None:
     data_dir = os.path.join(instances_dir, "data", resource)
     for sub in tpl["per_instance_dirs"]:
         os.makedirs(os.path.join(data_dir, sub), exist_ok=True)
-    subst = {"resource": resource, "container": f"deck-{resource}", "data_dir": data_dir,
+    container = f"{CONTAINER_PREFIX}{resource}"
+    subst = {"resource": resource, "container": container, "data_dir": data_dir,
              "ods_dir": ods_dir, "port": str(port)}
     service = {
-        "container_name": f"deck-{resource}",
+        "container_name": container,
         "image": tpl["image"],
         **tpl["service"],
         "environment": {**tpl["environment"], **env,
@@ -80,7 +80,7 @@ def main(templates_dir, doc_path, out_path, instances_dir, ods_dir) -> None:
         "volumes": [v.format_map(subst) for v in tpl["volumes"]],
         "networks": ["ods"],
     }
-    out = {"services": {resource: service},
+    out = {"services": {container: service},
            "networks": {"ods": {"external": True, "name": "ods-network"}}}
     tmp = out_path + ".tmp"
     with open(tmp, "w") as fh:
