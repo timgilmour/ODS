@@ -384,6 +384,21 @@ stays on the deck's sysfs reader, so the agent needs no device access at
 all for this channel — the block only ever applied to the sparky-style
 remote deployment above.
 
+**1b. Same-box deployment (the autarch case, 2026-08-21): use the
+`compose.local-network.yaml.disabled` overlay too** — it resets the base
+file's `network_mode: host` and joins the agent to the ODS bridge network,
+so the Deck reaches it by DNS (`address: http://ods-node-agent:7720`) with
+NO host port, no UFW rule and no dependence on the docker gateway IP:
+
+```bash
+docker compose -f compose.yaml.disabled -f compose.instances.yaml.disabled \
+               -f compose.local-network.yaml.disabled up -d --build
+```
+
+Host networking (the base file alone) stays the remote-node shape. The
+durable 0600 `.env` beside these files carries `NODE_AGENT_KEY`,
+`NODE_NAME`, `GPU_BACKEND=amd`, `HOST_INSTANCES_CTL_DIR`.
+
 **2. The host-side instances-helper** (`instances-helper/`) — the
 privileged half that actually runs `docker compose` on the rendered
 per-kind template. This is Python + one bash script; it does not run in a
@@ -410,6 +425,16 @@ instances-helper/instances-helper.sh --daemon \
 - `<instances-dir>` — where the helper renders `<resource>.yaml` (one
   compose file per instance) and creates `<instances-dir>/data/<resource>/`
   with that kind's `per_instance_dirs` underneath.
+- ⚠ **comfyui template image = `ods-comfyui:live`**, a snapshot of the
+  RUNNING native `ods-comfyui` container (`docker commit ods-comfyui
+  ods-comfyui:live`). The pristine upstream image's venv has drifted far
+  behind the shared ComfyUI tree (ComfyUI-Manager installs into the native
+  container's own layer — e.g. `comfy-aimdo` 0.2.1 in the image vs 0.4.10
+  required by the tree), so a fresh container from the upstream image
+  crash-loops at `import comfy.utils`. Re-run the `docker commit` whenever
+  the native comfyui's deps change; a missing `ods-comfyui:live` fails the
+  create loudly (image not found), never silently. The same drift would bite
+  a `--force-recreate` of the native container itself.
 - `<ods-dir>` — the operator's ODS checkout, read-only from here: template
   volumes reference it (e.g. lemonade's model directory), and
   `stage_route.py` writes into its `config/litellm/extra-routes.json` —

@@ -488,6 +488,18 @@ intent record, its status reads `unmanaged`, not `idle` (`app/lifecycle.py`'s
 `derive_status`: observed loaded, no intent, "adopt candidate"), until the
 operator adopts it or parks/resumes it.
 
+
+**Deploy-day notes (2026-08-21, first live run):** comfyui instances run
+from the snapshot image `ods-comfyui:live` (see the node-agent README —
+the upstream image's venv no longer matches the shared tree). A RESIDENT
+comfyui instance with no intent record reads `unmanaged` in the lifecycle
+map (like a hipfire instance that boots serving), not `idle`; `idle` is the
+TENANT state. The node-agent queues ONE request at a time and the helper
+runs one compose verb at a time (a comfyui `down` alone takes ~10-15 s), so
+a create/remove/move issued right behind another verb gets the 409
+"already pending" — retry for up to ~90 s, as `livetests/
+test_disruptive_instances.py` does; the Deck does not retry for you.
+
 ### Serving (node-addressed swap control)
 
 | Method | Path | Description |

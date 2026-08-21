@@ -38,6 +38,7 @@
       "engine",
       "footprint",
       "gpu_index",
+      "gpu_indices",
       "model",
       "queue_depth",
       "state"
@@ -46,6 +47,7 @@
       "engine",
       "footprint",
       "gpu_index",
+      "gpu_indices",
       "idle_s",
       "model",
       "state"
@@ -53,6 +55,7 @@
     "/api/state.world.tenants.comfyui": [
       "engine",
       "gpu_index",
+      "gpu_indices",
       "idle_s",
       "queue",
       "state"
@@ -78,6 +81,7 @@
       "busy_requests",
       "engine",
       "gpu_index",
+      "gpu_indices",
       "idle_s",
       "model",
       "node_id",
@@ -235,6 +239,7 @@
       "error",
       "gpus",
       "id",
+      "instance_port_range",
       "label",
       "last_seen",
       "serving",
@@ -270,12 +275,16 @@
       "demand",
       "human_verbs",
       "idle_release",
+      "instance",
+      "instance_env",
       "kind",
       "local_capable",
+      "max_gpus",
       "remote_capable"
     ],
     "/api/engine-kinds.kinds.connection": [
       "container",
+      "gateway_host",
       "metrics_url",
       "url"
     ],
@@ -299,6 +308,7 @@
       "credential_set",
       "engines",
       "id",
+      "instance_port_range",
       "label",
       "serving_address"
     ],
@@ -306,12 +316,14 @@
       "connection",
       "container_consent",
       "gpu_index",
+      "gpu_indices",
       "kind",
       "policy_defaults",
       "resource"
     ],
     "/api/nodes.nodes.engines.connection": [
       "container",
+      "gateway_host",
       "metrics_url",
       "url"
     ],
@@ -336,6 +348,7 @@
       "failures",
       "fields",
       "from",
+      "gpu_indices",
       "job",
       "key",
       "kind",
@@ -347,6 +360,7 @@
       "operation",
       "outcome",
       "phase",
+      "port",
       "reason",
       "resource",
       "source",
@@ -392,6 +406,9 @@
       "/api/nodes/{node_id}/engines",
       "/api/nodes/{node_id}/engines/{resource}",
       "/api/nodes/{node_id}/engines/{resource}/{verb}",
+      "/api/nodes/{node_id}/instances",
+      "/api/nodes/{node_id}/instances/{resource}",
+      "/api/nodes/{node_id}/instances/{resource}/move",
       "/api/nodes/{node_id}/serving/reload",
       "/api/nodes/{node_id}/serving/status",
       "/api/nodes/{node_id}/serving/swap",
@@ -3578,6 +3595,8 @@
       "Ephemeral",
       "ExpectAbsenceBody",
       "HTTPValidationError",
+      "InstanceCreate",
+      "InstanceMove",
       "LocationPatch",
       "MoveBody",
       "NodeCreate",
@@ -3850,6 +3869,7 @@
       "control",
       "credential",
       "id",
+      "instance_port_range",
       "label",
       "serving_address"
     ],
@@ -3893,6 +3913,7 @@
       "address",
       "control",
       "credential",
+      "instance_port_range",
       "label",
       "serving_address"
     ],
@@ -4275,6 +4296,289 @@
       "maximum",
       "title",
       "type"
+    ],
+    "/api/state.nodes.instance_port_range": [
+      "end",
+      "start"
+    ],
+    "/api/engine-kinds.kinds.instance_env": [
+      "HIPFIRE_IDLE_TIMEOUT",
+      "HIPFIRE_MODEL",
+      "LEMONADE_CTX_SIZE",
+      "LLAMA_ARG_SPLIT_MODE",
+      "LLAMA_ARG_TENSOR_SPLIT"
+    ],
+    "/api/engine-kinds.kinds.connection.gateway_host": [
+      "required"
+    ],
+    "/api/engine-kinds.kinds.instance_env.HIPFIRE_MODEL": [
+      "required"
+    ],
+    "/api/engine-kinds.kinds.instance_env.HIPFIRE_IDLE_TIMEOUT": [
+      "required"
+    ],
+    "/api/engine-kinds.kinds.instance_env.LEMONADE_CTX_SIZE": [
+      "required"
+    ],
+    "/api/engine-kinds.kinds.instance_env.LLAMA_ARG_TENSOR_SPLIT": [
+      "required"
+    ],
+    "/api/engine-kinds.kinds.instance_env.LLAMA_ARG_SPLIT_MODE": [
+      "required"
+    ],
+    "/api/nodes.nodes.instance_port_range": [
+      "end",
+      "start"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances": [
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses": [
+      "201",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.201": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.201.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.201.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.201.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}": [
+      "delete"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete": [
+      "operationId",
+      "parameters",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}.delete.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move": [
+      "post"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post": [
+      "operationId",
+      "parameters",
+      "requestBody",
+      "responses",
+      "summary",
+      "tags"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.parameters": [
+      "in",
+      "name",
+      "required",
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.parameters.schema": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.requestBody": [
+      "content",
+      "required"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.requestBody.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.requestBody.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.requestBody.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses": [
+      "200",
+      "422"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.200": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.200.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.200.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.200.content.application/json.schema": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.422": [
+      "content",
+      "description"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.422.content": [
+      "application/json"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.422.content.application/json": [
+      "schema"
+    ],
+    "/openapi.json.paths./api/nodes/{node_id}/instances/{resource}/move.post.responses.422.content.application/json.schema": [
+      "$ref"
+    ],
+    "/openapi.json.components.schemas.InstanceCreate": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceCreate.properties": [
+      "env",
+      "gpu_indices",
+      "kind"
+    ],
+    "/openapi.json.components.schemas.InstanceCreate.properties.kind": [
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceCreate.properties.gpu_indices": [
+      "items",
+      "minItems",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceCreate.properties.gpu_indices.items": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceCreate.properties.env": [
+      "additionalProperties",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceCreate.properties.env.additionalProperties": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceMove": [
+      "properties",
+      "required",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceMove.properties": [
+      "gpu_indices"
+    ],
+    "/openapi.json.components.schemas.InstanceMove.properties.gpu_indices": [
+      "items",
+      "minItems",
+      "title",
+      "type"
+    ],
+    "/openapi.json.components.schemas.InstanceMove.properties.gpu_indices.items": [
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.instance_port_range": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodeCreate.properties.instance_port_range.anyOf": [
+      "additionalProperties",
+      "type"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.instance_port_range": [
+      "anyOf",
+      "title"
+    ],
+    "/openapi.json.components.schemas.NodePatch.properties.instance_port_range.anyOf": [
+      "additionalProperties",
+      "type"
     ]
   },
   "tokens": {
@@ -4307,6 +4611,8 @@
       "free_comfyui",
       "harvest-failed",
       "host-agent-busy",
+      "instance-created",
+      "instance-removed",
       "lifecycle-node-misconfigured",
       "lifecycle-quarantined",
       "lifecycle-restore",

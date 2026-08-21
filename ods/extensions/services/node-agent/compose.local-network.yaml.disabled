@@ -1,0 +1,18 @@
+# LOCAL-NODE overlay (INST I1 deploy, 2026-08-20): run the agent on the ODS
+# bridge network instead of host networking, so the Model Deck container
+# reaches it by DNS (http://ods-node-agent:7720) — no host port, no UFW
+# rule, no dependence on the docker gateway IP (which can drift when the
+# network is recreated; see tests/test-host-agent-rebind.py). Use this on
+# the SAME box as the deck. Host networking (the base file) stays the
+# remote-node (sparky) shape, where /proc/net/tcp busy probes need it.
+#
+#   docker compose -f compose.yaml.disabled -f compose.instances.yaml.disabled \
+#                  -f compose.local-network.yaml.disabled up -d --build
+services:
+  ods-node-agent:
+    network_mode: !reset null
+    networks: [ods]
+networks:
+  ods:
+    external: true
+    name: ods-network

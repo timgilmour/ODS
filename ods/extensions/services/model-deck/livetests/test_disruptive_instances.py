@@ -76,6 +76,35 @@ def _wait_for(predicate, timeout_s: float, what: str) -> None:
     pytest.fail(f"{what} — not met within {timeout_s:.0f}s")
 
 
+def _create_instance(deck, body: dict, timeout_s: float = 90.0):
+    """POST .../instances, retrying ONLY a 409 whose detail names the
+    node-agent's capacity-one queue ("already pending"): a previous verb's
+    request file is consumed by the helper within its 2 s poll, so a create
+    that lands inside that window is not a refusal, just early. Any other
+    status (incl. the port-exhaustion / not-managed 409s) returns at once."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        r = deck.post("/api/nodes/local/instances", json=body)
+        if r.status_code == 409 and "already pending" in r.text and time.monotonic() < deadline:
+            time.sleep(1)
+            continue
+        return r
+
+
+def _remove_instance(deck, resource: str, timeout_s: float = 90.0):
+    """DELETE .../instances/{resource} with the same bounded retry on the
+    node-agent's capacity-one 409 — the helper runs ONE compose verb at a
+    time and a comfyui `down` alone takes ~10-15 s, so a remove queued
+    right behind another verb is early, not refused."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        r = deck.delete(f"/api/nodes/local/instances/{resource}")
+        if r.status_code == 409 and "already pending" in r.text and time.monotonic() < deadline:
+            time.sleep(1)
+            continue
+        return r
+
+
 def _wait_state(deck, resource: str, wanted: set[str], timeout: float) -> None:
     key = f"local/{resource}"
     _wait_for(lambda: deck.get("/api/state").json()["lifecycle"].get(key, {}).get("status") in wanted,
@@ -124,8 +153,7 @@ def test_lemonade_instance_create_load_serve_remove(deck, drill_model, events, i
     service DNS name proves it, not the local triple's -> remove -> clean.
     """
     gpu = _freest_gpu_index(deck)
-    created = deck.post("/api/nodes/local/instances",
-                        json={"kind": "lemonade", "gpu_indices": [gpu], "env": {}})
+    created = _create_instance(deck, {"kind": "lemonade", "gpu_indices": [gpu], "env": {}})
     assert created.status_code == 201, created.text
     entry = created.json()
     resource = entry["resource"]
@@ -149,14 +177,19 @@ def test_lemonade_instance_create_load_serve_remove(deck, drill_model, events, i
         # itself never dials the published 127.0.0.1:<port> either (D-I1-3),
         # so this is the same channel the deck's own observation uses, not a
         # side door.
+        # The served id is whatever the deck observed as loaded — lemonade
+        # names extra-dir files `extra.<file>` (app/state.py's _strip_prefix /
+        # the lemonade adapter's id vocabulary), so never the bare filename.
+        served = deck.get("/api/state").json()["world"]["tenants"][resource]["model"]
+        assert served, "deck reads the instance serving but reports no model id"
         r = httpx.post(f"http://{resource}:8080/api/v1/chat/completions",
-                       json={"model": drill_model,
+                       json={"model": served,
                              "messages": [{"role": "user", "content": "hi"}],
                              "max_tokens": 8},
                        timeout=60.0)
         assert r.status_code == 200, r.text
     finally:
-        removed = deck.delete(f"/api/nodes/local/instances/{resource}")
+        removed = _remove_instance(deck, resource)
         assert removed.status_code == 200, removed.text
         _wait_absent(deck, resource, REMOVE_TIMEOUT)
 
@@ -182,15 +215,23 @@ def test_comfyui_instance_boots_with_a_read_only_tree(deck, events, instances_wi
     next move, not an ad-hoc permissions fix here.
     """
     gpu = _freest_gpu_index(deck)
-    created = deck.post("/api/nodes/local/instances",
-                        json={"kind": "comfyui", "gpu_indices": [gpu], "env": {}})
+    created = _create_instance(deck, {"kind": "comfyui", "gpu_indices": [gpu], "env": {}})
     assert created.status_code == 201, created.text
     resource = created.json()["resource"]
 
     try:
-        _wait_state(deck, resource, {"idle"}, CREATE_TIMEOUT)
+        # A RESIDENT comfyui with no intent record reads `unmanaged`, not
+        # `idle` (app/lifecycle.py derive_status: "is loaded but the Deck
+        # has no intent for it" — comfyui's observation counts a reachable,
+        # resident process as loaded, exactly like a hipfire instance that
+        # boots serving). `idle` would only appear for a reachable-but-not-
+        # resident observation, which comfyui never reports. Either word
+        # proves the boot; the tenant state is the out-of-band check.
+        _wait_state(deck, resource, {"unmanaged", "idle"}, CREATE_TIMEOUT)
+        tenant = deck.get("/api/state").json()["world"]["tenants"][resource]
+        assert tenant["state"] in ("idle", "busy"), tenant
     finally:
-        removed = deck.delete(f"/api/nodes/local/instances/{resource}")
+        removed = _remove_instance(deck, resource)
         assert removed.status_code == 200, removed.text
         _wait_absent(deck, resource, REMOVE_TIMEOUT)
 
